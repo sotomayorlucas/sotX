@@ -11,10 +11,8 @@
 use spin::Mutex;
 use sotos_common::SysError;
 
+use crate::pool::Pool;
 use crate::sched;
-
-/// Maximum number of system-wide endpoints.
-const MAX_ENDPOINTS: usize = 256;
 
 /// Maximum threads that can be queued waiting to send on one endpoint.
 const MAX_SEND_QUEUE: usize = 16;
@@ -58,8 +56,6 @@ enum EndpointState {
 }
 
 struct Endpoint {
-    /// Whether this slot has been allocated via create().
-    allocated: bool,
     state: EndpointState,
     /// Thread currently waiting to receive.
     receiver: Option<ThreadId>,
@@ -69,9 +65,8 @@ struct Endpoint {
 }
 
 impl Endpoint {
-    const fn new() -> Self {
+    fn new() -> Self {
         Self {
-            allocated: false,
             state: EndpointState::Idle,
             receiver: None,
             send_queue: [None; MAX_SEND_QUEUE],
@@ -103,22 +98,12 @@ impl Endpoint {
     }
 }
 
-static ENDPOINTS: Mutex<[Endpoint; MAX_ENDPOINTS]> =
-    Mutex::new([const { Endpoint::new() }; MAX_ENDPOINTS]);
-static NEXT_ID: Mutex<u32> = Mutex::new(0);
+static ENDPOINTS: Mutex<Pool<Endpoint>> = Mutex::new(Pool::new());
 
-/// Create a new endpoint. Returns None if no slots available.
+/// Create a new endpoint.
 pub fn create() -> Option<EndpointId> {
-    let mut next = NEXT_ID.lock();
-    let id = *next;
-    if (id as usize) >= MAX_ENDPOINTS {
-        return None;
-    }
-    {
-        let mut eps = ENDPOINTS.lock();
-        eps[id as usize].allocated = true;
-    }
-    *next += 1;
+    let mut eps = ENDPOINTS.lock();
+    let id = eps.alloc(Endpoint::new());
     Some(EndpointId(id))
 }
 
@@ -131,10 +116,7 @@ pub fn send(ep_id: u32, msg: Message) -> Result<(), SysError> {
 
     let action = {
         let mut eps = ENDPOINTS.lock();
-        let ep = eps.get_mut(ep_id as usize).ok_or(SysError::NotFound)?;
-        if !ep.allocated {
-            return Err(SysError::NotFound);
-        }
+        let ep = eps.get_mut(ep_id).ok_or(SysError::NotFound)?;
 
         match ep.state {
             EndpointState::RecvWait => {
@@ -177,10 +159,7 @@ pub fn send(ep_id: u32, msg: Message) -> Result<(), SysError> {
 pub fn recv(ep_id: u32) -> Result<Message, SysError> {
     let action = {
         let mut eps = ENDPOINTS.lock();
-        let ep = eps.get_mut(ep_id as usize).ok_or(SysError::NotFound)?;
-        if !ep.allocated {
-            return Err(SysError::NotFound);
-        }
+        let ep = eps.get_mut(ep_id).ok_or(SysError::NotFound)?;
 
         match ep.state {
             EndpointState::SendWait => {

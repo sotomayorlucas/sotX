@@ -4,9 +4,15 @@
 QEMU := if os() == "windows" { "C:/Program Files/qemu/qemu-system-x86_64.exe" } else { "qemu-system-x86_64" }
 KERNEL := "target/x86_64-unknown-none/debug/sotos-kernel"
 IMAGE := "target/sotos.img"
+USER_INIT := "services/init/target/x86_64-unknown-none/debug/sotos-init"
+INITRD := "target/initrd.img"
 
 # Default: build and run
 default: run
+
+# Build userspace programs (CARGO_ENCODED_RUSTFLAGS overrides parent .cargo/config.toml)
+build-user:
+    cd services/init && CARGO_ENCODED_RUSTFLAGS="$(printf '%s\x1f%s' '-Clink-arg=-Tlinker.ld' '-Crelocation-model=static')" cargo build
 
 # Build the kernel
 build:
@@ -16,9 +22,13 @@ build:
 release:
     cargo build --package sotos-kernel --release
 
+# Create CPIO initrd from userspace binaries
+initrd: build-user
+    python scripts/mkinitrd.py --output {{INITRD}} --file init={{USER_INIT}}
+
 # Create the bootable disk image (BIOS + Limine)
-image: build
-    python scripts/mkimage.py --kernel {{KERNEL}} --output {{IMAGE}}
+image: build initrd
+    python scripts/mkimage.py --kernel {{KERNEL}} --initrd {{INITRD}} --output {{IMAGE}}
 
 # Build and run in QEMU (serial output to terminal)
 run: image

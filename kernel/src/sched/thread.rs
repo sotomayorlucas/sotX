@@ -33,7 +33,9 @@ pub enum ThreadState {
     Running,
     /// Blocked waiting for IPC, I/O, or a lock.
     Blocked,
-    /// Terminated.
+    /// Faulted — waiting for VMM to resolve page fault.
+    Faulted,
+    /// Terminated — slot will be freed after context switch.
     Dead,
 }
 
@@ -53,9 +55,6 @@ impl CpuContext {
         Self { rsp: 0 }
     }
 }
-
-/// Maximum threads in the system (fixed for now, slab allocator later).
-pub const MAX_THREADS: usize = 64;
 
 /// Kernel stack: 4 frames = 16 KiB.
 const STACK_FRAMES: usize = 4;
@@ -95,26 +94,6 @@ pub struct Thread {
 }
 
 impl Thread {
-    pub const fn empty() -> Self {
-        Self {
-            id: ThreadId(0),
-            state: ThreadState::Dead,
-            priority: 128,
-            context: CpuContext::zero(),
-            cap_space: None,
-            kernel_stack_base: 0,
-            kernel_stack_top: 0,
-            timeslice: 0,
-            is_user: false,
-            user_rip: 0,
-            user_rsp: 0,
-            cr3: 0,
-            ipc_msg: Message::empty(),
-            ipc_endpoint: None,
-            ipc_role: IpcRole::None,
-        }
-    }
-
     /// Create a new kernel thread with an allocated kernel stack.
     ///
     /// The initial stack frame is set up so that `context_switch` into this thread
@@ -210,15 +189,8 @@ impl Thread {
 fn alloc_kernel_stack() -> (u64, u64) {
     let hhdm = mm::hhdm_offset();
 
-    let mut stack_phys = 0u64;
-    for i in 0..STACK_FRAMES {
-        let frame = mm::alloc_frame().expect("out of frames for thread stack");
-        if i == 0 {
-            stack_phys = frame.addr();
-        }
-    }
-    // Relies on linear bitmap scan returning consecutive frames.
-    // TODO: add alloc_contiguous() to the frame allocator.
+    let base = mm::alloc_contiguous(STACK_FRAMES).expect("out of frames for thread stack");
+    let stack_phys = base.addr();
 
     let stack_virt = stack_phys + hhdm;
     let stack_top = stack_virt + STACK_SIZE as u64;

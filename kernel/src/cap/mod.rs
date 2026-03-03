@@ -16,8 +16,8 @@ static CAP_TABLE: Mutex<CapabilityTable> = Mutex::new(CapabilityTable::new());
 
 pub fn init() {
     // The root capability table is ready — it starts empty.
-    // The init service will receive root capabilities for all resources.
-    kprintln!("  capability table ready (max {} entries)", table::MAX_CAPS);
+    // Pool-backed: grows dynamically as capabilities are created.
+    kprintln!("  capability table ready (dynamic pool)");
 }
 
 /// Insert a new capability and return its ID.

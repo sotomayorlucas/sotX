@@ -8,9 +8,11 @@
 pub mod thread;
 
 pub use thread::{IpcRole, ThreadId, ThreadState};
-use thread::{Thread, MAX_THREADS};
+use thread::Thread;
 
+use alloc::collections::VecDeque;
 use crate::ipc::endpoint::Message;
+use crate::pool::Pool;
 
 use crate::kprintln;
 use spin::Mutex;
@@ -85,12 +87,9 @@ unsafe extern "C" fn user_thread_trampoline() -> ! {
 // ---------------------------------------------------------------------------
 
 struct Scheduler {
-    threads: [Thread; MAX_THREADS],
-    /// Circular run queue (indices into `threads`).
-    run_queue: [usize; MAX_THREADS],
-    rq_head: usize,
-    rq_tail: usize,
-    rq_len: usize,
+    threads: Pool<Thread>,
+    /// Run queue of pool indices.
+    run_queue: VecDeque<usize>,
     /// Index of the currently running thread in `threads` (None before first schedule).
     current: Option<usize>,
     next_id: u32,
@@ -99,53 +98,19 @@ struct Scheduler {
 impl Scheduler {
     const fn new() -> Self {
         Self {
-            threads: {
-                let empty = Thread::empty();
-                [
-                    empty, empty, empty, empty, empty, empty, empty, empty,
-                    empty, empty, empty, empty, empty, empty, empty, empty,
-                    empty, empty, empty, empty, empty, empty, empty, empty,
-                    empty, empty, empty, empty, empty, empty, empty, empty,
-                    empty, empty, empty, empty, empty, empty, empty, empty,
-                    empty, empty, empty, empty, empty, empty, empty, empty,
-                    empty, empty, empty, empty, empty, empty, empty, empty,
-                    empty, empty, empty, empty, empty, empty, empty, empty,
-                ]
-            },
-            run_queue: [0; MAX_THREADS],
-            rq_head: 0,
-            rq_tail: 0,
-            rq_len: 0,
+            threads: Pool::new(),
+            run_queue: VecDeque::new(),
             current: None,
             next_id: 0,
         }
     }
 
     fn enqueue(&mut self, idx: usize) {
-        assert!(self.rq_len < MAX_THREADS, "run queue full");
-        self.run_queue[self.rq_tail] = idx;
-        self.rq_tail = (self.rq_tail + 1) % MAX_THREADS;
-        self.rq_len += 1;
+        self.run_queue.push_back(idx);
     }
 
     fn dequeue(&mut self) -> Option<usize> {
-        if self.rq_len == 0 {
-            return None;
-        }
-        let idx = self.run_queue[self.rq_head];
-        self.rq_head = (self.rq_head + 1) % MAX_THREADS;
-        self.rq_len -= 1;
-        Some(idx)
-    }
-
-    /// Allocate a slot and return its index.
-    fn alloc_slot(&mut self) -> Option<usize> {
-        for i in 0..MAX_THREADS {
-            if self.threads[i].state == ThreadState::Dead {
-                return Some(i);
-            }
-        }
-        None
+        self.run_queue.pop_front()
     }
 }
 
@@ -162,11 +127,24 @@ pub fn init() {
     // Thread 0 = idle thread.
     // It doesn't get a real stack via Thread::new — it will run on the
     // boot stack. We just need a slot to save its context into.
-    let slot = sched.alloc_slot().expect("no slot for idle thread");
-    sched.threads[slot].id = ThreadId(sched.next_id);
-    sched.threads[slot].state = ThreadState::Running;
-    sched.threads[slot].priority = 255; // lowest priority
-    sched.threads[slot].timeslice = TIMESLICE;
+    let idle = Thread {
+        id: ThreadId(sched.next_id),
+        state: ThreadState::Running,
+        priority: 255, // lowest priority
+        context: thread::CpuContext::zero(),
+        cap_space: None,
+        kernel_stack_base: 0,
+        kernel_stack_top: 0,
+        timeslice: TIMESLICE,
+        is_user: false,
+        user_rip: 0,
+        user_rsp: 0,
+        cr3: 0,
+        ipc_msg: Message::empty(),
+        ipc_endpoint: None,
+        ipc_role: IpcRole::None,
+    };
+    let slot = sched.threads.alloc(idle) as usize;
     sched.next_id += 1;
     sched.current = Some(slot);
 
@@ -179,11 +157,11 @@ pub fn spawn(entry: fn() -> !) -> ThreadId {
     let id = sched.next_id;
     sched.next_id += 1;
 
-    let slot = sched.alloc_slot().expect("no free thread slots");
-    sched.threads[slot] = Thread::new(id, entry, 128, thread_trampoline);
-    sched.threads[slot].timeslice = TIMESLICE;
+    let mut t = Thread::new(id, entry, 128, thread_trampoline);
+    t.timeslice = TIMESLICE;
+    let tid = t.id;
 
-    let tid = sched.threads[slot].id;
+    let slot = sched.threads.alloc(t) as usize;
     sched.enqueue(slot);
     tid
 }
@@ -194,11 +172,11 @@ pub fn spawn_user(user_rip: u64, user_rsp: u64, cr3: u64) -> ThreadId {
     let id = sched.next_id;
     sched.next_id += 1;
 
-    let slot = sched.alloc_slot().expect("no free thread slots");
-    sched.threads[slot] = Thread::new_user(id, user_rip, user_rsp, cr3, user_thread_trampoline);
-    sched.threads[slot].timeslice = TIMESLICE;
+    let mut t = Thread::new_user(id, user_rip, user_rsp, cr3, user_thread_trampoline);
+    t.timeslice = TIMESLICE;
+    let tid = t.id;
 
-    let tid = sched.threads[slot].id;
+    let slot = sched.threads.alloc(t) as usize;
     sched.enqueue(slot);
     tid
 }
@@ -207,11 +185,14 @@ pub fn spawn_user(user_rip: u64, user_rsp: u64, cr3: u64) -> ThreadId {
 ///
 /// Marks the current thread as Dead (so `schedule()` won't re-enqueue it),
 /// then calls `schedule()` to switch to the next runnable thread.
+/// The dead thread's pool slot is freed after the context switch completes.
 pub fn exit_current() -> ! {
     {
         let mut sched = SCHEDULER.lock();
         if let Some(idx) = sched.current {
-            sched.threads[idx].state = ThreadState::Dead;
+            if let Some(t) = sched.threads.get_mut(idx as u32) {
+                t.state = ThreadState::Dead;
+            }
         }
     }
     schedule();
@@ -222,7 +203,7 @@ pub fn exit_current() -> ! {
 /// Return the current thread's ID.
 pub fn current_tid() -> Option<ThreadId> {
     let sched = SCHEDULER.lock();
-    sched.current.map(|idx| sched.threads[idx].id)
+    sched.current.and_then(|idx| sched.threads.get(idx as u32).map(|t| t.id))
 }
 
 /// Block the current thread (set to Blocked) and switch away.
@@ -231,22 +212,66 @@ pub fn block_current() {
     {
         let mut sched = SCHEDULER.lock();
         if let Some(idx) = sched.current {
-            sched.threads[idx].state = ThreadState::Blocked;
+            if let Some(t) = sched.threads.get_mut(idx as u32) {
+                t.state = ThreadState::Blocked;
+            }
         }
     }
     schedule();
 }
 
+/// Suspend the current thread due to a page fault and switch away.
+/// The VMM server will resolve the fault and call `resume_faulted()`.
+pub fn fault_current() {
+    {
+        let mut sched = SCHEDULER.lock();
+        if let Some(idx) = sched.current {
+            if let Some(t) = sched.threads.get_mut(idx as u32) {
+                t.state = ThreadState::Faulted;
+            }
+        }
+    }
+    schedule();
+}
+
+/// Resume a faulted thread: set to Ready, reset timeslice, enqueue.
+/// Returns true if the thread was found in Faulted state.
+pub fn resume_faulted(tid: ThreadId) -> bool {
+    let mut sched = SCHEDULER.lock();
+    let mut found = None;
+    for (i, t) in sched.threads.iter() {
+        if t.id == tid && t.state == ThreadState::Faulted {
+            found = Some(i);
+            break;
+        }
+    }
+    if let Some(i) = found {
+        let t = sched.threads.get_mut(i).unwrap();
+        t.state = ThreadState::Ready;
+        t.timeslice = TIMESLICE;
+        sched.enqueue(i as usize);
+        true
+    } else {
+        false
+    }
+}
+
 /// Wake a blocked thread: set to Ready, reset timeslice, enqueue.
 pub fn wake(tid: ThreadId) {
     let mut sched = SCHEDULER.lock();
-    for i in 0..MAX_THREADS {
-        if sched.threads[i].id == tid && sched.threads[i].state == ThreadState::Blocked {
-            sched.threads[i].state = ThreadState::Ready;
-            sched.threads[i].timeslice = TIMESLICE;
-            sched.enqueue(i);
-            return;
+    // Find index first to avoid borrow conflict.
+    let mut found = None;
+    for (i, t) in sched.threads.iter() {
+        if t.id == tid && t.state == ThreadState::Blocked {
+            found = Some(i);
+            break;
         }
+    }
+    if let Some(i) = found {
+        let t = sched.threads.get_mut(i).unwrap();
+        t.state = ThreadState::Ready;
+        t.timeslice = TIMESLICE;
+        sched.enqueue(i as usize);
     }
 }
 
@@ -254,9 +279,11 @@ pub fn wake(tid: ThreadId) {
 pub fn set_current_ipc(ep_id: u32, role: IpcRole, msg: Message) {
     let mut sched = SCHEDULER.lock();
     if let Some(idx) = sched.current {
-        sched.threads[idx].ipc_endpoint = Some(ep_id);
-        sched.threads[idx].ipc_role = role;
-        sched.threads[idx].ipc_msg = msg;
+        if let Some(t) = sched.threads.get_mut(idx as u32) {
+            t.ipc_endpoint = Some(ep_id);
+            t.ipc_role = role;
+            t.ipc_msg = msg;
+        }
     }
 }
 
@@ -264,28 +291,34 @@ pub fn set_current_ipc(ep_id: u32, role: IpcRole, msg: Message) {
 pub fn clear_current_ipc() {
     let mut sched = SCHEDULER.lock();
     if let Some(idx) = sched.current {
-        sched.threads[idx].ipc_endpoint = None;
-        sched.threads[idx].ipc_role = IpcRole::None;
+        if let Some(t) = sched.threads.get_mut(idx as u32) {
+            t.ipc_endpoint = None;
+            t.ipc_role = IpcRole::None;
+        }
     }
 }
 
 /// Write a message into a specific thread's IPC buffer.
 pub fn write_ipc_msg(tid: ThreadId, msg: Message) {
     let mut sched = SCHEDULER.lock();
-    for i in 0..MAX_THREADS {
-        if sched.threads[i].id == tid {
-            sched.threads[i].ipc_msg = msg;
-            return;
+    let mut found = None;
+    for (i, t) in sched.threads.iter() {
+        if t.id == tid {
+            found = Some(i);
+            break;
         }
+    }
+    if let Some(i) = found {
+        sched.threads.get_mut(i).unwrap().ipc_msg = msg;
     }
 }
 
 /// Read the message from a specific thread's IPC buffer.
 pub fn read_ipc_msg(tid: ThreadId) -> Message {
     let sched = SCHEDULER.lock();
-    for i in 0..MAX_THREADS {
-        if sched.threads[i].id == tid {
-            return sched.threads[i].ipc_msg;
+    for (_, t) in sched.threads.iter() {
+        if t.id == tid {
+            return t.ipc_msg;
         }
     }
     Message::empty()
@@ -296,7 +329,9 @@ pub fn read_ipc_msg(tid: ThreadId) -> Message {
 pub fn set_current_msg(msg: Message) {
     let mut sched = SCHEDULER.lock();
     if let Some(idx) = sched.current {
-        sched.threads[idx].ipc_msg = msg;
+        if let Some(t) = sched.threads.get_mut(idx as u32) {
+            t.ipc_msg = msg;
+        }
     }
 }
 
@@ -304,7 +339,9 @@ pub fn set_current_msg(msg: Message) {
 pub fn current_ipc_msg() -> Message {
     let sched = SCHEDULER.lock();
     if let Some(idx) = sched.current {
-        return sched.threads[idx].ipc_msg;
+        if let Some(t) = sched.threads.get(idx as u32) {
+            return t.ipc_msg;
+        }
     }
     Message::empty()
 }
@@ -314,10 +351,14 @@ pub fn tick() {
     let needs_reschedule = {
         let mut sched = SCHEDULER.lock();
         if let Some(idx) = sched.current {
-            if sched.threads[idx].timeslice > 0 {
-                sched.threads[idx].timeslice -= 1;
+            if let Some(t) = sched.threads.get_mut(idx as u32) {
+                if t.timeslice > 0 {
+                    t.timeslice -= 1;
+                }
+                t.timeslice == 0
+            } else {
+                false
             }
-            sched.threads[idx].timeslice == 0
         } else {
             false
         }
@@ -349,25 +390,41 @@ pub fn schedule() {
             Some(idx) => idx,
             None => {
                 // No other thread ready — reset timeslice and continue.
-                sched.threads[old_idx].timeslice = TIMESLICE;
+                if let Some(t) = sched.threads.get_mut(old_idx as u32) {
+                    t.timeslice = TIMESLICE;
+                }
                 return;
             }
         };
 
+        // Grab old_rsp_ptr before any slot manipulation (Dead threads may be freed).
+        let old_is_dead = sched.threads.get(old_idx as u32)
+            .map_or(false, |t| t.state == ThreadState::Dead);
+        let old_rsp_ptr = &mut sched.threads.get_mut(old_idx as u32).unwrap().context.rsp as *mut u64;
+
         // Re-enqueue the old thread if it's still runnable.
-        if sched.threads[old_idx].state == ThreadState::Running {
-            sched.threads[old_idx].state = ThreadState::Ready;
-            sched.threads[old_idx].timeslice = TIMESLICE;
-            sched.enqueue(old_idx);
+        // Dead threads get their slot freed to reclaim pool space.
+        if old_is_dead {
+            sched.threads.free(old_idx as u32);
+        } else if let Some(old_t) = sched.threads.get_mut(old_idx as u32) {
+            if old_t.state == ThreadState::Running {
+                old_t.state = ThreadState::Ready;
+                old_t.timeslice = TIMESLICE;
+                sched.enqueue(old_idx);
+            }
         }
 
-        sched.threads[new_idx].state = ThreadState::Running;
-        sched.threads[new_idx].timeslice = TIMESLICE;
+        let new_t = sched.threads.get_mut(new_idx as u32).unwrap();
+        new_t.state = ThreadState::Running;
+        new_t.timeslice = TIMESLICE;
+        let new_kstack_top = new_t.kernel_stack_top;
+        let new_cr3 = new_t.cr3;
+        let new_rsp = new_t.context.rsp;
+        // Done reading new_t fields — safe to reassign current.
         sched.current = Some(new_idx);
 
         // Update kernel stack for TSS (Ring 3 → Ring 0 on interrupt)
         // and for SYSCALL entry.
-        let new_kstack_top = sched.threads[new_idx].kernel_stack_top;
         if new_kstack_top != 0 {
             unsafe {
                 crate::arch::gdt::set_tss_rsp0(new_kstack_top);
@@ -376,7 +433,6 @@ pub fn schedule() {
         }
 
         // Switch address space if the new thread has a different CR3.
-        let new_cr3 = sched.threads[new_idx].cr3;
         let target_cr3 = if new_cr3 != 0 {
             new_cr3
         } else {
@@ -394,9 +450,6 @@ pub fn schedule() {
                 }
             }
         }
-
-        let old_rsp_ptr = &mut sched.threads[old_idx].context.rsp as *mut u64;
-        let new_rsp = sched.threads[new_idx].context.rsp;
 
         Some((old_rsp_ptr, new_rsp))
     };

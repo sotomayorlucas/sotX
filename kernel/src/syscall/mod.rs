@@ -8,10 +8,13 @@ use crate::arch::serial;
 use crate::arch::x86_64::io;
 use crate::arch::x86_64::syscall::TrapFrame;
 use crate::cap::{self, CapId, CapObject, Rights};
+use crate::fault;
 use crate::ipc::endpoint::{self, Message};
 use crate::ipc::channel;
+use crate::ipc::notify;
 use crate::mm::{self, PhysFrame};
 use crate::mm::paging::{self, AddressSpace, PAGE_PRESENT, PAGE_USER, PAGE_WRITABLE, PAGE_NO_EXECUTE};
+use crate::sched::ThreadId;
 use crate::{irq, sched};
 use sotos_common::SysError;
 
@@ -41,13 +44,24 @@ const SYS_CAP_REVOKE: u64 = 31;
 /// Syscall numbers — threads.
 const SYS_THREAD_CREATE: u64 = 40;
 const SYS_THREAD_EXIT: u64 = 42;
+const SYS_THREAD_RESUME: u64 = 43;
 
 /// Syscall numbers — IRQ virtualization.
 const SYS_IRQ_REGISTER: u64 = 50;
 const SYS_IRQ_ACK: u64 = 51;
 
-/// Syscall numbers — I/O (temporary debug).
+/// Syscall numbers — I/O ports.
 const SYS_PORT_IN: u64 = 60;
+const SYS_PORT_OUT: u64 = 61;
+
+/// Syscall numbers — notifications (shared-memory IPC).
+const SYS_NOTIFY_CREATE: u64 = 70;
+const SYS_NOTIFY_WAIT: u64 = 71;
+const SYS_NOTIFY_SIGNAL: u64 = 72;
+
+/// Syscall numbers — fault forwarding (VMM).
+const SYS_FAULT_REGISTER: u64 = 80;
+const SYS_FAULT_RECV: u64 = 81;
 
 /// Temporary syscall number for debug serial output.
 const SYS_DEBUG_PRINT: u64 = 255;
@@ -297,12 +311,18 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
             }
         }
 
-        // SYS_IRQ_REGISTER — bind current thread to an IRQ line (cap_id in rdi, requires READ)
+        // SYS_IRQ_REGISTER — bind IRQ to notification (rdi=irq_cap, rsi=notify_cap)
         SYS_IRQ_REGISTER => {
             match cap::validate(frame.rdi as u32, Rights::READ) {
                 Ok(CapObject::Irq { line }) => {
-                    match irq::register(line as u8) {
-                        Ok(()) => frame.rax = 0,
+                    match cap::validate(frame.rsi as u32, Rights::WRITE) {
+                        Ok(CapObject::Notification { id }) => {
+                            match irq::register(line as u8, id) {
+                                Ok(()) => frame.rax = 0,
+                                Err(e) => frame.rax = e as i64 as u64,
+                            }
+                        }
+                        Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
                         Err(e) => frame.rax = e as i64 as u64,
                     }
                 }
@@ -311,11 +331,11 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
             }
         }
 
-        // SYS_IRQ_ACK — acknowledge IRQ, unmask, block until next (cap_id in rdi, requires READ)
+        // SYS_IRQ_ACK — unmask IRQ line (cap_id in rdi, requires READ)
         SYS_IRQ_ACK => {
             match cap::validate(frame.rdi as u32, Rights::READ) {
                 Ok(CapObject::Irq { line }) => {
-                    match irq::ack_and_wait(line as u8) {
+                    match irq::ack(line as u8) {
                         Ok(()) => frame.rax = 0,
                         Err(e) => frame.rax = e as i64 as u64,
                     }
@@ -325,12 +345,34 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
             }
         }
 
-        // SYS_PORT_IN — read a byte from an I/O port (cap_id in rdi, requires READ)
+        // SYS_PORT_IN — read a byte from I/O port (rdi=cap, rsi=port, requires READ)
         SYS_PORT_IN => {
             match cap::validate(frame.rdi as u32, Rights::READ) {
-                Ok(CapObject::IoPort { base, .. }) => {
-                    let val = unsafe { io::inb(base) };
-                    frame.rax = val as u64;
+                Ok(CapObject::IoPort { base, count }) => {
+                    let port = frame.rsi as u16;
+                    if port < base || port >= base + count {
+                        frame.rax = SysError::InvalidArg as i64 as u64;
+                    } else {
+                        let val = unsafe { io::inb(port) };
+                        frame.rax = val as u64;
+                    }
+                }
+                Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
+                Err(e) => frame.rax = e as i64 as u64,
+            }
+        }
+
+        // SYS_PORT_OUT — write a byte to I/O port (rdi=cap, rsi=port, rdx=value, requires WRITE)
+        SYS_PORT_OUT => {
+            match cap::validate(frame.rdi as u32, Rights::WRITE) {
+                Ok(CapObject::IoPort { base, count }) => {
+                    let port = frame.rsi as u16;
+                    if port < base || port >= base + count {
+                        frame.rax = SysError::InvalidArg as i64 as u64;
+                    } else {
+                        unsafe { io::outb(port, frame.rdx as u8) };
+                        frame.rax = 0;
+                    }
                 }
                 Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
                 Err(e) => frame.rax = e as i64 as u64,
@@ -378,6 +420,86 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
         // SYS_THREAD_EXIT — terminate the current thread (never returns)
         SYS_THREAD_EXIT => {
             sched::exit_current();
+        }
+
+        // SYS_THREAD_RESUME — resume a faulted thread (rdi = tid)
+        SYS_THREAD_RESUME => {
+            let tid = frame.rdi as u32;
+            if sched::resume_faulted(ThreadId(tid)) {
+                frame.rax = 0;
+            } else {
+                frame.rax = SysError::InvalidArg as i64 as u64;
+            }
+        }
+
+        // SYS_NOTIFY_CREATE — create a new notification object, return cap_id
+        SYS_NOTIFY_CREATE => {
+            match notify::create() {
+                Some(n) => {
+                    match cap::insert(CapObject::Notification { id: n.0 }, Rights::ALL, None) {
+                        Some(cap_id) => frame.rax = cap_id.index() as u64,
+                        None => frame.rax = SysError::OutOfResources as i64 as u64,
+                    }
+                }
+                None => frame.rax = SysError::OutOfResources as i64 as u64,
+            }
+        }
+
+        // SYS_NOTIFY_WAIT — wait on notification (cap_id in rdi, requires READ)
+        SYS_NOTIFY_WAIT => {
+            match cap::validate(frame.rdi as u32, Rights::READ) {
+                Ok(CapObject::Notification { id }) => {
+                    match notify::wait(id) {
+                        Ok(()) => frame.rax = 0,
+                        Err(e) => frame.rax = e as i64 as u64,
+                    }
+                }
+                Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
+                Err(e) => frame.rax = e as i64 as u64,
+            }
+        }
+
+        // SYS_NOTIFY_SIGNAL — signal notification (cap_id in rdi, requires WRITE)
+        SYS_NOTIFY_SIGNAL => {
+            match cap::validate(frame.rdi as u32, Rights::WRITE) {
+                Ok(CapObject::Notification { id }) => {
+                    match notify::signal(id) {
+                        Ok(()) => frame.rax = 0,
+                        Err(e) => frame.rax = e as i64 as u64,
+                    }
+                }
+                Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
+                Err(e) => frame.rax = e as i64 as u64,
+            }
+        }
+
+        // SYS_FAULT_REGISTER — register notification for page fault delivery
+        // rdi = notify_cap (requires WRITE right)
+        SYS_FAULT_REGISTER => {
+            match cap::validate(frame.rdi as u32, Rights::WRITE) {
+                Ok(CapObject::Notification { id }) => {
+                    fault::register(id);
+                    frame.rax = 0;
+                }
+                Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
+                Err(e) => frame.rax = e as i64 as u64,
+            }
+        }
+
+        // SYS_FAULT_RECV — pop next fault from queue
+        // Returns: rdi=addr, rsi=code, rdx=tid (or WouldBlock if empty)
+        SYS_FAULT_RECV => {
+            match fault::pop_fault() {
+                Some(info) => {
+                    frame.rax = 0;
+                    frame.rdi = info.addr;
+                    frame.rsi = info.code;
+                    frame.rdx = info.tid as u64;
+                }
+                None => {
+                    frame.rax = SysError::WouldBlock as i64 as u64;
+                }
+            }
         }
 
         // SYS_DEBUG_PRINT — write a single byte to serial (temporary)

@@ -311,7 +311,7 @@ def write_mbr(disk: bytearray, disk_sectors: int, part_start: int):
     disk[511] = 0xAA
 
 
-def build_image(kernel_path: str, output_path: str, size_mb: int):
+def build_image(kernel_path: str, output_path: str, size_mb: int, initrd_path: str = None):
     root = Path(__file__).parent.parent
 
     bootx64 = (root / "limine" / "BOOTX64.EFI").read_bytes()
@@ -331,7 +331,7 @@ def build_image(kernel_path: str, output_path: str, size_mb: int):
 
     part_bytes = (disk_sectors - PART_START_LBA) * SECTOR
     fat = Fat32(part_bytes, hidden_sectors=PART_START_LBA)
-    fat.add_files({
+    files = {
         # Limine BIOS
         "limine-bios.sys": bios_sys,
         # Limine UEFI (for dual-boot support)
@@ -341,7 +341,14 @@ def build_image(kernel_path: str, output_path: str, size_mb: int):
         "boot/sotos-kernel": kernel,
         # Also place config at root for maximum compatibility
         "limine.conf": conf,
-    })
+    }
+
+    if initrd_path and Path(initrd_path).exists():
+        initrd_data = Path(initrd_path).read_bytes()
+        files["boot/initrd.img"] = initrd_data
+        print(f"  initrd.img:     {len(initrd_data):>10,} bytes")
+
+    fat.add_files(files)
     part_data = fat.finish()
     off = PART_START_LBA * SECTOR
     disk[off:off+len(part_data)] = part_data
@@ -376,6 +383,7 @@ def main():
     p.add_argument("--kernel", default=str(default_kernel))
     p.add_argument("--output", "-o", default=str(default_output))
     p.add_argument("--size", type=int, default=64, help="Disk size in MiB")
+    p.add_argument("--initrd", default=None, help="Initramfs image to include")
     args = p.parse_args()
 
     if not Path(args.kernel).exists():
@@ -384,7 +392,7 @@ def main():
         return 1
 
     print("Building sotOS disk image...")
-    build_image(args.kernel, args.output, args.size)
+    build_image(args.kernel, args.output, args.size, args.initrd)
     print("Done.")
     return 0
 

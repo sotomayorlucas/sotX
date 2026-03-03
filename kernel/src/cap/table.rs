@@ -1,13 +1,13 @@
 //! Capability table implementation.
 //!
-//! Fixed-size table mapping CapId → (Object, Rights, Parent).
+//! Pool-backed table mapping CapId → (Object, Rights, Parent).
 //! The Capability Derivation Tree (CDT) tracks parent-child
 //! relationships for O(n) revocation of all derivatives.
 
+use alloc::vec::Vec;
 use sotos_common::SysError;
 
-/// Maximum number of capabilities in the system.
-pub const MAX_CAPS: usize = 4096;
+use crate::pool::Pool;
 
 /// Unique capability identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +72,8 @@ pub enum CapObject {
     Irq { line: u32 },
     /// x86 I/O port range.
     IoPort { base: u16, count: u16 },
+    /// Notification object (binary semaphore for shared-memory IPC).
+    Notification { id: u32 },
     /// Null / empty slot.
     Null,
 }
@@ -83,107 +85,72 @@ struct CapEntry {
     rights: Rights,
     /// Parent capability (for the CDT). None = root capability.
     parent: Option<CapId>,
-    /// Is this entry alive?
-    alive: bool,
-}
-
-impl CapEntry {
-    const fn empty() -> Self {
-        Self {
-            object: CapObject::Null,
-            rights: Rights::empty(),
-            parent: None,
-            alive: false,
-        }
-    }
 }
 
 /// The kernel's capability table.
 pub struct CapabilityTable {
-    entries: [CapEntry; MAX_CAPS],
-    next_free: u32,
+    entries: Pool<CapEntry>,
 }
 
 impl CapabilityTable {
     pub const fn new() -> Self {
         Self {
-            entries: [CapEntry::empty(); MAX_CAPS],
-            next_free: 0,
+            entries: Pool::new(),
         }
     }
 
-    /// Insert a new capability. Returns None if the table is full.
+    /// Insert a new capability.
     pub fn insert(
         &mut self,
         object: CapObject,
         rights: Rights,
         parent: Option<CapId>,
     ) -> Option<CapId> {
-        // Linear scan from next_free hint.
-        for i in 0..MAX_CAPS {
-            let idx = (self.next_free as usize + i) % MAX_CAPS;
-            if !self.entries[idx].alive {
-                self.entries[idx] = CapEntry {
-                    object,
-                    rights,
-                    parent,
-                    alive: true,
-                };
-                self.next_free = (idx as u32 + 1) % MAX_CAPS as u32;
-                return Some(CapId(idx as u32));
-            }
-        }
-        None
+        let id = self.entries.alloc(CapEntry {
+            object,
+            rights,
+            parent,
+        });
+        Some(CapId(id))
     }
 
-    /// Validate a capability: look up by ID, check alive, check rights.
+    /// Validate a capability: look up by ID, check rights.
     pub fn validate(&self, id: CapId, required: Rights) -> Result<CapObject, SysError> {
-        let idx = id.index();
-        if idx >= MAX_CAPS {
-            return Err(SysError::InvalidCap);
-        }
-        let entry = &self.entries[idx];
-        if !entry.alive {
-            return Err(SysError::InvalidCap);
-        }
+        let entry = self.entries.get(id.0).ok_or(SysError::InvalidCap)?;
         if !entry.rights.contains(required) {
             return Err(SysError::NoRights);
         }
         Ok(entry.object)
     }
 
-    /// Look up a capability by ID. Returns None if not found or revoked.
+    /// Look up a capability by ID. Returns None if not found.
     pub fn lookup(&self, id: CapId) -> Option<(CapObject, Rights)> {
-        let entry = &self.entries[id.index()];
-        if entry.alive {
-            Some((entry.object, entry.rights))
-        } else {
-            None
-        }
+        let entry = self.entries.get(id.0)?;
+        Some((entry.object, entry.rights))
     }
 
     /// Revoke a capability and all capabilities derived from it (CDT walk).
     pub fn revoke(&mut self, id: CapId) {
-        if !self.entries[id.index()].alive {
+        if self.entries.free(id.0).is_none() {
             return;
         }
-        self.entries[id.index()].alive = false;
 
-        // Walk the table and revoke all children.
-        // This is O(n*depth) in the worst case — acceptable for the current
-        // fixed-size table. A real CDT would use a tree structure.
+        // Walk the pool and revoke all children whose parent was revoked.
+        // This is O(n*depth) in the worst case — acceptable for now.
+        let mut to_revoke: Vec<u32> = Vec::new();
         let mut changed = true;
         while changed {
             changed = false;
-            for i in 0..MAX_CAPS {
-                if self.entries[i].alive {
-                    if let Some(parent) = self.entries[i].parent {
-                        if !self.entries[parent.index()].alive {
-                            self.entries[i].alive = false;
-                            changed = true;
-                        }
+            for (i, entry) in self.entries.iter() {
+                if let Some(parent) = entry.parent {
+                    if self.entries.get(parent.0).is_none() {
+                        to_revoke.push(i);
+                        changed = true;
                     }
                 }
+            }
+            for id in to_revoke.drain(..) {
+                self.entries.free(id);
             }
         }
     }

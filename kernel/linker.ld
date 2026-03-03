@@ -62,6 +62,26 @@ SECTIONS
         KEEP(*(.user_child))
     } :data
 
+    .user_shm_tx : {
+        KEEP(*(.user_shm_tx))
+    } :data
+
+    .user_shm_rx : {
+        KEEP(*(.user_shm_rx))
+    } :data
+
+    .user_serial : {
+        KEEP(*(.user_serial))
+    } :data
+
+    .user_vmm : {
+        KEEP(*(.user_vmm))
+    } :data
+
+    .user_fault_test : {
+        KEEP(*(.user_fault_test))
+    } :data
+
     .bss : {
         *(.bss .bss.*)
         *(COMMON)

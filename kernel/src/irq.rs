@@ -1,47 +1,39 @@
-//! IRQ virtualization — binding table for userspace driver threads.
+//! IRQ virtualization — notification-based binding for userspace drivers.
 //!
-//! Maps hardware IRQ lines to handler threads. The kernel masks the IRQ
-//! on entry and wakes the handler; the handler processes the device and
-//! calls `ack_and_wait()` to unmask and block for the next interrupt.
+//! Maps hardware IRQ lines to notification objects. When an IRQ fires,
+//! the kernel signals the bound notification; the driver calls
+//! `NOTIFY_WAIT` to block and `IRQ_ACK` to unmask the line.
+//!
+//! Lock ordering: IRQ_TABLE dropped before calling ipc::notify (which
+//! acquires NOTIFICATIONS then SCHEDULER).
 
 use crate::arch::x86_64::pic;
-use crate::sched::{self, ThreadId};
+use crate::ipc::notify;
 use sotos_common::SysError;
 use spin::Mutex;
 
 /// Maximum IRQ lines managed (8259 PIC: 0-15).
 const MAX_IRQ: usize = 16;
 
-/// Per-IRQ binding state.
+/// Per-IRQ binding: maps an IRQ line to a notification object.
 #[derive(Clone, Copy)]
 struct IrqBinding {
-    /// Thread registered to handle this IRQ (None = unbound).
-    handler_tid: Option<ThreadId>,
-    /// Thread currently blocked in ack_and_wait (None = not waiting).
-    waiting_tid: Option<ThreadId>,
-    /// IRQ fired while handler wasn't waiting yet.
-    pending: bool,
+    /// Bound notification (None = unbound).
+    notify_id: Option<u32>,
 }
 
 impl IrqBinding {
     const fn empty() -> Self {
-        Self {
-            handler_tid: None,
-            waiting_tid: None,
-            pending: false,
-        }
+        Self { notify_id: None }
     }
 }
 
 static IRQ_TABLE: Mutex<[IrqBinding; MAX_IRQ]> = Mutex::new([IrqBinding::empty(); MAX_IRQ]);
 
-/// Register the current thread as the handler for `irq`.
+/// Bind an IRQ line to a notification object and unmask the line.
 ///
-/// Called from SYS_IRQ_REGISTER. Rejects IRQ 0 (kernel timer) and
-/// already-bound lines.
-pub fn register(irq: u8) -> Result<(), SysError> {
-    let tid = sched::current_tid().ok_or(SysError::InvalidArg)?;
-
+/// Rejects IRQ 0 (kernel timer) and already-bound lines.
+pub fn register(irq: u8, notify_id: u32) -> Result<(), SysError> {
     if irq == 0 || irq as usize >= MAX_IRQ {
         return Err(SysError::InvalidArg);
     }
@@ -49,63 +41,29 @@ pub fn register(irq: u8) -> Result<(), SysError> {
     let mut table = IRQ_TABLE.lock();
     let entry = &mut table[irq as usize];
 
-    if entry.handler_tid.is_some() {
+    if entry.notify_id.is_some() {
         return Err(SysError::OutOfResources);
     }
 
-    entry.handler_tid = Some(tid);
-    entry.pending = false;
-    entry.waiting_tid = None;
+    entry.notify_id = Some(notify_id);
+    pic::unmask(irq);
+    Ok(())
+}
+
+/// Acknowledge an IRQ by unmasking the line. Does not block.
+///
+/// The driver blocks separately via `SYS_NOTIFY_WAIT`.
+pub fn ack(irq: u8) -> Result<(), SysError> {
+    if irq as usize >= MAX_IRQ {
+        return Err(SysError::InvalidArg);
+    }
 
     pic::unmask(irq);
     Ok(())
 }
 
-/// Acknowledge the previous IRQ, unmask the line, and block until
-/// the next one fires. Returns immediately if an IRQ is already pending.
-///
-/// Called from SYS_IRQ_ACK.
-pub fn ack_and_wait(irq: u8) -> Result<(), SysError> {
-    let tid = sched::current_tid().ok_or(SysError::InvalidArg)?;
-
-    if irq as usize >= MAX_IRQ {
-        return Err(SysError::InvalidArg);
-    }
-
-    // Check binding and pending state, then decide whether to block.
-    let should_block = {
-        let mut table = IRQ_TABLE.lock();
-        let entry = &mut table[irq as usize];
-
-        // Only the registered handler may ack.
-        match entry.handler_tid {
-            Some(h) if h == tid => {}
-            _ => return Err(SysError::NoRights),
-        }
-
-        if entry.pending {
-            // IRQ already fired — consume it, unmask, return immediately.
-            entry.pending = false;
-            pic::unmask(irq);
-            false
-        } else {
-            // No pending IRQ — unmask and prepare to block.
-            entry.waiting_tid = Some(tid);
-            pic::unmask(irq);
-            true
-        }
-    };
-    // IRQ_TABLE lock dropped here.
-
-    if should_block {
-        sched::block_current();
-    }
-
-    Ok(())
-}
-
-/// Called from IDT interrupt handler (IF=0). Sets pending flag and
-/// wakes the handler thread if it's blocked in ack_and_wait.
+/// Called from IDT interrupt handler (IF=0). Signals the bound
+/// notification object if one exists.
 ///
 /// The IRQ line is already masked by the IDT handler before calling this.
 pub fn notify(irq: u8) {
@@ -113,21 +71,13 @@ pub fn notify(irq: u8) {
         return;
     }
 
-    let wake_tid = {
-        let mut table = IRQ_TABLE.lock();
-        let entry = &mut table[irq as usize];
-
-        if entry.handler_tid.is_none() {
-            // Unbound IRQ — ignore (spurious or unregistered).
-            return;
-        }
-
-        entry.pending = true;
-        entry.waiting_tid.take()
+    let notify_id = {
+        let table = IRQ_TABLE.lock();
+        table[irq as usize].notify_id
     };
-    // IRQ_TABLE lock dropped here — safe to acquire SCHEDULER.
+    // IRQ_TABLE lock dropped — safe to call into notify subsystem.
 
-    if let Some(tid) = wake_tid {
-        sched::wake(tid);
+    if let Some(id) = notify_id {
+        let _ = notify::signal(id);
     }
 }

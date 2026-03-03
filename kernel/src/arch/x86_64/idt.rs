@@ -101,13 +101,16 @@ extern "x86-interrupt" fn page_fault_handler(
     let addr = Cr2::read_raw();
 
     if code.contains(PageFaultErrorCode::USER_MODE) {
-        // User-mode page fault — kill the faulting thread.
-        // Future: deliver to VMM server via IPC for demand paging.
-        kprintln!(
-            "page fault (user): addr={:#x} code={:?} rip={:#x}",
-            addr, code, frame.instruction_pointer.as_u64()
-        );
-        crate::sched::exit_current();
+        let tid = crate::sched::current_tid().map(|t| t.0).unwrap_or(0);
+        if crate::fault::push_fault(tid, addr, code.bits()) {
+            crate::sched::fault_current();
+        } else {
+            kprintln!(
+                "page fault (user, no VMM): addr={:#x} code={:?} rip={:#x}",
+                addr, code, frame.instruction_pointer.as_u64()
+            );
+            crate::sched::exit_current();
+        }
     } else {
         // Kernel-mode page fault — this is a bug.
         panic!(

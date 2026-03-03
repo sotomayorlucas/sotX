@@ -4,6 +4,9 @@ members = [
     "kernel",
     "libs/sotos-common",
 ]
+exclude = [
+    "services/init",
+]
 
 [profile.dev]
 panic = "abort"

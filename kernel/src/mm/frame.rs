@@ -93,6 +93,31 @@ impl BitmapAllocator {
         None
     }
 
+    fn allocate_contiguous(&mut self, count: usize) -> Option<PhysFrame> {
+        if count == 0 { return None; }
+        let limit = self.total_frames.checked_sub(count - 1)?;
+        for start in 0..limit {
+            let idx = (self.search_hint + start) % self.total_frames;
+            if idx + count > self.total_frames { continue; }
+            let mut all_free = true;
+            for j in 0..count {
+                if self.is_set(idx + j) {
+                    all_free = false;
+                    break;
+                }
+            }
+            if all_free {
+                for j in 0..count {
+                    self.set(idx + j);
+                }
+                self.free_frames -= count;
+                self.search_hint = idx + count;
+                return Some(PhysFrame::from_addr(idx as u64 * FRAME_SIZE as u64));
+            }
+        }
+        None
+    }
+
     fn free(&mut self, frame: PhysFrame) {
         let idx = frame.index();
         assert!(self.is_set(idx), "double free of frame {:#x}", frame.addr());
@@ -178,6 +203,12 @@ pub fn init(memory_map: &MemoryMapResponse, hhdm_offset: u64) {
 /// Allocate a single physical frame.
 pub fn alloc_frame() -> Option<PhysFrame> {
     ALLOCATOR.lock().as_mut()?.allocate()
+}
+
+/// Allocate `count` physically contiguous frames.
+/// Returns the base frame (lowest address). All frames are consecutive.
+pub fn alloc_contiguous(count: usize) -> Option<PhysFrame> {
+    ALLOCATOR.lock().as_mut()?.allocate_contiguous(count)
 }
 
 /// Free a previously allocated physical frame.

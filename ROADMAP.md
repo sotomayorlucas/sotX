@@ -1,6 +1,8 @@
 # sotOS Development Roadmap
 
-> Current state: Kernel boots via Limine BIOS, initializes GDT/IDT/frame allocator/capabilities/scheduler skeletons, outputs to serial, and halts.
+> Current state: Kernel boots via Limine BIOS, runs preemptive multitasking with userspace
+> processes, sync/async IPC, capability enforcement, notifications, shared-memory zero-copy,
+> and a slab allocator for kernel heap. 8 userspace threads demonstrate all primitives.
 
 ---
 
@@ -20,94 +22,103 @@
 
 ---
 
-## Phase 1 — Preemption & Context Switching
+## Phase 1 — Preemption & Context Switching (DONE)
 
 **Goal**: The CPU can run multiple kernel threads and switch between them on a timer tick.
 
 ### 1.1 Timer Interrupt
-- [ ] Initialize the PIT (Programmable Interval Timer) at ~100 Hz for initial preemption
+- [x] Initialize the PIT (Programmable Interval Timer) at ~100 Hz for initial preemption
   - Configure PIT channel 0, mode 2 (rate generator)
   - Wire IRQ0 through the legacy 8259 PIC (remap to vectors 32+)
-- [ ] Add PIC initialization (remap IRQ 0–15 to IDT vectors 32–47)
-- [ ] Register timer interrupt handler in the IDT (vector 32)
-- [ ] Handler increments a global tick counter and calls `sched::tick()`
+- [x] Add PIC initialization (remap IRQ 0–15 to IDT vectors 32–47)
+- [x] Register timer interrupt handler in the IDT (vector 32)
+- [x] Handler increments a global tick counter and calls `sched::tick()`
 
 ### 1.2 Context Switch
-- [ ] Write the assembly trampoline `context_switch(old: *mut CpuContext, new: *const CpuContext)`
+- [x] Write the assembly trampoline `context_switch(old: *mut CpuContext, new: *const CpuContext)`
   - Save callee-saved registers (rbx, rbp, r12–r15) + rsp + rflags to `old`
   - Restore from `new`
   - `ret` jumps to new thread's saved rip
-- [ ] Allocate kernel stacks for threads (one 16 KiB page per thread from the frame allocator)
-- [ ] Implement `Thread::new()` that sets up initial context (rip = entry function, rsp = top of stack)
+- [x] Allocate kernel stacks for threads (one 16 KiB page per thread from the frame allocator)
+- [x] Implement `Thread::new()` that sets up initial context (rip = entry function, rsp = top of stack)
 
 ### 1.3 Scheduler Core
-- [ ] Implement a run queue (fixed-size circular buffer of `ThreadId`)
-- [ ] Round-robin `schedule()`: pick next Ready thread, mark Running, context switch
-- [ ] `sched::tick()`: decrement current thread's timeslice, if expired → preempt
-- [ ] Create an idle thread (hlt loop) that runs when no other thread is Ready
-- [ ] Create 2–3 test kernel threads that print to serial in a loop to demonstrate preemption
+- [x] Implement a run queue (fixed-size circular buffer of `ThreadId`)
+- [x] Round-robin `schedule()`: pick next Ready thread, mark Running, context switch
+- [x] `sched::tick()`: decrement current thread's timeslice, if expired → preempt
+- [x] Create an idle thread (hlt loop) that runs when no other thread is Ready
+- [x] Create 2–3 test kernel threads that print to serial in a loop to demonstrate preemption
 
 ### Milestone: Multiple kernel threads printing interleaved output to serial.
 
 ---
 
-## Phase 2 — Syscall Interface & Ring 3
+## Phase 2 — Syscall Interface & Ring 3 (DONE)
 
 **Goal**: Userspace code can execute, trap into the kernel via `syscall`, and return.
 
 ### 2.1 Syscall Entry/Exit
-- [ ] Configure MSRs for `syscall`/`sysret` (STAR, LSTAR, SFMASK)
+- [x] Configure MSRs for `syscall`/`sysret` (STAR, LSTAR, SFMASK)
   - LSTAR → `syscall_entry` assembly stub
   - STAR → kernel CS/SS in bits 47:32, user CS/SS in bits 63:48
   - SFMASK → mask IF (disable interrupts on syscall entry)
-- [ ] Write `syscall_entry` asm: swap to kernel stack (from TSS RSP0), save user registers, call Rust dispatcher
-- [ ] Write `syscall_exit` asm: restore user registers, `sysret`
-- [ ] Implement syscall dispatcher: match on rax (syscall number from `sotos-common::Syscall`)
-- [ ] Implement `sys_yield()` as first working syscall
+- [x] Write `syscall_entry` asm: swap to kernel stack (from TSS RSP0), save user registers, call Rust dispatcher
+- [x] Write `syscall_exit` asm: restore user registers, `sysret`
+- [x] Implement syscall dispatcher: match on rax (syscall number from `sotos-common::Syscall`)
+- [x] Implement `sys_yield()` as first working syscall
 
 ### 2.2 User Segments & Address Space
-- [ ] Add user code/data segments to the GDT (Ring 3, 64-bit)
-- [ ] Create a minimal page table for the first userspace process:
+- [x] Add user code/data segments to the GDT (Ring 3, 64-bit)
+- [x] Create a minimal page table for the first userspace process:
   - Identity-map (or HHDM-map) the kernel in the higher half
   - Map the user binary at a fixed low address (e.g., 0x400000)
-- [ ] Implement basic page table construction in the kernel (4-level: PML4 → PDPT → PD → PT)
+- [x] Implement basic page table construction in the kernel (4-level: PML4 → PDPT → PD → PT)
   - Use frames from the allocator for page table pages
 
 ### 2.3 First Userspace Process
-- [ ] Embed a minimal user binary (flat binary or simple ELF) in the kernel image
-- [ ] Parse it and map its segments into the user address space
-- [ ] Create a user thread: set Ring 3 CS/SS, rip = entry point, rsp = user stack
-- [ ] Jump to userspace via `sysret` (or `iretq` for initial transition)
-- [ ] User program calls `sys_yield()` → traps to kernel → returns to user → prints confirmation
+- [x] Embed a minimal user binary (flat binary or simple ELF) in the kernel image
+- [x] Parse it and map its segments into the user address space
+- [x] Create a user thread: set Ring 3 CS/SS, rip = entry point, rsp = user stack
+- [x] Jump to userspace via `sysret` (or `iretq` for initial transition)
+- [x] User program calls `sys_yield()` → traps to kernel → returns to user → prints confirmation
 
 ### Milestone: A userspace process runs, syscalls into the kernel, and returns.
 
 ---
 
-## Phase 3 — IPC: Send, Receive, Call
+## Phase 3 — IPC: Send, Receive, Call (DONE)
 
 **Goal**: Two userspace threads can exchange messages through kernel endpoints.
 
 ### 3.1 Endpoint Send/Recv
-- [ ] Implement `sys_send(endpoint_cap, msg)`:
+- [x] Implement `sys_send(endpoint_cap, msg)`:
   - Validate capability (cap table lookup + rights check)
   - If receiver is waiting → direct transfer (copy registers) + wake receiver
   - Else → block sender, add to endpoint's send queue
-- [ ] Implement `sys_recv(endpoint_cap)`:
+- [x] Implement `sys_recv(endpoint_cap)`:
   - If sender is waiting → direct transfer + wake sender
   - Else → block receiver
-- [ ] Implement `sys_call(endpoint_cap, msg)` = send + recv in one syscall (atomic rendezvous)
+- [x] Implement `sys_call(endpoint_cap, msg)` = send + recv in one syscall (atomic rendezvous)
 
 ### 3.2 Register-Based Transfer
-- [ ] On rendezvous, copy message registers directly between thread CpuContexts
+- [x] On rendezvous, copy message registers directly between thread CpuContexts
   - 8 registers × 8 bytes = 64 bytes per message, zero allocation
 - [ ] Include capability transfer: one message register can carry a CapId
   - Kernel validates and clones the capability into the receiver's cap space
 
 ### 3.3 Integration Test
-- [ ] Create a "ping-pong" test: two user threads exchange messages in a loop
+- [x] Create a "ping-pong" test: two user threads exchange messages in a loop
 - [ ] Measure IPC round-trip time (rdtsc before/after)
 - [ ] Target: < 1000 cycles per one-way message on modern hardware
+
+### 3.4 Extra (not in original plan)
+- [x] Capability enforcement on all syscalls (cap validate + rights checks)
+- [x] Async IPC channels (bounded ring buffers, 64 channels × 16 messages)
+- [x] Notification objects (binary semaphore, wait/signal)
+- [x] Shared-memory zero-copy IPC (userspace data, kernel only wake/sleep)
+- [x] Slab allocator (`#[global_allocator]`, 8 size classes, enables `alloc` crate)
+- [x] Keyboard IRQ driver (userspace, via IRQ cap + I/O port cap)
+- [x] `sys_thread_create` syscall (spawn threads from userspace)
 
 ### Milestone: Two processes communicate via IPC. Latency measured.
 
@@ -390,34 +401,34 @@ capability-based primitives — entirely in Ring 3.
 ## Phase Summary
 
 ```
-Phase  Scope                          Dependencies    Effort
+Phase  Scope                          Dependencies    Status
 ─────  ─────────────────────────────  ──────────────  ──────
-  0    Foundation (DONE)              —               ██████ done
-  1    Preemption + Context Switch    Phase 0         ████
-  2    Syscall + Ring 3               Phase 1         █████
-  3    IPC Send/Recv/Call             Phase 2         ████
-  4    IRQ Virtualization             Phase 3         ███
-  5    VMM Server                     Phase 2         █████
-  6    Init Service + ELF Loader      Phase 3,5       ████
-  7    Shared-Memory Channels         Phase 3         ████
-  8    SMP (Multi-Core)               Phase 1         █████
-  9    Scheduling Domains             Phase 8         ████
- 10    LUCAS (UNIX Compat Layer)      Phase 6,7,11    ████████
- 11    Filesystem + Object Store      Phase 6         ██████
- 12    Networking + Distribution      Phase 6,11      ██████
- 13    Verification + Hardening       Phase 3+        ████████
+  0    Foundation                     —               DONE
+  1    Preemption + Context Switch    Phase 0         DONE
+  2    Syscall + Ring 3               Phase 1         DONE
+  3    IPC Send/Recv/Call + extras    Phase 2         DONE (partial: no cap transfer, no benchmarks)
+  4    IRQ Virtualization             Phase 3         TODO
+  5    VMM Server                     Phase 2         TODO
+  6    Init Service + ELF Loader      Phase 3,5       TODO
+  7    Shared-Memory Channels         Phase 3         TODO (basic version done in Phase 3 extras)
+  8    SMP (Multi-Core)               Phase 1         TODO
+  9    Scheduling Domains             Phase 8         TODO
+ 10    LUCAS (UNIX Compat Layer)      Phase 6,7,11    TODO
+ 11    Filesystem + Object Store      Phase 6         TODO
+ 12    Networking + Distribution      Phase 6,11      TODO
+ 13    Verification + Hardening       Phase 3+        TODO
 ```
 
 ```
                          Phase 0 (DONE)
                               │
-                         Phase 1 (Timer + Context Switch)
+                         Phase 1 (DONE)
                         ╱          ╲
                 Phase 2              Phase 8
-            (Syscall/Ring3)          (SMP)
+                (DONE)               (SMP)
               ╱     ╲                   │
         Phase 3    Phase 5         Phase 9
-        (IPC)      (VMM)      (Sched Domains)
+        (DONE)     (VMM)      (Sched Domains)
         ╱    ╲        │
   Phase 4   Phase 7   │
   (IRQ)    (Channels)  │
@@ -440,13 +451,8 @@ Phase  Scope                          Dependencies    Effort
 
 ## Immediate Next Steps
 
-After reading this roadmap, start with **Phase 1.1** — the PIT timer interrupt. It's the single most impactful change: once the timer fires, you can build everything else on top of preemptive multitasking.
+Phases 0–3 are complete. The next unlocked phases are:
 
-```
-1. PIC initialization (remap IRQs)     → kernel/src/arch/x86_64/pic.rs
-2. PIT configuration (100 Hz)          → kernel/src/arch/x86_64/pit.rs
-3. Timer handler in IDT                → kernel/src/arch/x86_64/idt.rs
-4. context_switch.asm                  → kernel/src/arch/x86_64/switch.s
-5. Run queue + round-robin scheduler   → kernel/src/sched/mod.rs
-6. Test: two threads printing           → kernel/src/main.rs
-```
+- **Phase 4 (IRQ Virtualization)**: full IRQ→IPC delivery with `sys_irq_register`/`sys_irq_ack`, userspace serial driver. Basic keyboard IRQ already works as a proof of concept.
+- **Phase 5 (VMM Server)**: page fault delivery to userspace, full `sys_map`/`sys_unmap` with VMM policy. Bootstrap paging syscalls (`sys_frame_alloc`, `sys_map`) already exist.
+- **Phase 8 (SMP)**: independent of Phases 4–7, can be started in parallel. Requires APIC, per-CPU state, and lock audit.

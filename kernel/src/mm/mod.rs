@@ -6,8 +6,9 @@
 
 pub mod frame;
 pub mod paging;
+pub mod slab;
 
-pub use frame::{alloc_frame, free_frame, PhysFrame};
+pub use frame::{alloc_frame, alloc_contiguous, free_frame, PhysFrame};
 
 use core::sync::atomic::{AtomicU64, Ordering};
 use limine::response::MemoryMapResponse;

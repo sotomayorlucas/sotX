@@ -11,6 +11,8 @@
 
 pub mod channel;
 pub mod endpoint;
+pub mod notify;
 
 pub use channel::ChannelId;
 pub use endpoint::{EndpointId, Message};
+pub use notify::NotifyId;
