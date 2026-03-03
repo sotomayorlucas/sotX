@@ -465,8 +465,8 @@ fn spawn_init_process() -> u64 {
     // 4. Spawn all threads in dependency order
     //   recv blocks on ep → sender rendezvous → kb → async_rx → async_tx
     //   → shm_rx → shm_tx → serial → vmm → fault_test
-    sched::spawn_user(RECV_CODE,       stacks[1], cr3);  // recv
-    sched::spawn_user(SENDER_CODE,     stacks[0], cr3);  // sender
+    let recv_tid = sched::spawn_user(RECV_CODE,       stacks[1], cr3);  // recv
+    let sender_tid = sched::spawn_user(SENDER_CODE,     stacks[0], cr3);  // sender
     sched::spawn_user(KB_CODE,         stacks[2], cr3);  // keyboard
     sched::spawn_user(ASYNC_RX_CODE,   stacks[4], cr3);  // async consumer
     sched::spawn_user(ASYNC_TX_CODE,   stacks[3], cr3);  // async producer
@@ -475,6 +475,14 @@ fn spawn_init_process() -> u64 {
     sched::spawn_user(SERIAL_CODE,     stacks[8], cr3);  // serial driver
     sched::spawn_user(VMM_CODE,        stacks[9], cr3);  // VMM server
     sched::spawn_user(FAULT_TEST_CODE, stacks[10], cr3); // fault test
+
+    // 5. Create a test scheduling domain: quantum=5, period=20 (25% CPU share).
+    //    Attach sender + receiver threads to demonstrate budget enforcement.
+    if let Some(dom_handle) = sched::create_domain(5, 20) {
+        let _ = sched::attach_to_domain(dom_handle, sender_tid);
+        let _ = sched::attach_to_domain(dom_handle, recv_tid);
+        kprintln!("  init: domain test — sender+recv attached (25% CPU budget)");
+    }
 
     cr3
 }

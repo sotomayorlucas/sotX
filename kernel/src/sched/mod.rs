@@ -10,20 +10,28 @@
 //! Per-CPU state (current thread index) lives in `PerCpu` accessed via GS base.
 //! The global `Scheduler` holds the thread pool; run queues are per-CPU.
 
+pub mod domain;
 pub mod thread;
 
 pub use thread::{IpcRole, ThreadId, ThreadState};
 use thread::Thread;
 
 use alloc::collections::VecDeque;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 use crate::arch::x86_64::percpu;
 use crate::ipc::endpoint::Message;
-use crate::pool::Pool;
+use crate::pool::{Pool, PoolHandle};
 use crate::sync::ticket::TicketMutex;
 
 use crate::kprintln;
+use domain::{DomainState, SchedDomain};
 use spin::Mutex;
 use x86_64::VirtAddr;
+
+/// Global tick counter — incremented unconditionally on every timer tick.
+/// Used as the clock source for domain period refills.
+static GLOBAL_TICKS: AtomicU64 = AtomicU64::new(0);
 
 /// Timeslice in ticks (100 ms at 100 Hz).
 const TIMESLICE: u32 = 10;
@@ -175,6 +183,33 @@ fn dequeue_from_any(my_cpu: usize) -> Option<usize> {
     None
 }
 
+/// Dequeue a non-depleted thread. If a dequeued thread belongs to a depleted
+/// domain, park it in the domain's suspended list and try the next one.
+fn dequeue_non_depleted(my_cpu: usize, sched: &mut Scheduler) -> Option<usize> {
+    // Limit iterations to prevent infinite loop if all threads are depleted.
+    for _ in 0..MAX_THREADS {
+        let idx = dequeue_from_any(my_cpu)?;
+        let domain_idx = sched.threads.get_by_index(idx as u32)
+            .and_then(|t| t.domain_idx);
+
+        match domain_idx {
+            None => return Some(idx), // No domain — always runnable
+            Some(dom_idx) => {
+                let is_active = sched.domains.get_by_index(dom_idx)
+                    .map_or(true, |d| d.state == DomainState::Active);
+                if is_active {
+                    return Some(idx);
+                }
+                // Domain is depleted — park this thread.
+                if let Some(dom) = sched.domains.get_mut_by_index(dom_idx) {
+                    dom.suspended.push(idx);
+                }
+            }
+        }
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
 // Scheduler state (thread pool + ID generator)
 // ---------------------------------------------------------------------------
@@ -184,6 +219,7 @@ const MAX_THREADS: usize = 256;
 
 pub struct Scheduler {
     pub threads: Pool<Thread>,
+    pub domains: Pool<SchedDomain>,
     next_id: u32,
     /// O(1) lookup: tid_to_slot[tid] = Some(pool_index) for live threads.
     tid_to_slot: [Option<u32>; MAX_THREADS],
@@ -193,6 +229,7 @@ impl Scheduler {
     const fn new() -> Self {
         Self {
             threads: Pool::new(),
+            domains: Pool::new(),
             next_id: 0,
             tid_to_slot: [None; MAX_THREADS],
         }
@@ -259,6 +296,7 @@ pub fn init() {
         ipc_endpoint: None,
         ipc_role: IpcRole::None,
         preferred_cpu: None,
+        domain_idx: None,
     };
     let tid = ThreadId(sched.next_id);
     let handle = sched.threads.alloc(idle);
@@ -293,6 +331,7 @@ pub fn create_idle_thread() -> usize {
         ipc_endpoint: None,
         ipc_role: IpcRole::None,
         preferred_cpu: None,
+        domain_idx: None,
     };
     let handle = sched.threads.alloc(idle);
     let slot = handle.index();
@@ -495,9 +534,85 @@ pub fn current_ipc_msg() -> Message {
     Message::empty()
 }
 
+// ---------------------------------------------------------------------------
+// Scheduling Domain API
+// ---------------------------------------------------------------------------
+
+/// Create a new scheduling domain. Returns its pool handle.
+pub fn create_domain(quantum_ticks: u32, period_ticks: u32) -> Option<PoolHandle> {
+    let global_now = GLOBAL_TICKS.load(Ordering::Relaxed);
+    let dom = SchedDomain::new(quantum_ticks, period_ticks, global_now);
+    let mut sched = SCHEDULER.lock();
+    let handle = sched.domains.alloc(dom);
+    kprintln!("  domain: created (quantum={} period={} ticks)", quantum_ticks, period_ticks);
+    Some(handle)
+}
+
+/// Attach a thread to a domain.
+pub fn attach_to_domain(domain_handle: PoolHandle, tid: ThreadId) -> Result<(), sotos_common::SysError> {
+    let mut sched = SCHEDULER.lock();
+    let slot = sched.slot_of(tid).ok_or(sotos_common::SysError::InvalidArg)?;
+    let dom = sched.domains.get_mut(domain_handle).ok_or(sotos_common::SysError::InvalidArg)?;
+    if !dom.add_member(slot) {
+        return Err(sotos_common::SysError::OutOfResources);
+    }
+    let dom_idx = domain_handle.index() as u32;
+    let t = sched.threads.get_mut_by_index(slot).ok_or(sotos_common::SysError::InvalidArg)?;
+    t.domain_idx = Some(dom_idx);
+    Ok(())
+}
+
+/// Detach a thread from a domain.
+pub fn detach_from_domain(domain_handle: PoolHandle, tid: ThreadId) -> Result<(), sotos_common::SysError> {
+    let mut sched = SCHEDULER.lock();
+    let slot = sched.slot_of(tid).ok_or(sotos_common::SysError::InvalidArg)?;
+    let dom_idx = domain_handle.index() as u32;
+
+    // Remove from suspended list and re-enqueue if needed.
+    let mut re_enqueue = false;
+    if let Some(dom) = sched.domains.get_mut(domain_handle) {
+        let was_suspended = dom.suspended.iter().any(|&s| s == slot as usize);
+        dom.remove_member(slot);
+        if was_suspended {
+            re_enqueue = true;
+        }
+    } else {
+        return Err(sotos_common::SysError::InvalidArg);
+    }
+
+    let t = sched.threads.get_mut_by_index(slot).ok_or(sotos_common::SysError::InvalidArg)?;
+    if t.domain_idx == Some(dom_idx) {
+        t.domain_idx = None;
+    }
+
+    if re_enqueue && t.state == ThreadState::Ready {
+        sched.enqueue(slot as usize);
+    }
+
+    Ok(())
+}
+
+/// Adjust a domain's quantum.
+pub fn adjust_domain(domain_handle: PoolHandle, new_quantum: u32) -> Result<(), sotos_common::SysError> {
+    let mut sched = SCHEDULER.lock();
+    let dom = sched.domains.get_mut(domain_handle).ok_or(sotos_common::SysError::InvalidArg)?;
+    dom.quantum_ticks = new_quantum;
+    Ok(())
+}
+
+/// Query domain info: (quantum_ticks, consumed_ticks, period_ticks).
+pub fn domain_info(domain_handle: PoolHandle) -> Option<(u32, u32, u32)> {
+    let sched = SCHEDULER.lock();
+    let dom = sched.domains.get(domain_handle)?;
+    Some((dom.quantum_ticks, dom.consumed_ticks, dom.period_ticks))
+}
+
 /// Called from the timer interrupt handler on every tick.
 /// Uses try_lock to avoid deadlock if the timer fires while SCHEDULER is held.
 pub fn tick() {
+    // Always increment global tick counter (even if lock contended).
+    let global_now = GLOBAL_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+
     let needs_reschedule = {
         let mut sched = match SCHEDULER.try_lock() {
             Some(s) => s,
@@ -505,22 +620,74 @@ pub fn tick() {
         };
         let percpu = percpu::current_percpu();
         let idx = percpu.current_thread;
+        let mut resched = false;
+
         if idx != usize::MAX {
             if let Some(t) = sched.threads.get_mut_by_index(idx as u32) {
                 if t.timeslice > 0 {
                     t.timeslice -= 1;
                 }
-                t.timeslice == 0
-            } else {
-                false
+                if t.timeslice == 0 {
+                    resched = true;
+                }
+
+                // Domain budget tracking.
+                if let Some(dom_idx) = t.domain_idx {
+                    if let Some(dom) = sched.domains.get_mut_by_index(dom_idx) {
+                        dom.consumed_ticks += 1;
+                        if dom.consumed_ticks >= dom.quantum_ticks && dom.state == DomainState::Active {
+                            dom.state = DomainState::Depleted;
+                            kprintln!("  domain: depleted (consumed={}/{})", dom.consumed_ticks, dom.quantum_ticks);
+                            resched = true;
+                        }
+                    }
+                }
             }
-        } else {
-            false
         }
+
+        // Check all domain refills.
+        check_domain_refills(&mut sched, global_now);
+
+        resched
     };
 
     if needs_reschedule {
         schedule();
+    }
+}
+
+/// Check all domains for period refills. Re-enqueue suspended threads.
+fn check_domain_refills(sched: &mut Scheduler, global_now: u64) {
+    // Iterate domain pool by raw index (small, bounded).
+    for idx in 0..64u32 {
+        let re_enqueue = if let Some(dom) = sched.domains.get_mut_by_index(idx) {
+            if global_now >= dom.next_refill_tick {
+                dom.consumed_ticks = 0;
+                dom.state = DomainState::Active;
+                dom.next_refill_tick += dom.period_ticks as u64;
+                // Drain suspended list.
+                let suspended: Vec<usize> = dom.suspended.drain(..).collect();
+                if !suspended.is_empty() {
+                    kprintln!("  domain: refilled, {} threads re-enqueued", suspended.len());
+                }
+                Some(suspended)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Re-enqueue outside the domain borrow.
+        if let Some(threads) = re_enqueue {
+            for tidx in threads {
+                if let Some(t) = sched.threads.get_mut_by_index(tidx as u32) {
+                    if t.state == ThreadState::Ready {
+                        sched.enqueue(tidx);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -543,9 +710,9 @@ pub fn schedule() {
             return;
         }
 
-        // Try to dequeue a ready thread from per-core queue (with work stealing).
+        // Try to dequeue a non-depleted thread from per-core queue (with work stealing).
         let my_cpu = percpu.cpu_index as usize;
-        let new_idx = match dequeue_from_any(my_cpu) {
+        let new_idx = match dequeue_non_depleted(my_cpu, &mut sched) {
             Some(idx) => idx,
             None => {
                 // No other thread ready.
@@ -576,7 +743,14 @@ pub fn schedule() {
             .map_or(false, |t| t.state == ThreadState::Dead);
 
         let old_rsp_ptr = if old_is_dead {
-            // Dead thread: unregister tid, free the slot, use stack dummy for RSP save.
+            // Dead thread: remove from domain, unregister tid, free the slot.
+            if let Some(dead_t) = sched.threads.get_by_index(old_idx as u32) {
+                if let Some(dom_idx) = dead_t.domain_idx {
+                    if let Some(dom) = sched.domains.get_mut_by_index(dom_idx) {
+                        dom.remove_member(old_idx as u32);
+                    }
+                }
+            }
             let dead_tid = sched.threads.get_by_index(old_idx as u32).map(|t| t.id);
             if let Some(tid) = dead_tid {
                 sched.unregister_tid(tid);

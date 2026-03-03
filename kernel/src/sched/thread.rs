@@ -93,6 +93,8 @@ pub struct Thread {
     pub ipc_role: IpcRole,
     /// Preferred CPU for scheduling (None = any CPU).
     pub preferred_cpu: Option<u32>,
+    /// Scheduling domain this thread belongs to (raw pool index).
+    pub domain_idx: Option<u32>,
 }
 
 impl Thread {
@@ -136,6 +138,7 @@ impl Thread {
             ipc_endpoint: None,
             ipc_role: IpcRole::None,
             preferred_cpu: None,
+            domain_idx: None,
         }
     }
 
@@ -184,6 +187,7 @@ impl Thread {
             ipc_endpoint: None,
             ipc_role: IpcRole::None,
             preferred_cpu: None,
+            domain_idx: None,
         }
     }
 }

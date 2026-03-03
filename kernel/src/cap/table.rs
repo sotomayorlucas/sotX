@@ -88,6 +88,8 @@ pub enum CapObject {
     IoPort { base: u16, count: u16 },
     /// Notification object (binary semaphore for shared-memory IPC).
     Notification { id: u32 },
+    /// Scheduling domain (budget-enforced thread group).
+    Domain { id: u32 },
     /// Null / empty slot.
     Null,
 }

@@ -1,8 +1,10 @@
 # sotOS (Secure Object Transactional Operating System) — Development Roadmap
 
-> Current state: SMP-capable microkernel with per-core scheduling, lock-free userspace
-> IPC, capability transfer, and IPC benchmarks. All five kernel primitives run across
-> multiple CPU cores with per-core run queues and work stealing. Lock-free SPSC
+> Current state: SMP-capable microkernel with scheduling domains (budget-enforced
+> thread groups), per-core scheduling, lock-free userspace IPC, capability transfer,
+> and IPC benchmarks. All five kernel primitives run across multiple CPU cores with
+> per-core run queues and work stealing. Scheduling domains provide kernel-enforced
+> CPU time budgets for thread groups (seL4-inspired model). Lock-free SPSC
 > shared-memory channels provide zero-syscall hot-path messaging with typed wrappers.
 > 12+ userspace threads demonstrate sync/async IPC, capabilities, notifications,
 > shared-memory, IRQ virtualization, demand paging (VMM), ELF loading from initramfs,
@@ -254,26 +256,51 @@ This phase adds the lock-free userspace-only fast path.
 
 ---
 
-## Phase 9 — Scheduling Domains
+## Phase 9 — Scheduling Domains (DONE)
 
-**Goal**: Userspace can implement custom schedulers for their own threads.
+**Goal**: Userspace can implement custom schedulers for their own threads via
+budget-enforced thread groups (seL4-inspired model).
 
-### 9.1 Domain API
-- [ ] `sys_sched_domain_create(quantum_us)`: create a scheduling domain with a budget
-- [ ] The kernel schedules domains (not individual user threads within a domain)
-- [ ] Domain manager thread receives its quantum and distributes it internally
+### 9.1 Domain Kernel Object
+- [x] `SchedDomain` struct: quantum_ticks, period_ticks, consumed_ticks, state (Active/Depleted)
+- [x] Per-domain member list (64 threads max) + suspended list for depleted threads
+- [x] `Pool<SchedDomain>` in Scheduler — dynamic, generation-checked
+- [x] `CapObject::Domain { id }` — domains accessed via capability system
 
-### 9.2 Use Cases
+### 9.2 Budget Enforcement
+- [x] `GLOBAL_TICKS` atomic counter — incremented unconditionally on every timer tick
+- [x] `tick()`: tracks per-domain consumed_ticks, transitions Active → Depleted at quantum
+- [x] `check_domain_refills()`: scans domains on each tick, refills when period elapses
+- [x] `dequeue_non_depleted()`: skips threads in depleted domains, parks them in suspended list
+- [x] Refill drains suspended list → re-enqueue Ready threads
+- [x] Threads without a domain always run (no budget limit)
+- [x] Dead thread cleanup: remove from domain membership on exit
+
+### 9.3 Syscall Interface (90–94)
+- [x] `DomainCreate(quantum_ms, period_ms)` — create domain with CPU budget (ms→ticks conversion)
+- [x] `DomainAttach(domain_cap, thread_cap)` — add thread to domain
+- [x] `DomainDetach(domain_cap, thread_cap)` — remove thread from domain (re-enqueue if suspended)
+- [x] `DomainAdjust(domain_cap, new_quantum_ms)` — dynamic budget adjustment
+- [x] `DomainInfo(domain_cap)` → (quantum, consumed, period) — query budget state
+- [x] All operations cap-validated (WRITE for create/attach/detach/adjust, READ for info)
+
+### 9.4 Userspace ABI
+- [x] `Syscall::DomainCreate/Attach/Detach/Adjust/Info` enum variants (90–94)
+- [x] `sys::domain_create/attach/detach/adjust/info` wrappers in sotos-common
+- [x] `domain_info` uses custom asm with 3 output registers (rdi, rsi, rdx)
+
+### 9.5 Use Cases
 - [ ] Go-style M:N green thread runtime as a scheduling domain
 - [ ] Dedicated-core domain for latency-sensitive workloads
 - [ ] Work-stealing pool domain for parallel compute
 
-### 9.3 Enforcement
-- [ ] If a domain exceeds its quantum → kernel preempts unconditionally
-- [ ] Domains can request more/less quantum dynamically (kernel mediates)
+### 9.6 Deferred (Future Work)
+- [ ] CPU pinning: `cpu_affinity: u16` bitmask — threads only on selected CPUs
 - [ ] Priority inheritance across domain boundaries for IPC chains
+- [ ] Domain destruction: detach all threads, drain suspended, free slot
+- [ ] Exclusive cores: domain reserves CPU(s), other threads excluded
 
-### Milestone: A user-level scheduler manages green threads without kernel involvement.
+### Milestone: Kernel-enforced time budgets work. Domain threads deplete/refill cycles visible in serial output. 25% CPU share demonstrated with sender+receiver threads.
 
 ---
 
@@ -418,7 +445,7 @@ Phase  Scope                          Dependencies    Status
   7    Shared-Memory Channels         Phase 3         DONE (SPSC + typed wrappers + benchmarks)
   8    SMP (Multi-Core)               Phase 1         DONE (per-core queues, work stealing, IPI, ticket locks)
  16    Technical Hardening            Phase 8         DONE (ABA protection, O(1) lookup, lock ordering, per-CPU slab)
-  9    Scheduling Domains             Phase 8         TODO
+  9    Scheduling Domains             Phase 8         DONE (budget enforcement, 5 syscalls, cap-based)
  10    LUCAS (UNIX Compat Layer)      Phase 6,7,11    TODO
  11    Filesystem + Object Store      Phase 6         TODO
  12    Networking + Distribution      Phase 6,11      TODO
@@ -434,7 +461,7 @@ Phase  Scope                          Dependencies    Status
                 (DONE)               (DONE)
               ╱     ╲                   │
         Phase 3    Phase 5         Phase 9
-        (DONE)     (DONE)     (Sched Domains)
+        (DONE)     (DONE)          (DONE)
         ╱    ╲        │
   Phase 4   Phase 7   │
   (DONE)    (DONE)     │
@@ -457,13 +484,13 @@ Phase  Scope                          Dependencies    Status
 
 ## Immediate Next Steps
 
-Phases 0–8 and Phase 16 (Technical Hardening) are complete. The kernel is SMP-capable
-with generation-checked object pools, O(1) scheduler lookups, per-CPU slab caches,
-lock ordering enforcement, and a complete syscall wrapper ABI for userspace Rust programs.
-The next unlocked phases are:
+Phases 0–9 and Phase 16 (Technical Hardening) are complete. The kernel is SMP-capable
+with scheduling domains (budget-enforced thread groups), generation-checked object pools,
+O(1) scheduler lookups, per-CPU slab caches, lock ordering enforcement, and a complete
+syscall wrapper ABI for userspace Rust programs. The next unlocked phases are:
 
-- **Phase 9 (Scheduling Domains)**: now unlocked by Phase 8. Userspace custom schedulers with kernel-enforced time budgets.
 - **Phase 11 (Filesystem + Storage)**: virtio-blk driver + object store. Prerequisite for LUCAS (Phase 10).
 - **Assembly blob → Rust migration**: all syscall wrappers now available in sotos-common; init service blobs can be rewritten in Rust.
 - **Full IDL-based typed channels**: code generator from IDL → Rust stubs (Phase 7 stretch).
 - **Expand init service**: spawn VMM + drivers from config, full process lifecycle management.
+- **Domain extensions**: CPU pinning, priority inheritance, domain destruction, exclusive cores.

@@ -69,6 +69,16 @@ pub enum Syscall {
     FaultRegister = 80,
     /// Receive the next pending page fault (VMM).
     FaultRecv = 81,
+    /// Create a scheduling domain (budget-enforced thread group).
+    DomainCreate = 90,
+    /// Attach a thread to a scheduling domain.
+    DomainAttach = 91,
+    /// Detach a thread from a scheduling domain.
+    DomainDetach = 92,
+    /// Adjust a domain's quantum (time budget per period).
+    DomainAdjust = 93,
+    /// Query domain budget info (quantum, consumed, period).
+    DomainInfo = 94,
     /// Write a single byte to serial (temporary debug aid).
     DebugPrint = 255,
 }
@@ -568,6 +578,65 @@ pub mod sys {
             Err(ret as i64)
         } else {
             Ok(super::FaultInfo { addr, code, tid: tid as u32 })
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Scheduling Domains
+    // ---------------------------------------------------------------
+
+    /// Create a scheduling domain with the given quantum and period (in ms).
+    /// Returns the domain capability ID.
+    #[inline(always)]
+    pub fn domain_create(quantum_ms: u64, period_ms: u64) -> Result<u64, i64> {
+        let ret = syscall2(super::Syscall::DomainCreate as u64, quantum_ms, period_ms);
+        if (ret as i64) < 0 { Err(ret as i64) } else { Ok(ret) }
+    }
+
+    /// Attach a thread to a scheduling domain.
+    #[inline(always)]
+    pub fn domain_attach(domain_cap: u64, thread_cap: u64) -> Result<(), i64> {
+        let ret = syscall2(super::Syscall::DomainAttach as u64, domain_cap, thread_cap);
+        if (ret as i64) < 0 { Err(ret as i64) } else { Ok(()) }
+    }
+
+    /// Detach a thread from a scheduling domain.
+    #[inline(always)]
+    pub fn domain_detach(domain_cap: u64, thread_cap: u64) -> Result<(), i64> {
+        let ret = syscall2(super::Syscall::DomainDetach as u64, domain_cap, thread_cap);
+        if (ret as i64) < 0 { Err(ret as i64) } else { Ok(()) }
+    }
+
+    /// Adjust a domain's quantum (in ms).
+    #[inline(always)]
+    pub fn domain_adjust(domain_cap: u64, new_quantum_ms: u64) -> Result<(), i64> {
+        let ret = syscall2(super::Syscall::DomainAdjust as u64, domain_cap, new_quantum_ms);
+        if (ret as i64) < 0 { Err(ret as i64) } else { Ok(()) }
+    }
+
+    /// Query domain info. Returns (quantum_ticks, consumed_ticks, period_ticks).
+    #[inline(always)]
+    pub fn domain_info(domain_cap: u64) -> Result<(u64, u64, u64), i64> {
+        let ret: u64;
+        let quantum: u64;
+        let consumed: u64;
+        let period: u64;
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                inlateout("rax") super::Syscall::DomainInfo as u64 => ret,
+                inlateout("rdi") domain_cap => quantum,
+                lateout("rsi") consumed,
+                lateout("rdx") period,
+                lateout("rcx") _,
+                lateout("r11") _,
+                options(nostack),
+            );
+        }
+        if (ret as i64) < 0 {
+            Err(ret as i64)
+        } else {
+            Ok((quantum, consumed, period))
         }
     }
 }
