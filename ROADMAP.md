@@ -1,4 +1,4 @@
-# sotOS Development Roadmap
+# sotOS (Secure Object Transactional Operating System) — Development Roadmap
 
 > Current state: SMP-capable microkernel with per-core scheduling, lock-free userspace
 > IPC, capability transfer, and IPC benchmarks. All five kernel primitives run across
