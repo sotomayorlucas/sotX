@@ -38,50 +38,6 @@ SECTIONS
         KEEP(*(.requests_end_marker))
     } :data
 
-    .user_init : {
-        KEEP(*(.user_init))
-    } :data
-
-    .user_recv : {
-        KEEP(*(.user_recv))
-    } :data
-
-    .user_kb : {
-        KEEP(*(.user_kb))
-    } :data
-
-    .user_async_tx : {
-        KEEP(*(.user_async_tx))
-    } :data
-
-    .user_async_rx : {
-        KEEP(*(.user_async_rx))
-    } :data
-
-    .user_child : {
-        KEEP(*(.user_child))
-    } :data
-
-    .user_shm_tx : {
-        KEEP(*(.user_shm_tx))
-    } :data
-
-    .user_shm_rx : {
-        KEEP(*(.user_shm_rx))
-    } :data
-
-    .user_serial : {
-        KEEP(*(.user_serial))
-    } :data
-
-    .user_vmm : {
-        KEEP(*(.user_vmm))
-    } :data
-
-    .user_fault_test : {
-        KEEP(*(.user_fault_test))
-    } :data
-
     .bss : {
         *(.bss .bss.*)
         *(COMMON)

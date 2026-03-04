@@ -89,6 +89,16 @@ pub enum Syscall {
     IrqCreate = 103,
     /// Map page from multi-page Memory cap at offset.
     MapOffset = 104,
+    /// Set syscall redirect endpoint on a thread (LUCAS).
+    RedirectSet = 110,
+    /// Create a new empty user address space, return AS cap.
+    AddrSpaceCreate = 120,
+    /// Map a frame into a target address space (not caller's).
+    MapInto = 121,
+    /// Create a thread in a target address space.
+    ThreadCreateIn = 122,
+    /// Unmap a page from a target address space.
+    UnmapFrom = 123,
     /// Write a single byte to serial (temporary debug aid).
     DebugPrint = 255,
 }
@@ -130,6 +140,18 @@ pub struct BootInfo {
     pub magic: u64,
     pub cap_count: u64,
     pub caps: [u64; BOOT_INFO_MAX_CAPS],
+    /// Entry point of the LUCAS guest binary (0 = none).
+    pub guest_entry: u64,
+    /// Framebuffer virtual address (0x4000000), 0 = no framebuffer.
+    pub fb_addr: u64,
+    /// Framebuffer width in pixels.
+    pub fb_width: u32,
+    /// Framebuffer height in pixels.
+    pub fb_height: u32,
+    /// Framebuffer pitch (bytes per row).
+    pub fb_pitch: u32,
+    /// Framebuffer bits per pixel (typically 32).
+    pub fb_bpp: u32,
 }
 
 impl BootInfo {
@@ -138,6 +160,12 @@ impl BootInfo {
             magic: 0,
             cap_count: 0,
             caps: [0; BOOT_INFO_MAX_CAPS],
+            guest_entry: 0,
+            fb_addr: 0,
+            fb_width: 0,
+            fb_height: 0,
+            fb_pitch: 0,
+            fb_bpp: 0,
         }
     }
 
@@ -171,6 +199,8 @@ pub struct FaultInfo {
     pub addr: u64,
     pub code: u64,
     pub tid: u32,
+    /// CR3 of the faulting address space (0 if not provided).
+    pub cr3: u64,
 }
 
 /// Raw syscall wrappers for userspace programs.
@@ -605,10 +635,17 @@ pub mod sys {
     // Faults (VMM)
     // ---------------------------------------------------------------
 
-    /// Register a notification for page fault delivery.
+    /// Register a notification for page fault delivery (caller's own AS).
     #[inline(always)]
     pub fn fault_register(notify_cap: u64) -> Result<(), i64> {
-        let ret = syscall1(super::Syscall::FaultRegister as u64, notify_cap);
+        let ret = syscall2(super::Syscall::FaultRegister as u64, notify_cap, 0);
+        if (ret as i64) < 0 { Err(ret as i64) } else { Ok(()) }
+    }
+
+    /// Register a notification for page fault delivery in a specific address space.
+    #[inline(always)]
+    pub fn fault_register_as(notify_cap: u64, as_cap: u64) -> Result<(), i64> {
+        let ret = syscall2(super::Syscall::FaultRegister as u64, notify_cap, as_cap);
         if (ret as i64) < 0 { Err(ret as i64) } else { Ok(()) }
     }
 
@@ -619,6 +656,7 @@ pub mod sys {
         let addr: u64;
         let code: u64;
         let tid: u64;
+        let cr3: u64;
         unsafe {
             core::arch::asm!(
                 "syscall",
@@ -626,6 +664,7 @@ pub mod sys {
                 lateout("rdi") addr,
                 lateout("rsi") code,
                 lateout("rdx") tid,
+                lateout("r8") cr3,
                 lateout("rcx") _,
                 lateout("r11") _,
                 options(nostack),
@@ -634,7 +673,7 @@ pub mod sys {
         if (ret as i64) < 0 {
             Err(ret as i64)
         } else {
-            Ok(super::FaultInfo { addr, code, tid: tid as u32 })
+            Ok(super::FaultInfo { addr, code, tid: tid as u32, cr3 })
         }
     }
 
@@ -734,6 +773,47 @@ pub mod sys {
     #[inline(always)]
     pub fn map_offset(vaddr: u64, mem_cap: u64, offset: u64, flags: u64) -> Result<(), i64> {
         let ret = syscall4(super::Syscall::MapOffset as u64, vaddr, mem_cap, offset, flags);
+        if (ret as i64) < 0 { Err(ret as i64) } else { Ok(()) }
+    }
+
+    /// Set syscall redirect endpoint on a thread (LUCAS).
+    /// All syscalls from the target thread will be forwarded as IPC messages
+    /// to the specified endpoint.
+    #[inline(always)]
+    pub fn redirect_set(thread_cap: u64, ep_cap: u64) -> Result<(), i64> {
+        let ret = syscall2(super::Syscall::RedirectSet as u64, thread_cap, ep_cap);
+        if (ret as i64) < 0 { Err(ret as i64) } else { Ok(()) }
+    }
+
+    // ---------------------------------------------------------------
+    // Multi-address-space
+    // ---------------------------------------------------------------
+
+    /// Create a new empty user address space. Returns AS cap ID.
+    #[inline(always)]
+    pub fn addr_space_create() -> Result<u64, i64> {
+        let ret = syscall0(super::Syscall::AddrSpaceCreate as u64);
+        if (ret as i64) < 0 { Err(ret as i64) } else { Ok(ret) }
+    }
+
+    /// Map a frame into a target address space (not the caller's).
+    #[inline(always)]
+    pub fn map_into(as_cap: u64, vaddr: u64, frame_cap: u64, flags: u64) -> Result<(), i64> {
+        let ret = syscall4(super::Syscall::MapInto as u64, as_cap, vaddr, frame_cap, flags);
+        if (ret as i64) < 0 { Err(ret as i64) } else { Ok(()) }
+    }
+
+    /// Create a thread in a target address space. Returns thread cap ID.
+    #[inline(always)]
+    pub fn thread_create_in(as_cap: u64, rip: u64, rsp: u64) -> Result<u64, i64> {
+        let ret = syscall3(super::Syscall::ThreadCreateIn as u64, as_cap, rip, rsp);
+        if (ret as i64) < 0 { Err(ret as i64) } else { Ok(ret) }
+    }
+
+    /// Unmap a page from a target address space.
+    #[inline(always)]
+    pub fn unmap_from(as_cap: u64, vaddr: u64) -> Result<(), i64> {
+        let ret = syscall2(super::Syscall::UnmapFrom as u64, as_cap, vaddr);
         if (ret as i64) < 0 { Err(ret as i64) } else { Ok(()) }
     }
 

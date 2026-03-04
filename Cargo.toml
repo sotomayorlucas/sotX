@@ -9,6 +9,8 @@ members = [
 ]
 exclude = [
     "services/init",
+    "services/lucas-shell",
+    "services/kbd",
 ]
 
 [profile.dev]

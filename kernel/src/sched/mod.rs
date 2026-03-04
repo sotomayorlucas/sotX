@@ -297,6 +297,7 @@ pub fn init() {
         ipc_role: IpcRole::None,
         preferred_cpu: None,
         domain_idx: None,
+        redirect_ep: None,
     };
     let tid = ThreadId(sched.next_id);
     let handle = sched.threads.alloc(idle);
@@ -332,6 +333,7 @@ pub fn create_idle_thread() -> usize {
         ipc_role: IpcRole::None,
         preferred_cpu: None,
         domain_idx: None,
+        redirect_ep: None,
     };
     let handle = sched.threads.alloc(idle);
     let slot = handle.index();
@@ -532,6 +534,33 @@ pub fn current_ipc_msg() -> Message {
         }
     }
     Message::empty()
+}
+
+// ---------------------------------------------------------------------------
+// Syscall Redirect (LUCAS)
+// ---------------------------------------------------------------------------
+
+/// Get the current thread's syscall redirect endpoint (if set).
+pub fn get_current_redirect_ep() -> Option<u32> {
+    let percpu = percpu::current_percpu();
+    let idx = percpu.current_thread;
+    if idx != usize::MAX {
+        let sched = SCHEDULER.lock();
+        if let Some(t) = sched.threads.get_by_index(idx as u32) {
+            return t.redirect_ep;
+        }
+    }
+    None
+}
+
+/// Set a thread's syscall redirect endpoint.
+pub fn set_thread_redirect_ep(tid: ThreadId, ep_id: u32) {
+    let mut sched = SCHEDULER.lock();
+    if let Some(slot) = sched.slot_of(tid) {
+        if let Some(t) = sched.threads.get_mut_by_index(slot) {
+            t.redirect_ep = Some(ep_id);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

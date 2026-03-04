@@ -95,6 +95,9 @@ pub struct Thread {
     pub preferred_cpu: Option<u32>,
     /// Scheduling domain this thread belongs to (raw pool index).
     pub domain_idx: Option<u32>,
+    /// Endpoint for syscall redirection (LUCAS). When set, unknown syscalls
+    /// are forwarded as IPC messages to this endpoint.
+    pub redirect_ep: Option<u32>,
 }
 
 impl Thread {
@@ -139,6 +142,7 @@ impl Thread {
             ipc_role: IpcRole::None,
             preferred_cpu: None,
             domain_idx: None,
+            redirect_ep: None,
         }
     }
 
@@ -188,6 +192,7 @@ impl Thread {
             ipc_role: IpcRole::None,
             preferred_cpu: None,
             domain_idx: None,
+            redirect_ep: None,
         }
     }
 }

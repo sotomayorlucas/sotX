@@ -4,6 +4,7 @@
 //! saved register frame. Decodes rax as the syscall number and
 //! dispatches to the appropriate handler.
 
+use crate::kprintln;
 use crate::arch::serial;
 use crate::arch::x86_64::io;
 use crate::arch::x86_64::syscall::TrapFrame;
@@ -78,6 +79,15 @@ const SYS_FRAME_ALLOC_CONTIG: u64 = 102;
 const SYS_IRQ_CREATE: u64 = 103;
 const SYS_MAP_OFFSET: u64 = 104;
 
+/// Syscall numbers — LUCAS (syscall redirection).
+const SYS_REDIRECT_SET: u64 = 110;
+
+/// Syscall numbers — multi-address-space.
+const SYS_ADDR_SPACE_CREATE: u64 = 120;
+const SYS_MAP_INTO: u64 = 121;
+const SYS_THREAD_CREATE_IN: u64 = 122;
+const SYS_UNMAP_FROM: u64 = 123;
+
 /// Temporary syscall number for debug serial output.
 const SYS_DEBUG_PRINT: u64 = 255;
 
@@ -134,6 +144,29 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
     // context switch because it lives on the per-thread kernel stack.
     use crate::arch::x86_64::percpu;
     let saved_user_rsp = percpu::current_percpu().user_rsp_save;
+
+    // --- LUCAS syscall redirect ---
+    // If the current thread has a redirect endpoint set, forward the syscall
+    // as an IPC message to the LUCAS handler. The handler translates Linux
+    // syscalls to sotOS primitives and replies with the result.
+    if let Some(ep_raw) = sched::get_current_redirect_ep() {
+        let tid = sched::current_tid().map(|t| t.0 as u64).unwrap_or(0);
+        let msg = Message {
+            tag: frame.rax, // Linux syscall number
+            regs: [frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9, tid, 0],
+            cap_transfer: None,
+        };
+        match endpoint::call(PoolHandle::from_raw(ep_raw), msg) {
+            Ok(reply) => {
+                frame.rax = reply.regs[0]; // return value
+            }
+            Err(e) => {
+                frame.rax = e as i64 as u64;
+            }
+        }
+        percpu::current_percpu().user_rsp_save = saved_user_rsp;
+        return;
+    }
 
     match frame.rax {
         // SYS_YIELD — give up remaining timeslice
@@ -311,6 +344,7 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
             match cap::validate(frame_cap, Rights::READ) {
                 Ok(CapObject::Memory { base: paddr, .. }) => {
                     if vaddr & 0xFFF != 0 || vaddr >= USER_ADDR_LIMIT {
+                        kprintln!("SYS_MAP: InvalidArg vaddr={:#x}", vaddr);
                         frame.rax = SysError::InvalidArg as i64 as u64;
                     } else {
                         let flags = PAGE_PRESENT | PAGE_USER | (user_flags & USER_FLAG_MASK);
@@ -321,8 +355,14 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
                         frame.rax = 0;
                     }
                 }
-                Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
-                Err(e) => frame.rax = e as i64 as u64,
+                Ok(_) => {
+                    kprintln!("SYS_MAP: cap {} is not Memory", frame_cap);
+                    frame.rax = SysError::InvalidCap as i64 as u64;
+                }
+                Err(e) => {
+                    kprintln!("SYS_MAP: validate cap={} failed: {:?}", frame_cap, e);
+                    frame.rax = e as i64 as u64;
+                }
             }
         }
 
@@ -528,11 +568,30 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
         }
 
         // SYS_FAULT_REGISTER — register notification for page fault delivery
-        // rdi = notify_cap (requires WRITE right)
+        // rdi = notify_cap (requires WRITE right), rsi = as_cap (0 = caller's own AS)
         SYS_FAULT_REGISTER => {
             match cap::validate(frame.rdi as u32, Rights::WRITE) {
                 Ok(CapObject::Notification { id }) => {
-                    fault::register(PoolHandle::from_raw(id));
+                    let cr3 = if frame.rsi == 0 {
+                        // Register for caller's own address space.
+                        paging::read_cr3()
+                    } else {
+                        // Register for a specific address space.
+                        match cap::validate(frame.rsi as u32, Rights::READ) {
+                            Ok(CapObject::AddrSpace { cr3 }) => cr3,
+                            Ok(_) => {
+                                frame.rax = SysError::InvalidCap as i64 as u64;
+                                percpu::current_percpu().user_rsp_save = saved_user_rsp;
+                                return;
+                            }
+                            Err(e) => {
+                                frame.rax = e as i64 as u64;
+                                percpu::current_percpu().user_rsp_save = saved_user_rsp;
+                                return;
+                            }
+                        }
+                    };
+                    fault::register(PoolHandle::from_raw(id), cr3);
                     frame.rax = 0;
                 }
                 Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
@@ -541,7 +600,7 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
         }
 
         // SYS_FAULT_RECV — pop next fault from queue
-        // Returns: rdi=addr, rsi=code, rdx=tid (or WouldBlock if empty)
+        // Returns: rdi=addr, rsi=code, rdx=tid, r8=cr3 (or WouldBlock if empty)
         SYS_FAULT_RECV => {
             match fault::pop_fault() {
                 Some(info) => {
@@ -549,6 +608,7 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
                     frame.rdi = info.addr;
                     frame.rsi = info.code;
                     frame.rdx = info.tid as u64;
+                    frame.r8 = info.cr3;
                 }
                 None => {
                     frame.rax = SysError::WouldBlock as i64 as u64;
@@ -761,6 +821,115 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
                         aspace.map_page(vaddr, paddr, flags);
                         paging::invlpg(vaddr);
                         frame.rax = 0;
+                    }
+                }
+                Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
+                Err(e) => frame.rax = e as i64 as u64,
+            }
+        }
+
+        // SYS_REDIRECT_SET — set syscall redirect endpoint on a thread (LUCAS)
+        // rdi = thread_cap (WRITE), rsi = endpoint_cap (READ|WRITE)
+        SYS_REDIRECT_SET => {
+            match cap::validate(frame.rdi as u32, Rights::WRITE) {
+                Ok(CapObject::Thread { id: tid }) => {
+                    match cap::validate(frame.rsi as u32, Rights::READ.or(Rights::WRITE)) {
+                        Ok(CapObject::Endpoint { id: ep_id }) => {
+                            sched::set_thread_redirect_ep(ThreadId(tid), ep_id);
+                            frame.rax = 0;
+                        }
+                        Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
+                        Err(e) => frame.rax = e as i64 as u64,
+                    }
+                }
+                Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
+                Err(e) => frame.rax = e as i64 as u64,
+            }
+        }
+
+        // SYS_ADDR_SPACE_CREATE — create a new empty user address space
+        // Returns: rax = AS cap_id (or error)
+        SYS_ADDR_SPACE_CREATE => {
+            let addr_space = paging::AddressSpace::new_user();
+            let cr3 = addr_space.cr3();
+            match cap::insert(CapObject::AddrSpace { cr3 }, Rights::ALL, None) {
+                Some(cap_id) => frame.rax = cap_id.raw() as u64,
+                None => frame.rax = SysError::OutOfResources as i64 as u64,
+            }
+        }
+
+        // SYS_MAP_INTO — map a frame into a target address space
+        // rdi = as_cap (WRITE), rsi = vaddr, rdx = frame_cap (READ), r8 = flags
+        SYS_MAP_INTO => {
+            match cap::validate(frame.rdi as u32, Rights::WRITE) {
+                Ok(CapObject::AddrSpace { cr3 }) => {
+                    let vaddr = frame.rsi;
+                    let frame_cap = frame.rdx as u32;
+                    let user_flags = frame.r8;
+                    match cap::validate(frame_cap, Rights::READ) {
+                        Ok(CapObject::Memory { base: paddr, .. }) => {
+                            if vaddr & 0xFFF != 0 || vaddr >= USER_ADDR_LIMIT {
+                                frame.rax = SysError::InvalidArg as i64 as u64;
+                            } else {
+                                let flags = PAGE_PRESENT | PAGE_USER | (user_flags & USER_FLAG_MASK);
+                                let aspace = paging::AddressSpace::from_cr3(cr3);
+                                aspace.map_page(vaddr, paddr, flags);
+                                // No invlpg needed — target AS may not be current CR3.
+                                // If it is, the caller can issue invlpg themselves or
+                                // it will be flushed on next CR3 load.
+                                frame.rax = 0;
+                            }
+                        }
+                        Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
+                        Err(e) => frame.rax = e as i64 as u64,
+                    }
+                }
+                Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
+                Err(e) => frame.rax = e as i64 as u64,
+            }
+        }
+
+        // SYS_THREAD_CREATE_IN — create a thread in a target address space
+        // rdi = as_cap (WRITE), rsi = rip, rdx = rsp
+        SYS_THREAD_CREATE_IN => {
+            match cap::validate(frame.rdi as u32, Rights::WRITE) {
+                Ok(CapObject::AddrSpace { cr3 }) => {
+                    let rip = frame.rsi;
+                    let rsp = frame.rdx;
+                    if rip == 0 || rsp == 0 || rip >= USER_ADDR_LIMIT || rsp >= USER_ADDR_LIMIT {
+                        frame.rax = SysError::InvalidArg as i64 as u64;
+                    } else {
+                        let tid = sched::spawn_user(rip, rsp, cr3);
+                        match cap::insert(CapObject::Thread { id: tid.0 }, Rights::ALL, None) {
+                            Some(cap_id) => frame.rax = cap_id.raw() as u64,
+                            None => frame.rax = SysError::OutOfResources as i64 as u64,
+                        }
+                    }
+                }
+                Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
+                Err(e) => frame.rax = e as i64 as u64,
+            }
+        }
+
+        // SYS_UNMAP_FROM — unmap a page from a target address space
+        // rdi = as_cap (WRITE), rsi = vaddr
+        SYS_UNMAP_FROM => {
+            match cap::validate(frame.rdi as u32, Rights::WRITE) {
+                Ok(CapObject::AddrSpace { cr3 }) => {
+                    let vaddr = frame.rsi;
+                    if vaddr & 0xFFF != 0 || vaddr >= USER_ADDR_LIMIT {
+                        frame.rax = SysError::InvalidArg as i64 as u64;
+                    } else {
+                        let aspace = paging::AddressSpace::from_cr3(cr3);
+                        if aspace.unmap_page(vaddr) {
+                            // If target is current CR3, flush TLB entry.
+                            if cr3 == paging::read_cr3() {
+                                paging::invlpg(vaddr);
+                            }
+                            frame.rax = 0;
+                        } else {
+                            frame.rax = SysError::NotFound as i64 as u64;
+                        }
                     }
                 }
                 Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,

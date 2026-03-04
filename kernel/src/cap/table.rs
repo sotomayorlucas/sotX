@@ -90,6 +90,8 @@ pub enum CapObject {
     Notification { id: u32 },
     /// Scheduling domain (budget-enforced thread group).
     Domain { id: u32 },
+    /// User address space (PML4).
+    AddrSpace { cr3: u64 },
     /// Null / empty slot.
     Null,
 }

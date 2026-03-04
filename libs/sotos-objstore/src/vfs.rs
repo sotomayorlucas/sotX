@@ -192,6 +192,25 @@ impl Vfs {
         Ok(())
     }
 
+    /// Get the current file position.
+    pub fn tell(&self, fd: u32) -> Result<u64, &'static str> {
+        let h = self.get_handle(fd)?;
+        Ok(h.pos)
+    }
+
+    /// Get the object ID for a file handle (useful as inode number in stat).
+    pub fn file_oid(&self, fd: u32) -> Result<u64, &'static str> {
+        let h = self.get_handle(fd)?;
+        Ok(h.oid)
+    }
+
+    /// Get the size of the file behind a handle via store.stat().
+    pub fn file_size(&self, fd: u32) -> Result<u64, &'static str> {
+        let h = self.get_handle(fd)?;
+        let entry = self.store.stat(h.oid).ok_or("stat failed")?;
+        Ok(entry.size)
+    }
+
     /// Get access to the underlying object store.
     pub fn store(&self) -> &ObjectStore {
         self.store

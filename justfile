@@ -5,14 +5,24 @@ QEMU := if os() == "windows" { "C:/Program Files/qemu/qemu-system-x86_64.exe" } 
 KERNEL := "target/x86_64-unknown-none/debug/sotos-kernel"
 IMAGE := "target/sotos.img"
 USER_INIT := "services/init/target/x86_64-unknown-none/debug/sotos-init"
+USER_SHELL := "services/lucas-shell/target/x86_64-unknown-none/debug/sotos-lucas-shell"
+USER_KBD := "services/kbd/target/x86_64-unknown-none/debug/sotos-kbd"
 INITRD := "target/initrd.img"
 
 # Default: build and run
 default: run
 
-# Build userspace programs (CARGO_ENCODED_RUSTFLAGS overrides parent .cargo/config.toml)
+# Build userspace init
 build-user:
     cd services/init && CARGO_ENCODED_RUSTFLAGS="$(printf '%s\x1f%s' '-Clink-arg=-Tlinker.ld' '-Crelocation-model=static')" cargo build
+
+# Build LUCAS shell (Linux-ABI guest binary)
+build-shell:
+    cd services/lucas-shell && CARGO_ENCODED_RUSTFLAGS="$(printf '%s\x1f%s' '-Clink-arg=-Tlinker.ld' '-Crelocation-model=static')" cargo build
+
+# Build keyboard driver (separate process)
+build-kbd:
+    cd services/kbd && CARGO_ENCODED_RUSTFLAGS="$(printf '%s\x1f%s' '-Clink-arg=-Tlinker.ld' '-Crelocation-model=static')" cargo build
 
 # Build the kernel
 build:
@@ -23,8 +33,8 @@ release:
     cargo build --package sotos-kernel --release
 
 # Create CPIO initrd from userspace binaries
-initrd: build-user
-    python scripts/mkinitrd.py --output {{INITRD}} --file init={{USER_INIT}}
+initrd: build-user build-shell build-kbd
+    python scripts/mkinitrd.py --output {{INITRD}} --file init={{USER_INIT}} --file shell={{USER_SHELL}} --file kbd={{USER_KBD}}
 
 # Create the bootable disk image (BIOS + Limine)
 image: build initrd
@@ -49,10 +59,12 @@ run-smp: image
         -m 256M \
         -smp 4
 
-# Run with QEMU display window (for framebuffer/Limine menu)
-run-gui: image
+# Run with QEMU display window (for framebuffer/keyboard)
+run-gui: image create-test-disk
     "{{QEMU}}" \
         -drive format=raw,file={{IMAGE}} \
+        -drive if=none,format=raw,file=target/disk.img,id=disk0 \
+        -device virtio-blk-pci,drive=disk0,disable-modern=on \
         -serial stdio \
         -no-reboot \
         -m 256M
@@ -78,7 +90,6 @@ run-blk: image create-test-disk
         -drive if=none,format=raw,file=target/disk.img,id=disk0 \
         -device virtio-blk-pci,drive=disk0,disable-modern=on \
         -serial stdio \
-        -display none \
         -no-reboot \
         -m 256M
 

@@ -26,11 +26,9 @@ mod pool;
 mod sched;
 mod sync;
 mod syscall;
-mod user_init;
-
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use limine::BaseRevision;
-use limine::request::{HhdmRequest, MemoryMapRequest, ModuleRequest, MpRequest, RequestsEndMarker, RequestsStartMarker};
+use limine::request::{FramebufferRequest, HhdmRequest, MemoryMapRequest, ModuleRequest, MpRequest, RequestsEndMarker, RequestsStartMarker};
 
 #[used]
 #[link_section = ".requests_start_marker"]
@@ -66,8 +64,16 @@ static MODULE_REQUEST: ModuleRequest = ModuleRequest::new();
 #[link_section = ".requests"]
 static MP_REQUEST: MpRequest = MpRequest::new();
 
+/// Request a framebuffer from the bootloader.
+#[used]
+#[link_section = ".requests"]
+static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
+
 /// Counter for APs that have finished initialization.
 static APS_READY: AtomicU32 = AtomicU32::new(0);
+
+/// Guest (LUCAS shell) ELF entry point, set by load_initrd().
+static GUEST_ENTRY: AtomicU64 = AtomicU64::new(0);
 
 /// Kernel entry point — called by the Limine bootloader.
 #[no_mangle]
@@ -270,224 +276,46 @@ unsafe extern "C" fn ap_entry(cpu: &limine::mp::Cpu) -> ! {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Init process layout — all virtual addresses used by assembly blob threads.
-// ---------------------------------------------------------------------------
+/// Virtual address for keyboard scancode ring buffer (shared between KB driver + LUCAS handler).
+const KB_RING_PAGE: u64 = 0x510000;
 
-mod init_layout {
-    // Code pages (RX)
-    pub const SENDER_CODE:    u64 = 0x400000;
-    pub const RECV_CODE:      u64 = 0x401000;
-    pub const KB_CODE:        u64 = 0x402000;
-    pub const ASYNC_TX_CODE:  u64 = 0x403000;
-    pub const ASYNC_RX_CODE:  u64 = 0x404000;
-    pub const CHILD_CODE:     u64 = 0x405000;
-    pub const SHM_TX_CODE:    u64 = 0x406000;
-    pub const SHM_RX_CODE:    u64 = 0x407000;
-    pub const SERIAL_CODE:    u64 = 0x408000;
-    pub const VMM_CODE:       u64 = 0x409000;
-    pub const FAULT_TEST_CODE:u64 = 0x40A000;
-
-    // Stack pages (RW)
-    pub const SENDER_STACK:   u64 = 0x800000;
-    pub const RECV_STACK:     u64 = 0x802000;
-    pub const KB_STACK:       u64 = 0x804000;
-    pub const ASYNC_TX_STACK: u64 = 0x806000;
-    pub const ASYNC_RX_STACK: u64 = 0x808000;
-    pub const CHILD_STACK:    u64 = 0x80A000;
-    pub const SHM_TX_STACK:   u64 = 0x80C000;
-    pub const SHM_RX_STACK:   u64 = 0x80E000;
-    pub const SERIAL_STACK:   u64 = 0x810000;
-    pub const VMM_STACK:      u64 = 0x812000;
-    pub const FAULT_TEST_STACK: u64 = 0x814000;
-
-    // Shared memory
-    pub const SHARED_PAGE:    u64 = 0x500000;
-}
-
-/// Allocate a frame, zero it, copy code bytes, map as RX at `vaddr`.
-fn map_code_page(
-    addr_space: &mm::paging::AddressSpace,
-    code: &[u8],
-    vaddr: u64,
-    hhdm: u64,
-) {
-    use mm::paging::{PAGE_PRESENT, PAGE_USER};
-
-    let frame = mm::alloc_frame().expect("no frame for code page");
-    let phys = frame.addr();
-    unsafe {
-        core::ptr::write_bytes((phys + hhdm) as *mut u8, 0, 4096);
-        core::ptr::copy_nonoverlapping(code.as_ptr(), (phys + hhdm) as *mut u8, code.len());
-    }
-    addr_space.map_page(vaddr, phys, PAGE_PRESENT | PAGE_USER);
-}
-
-/// Allocate a frame, zero it, map as RW at `vaddr`. Returns stack top (vaddr + 0x1000).
-fn map_stack_page(
-    addr_space: &mm::paging::AddressSpace,
-    vaddr: u64,
-    hhdm: u64,
-) -> u64 {
-    use mm::paging::{PAGE_PRESENT, PAGE_USER, PAGE_WRITABLE};
-
-    let frame = mm::alloc_frame().expect("no frame for stack page");
-    let phys = frame.addr();
-    unsafe {
-        core::ptr::write_bytes((phys + hhdm) as *mut u8, 0, 4096);
-    }
-    addr_space.map_page(vaddr, phys, PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
-    vaddr + 0x1000
-}
-
-/// Map all 11 code blobs into the user address space.
-fn map_all_blobs(addr_space: &mm::paging::AddressSpace, hhdm: u64) {
-    use init_layout::*;
-
-    map_code_page(addr_space, user_init::init_code(),       SENDER_CODE, hhdm);
-    map_code_page(addr_space, user_init::recv_code(),       RECV_CODE, hhdm);
-    map_code_page(addr_space, user_init::kb_code(),         KB_CODE, hhdm);
-    map_code_page(addr_space, user_init::async_tx_code(),   ASYNC_TX_CODE, hhdm);
-    map_code_page(addr_space, user_init::async_rx_code(),   ASYNC_RX_CODE, hhdm);
-    map_code_page(addr_space, user_init::child_code(),      CHILD_CODE, hhdm);
-    map_code_page(addr_space, user_init::shm_tx_code(),     SHM_TX_CODE, hhdm);
-    map_code_page(addr_space, user_init::shm_rx_code(),     SHM_RX_CODE, hhdm);
-    map_code_page(addr_space, user_init::serial_code(),     SERIAL_CODE, hhdm);
-    map_code_page(addr_space, user_init::vmm_code(),        VMM_CODE, hhdm);
-    map_code_page(addr_space, user_init::fault_test_code(), FAULT_TEST_CODE, hhdm);
-}
-
-/// Allocate all 11 stacks + shared memory page. Returns stack tops as array.
-fn map_all_stacks(addr_space: &mm::paging::AddressSpace, hhdm: u64) -> [u64; 11] {
-    use init_layout::*;
-    use mm::paging::{PAGE_PRESENT, PAGE_USER, PAGE_WRITABLE};
-
-    // Shared memory page (RW, not a stack)
-    let shm_frame = mm::alloc_frame().expect("no frame for shared page");
-    let shm_phys = shm_frame.addr();
-    unsafe { core::ptr::write_bytes((shm_phys + hhdm) as *mut u8, 0, 4096); }
-    addr_space.map_page(SHARED_PAGE, shm_phys, PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
-
-    [
-        map_stack_page(addr_space, SENDER_STACK, hhdm),
-        map_stack_page(addr_space, RECV_STACK, hhdm),
-        map_stack_page(addr_space, KB_STACK, hhdm),
-        map_stack_page(addr_space, ASYNC_TX_STACK, hhdm),
-        map_stack_page(addr_space, ASYNC_RX_STACK, hhdm),
-        map_stack_page(addr_space, CHILD_STACK, hhdm),
-        map_stack_page(addr_space, SHM_TX_STACK, hhdm),
-        map_stack_page(addr_space, SHM_RX_STACK, hhdm),
-        map_stack_page(addr_space, SERIAL_STACK, hhdm),
-        map_stack_page(addr_space, VMM_STACK, hhdm),
-        map_stack_page(addr_space, FAULT_TEST_STACK, hhdm),
-    ]
-}
-
-/// Create all root capabilities for init (endpoint, channel, notifications, IRQs, I/O ports).
+/// Create root capabilities for init (keyboard caps removed — they go to kbd process).
+///
+/// Cap 0: Notification (VMM page faults)
+/// Cap 1: I/O port 0xCF8-0xCFF (PCI config)
 fn create_init_caps() {
-    // Endpoint
-    let ep = ipc::endpoint::create().expect("failed to create endpoint");
-    let ep_cap = cap::insert(cap::CapObject::Endpoint { id: ep.0.raw() }, cap::Rights::ALL, None)
-        .expect("failed to create endpoint cap");
-    kprintln!("  cap {}: endpoint", ep_cap.raw());
-
-    // Async channel
-    let ch = ipc::channel::create().expect("failed to create channel");
-    let ch_cap = cap::insert(cap::CapObject::Channel { id: ch.0.raw() }, cap::Rights::ALL, None)
-        .expect("failed to create channel cap");
-    kprintln!("  cap {}: channel", ch_cap.raw());
-
-    // IRQ 1 (keyboard)
-    let irq_cap = cap::insert(cap::CapObject::Irq { line: 1 }, cap::Rights::ALL, None)
-        .expect("failed to create irq cap");
-    kprintln!("  cap {}: IRQ 1 (keyboard)", irq_cap.raw());
-
-    // I/O port 0x60 (keyboard data)
-    let port_cap = cap::insert(cap::CapObject::IoPort { base: 0x60, count: 1 }, cap::Rights::ALL, None)
-        .expect("failed to create ioport cap");
-    kprintln!("  cap {}: port 0x60", port_cap.raw());
-
-    // Notification 0 — SHM
-    let n0 = ipc::notify::create().expect("failed to create notification");
-    let n0_cap = cap::insert(cap::CapObject::Notification { id: n0.0.raw() }, cap::Rights::ALL, None)
+    // Cap 0: Notification — fault delivery (VMM)
+    let n_vmm = ipc::notify::create().expect("failed to create notification");
+    let n_vmm_cap = cap::insert(cap::CapObject::Notification { id: n_vmm.0.raw() }, cap::Rights::ALL, None)
         .expect("failed to create notification cap");
-    kprintln!("  cap {}: notification (SHM)", n0_cap.raw());
+    kprintln!("  cap {}: notification (VMM faults)", n_vmm_cap.raw());
 
-    // Notification 1 — keyboard IRQ
-    let n1 = ipc::notify::create().expect("failed to create notification");
-    let n1_cap = cap::insert(cap::CapObject::Notification { id: n1.0.raw() }, cap::Rights::ALL, None)
-        .expect("failed to create notification cap");
-    kprintln!("  cap {}: notification (KB IRQ)", n1_cap.raw());
-
-    // IRQ 4 (COM1)
-    let sirq_cap = cap::insert(cap::CapObject::Irq { line: 4 }, cap::Rights::ALL, None)
-        .expect("failed to create serial irq cap");
-    kprintln!("  cap {}: IRQ 4 (COM1)", sirq_cap.raw());
-
-    // I/O port range 0x3F8-0x3FF (COM1)
-    let sport_cap = cap::insert(cap::CapObject::IoPort { base: 0x3F8, count: 8 }, cap::Rights::ALL, None)
-        .expect("failed to create serial ioport cap");
-    kprintln!("  cap {}: port 0x3F8-0x3FF", sport_cap.raw());
-
-    // Notification 2 — serial IRQ
-    let n2 = ipc::notify::create().expect("failed to create notification");
-    let n2_cap = cap::insert(cap::CapObject::Notification { id: n2.0.raw() }, cap::Rights::ALL, None)
-        .expect("failed to create notification cap");
-    kprintln!("  cap {}: notification (serial IRQ)", n2_cap.raw());
-
-    // Notification 3 — fault delivery (VMM)
-    let n3 = ipc::notify::create().expect("failed to create notification");
-    let n3_cap = cap::insert(cap::CapObject::Notification { id: n3.0.raw() }, cap::Rights::ALL, None)
-        .expect("failed to create notification cap");
-    kprintln!("  cap {}: notification (VMM faults)", n3_cap.raw());
-
-    // PCI config space ports 0xCF8-0xCFF (8 bytes: address + data)
+    // Cap 1: PCI config space ports 0xCF8-0xCFF (8 bytes: address + data)
     let pci_cap = cap::insert(cap::CapObject::IoPort { base: 0xCF8, count: 8 }, cap::Rights::ALL, None)
         .expect("failed to create PCI ioport cap");
     kprintln!("  cap {}: port 0xCF8-0xCFF (PCI config)", pci_cap.raw());
 }
 
-/// Create the user address space, map code+stacks, create caps, spawn all threads.
+/// Create the user address space, map KB ring page, create caps.
+/// No assembly blobs or blob threads — VMM and KB driver are Rust
+/// functions in the init binary, spawned by init itself.
 fn spawn_init_process() -> u64 {
-    use init_layout::*;
+    use mm::paging::{PAGE_PRESENT, PAGE_USER, PAGE_WRITABLE};
 
     let addr_space = mm::paging::AddressSpace::new_user();
     let hhdm = mm::hhdm_offset();
     let cr3 = addr_space.cr3();
 
-    // 1. Map all code blobs
-    map_all_blobs(&addr_space, hhdm);
+    // Map KB ring buffer page at 0x510000 (shared between KB driver + LUCAS handler).
+    let kb_ring_frame = mm::alloc_frame().expect("no frame for KB ring");
+    let kb_ring_phys = kb_ring_frame.addr();
+    unsafe { core::ptr::write_bytes((kb_ring_phys + hhdm) as *mut u8, 0, 4096); }
+    addr_space.map_page(KB_RING_PAGE, kb_ring_phys, PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
 
-    // 2. Map all stacks + shared page
-    let stacks = map_all_stacks(&addr_space, hhdm);
-    // stacks: [sender, recv, kb, async_tx, async_rx, child, shm_tx, shm_rx, serial, vmm, fault_test]
-
-    // 3. Create root capabilities
+    // Create root capabilities.
     create_init_caps();
 
     kprintln!("  init: cr3 = {:#x}", cr3);
-
-    // 4. Spawn all threads in dependency order
-    //   recv blocks on ep → sender rendezvous → kb → async_rx → async_tx
-    //   → shm_rx → shm_tx → serial → vmm → fault_test
-    let recv_tid = sched::spawn_user(RECV_CODE,       stacks[1], cr3);  // recv
-    let sender_tid = sched::spawn_user(SENDER_CODE,     stacks[0], cr3);  // sender
-    sched::spawn_user(KB_CODE,         stacks[2], cr3);  // keyboard
-    sched::spawn_user(ASYNC_RX_CODE,   stacks[4], cr3);  // async consumer
-    sched::spawn_user(ASYNC_TX_CODE,   stacks[3], cr3);  // async producer
-    sched::spawn_user(SHM_RX_CODE,     stacks[7], cr3);  // shm consumer
-    sched::spawn_user(SHM_TX_CODE,     stacks[6], cr3);  // shm producer
-    sched::spawn_user(SERIAL_CODE,     stacks[8], cr3);  // serial driver
-    sched::spawn_user(VMM_CODE,        stacks[9], cr3);  // VMM server
-    sched::spawn_user(FAULT_TEST_CODE, stacks[10], cr3); // fault test
-
-    // 5. Create a test scheduling domain: quantum=5, period=20 (25% CPU share).
-    //    Attach sender + receiver threads to demonstrate budget enforcement.
-    if let Some(dom_handle) = sched::create_domain(5, 20) {
-        let _ = sched::attach_to_domain(dom_handle, sender_tid);
-        let _ = sched::attach_to_domain(dom_handle, recv_tid);
-        kprintln!("  init: domain test — sender+recv attached (25% CPU budget)");
-    }
 
     cr3
 }
@@ -538,20 +366,43 @@ fn load_initrd(cr3: u64) {
     };
     kprintln!("  initrd: entry = {:#x}", entry);
 
-    // Allocate a user stack at 0x900000.
-    let stack_frame = mm::alloc_frame().expect("no frame for ELF stack");
-    let stack_phys = stack_frame.addr();
-    unsafe {
-        core::ptr::write_bytes((stack_phys + mm::hhdm_offset()) as *mut u8, 0, 4096);
+    // Find and load "shell" binary (LUCAS guest) if present.
+    if let Some(shell_data) = initrd::find(module_data, "shell") {
+        kprintln!("  initrd: found 'shell' ({} bytes)", shell_data.len());
+        match elf::load(shell_data, &addr_space) {
+            Ok(shell_entry) => {
+                kprintln!("  initrd: shell entry = {:#x}", shell_entry);
+                GUEST_ENTRY.store(shell_entry, Ordering::Release);
+            }
+            Err(msg) => {
+                kprintln!("  initrd: shell ELF load failed: {}", msg);
+            }
+        }
     }
+
+    // Allocate a user stack at 0x900000 (4 pages = 16 KiB).
     let stack_base: u64 = 0x900000;
-    addr_space.map_page(stack_base, stack_phys, PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
-    let stack_top = stack_base + 0x1000;
+    let stack_pages: u64 = 4;
+    for i in 0..stack_pages {
+        let sf = mm::alloc_frame().expect("no frame for ELF stack");
+        let sp = sf.addr();
+        unsafe {
+            core::ptr::write_bytes((sp + mm::hhdm_offset()) as *mut u8, 0, 4096);
+        }
+        addr_space.map_page(stack_base + i * 0x1000, sp, PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
+    }
+    let stack_top = stack_base + stack_pages * 0x1000;
 
     // Write BootInfo page at 0xB00000 (read-only for userspace).
     write_boot_info(cr3, &addr_space);
 
     sched::spawn_user(entry, stack_top, cr3);
+
+    // --- Load "kbd" as a separate process (if present in initrd) ---
+    if let Some(kbd_data) = initrd::find(module_data, "kbd") {
+        kprintln!("  initrd: found 'kbd' ({} bytes)", kbd_data.len());
+        load_kbd_process(kbd_data, cr3);
+    }
 }
 
 /// Write a BootInfo struct to 0xB00000 with all root capabilities granted to init.
@@ -559,7 +410,7 @@ fn write_boot_info(
     _cr3: u64,
     addr_space: &mm::paging::AddressSpace,
 ) {
-    use mm::paging::{PAGE_PRESENT, PAGE_USER};
+    use mm::paging::{PAGE_PRESENT, PAGE_USER, PAGE_WRITABLE, PAGE_CACHE_DISABLE, PAGE_WRITE_THROUGH};
     use sotos_common::{BOOT_INFO_ADDR, BOOT_INFO_MAGIC, BootInfo};
 
     let hhdm = mm::hhdm_offset();
@@ -587,6 +438,38 @@ fn write_boot_info(
         }
     }
     info.cap_count = count;
+    info.guest_entry = GUEST_ENTRY.load(Ordering::Acquire);
+
+    // Map framebuffer into user address space if available.
+    if let Some(fb_response) = FRAMEBUFFER_REQUEST.get_response() {
+        if let Some(fb) = fb_response.framebuffers().next() {
+            let fb_virt = fb.addr() as u64;
+            let fb_phys = fb_virt - hhdm;
+            let width = fb.width() as u32;
+            let height = fb.height() as u32;
+            let pitch = fb.pitch() as u32;
+            let bpp = fb.bpp() as u32;
+            let fb_size = (pitch as u64) * (height as u64);
+            let fb_pages = (fb_size + 0xFFF) / 0x1000;
+            let fb_user_base: u64 = 0x4000000;
+
+            for i in 0..fb_pages {
+                addr_space.map_page(
+                    fb_user_base + i * 0x1000,
+                    fb_phys + i * 0x1000,
+                    PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER
+                        | PAGE_CACHE_DISABLE | PAGE_WRITE_THROUGH,
+                );
+            }
+
+            info.fb_addr = fb_user_base;
+            info.fb_width = width;
+            info.fb_height = height;
+            info.fb_pitch = pitch;
+            info.fb_bpp = bpp;
+            kprintln!("  fb: {}x{} bpp={} phys=0x{:x} ({} pages)", width, height, bpp, fb_phys, fb_pages);
+        }
+    }
 
     // Write the struct via HHDM.
     unsafe {
@@ -595,4 +478,104 @@ fn write_boot_info(
     }
 
     kprintln!("  bootinfo: {} caps at {:#x}", count, BOOT_INFO_ADDR);
+}
+
+/// Load the keyboard driver as a fully pre-mapped separate process.
+///
+/// Creates a new address space, loads the ELF, maps stack, shared KB ring page,
+/// creates kbd-specific capabilities, and spawns the thread.
+fn load_kbd_process(kbd_data: &[u8], init_cr3: u64) {
+    use mm::paging::{AddressSpace, PAGE_PRESENT, PAGE_USER, PAGE_WRITABLE};
+
+    let kbd_as = AddressSpace::new_user();
+    let kbd_cr3 = kbd_as.cr3();
+
+    // Load ELF segments into the kbd address space.
+    let kbd_entry = match elf::load(kbd_data, &kbd_as) {
+        Ok(e) => e,
+        Err(msg) => {
+            kprintln!("  kbd: ELF load failed: {}", msg);
+            return;
+        }
+    };
+    kprintln!("  kbd: entry = {:#x}", kbd_entry);
+
+    let hhdm = mm::hhdm_offset();
+
+    // Stack for kbd (4 pages at 0x900000 in kbd's AS).
+    let stack_base: u64 = 0x900000;
+    let stack_pages: u64 = 4;
+    for i in 0..stack_pages {
+        let sf = mm::alloc_frame().expect("no frame for kbd stack");
+        unsafe { core::ptr::write_bytes((sf.addr() + hhdm) as *mut u8, 0, 4096); }
+        kbd_as.map_page(stack_base + i * 0x1000, sf.addr(),
+            PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
+    }
+    let stack_top = stack_base + stack_pages * 0x1000;
+
+    // Map shared KB ring page into kbd's AS at 0x510000.
+    // Find the physical address of init's 0x510000 (already mapped).
+    let init_as = AddressSpace::from_cr3(init_cr3);
+    let kb_ring_phys = init_as.lookup_phys(KB_RING_PAGE)
+        .expect("init's KB ring page not mapped");
+    kbd_as.map_page(KB_RING_PAGE, kb_ring_phys,
+        PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
+
+    // Create kbd capabilities and write BootInfo.
+    write_kbd_boot_info(kbd_cr3, &kbd_as);
+
+    sched::spawn_user(kbd_entry, stack_top, kbd_cr3);
+    kprintln!("  kbd: separate process, cr3={:#x}", kbd_cr3);
+}
+
+/// Write BootInfo for the keyboard driver process.
+///
+/// Creates fresh capabilities for kbd:
+///   Cap 0: IRQ 1 (keyboard)
+///   Cap 1: I/O port 0x60 (keyboard data)
+///   Cap 2: Notification (KB IRQ delivery)
+fn write_kbd_boot_info(
+    _kbd_cr3: u64,
+    kbd_as: &mm::paging::AddressSpace,
+) {
+    use mm::paging::{PAGE_PRESENT, PAGE_USER};
+    use sotos_common::{BOOT_INFO_ADDR, BOOT_INFO_MAGIC, BootInfo};
+
+    let hhdm = mm::hhdm_offset();
+    let frame = mm::alloc_frame().expect("no frame for kbd BootInfo");
+    let phys = frame.addr();
+    unsafe {
+        core::ptr::write_bytes((phys + hhdm) as *mut u8, 0, 4096);
+    }
+
+    // Map read-only into kbd address space.
+    kbd_as.map_page(BOOT_INFO_ADDR, phys, PAGE_PRESENT | PAGE_USER);
+
+    // Create kbd-specific capabilities.
+    let irq_cap = cap::insert(cap::CapObject::Irq { line: 1 }, cap::Rights::ALL, None)
+        .expect("failed to create kbd irq cap");
+    kprintln!("  kbd cap {}: IRQ 1 (keyboard)", irq_cap.raw());
+
+    let port_cap = cap::insert(cap::CapObject::IoPort { base: 0x60, count: 1 }, cap::Rights::ALL, None)
+        .expect("failed to create kbd ioport cap");
+    kprintln!("  kbd cap {}: port 0x60", port_cap.raw());
+
+    let n_kb = ipc::notify::create().expect("failed to create kbd notification");
+    let n_kb_cap = cap::insert(cap::CapObject::Notification { id: n_kb.0.raw() }, cap::Rights::ALL, None)
+        .expect("failed to create kbd notification cap");
+    kprintln!("  kbd cap {}: notification (KB IRQ)", n_kb_cap.raw());
+
+    let mut info = BootInfo::empty();
+    info.magic = BOOT_INFO_MAGIC;
+    info.cap_count = 3;
+    info.caps[0] = irq_cap.raw() as u64;
+    info.caps[1] = port_cap.raw() as u64;
+    info.caps[2] = n_kb_cap.raw() as u64;
+
+    unsafe {
+        let ptr = (phys + hhdm) as *mut BootInfo;
+        core::ptr::write(ptr, info);
+    }
+
+    kprintln!("  kbd bootinfo: 3 caps at {:#x}", BOOT_INFO_ADDR);
 }

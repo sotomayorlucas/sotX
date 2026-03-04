@@ -9,6 +9,8 @@ use super::{alloc_frame, hhdm_offset};
 pub const PAGE_PRESENT: u64 = 1 << 0;
 pub const PAGE_WRITABLE: u64 = 1 << 1;
 pub const PAGE_USER: u64 = 1 << 2;
+pub const PAGE_WRITE_THROUGH: u64 = 1 << 3;
+pub const PAGE_CACHE_DISABLE: u64 = 1 << 4;
 #[allow(dead_code)]
 pub const PAGE_NO_EXECUTE: u64 = 1 << 63;
 
@@ -152,6 +154,44 @@ impl AddressSpace {
         unsafe {
             *pt.add(pt_index(virt)) = (phys & !0xFFF) | flags;
         }
+    }
+
+    /// Look up the physical address mapped at `virt` in this address space.
+    /// Returns `Some(phys_addr)` if the page is present, `None` otherwise.
+    pub fn lookup_phys(&self, virt: u64) -> Option<u64> {
+        let hhdm = hhdm_offset();
+
+        // PML4 → PDP
+        let pml4 = (self.pml4_phys + hhdm) as *const u64;
+        let pml4e = unsafe { *pml4.add(pml4_index(virt)) };
+        if pml4e & PAGE_PRESENT == 0 {
+            return None;
+        }
+        let pdp_phys = pml4e & 0x000F_FFFF_FFFF_F000;
+
+        // PDP → PD
+        let pdp = (pdp_phys + hhdm) as *const u64;
+        let pdpe = unsafe { *pdp.add(pdp_index(virt)) };
+        if pdpe & PAGE_PRESENT == 0 {
+            return None;
+        }
+        let pd_phys = pdpe & 0x000F_FFFF_FFFF_F000;
+
+        // PD → PT
+        let pd = (pd_phys + hhdm) as *const u64;
+        let pde = unsafe { *pd.add(pd_index(virt)) };
+        if pde & PAGE_PRESENT == 0 {
+            return None;
+        }
+        let pt_phys = pde & 0x000F_FFFF_FFFF_F000;
+
+        // Read leaf PTE
+        let pt = (pt_phys + hhdm) as *const u64;
+        let pte = unsafe { *pt.add(pt_index(virt)) };
+        if pte & PAGE_PRESENT == 0 {
+            return None;
+        }
+        Some(pte & 0x000F_FFFF_FFFF_F000)
     }
 
     /// Unmap a single 4 KiB page.

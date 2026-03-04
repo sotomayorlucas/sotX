@@ -138,7 +138,8 @@ extern "x86-interrupt" fn page_fault_handler(
 
     if code.contains(PageFaultErrorCode::USER_MODE) {
         let tid = crate::sched::current_tid().map(|t| t.0).unwrap_or(0);
-        if crate::fault::push_fault(tid, addr, code.bits()) {
+        let cr3 = crate::mm::paging::read_cr3();
+        if crate::fault::push_fault(tid, addr, code.bits(), cr3) {
             crate::sched::fault_current();
         } else {
             kprintln!(
