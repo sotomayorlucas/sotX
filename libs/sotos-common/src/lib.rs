@@ -79,6 +79,16 @@ pub enum Syscall {
     DomainAdjust = 93,
     /// Query domain budget info (quantum, consumed, period).
     DomainInfo = 94,
+    /// Query physical address of a frame capability.
+    FramePhys = 100,
+    /// Create an I/O port capability dynamically.
+    IoPortCreate = 101,
+    /// Allocate N contiguous physical frames.
+    FrameAllocContig = 102,
+    /// Create an IRQ capability dynamically.
+    IrqCreate = 103,
+    /// Map page from multi-page Memory cap at offset.
+    MapOffset = 104,
     /// Write a single byte to serial (temporary debug aid).
     DebugPrint = 255,
 }
@@ -234,6 +244,25 @@ pub mod sys {
         ret
     }
 
+    #[inline(always)]
+    pub fn syscall4(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
+        let ret: u64;
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                inlateout("rax") nr => ret,
+                in("rdi") a1,
+                in("rsi") a2,
+                in("rdx") a3,
+                in("r8") a4,
+                lateout("rcx") _,
+                lateout("r11") _,
+                options(nostack),
+            );
+        }
+        ret
+    }
+
     /// Write a single byte to the kernel debug serial port.
     #[inline(always)]
     pub fn debug_print(byte: u8) {
@@ -298,14 +327,42 @@ pub mod sys {
     /// Read a byte from an I/O port.
     #[inline(always)]
     pub fn port_in(cap: u64, port: u64) -> Result<u8, i64> {
-        let ret = syscall2(super::Syscall::PortIn as u64, cap, port);
+        let ret = syscall3(super::Syscall::PortIn as u64, cap, port, 1);
         if (ret as i64) < 0 { Err(ret as i64) } else { Ok(ret as u8) }
     }
 
     /// Write a byte to an I/O port.
     #[inline(always)]
     pub fn port_out(cap: u64, port: u64, value: u8) -> Result<(), i64> {
-        let ret = syscall3(super::Syscall::PortOut as u64, cap, port, value as u64);
+        let ret = syscall4(super::Syscall::PortOut as u64, cap, port, value as u64, 1);
+        if (ret as i64) < 0 { Err(ret as i64) } else { Ok(()) }
+    }
+
+    /// Read a 16-bit word from an I/O port.
+    #[inline(always)]
+    pub fn port_in16(cap: u64, port: u64) -> Result<u16, i64> {
+        let ret = syscall3(super::Syscall::PortIn as u64, cap, port, 2);
+        if (ret as i64) < 0 { Err(ret as i64) } else { Ok(ret as u16) }
+    }
+
+    /// Read a 32-bit dword from an I/O port.
+    #[inline(always)]
+    pub fn port_in32(cap: u64, port: u64) -> Result<u32, i64> {
+        let ret = syscall3(super::Syscall::PortIn as u64, cap, port, 4);
+        if (ret as i64) < 0 { Err(ret as i64) } else { Ok(ret as u32) }
+    }
+
+    /// Write a 16-bit word to an I/O port.
+    #[inline(always)]
+    pub fn port_out16(cap: u64, port: u64, value: u16) -> Result<(), i64> {
+        let ret = syscall4(super::Syscall::PortOut as u64, cap, port, value as u64, 2);
+        if (ret as i64) < 0 { Err(ret as i64) } else { Ok(()) }
+    }
+
+    /// Write a 32-bit dword to an I/O port.
+    #[inline(always)]
+    pub fn port_out32(cap: u64, port: u64, value: u32) -> Result<(), i64> {
+        let ret = syscall4(super::Syscall::PortOut as u64, cap, port, value as u64, 4);
         if (ret as i64) < 0 { Err(ret as i64) } else { Ok(()) }
     }
 
@@ -638,5 +695,51 @@ pub mod sys {
         } else {
             Ok((quantum, consumed, period))
         }
+    }
+
+    // ---------------------------------------------------------------
+    // Device infrastructure (virtio, PCI)
+    // ---------------------------------------------------------------
+
+    /// Query the physical address of a frame capability.
+    #[inline(always)]
+    pub fn frame_phys(frame_cap: u64) -> Result<u64, i64> {
+        let ret = syscall1(super::Syscall::FramePhys as u64, frame_cap);
+        if (ret as i64) < 0 { Err(ret as i64) } else { Ok(ret) }
+    }
+
+    /// Create an I/O port capability dynamically. Returns cap_id.
+    #[inline(always)]
+    pub fn ioport_create(base: u16, count: u16) -> Result<u64, i64> {
+        let ret = syscall2(super::Syscall::IoPortCreate as u64, base as u64, count as u64);
+        if (ret as i64) < 0 { Err(ret as i64) } else { Ok(ret) }
+    }
+
+    /// Allocate N contiguous physical frames (1–16). Returns Memory cap_id.
+    #[inline(always)]
+    pub fn frame_alloc_contiguous(count: u64) -> Result<u64, i64> {
+        let ret = syscall1(super::Syscall::FrameAllocContig as u64, count);
+        if (ret as i64) < 0 { Err(ret as i64) } else { Ok(ret) }
+    }
+
+    /// Create an IRQ capability dynamically (irq_line 0–15). Returns cap_id.
+    #[inline(always)]
+    pub fn irq_create(irq_line: u64) -> Result<u64, i64> {
+        let ret = syscall1(super::Syscall::IrqCreate as u64, irq_line);
+        if (ret as i64) < 0 { Err(ret as i64) } else { Ok(ret) }
+    }
+
+    /// Map a page from a multi-page Memory capability at the given offset.
+    /// `flags`: bit 1 = WRITABLE, bit 63 = NO_EXECUTE.
+    #[inline(always)]
+    pub fn map_offset(vaddr: u64, mem_cap: u64, offset: u64, flags: u64) -> Result<(), i64> {
+        let ret = syscall4(super::Syscall::MapOffset as u64, vaddr, mem_cap, offset, flags);
+        if (ret as i64) < 0 { Err(ret as i64) } else { Ok(()) }
+    }
+
+    /// Temporary debug: read u64 from physical address via kernel HHDM.
+    #[inline(always)]
+    pub fn debug_phys_read(phys_addr: u64) -> u64 {
+        syscall1(254, phys_addr)
     }
 }

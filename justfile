@@ -67,6 +67,21 @@ debug: image
         -m 256M \
         -s -S
 
+# Create a 1 MiB test disk for virtio-blk
+create-test-disk:
+    python scripts/mkdisk.py
+
+# Run with virtio-blk test disk
+run-blk: image create-test-disk
+    "{{QEMU}}" \
+        -drive format=raw,file={{IMAGE}} \
+        -drive if=none,format=raw,file=target/disk.img,id=disk0 \
+        -device virtio-blk-pci,drive=disk0,disable-modern=on \
+        -serial stdio \
+        -display none \
+        -no-reboot \
+        -m 256M
+
 # Clean build artifacts
 clean:
     cargo clean

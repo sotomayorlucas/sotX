@@ -4,6 +4,8 @@
 use sotos_common::sys;
 use sotos_common::spsc;
 use sotos_common::{BootInfo, BOOT_INFO_ADDR};
+use sotos_pci::PciBus;
+use sotos_virtio::blk::VirtioBlk;
 
 /// Shared memory page for the SPSC ring buffer.
 const RING_ADDR: u64 = 0xA00000;
@@ -90,6 +92,9 @@ pub extern "C" fn _start() -> ! {
     // --- Phase 3: Benchmarks ---
     run_benchmarks(ring);
 
+    // --- Phase 4: Virtio-BLK demo ---
+    run_virtio_blk_demo(boot_info);
+
     sys::thread_exit();
 }
 
@@ -156,6 +161,143 @@ fn run_benchmarks(ring: &spsc::SpscRing) {
     print(b"BENCH: spsc_tput=");
     print_u64(tput_cy);
     print(b"cy/msg (10000 msgs)\n");
+}
+
+fn print_hex(val: u32) {
+    let hex = b"0123456789ABCDEF";
+    for i in (0..8).rev() {
+        sys::debug_print(hex[((val >> (i * 4)) & 0xF) as usize]);
+    }
+}
+
+fn run_virtio_blk_demo(boot_info: &BootInfo) {
+    // Cap 10 is the PCI config space port cap (0xCF8-0xCFF).
+    // Check if we have enough caps.
+    if boot_info.cap_count < 11 {
+        print(b"BLK: no PCI cap, skipping\n");
+        return;
+    }
+    let pci_cap = boot_info.caps[10];
+
+    let pci = PciBus::new(pci_cap);
+
+    // Enumerate PCI bus 0.
+    let (devices, count) = pci.enumerate::<32>();
+    print(b"PCI: ");
+    print_u64(count as u64);
+    print(b" devices\n");
+
+    for i in 0..count {
+        let d = &devices[i];
+        print(b"  ");
+        print_u64(i as u64);
+        print(b": vendor=");
+        print_hex(d.vendor_id as u32);
+        print(b" device=");
+        print_hex(d.device_id as u32);
+        print(b" class=");
+        print_hex(d.class as u32);
+        print(b":");
+        print_hex(d.subclass as u32);
+        print(b" irq=");
+        print_u64(d.irq_line as u64);
+        print(b"\n");
+    }
+
+    // Find virtio-blk device (vendor=0x1AF4, device=0x1001).
+    let blk_dev = match pci.find_device(0x1AF4, 0x1001) {
+        Some(d) => d,
+        None => {
+            print(b"BLK: virtio-blk not found\n");
+            return;
+        }
+    };
+
+    print(b"BLK: found at dev ");
+    print_u64(blk_dev.addr.dev as u64);
+    print(b" IRQ ");
+    print_u64(blk_dev.irq_line as u64);
+    print(b"\n");
+
+    // Initialize the virtio-blk driver.
+    let mut blk = match VirtioBlk::init(&blk_dev, &pci) {
+        Ok(b) => b,
+        Err(e) => {
+            print(b"BLK: init failed: ");
+            print(e.as_bytes());
+            print(b"\n");
+            return;
+        }
+    };
+
+    print(b"BLK: ");
+    print_u64(blk.capacity);
+    print(b" sectors\n");
+
+    // Read sector 0 and print first 16 bytes.
+    match blk.read_sector(0) {
+        Ok(()) => {
+            print(b"BLK READ: ");
+            let data = unsafe { core::slice::from_raw_parts(blk.data_ptr(), 16) };
+            for &b in data {
+                if b >= 0x20 && b < 0x7F {
+                    sys::debug_print(b);
+                } else {
+                    sys::debug_print(b'.');
+                }
+            }
+            print(b"\n");
+        }
+        Err(e) => {
+            print(b"BLK READ ERR: ");
+            print(e.as_bytes());
+            print(b"\n");
+            return;
+        }
+    }
+
+    // Write "WROTE\0" to sector 1.
+    {
+        let data = unsafe { core::slice::from_raw_parts_mut(blk.data_ptr_mut(), 512) };
+        // Zero the buffer first.
+        for b in data.iter_mut() {
+            *b = 0;
+        }
+        let msg = b"WROTE";
+        data[..msg.len()].copy_from_slice(msg);
+    }
+    match blk.write_sector(1) {
+        Ok(()) => print(b"BLK WRITE OK\n"),
+        Err(e) => {
+            print(b"BLK WRITE ERR: ");
+            print(e.as_bytes());
+            print(b"\n");
+            return;
+        }
+    }
+
+    // Read back sector 1 to verify.
+    match blk.read_sector(1) {
+        Ok(()) => {
+            print(b"BLK VERIFY: ");
+            let data = unsafe { core::slice::from_raw_parts(blk.data_ptr(), 16) };
+            for &b in data {
+                if b >= 0x20 && b < 0x7F {
+                    sys::debug_print(b);
+                } else if b == 0 {
+                    break;
+                } else {
+                    sys::debug_print(b'.');
+                }
+            }
+            print(b"\n");
+        }
+        Err(e) => {
+            print(b"BLK VERIFY ERR: ");
+            print(e.as_bytes());
+            print(b"\n");
+        }
+    }
 }
 
 fn panic_halt() -> ! {

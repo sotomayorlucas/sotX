@@ -71,6 +71,13 @@ const SYS_DOMAIN_DETACH: u64 = 92;
 const SYS_DOMAIN_ADJUST: u64 = 93;
 const SYS_DOMAIN_INFO: u64 = 94;
 
+/// Syscall numbers — device infrastructure.
+const SYS_FRAME_PHYS: u64 = 100;
+const SYS_IOPORT_CREATE: u64 = 101;
+const SYS_FRAME_ALLOC_CONTIG: u64 = 102;
+const SYS_IRQ_CREATE: u64 = 103;
+const SYS_MAP_OFFSET: u64 = 104;
+
 /// Temporary syscall number for debug serial output.
 const SYS_DEBUG_PRINT: u64 = 255;
 
@@ -264,6 +271,11 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
         SYS_FRAME_ALLOC => {
             match mm::alloc_frame() {
                 Some(f) => {
+                    // Zero the page via HHDM so physical memory is clean.
+                    let hhdm = mm::hhdm_offset();
+                    unsafe {
+                        core::ptr::write_bytes((f.addr() + hhdm) as *mut u8, 0, 4096);
+                    }
                     match cap::insert(CapObject::Memory { base: f.addr(), size: 4096 }, Rights::ALL, None) {
                         Some(cap_id) => frame.rax = cap_id.raw() as u64,
                         None => {
@@ -365,16 +377,27 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
             }
         }
 
-        // SYS_PORT_IN — read a byte from I/O port (rdi=cap, rsi=port, requires READ)
+        // SYS_PORT_IN — read from I/O port (rdi=cap, rsi=port, rdx=width 1/2/4, requires READ)
+        // Width defaults to 1 for any value other than 2 or 4 (backward compatible).
         SYS_PORT_IN => {
             match cap::validate(frame.rdi as u32, Rights::READ) {
                 Ok(CapObject::IoPort { base, count }) => {
                     let port = frame.rsi as u16;
-                    if port < base || port >= base + count {
+                    let width: u16 = match frame.rdx {
+                        2 => 2,
+                        4 => 4,
+                        _ => 1,
+                    };
+                    if port < base || port.wrapping_add(width) > base.wrapping_add(count) {
                         frame.rax = SysError::InvalidArg as i64 as u64;
                     } else {
-                        let val = unsafe { io::inb(port) };
-                        frame.rax = val as u64;
+                        let val = match width {
+                            1 => (unsafe { io::inb(port) }) as u64,
+                            2 => (unsafe { io::inw(port) }) as u64,
+                            4 => (unsafe { io::inl(port) }) as u64,
+                            _ => unreachable!(),
+                        };
+                        frame.rax = val;
                     }
                 }
                 Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
@@ -382,15 +405,26 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
             }
         }
 
-        // SYS_PORT_OUT — write a byte to I/O port (rdi=cap, rsi=port, rdx=value, requires WRITE)
+        // SYS_PORT_OUT — write to I/O port (rdi=cap, rsi=port, rdx=value, r8=width 1/2/4, requires WRITE)
+        // Width defaults to 1 for any value other than 2 or 4 (backward compatible).
         SYS_PORT_OUT => {
             match cap::validate(frame.rdi as u32, Rights::WRITE) {
                 Ok(CapObject::IoPort { base, count }) => {
                     let port = frame.rsi as u16;
-                    if port < base || port >= base + count {
+                    let width: u16 = match frame.r8 {
+                        2 => 2,
+                        4 => 4,
+                        _ => 1,
+                    };
+                    if port < base || port.wrapping_add(width) > base.wrapping_add(count) {
                         frame.rax = SysError::InvalidArg as i64 as u64;
                     } else {
-                        unsafe { io::outb(port, frame.rdx as u8) };
+                        match width {
+                            1 => unsafe { io::outb(port, frame.rdx as u8) },
+                            2 => unsafe { io::outw(port, frame.rdx as u16) },
+                            4 => unsafe { io::outl(port, frame.rdx as u32) },
+                            _ => unreachable!(),
+                        }
                         frame.rax = 0;
                     }
                 }
@@ -628,10 +662,124 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
             }
         }
 
+        // SYS_FRAME_PHYS — query physical address of a frame capability
+        // rdi = frame_cap (requires READ); returns rax = physical address
+        SYS_FRAME_PHYS => {
+            match cap::validate(frame.rdi as u32, Rights::READ) {
+                Ok(CapObject::Memory { base, .. }) => {
+                    frame.rax = base;
+                }
+                Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
+                Err(e) => frame.rax = e as i64 as u64,
+            }
+        }
+
+        // SYS_IOPORT_CREATE — create an I/O port capability dynamically
+        // rdi = base port, rsi = count; returns rax = cap_id
+        SYS_IOPORT_CREATE => {
+            let base = frame.rdi as u16;
+            let count = frame.rsi as u16;
+            if count == 0 || count > 256 {
+                frame.rax = SysError::InvalidArg as i64 as u64;
+            } else {
+                match cap::insert(CapObject::IoPort { base, count }, Rights::ALL, None) {
+                    Some(cap_id) => frame.rax = cap_id.raw() as u64,
+                    None => frame.rax = SysError::OutOfResources as i64 as u64,
+                }
+            }
+        }
+
+        // SYS_FRAME_ALLOC_CONTIG — allocate N contiguous physical frames
+        // rdi = count (1–16); returns rax = cap_id (Memory cap with size = count * 4096)
+        SYS_FRAME_ALLOC_CONTIG => {
+            let count = frame.rdi as usize;
+            if count == 0 || count > 16 {
+                frame.rax = SysError::InvalidArg as i64 as u64;
+            } else {
+                match mm::alloc_contiguous(count) {
+                    Some(f) => {
+                        let size = (count as u64) * 4096;
+                        // Zero the pages via HHDM so physical memory is clean
+                        // before userspace (or device emulation) touches it.
+                        let hhdm = mm::hhdm_offset();
+                        unsafe {
+                            core::ptr::write_bytes(
+                                (f.addr() + hhdm) as *mut u8,
+                                0,
+                                size as usize,
+                            );
+                        }
+                        match cap::insert(CapObject::Memory { base: f.addr(), size }, Rights::ALL, None) {
+                            Some(cap_id) => frame.rax = cap_id.raw() as u64,
+                            None => {
+                                // Free all frames on cap insert failure
+                                for i in 0..count {
+                                    mm::free_frame(PhysFrame::from_addr(f.addr() + (i as u64) * 4096));
+                                }
+                                frame.rax = SysError::OutOfResources as i64 as u64;
+                            }
+                        }
+                    }
+                    None => frame.rax = SysError::OutOfResources as i64 as u64,
+                }
+            }
+        }
+
+        // SYS_IRQ_CREATE — create an IRQ capability dynamically
+        // rdi = irq_line (0–15); returns rax = cap_id
+        SYS_IRQ_CREATE => {
+            let line = frame.rdi as u32;
+            if line >= 16 {
+                frame.rax = SysError::InvalidArg as i64 as u64;
+            } else {
+                match cap::insert(CapObject::Irq { line }, Rights::ALL, None) {
+                    Some(cap_id) => frame.rax = cap_id.raw() as u64,
+                    None => frame.rax = SysError::OutOfResources as i64 as u64,
+                }
+            }
+        }
+
+        // SYS_MAP_OFFSET — map page from multi-page Memory cap at given offset
+        // rdi = vaddr, rsi = mem_cap, rdx = offset (bytes, page-aligned), r8 = flags
+        SYS_MAP_OFFSET => {
+            let vaddr = frame.rdi;
+            let mem_cap = frame.rsi as u32;
+            let offset = frame.rdx;
+            let user_flags = frame.r8;
+
+            match cap::validate(mem_cap, Rights::READ) {
+                Ok(CapObject::Memory { base, size }) => {
+                    if vaddr & 0xFFF != 0 || vaddr >= USER_ADDR_LIMIT
+                        || offset & 0xFFF != 0 || offset >= size
+                    {
+                        frame.rax = SysError::InvalidArg as i64 as u64;
+                    } else {
+                        let paddr = base + offset;
+                        let flags = PAGE_PRESENT | PAGE_USER | (user_flags & USER_FLAG_MASK);
+                        let cr3 = paging::read_cr3();
+                        let aspace = AddressSpace::from_cr3(cr3);
+                        aspace.map_page(vaddr, paddr, flags);
+                        paging::invlpg(vaddr);
+                        frame.rax = 0;
+                    }
+                }
+                Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
+                Err(e) => frame.rax = e as i64 as u64,
+            }
+        }
+
         // SYS_DEBUG_PRINT — write a single byte to serial (temporary)
         SYS_DEBUG_PRINT => {
             serial::write_byte(frame.rdi as u8);
             frame.rax = 0;
+        }
+
+        // SYS_DEBUG_PHYS_READ (254) — read u64 from physical address via HHDM (temporary debug)
+        254 => {
+            let phys_addr = frame.rdi;
+            let hhdm = mm::hhdm_offset();
+            let virt = (phys_addr + hhdm) as *const u64;
+            frame.rax = unsafe { core::ptr::read_volatile(virt) };
         }
 
         // Unknown syscall

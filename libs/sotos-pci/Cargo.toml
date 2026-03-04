@@ -1,0 +1,7 @@
+[package]
+name = "sotos-pci"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sotos-common = { path = "../sotos-common" }

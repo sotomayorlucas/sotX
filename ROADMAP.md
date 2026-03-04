@@ -2,16 +2,19 @@
 
 > Current state: SMP-capable microkernel with scheduling domains (budget-enforced
 > thread groups), per-core scheduling, lock-free userspace IPC, capability transfer,
-> and IPC benchmarks. All five kernel primitives run across multiple CPU cores with
-> per-core run queues and work stealing. Scheduling domains provide kernel-enforced
-> CPU time budgets for thread groups (seL4-inspired model). Lock-free SPSC
-> shared-memory channels provide zero-syscall hot-path messaging with typed wrappers.
+> IPC benchmarks, and a userspace virtio-blk block device driver. All five kernel
+> primitives run across multiple CPU cores with per-core run queues and work stealing.
+> Scheduling domains provide kernel-enforced CPU time budgets for thread groups
+> (seL4-inspired model). Lock-free SPSC shared-memory channels provide zero-syscall
+> hot-path messaging with typed wrappers. Userspace PCI enumeration and virtio-blk
+> driver demonstrate device driver model: PCI config space access, DMA via contiguous
+> frame allocation, IRQ-driven I/O completion, and block read/write through capabilities.
 > 12+ userspace threads demonstrate sync/async IPC, capabilities, notifications,
 > shared-memory, IRQ virtualization, demand paging (VMM), ELF loading from initramfs,
-> SPSC data streaming, and IPC benchmarks. Init process receives root capabilities via
-> BootInfo page. LAPIC timer provides per-CPU preemption. IPI support for cross-core
-> notifications. Ticket spinlocks for FIFO-fair locking. Tested on 1-4 cores.
-> Technical hardening complete: generation-checked Pool<T> (ABA protection), O(1)
+> SPSC data streaming, IPC benchmarks, and virtio block I/O. Init process receives root
+> capabilities via BootInfo page. LAPIC timer provides per-CPU preemption. IPI support
+> for cross-core notifications. Ticket spinlocks for FIFO-fair locking. Tested on 1-4
+> cores. Technical hardening complete: generation-checked Pool<T> (ABA protection), O(1)
 > thread lookup, lock ordering enforcement, per-CPU slab caches, complete syscall
 > wrappers for assembly→Rust migration.
 
@@ -362,9 +365,15 @@ capability-based primitives — entirely in Ring 3.
 
 **Goal**: Persistent storage accessible through the object store interface.
 
-### 11.1 Block Device Driver
-- [ ] Virtio-blk driver (userspace, talks to QEMU)
-- [ ] Block layer abstraction: read/write sectors through capabilities
+### 11.1 Block Device Driver (DONE)
+- [x] Virtio-blk driver (userspace, talks to QEMU via legacy transport)
+- [x] Block layer abstraction: read/write sectors through capabilities
+- [x] PCI enumeration library (`libs/sotos-pci`): bus 0 scan, config space R/W
+- [x] Virtio driver library (`libs/sotos-virtio`): split virtqueue + blk driver
+- [x] 5 new syscalls (100–104): FramePhys, IoPortCreate, FrameAllocContig, IrqCreate, MapOffset
+- [x] 16/32-bit port I/O (inw/outw/inl/outl) + PORT_IN/OUT width parameter
+- [x] PCI config space cap (0xCF8–0xCFF) in init BootInfo
+- [x] Integration demo: PCI enumerate → find virtio-blk → read/write/verify sectors
 
 ### 11.2 Object Store
 - [ ] Transactional object store (userspace service)
@@ -447,7 +456,7 @@ Phase  Scope                          Dependencies    Status
  16    Technical Hardening            Phase 8         DONE (ABA protection, O(1) lookup, lock ordering, per-CPU slab)
   9    Scheduling Domains             Phase 8         DONE (budget enforcement, 5 syscalls, cap-based)
  10    LUCAS (UNIX Compat Layer)      Phase 6,7,11    TODO
- 11    Filesystem + Object Store      Phase 6         TODO
+ 11    Filesystem + Object Store      Phase 6         11.1 DONE (block driver)
  12    Networking + Distribution      Phase 6,11      TODO
  13    Verification + Hardening       Phase 3+        TODO
 ```
@@ -484,12 +493,14 @@ Phase  Scope                          Dependencies    Status
 
 ## Immediate Next Steps
 
-Phases 0–9 and Phase 16 (Technical Hardening) are complete. The kernel is SMP-capable
-with scheduling domains (budget-enforced thread groups), generation-checked object pools,
-O(1) scheduler lookups, per-CPU slab caches, lock ordering enforcement, and a complete
-syscall wrapper ABI for userspace Rust programs. The next unlocked phases are:
+Phases 0–9, Phase 16 (Technical Hardening), and Phase 11.1 (Block Device Driver) are
+complete. The kernel is SMP-capable with scheduling domains, generation-checked object
+pools, O(1) scheduler lookups, per-CPU slab caches, lock ordering enforcement, a complete
+syscall wrapper ABI, and a userspace virtio-blk block device driver with PCI enumeration.
+The next unlocked phases are:
 
-- **Phase 11 (Filesystem + Storage)**: virtio-blk driver + object store. Prerequisite for LUCAS (Phase 10).
+- **Phase 11.2 (Object Store)**: transactional object store + WAL on top of virtio-blk.
+- **Phase 11.3 (POSIX VFS)**: VFS shim translating open/read/write/close to object store ops.
 - **Assembly blob → Rust migration**: all syscall wrappers now available in sotos-common; init service blobs can be rewritten in Rust.
 - **Full IDL-based typed channels**: code generator from IDL → Rust stubs (Phase 7 stretch).
 - **Expand init service**: spawn VMM + drivers from config, full process lifecycle management.

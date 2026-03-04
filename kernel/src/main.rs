@@ -440,6 +440,11 @@ fn create_init_caps() {
     let n3_cap = cap::insert(cap::CapObject::Notification { id: n3.0.raw() }, cap::Rights::ALL, None)
         .expect("failed to create notification cap");
     kprintln!("  cap {}: notification (VMM faults)", n3_cap.raw());
+
+    // PCI config space ports 0xCF8-0xCFF (8 bytes: address + data)
+    let pci_cap = cap::insert(cap::CapObject::IoPort { base: 0xCF8, count: 8 }, cap::Rights::ALL, None)
+        .expect("failed to create PCI ioport cap");
+    kprintln!("  cap {}: port 0xCF8-0xCFF (PCI config)", pci_cap.raw());
 }
 
 /// Create the user address space, map code+stacks, create caps, spawn all threads.

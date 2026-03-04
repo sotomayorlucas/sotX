@@ -50,6 +50,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "sotos-pci"
+version = "0.1.0"
+dependencies = [
+ "sotos-common",
+]
+
+[[package]]
+name = "sotos-virtio"
+version = "0.1.0"
+dependencies = [
+ "sotos-common",
+ "sotos-pci",
+]
+
+[[package]]
 name = "spin"
 version = "0.9.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
