@@ -13,7 +13,7 @@
 pub mod domain;
 pub mod thread;
 
-pub use thread::{IpcRole, ThreadId, ThreadState};
+pub use thread::{ComputeTarget, IpcRole, ThreadId, ThreadState};
 use thread::Thread;
 
 use alloc::collections::VecDeque;
@@ -234,12 +234,23 @@ fn dequeue_from_any(my_cpu: usize) -> Option<usize> {
     None
 }
 
-/// Dequeue a non-depleted thread. If a dequeued thread belongs to a depleted
-/// domain, park it in the domain's suspended list and try the next one.
+/// Dequeue a non-depleted, CPU-targeted thread. If a dequeued thread belongs
+/// to a depleted domain, park it in the domain's suspended list and try the
+/// next one. GPU/NPU-targeted threads are re-enqueued (they await offload).
 fn dequeue_non_depleted(my_cpu: usize, sched: &mut Scheduler) -> Option<usize> {
     // Limit iterations to prevent infinite loop if all threads are depleted.
     for _ in 0..MAX_THREADS {
         let idx = dequeue_from_any(my_cpu)?;
+
+        // Skip non-CPU compute targets (GPU/NPU threads wait for offload).
+        let compute_target = sched.threads.get_by_index(idx as u32)
+            .map(|t| t.compute_target);
+        if compute_target != Some(ComputeTarget::Cpu) && compute_target.is_some() {
+            // Re-enqueue: this thread targets a different compute unit.
+            sched.enqueue(idx);
+            continue;
+        }
+
         let domain_idx = sched.threads.get_by_index(idx as u32)
             .and_then(|t| t.domain_idx);
 
@@ -357,6 +368,7 @@ pub fn init() {
         cpu_tick_limit: 0,
         mem_pages: 0,
         mem_page_limit: 0,
+        compute_target: ComputeTarget::Cpu,
     };
     let tid = ThreadId(sched.next_id);
     let handle = sched.threads.alloc(idle);
@@ -397,6 +409,7 @@ pub fn create_idle_thread() -> usize {
         cpu_tick_limit: 0,
         mem_pages: 0,
         mem_page_limit: 0,
+        compute_target: ComputeTarget::Cpu,
     };
     let handle = sched.threads.alloc(idle);
     let slot = handle.index();
@@ -654,6 +667,16 @@ pub fn track_mem_free() {
     if let Some(t) = sched.threads.get_mut_by_index(idx as u32) {
         if t.mem_pages > 0 {
             t.mem_pages -= 1;
+        }
+    }
+}
+
+/// Set the compute target for a thread.
+pub fn set_compute_target(tid: ThreadId, target: ComputeTarget) {
+    let mut sched = SCHEDULER.lock();
+    if let Some(slot) = sched.slot_of(tid) {
+        if let Some(t) = sched.threads.get_mut_by_index(slot) {
+            t.compute_target = target;
         }
     }
 }

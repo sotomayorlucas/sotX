@@ -13,7 +13,12 @@ transactional object store at its core.
 - **Verified microkernel** (~10K LOC target) with selective exokernel bypass
 - **Capability-based security**: every kernel object accessed through capabilities with delegation and revocation
 - **Per-core scheduling**: ticket-locked run queues with work stealing across CPUs
+- **Per-core IPC**: each core has its own endpoint pool (no global lock contention), cross-core delivery via mailbox + IPI
 - **IPC**: synchronous endpoints (L4-style register transfer) + lock-free SPSC shared-memory channels
+- **Network-transparent IPC**: routing layer for distributed computing ("Swarm OS") with message serialization
+- **Heterogeneous scheduling**: CPU/GPU/NPU compute targets in thread model
+- **WASM SFI**: bare-metal WebAssembly interpreter for software fault isolation (no_std, 50+ opcodes)
+- **Formal verification**: TLA+ specifications of IPC, capabilities, and scheduler with safety proofs
 - **Userspace VMM**: page faults handled by a userspace server, not the kernel
 - **Multi-address-space**: each process gets its own CR3 + page tables
 - **SMP**: runs on 1-4+ CPU cores with per-CPU LAPIC timers, IPI, and per-core state
@@ -24,9 +29,13 @@ All core kernel primitives are implemented and tested on x86_64.
 
 ### Kernel
 - Preemptive round-robin scheduler with per-core queues and work stealing
+- **Per-core IPC endpoint pools**: each CPU core has its own endpoint pool with core-encoded handles — eliminates global lock contention
+- **Cross-core mailbox + IPI**: per-core bounded message queues with LAPIC IPI for immediate cross-core wake
+- **Heterogeneous compute targets**: threads tagged with CPU/GPU/NPU target; scheduler filters by compute target
 - SYSCALL/SYSRET Ring 3 transitions with GS-relative per-CPU state
 - Synchronous IPC endpoints with capability transfer
 - Async channels (kernel ring buffers) + lock-free SPSC (userspace shared memory)
+- **Network-transparent IPC routing**: routing table maps endpoints to remote nodes, 80-byte wire message format
 - IRQ virtualization with shared IRQ support — drivers run in userspace
 - Demand paging via userspace VMM server (separate process, own CR3)
 - ELF loader + CPIO initramfs
@@ -92,6 +101,19 @@ All core kernel primitives are implemented and tested on x86_64.
 - W^X compatible: pages mapped RW for loading, then changed to R+X via SYS_PROTECT
 - Test library (`libs/sotos-testlib/`) verified: `add(3,4)=7`, `mul(6,7)=42`
 
+### WASM Runtime (Software Fault Isolation)
+- Bare-metal `no_std` WebAssembly bytecode interpreter (`libs/sotos-wasm/`)
+- Full WASM binary parser (type, function, memory, global, export, code sections)
+- Stack-based execution: 1024-value operand stack, 64-level call depth
+- 50+ opcodes: i32/i64 arithmetic, comparison, bitwise, control flow, memory
+- SFI guarantee: every memory load/store bounds-checked against linear memory
+- Linear memory up to 1 MiB (16 × 64 KiB WASM pages)
+
+### Formal Verification
+- TLA+ specification of IPC protocol (`formal/ipc.tla`): no duplicate delivery, single receiver
+- TLA+ specification of capability system (`formal/capabilities.tla`): monotonic rights, revocation completeness
+- TLA+ specification of scheduler (`formal/scheduler.tla`): mutual exclusion, no starvation
+
 ## Build & Run
 
 Requires: Rust nightly, Python 3, QEMU, [just](https://github.com/casey/just)
@@ -142,6 +164,7 @@ libs/
   sotos-testlib/        PIC test shared library for dynamic linking verification
   sotos-nvme/           NVMe SSD driver library (MMIO regs, queues, controller, sector I/O)
   sotos-xhci/           xHCI USB host controller library (TRBs, rings, ports, HID keyboard)
+  sotos-wasm/           Bare-metal WASM interpreter (SFI, no_std, 50+ opcodes)
 services/
   init/                 Init process (VMM, LUCAS interceptor, framebuffer, process spawner)
   kbd/                  PS/2 keyboard driver (separate process)
@@ -153,6 +176,8 @@ services/
   lucas-shell/          Linux-ABI compatible shell
 boot/                   Bootloader configuration (limine.conf)
 scripts/                Build tools (mkimage.py, mkinitrd.py, mkdisk.py, mksharedlib.py)
+formal/                 TLA+ formal specifications (IPC, capabilities, scheduler)
+docs/                   Technical paper (LaTeX, CLRS-style)
 ```
 
 ## Key Technical Details

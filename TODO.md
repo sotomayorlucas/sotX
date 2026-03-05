@@ -116,6 +116,34 @@
 
 ---
 
+## Research & Development: Evolución a SO de 4ta Generación
+
+### Multikernel Architecture
+- [x] Per-core IPC queues (eliminate global TicketMutex on endpoint pool)
+- [x] Per-core mini-kernels (local scheduling + IPC, no shared mutable state)
+- [x] PCIe-style message passing between cores (IPI-based wake, lock-free transfer)
+
+### Software Fault Isolation via WASM
+- [x] Bare-metal WASM runtime in kernel (no_std interpreter, i32/i64/control flow)
+- [ ] Compile services to WASM modules (bytecode loading from initrd)
+- [ ] Ring 0 execution with SFI guarantees (memory bounds checking, stack isolation)
+
+### Transparent Distributed Computing ("Swarm OS")
+- [x] IPC over network (message serialization + routing layer)
+- [ ] Live process migration (checkpoint thread state + transfer to remote node)
+- [ ] Unified distributed VFS (object store replication across nodes)
+
+### Native Heterogeneous Computing
+- [x] CPU+GPU+NPU scheduler (compute target abstraction in thread model)
+- [ ] Tensor/shader as first-class IPC payloads (typed message extensions)
+
+### Formal Mathematical Verification
+- [x] TLA+ specification of IPC protocol (safety + liveness properties)
+- [x] TLA+ specification of capability system (no unauthorized access)
+- [x] TLA+ specification of scheduler (no starvation, bounded latency)
+
+---
+
 ## Dream Goals
 - [ ] GUI — framebuffer window compositor + mouse input
 - [ ] Port a real application (e.g., Lua, MicroPython, or a simple text editor)

@@ -92,6 +92,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "sotos-wasm"
+version = "0.1.0"
+
+[[package]]
 name = "sotos-xhci"
 version = "0.1.0"
 dependencies = [

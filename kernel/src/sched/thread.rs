@@ -25,6 +25,18 @@ pub enum IpcRole {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ThreadId(pub u32);
 
+/// Compute target for heterogeneous scheduling.
+/// Threads can be assigned to different compute units.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComputeTarget {
+    /// General-purpose CPU core (default).
+    Cpu,
+    /// GPU compute unit (shader dispatch).
+    Gpu,
+    /// Neural processing unit (tensor dispatch).
+    Npu,
+}
+
 /// Thread lifecycle states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreadState {
@@ -108,6 +120,8 @@ pub struct Thread {
     pub mem_pages: u32,
     /// Memory page limit (0 = unlimited).
     pub mem_page_limit: u32,
+    /// Compute target for heterogeneous scheduling.
+    pub compute_target: ComputeTarget,
 }
 
 impl Thread {
@@ -158,6 +172,7 @@ impl Thread {
             cpu_tick_limit: 0,
             mem_pages: 0,
             mem_page_limit: 0,
+            compute_target: ComputeTarget::Cpu,
         }
     }
 
@@ -212,6 +227,7 @@ impl Thread {
             cpu_tick_limit: 0,
             mem_pages: 0,
             mem_page_limit: 0,
+            compute_target: ComputeTarget::Cpu,
         }
     }
 }

@@ -31,6 +31,11 @@ pub fn mark_percpu_ready() {
     PERCPU_READY.store(true, Ordering::Release);
 }
 
+/// Check if percpu is ready (used by per-core IPC pools to determine current core).
+pub fn is_percpu_ready() -> bool {
+    PERCPU_READY.load(Ordering::Acquire)
+}
+
 /// Get the current CPU index (0 during early boot).
 fn current_cpu_index() -> usize {
     if PERCPU_READY.load(Ordering::Acquire) {
