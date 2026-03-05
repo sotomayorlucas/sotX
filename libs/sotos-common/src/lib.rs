@@ -6,8 +6,34 @@
 
 #![no_std]
 
+pub mod elf;
 pub mod spsc;
 pub mod typed_channel;
+
+// ---------------------------------------------------------------
+// Stack canary support for userspace processes
+// ---------------------------------------------------------------
+// Only compiled for userspace (not kernel, which has its own definitions).
+
+#[cfg(not(feature = "kernel"))]
+mod stack_canary {
+    /// Stack canary value. Initialized with RDTSC entropy.
+    #[used]
+    #[no_mangle]
+    pub static mut __stack_chk_guard: u64 = 0x00000aff0a0d0000;
+
+    /// Called by LLVM when a stack buffer overflow is detected.
+    #[no_mangle]
+    pub extern "C" fn __stack_chk_fail() -> ! {
+        // Write directly to serial via syscall — don't trust the stack.
+        let msg = b"!!! STACK SMASH DETECTED !!!\n";
+        for &b in msg {
+            super::sys::debug_print(b);
+        }
+        super::sys::thread_exit();
+    }
+}
+
 
 /// Syscall numbers. The kernel exposes exactly these operations.
 #[repr(u64)]
@@ -99,8 +125,20 @@ pub enum Syscall {
     ThreadCreateIn = 122,
     /// Unmap a page from a target address space.
     UnmapFrom = 123,
+    /// Register a service name → endpoint mapping.
+    SvcRegister = 130,
+    /// Look up a service by name, returns a derived endpoint cap.
+    SvcLookup = 131,
+    /// Read a file from the initrd CPIO archive into a userspace buffer.
+    InitrdRead = 132,
+    /// Write a BootInfo page into a target address space.
+    BootInfoWrite = 133,
+    /// Change page permissions (mprotect-like, W^X enforced).
+    Protect = 134,
     /// Write a single byte to serial (temporary debug aid).
     DebugPrint = 255,
+    /// Non-blocking serial read (returns byte or u64::MAX if none).
+    DebugRead = 253,
 }
 
 /// Error codes returned by syscalls.
@@ -152,6 +190,8 @@ pub struct BootInfo {
     pub fb_pitch: u32,
     /// Framebuffer bits per pixel (typically 32).
     pub fb_bpp: u32,
+    /// Randomized stack top address (0 = default 0x904000).
+    pub stack_top: u64,
 }
 
 impl BootInfo {
@@ -166,6 +206,7 @@ impl BootInfo {
             fb_height: 0,
             fb_pitch: 0,
             fb_bpp: 0,
+            stack_top: 0,
         }
     }
 
@@ -297,6 +338,13 @@ pub mod sys {
     #[inline(always)]
     pub fn debug_print(byte: u8) {
         syscall1(super::Syscall::DebugPrint as u64, byte as u64);
+    }
+
+    /// Non-blocking read one byte from serial. Returns Some(byte) or None.
+    #[inline(always)]
+    pub fn debug_read() -> Option<u8> {
+        let ret = syscall0(super::Syscall::DebugRead as u64);
+        if ret == u64::MAX { None } else { Some(ret as u8) }
     }
 
     /// Allocate a physical frame. Returns the frame capability ID.
@@ -814,6 +862,53 @@ pub mod sys {
     #[inline(always)]
     pub fn unmap_from(as_cap: u64, vaddr: u64) -> Result<(), i64> {
         let ret = syscall2(super::Syscall::UnmapFrom as u64, as_cap, vaddr);
+        if (ret as i64) < 0 { Err(ret as i64) } else { Ok(()) }
+    }
+
+    // ---------------------------------------------------------------
+    // Service registry
+    // ---------------------------------------------------------------
+
+    /// Register a service name → endpoint mapping.
+    /// `ep_cap` must be an Endpoint capability.
+    #[inline(always)]
+    pub fn svc_register(name_ptr: u64, name_len: u64, ep_cap: u64) -> Result<(), i64> {
+        let ret = syscall3(super::Syscall::SvcRegister as u64, name_ptr, name_len, ep_cap);
+        if (ret as i64) < 0 { Err(ret as i64) } else { Ok(()) }
+    }
+
+    /// Look up a service by name. Returns a derived endpoint cap ID.
+    #[inline(always)]
+    pub fn svc_lookup(name_ptr: u64, name_len: u64) -> Result<u64, i64> {
+        let ret = syscall2(super::Syscall::SvcLookup as u64, name_ptr, name_len);
+        if (ret as i64) < 0 { Err(ret as i64) } else { Ok(ret) }
+    }
+
+    // ---------------------------------------------------------------
+    // Userspace process spawning
+    // ---------------------------------------------------------------
+
+    /// Read a file from the initrd CPIO archive into a userspace buffer.
+    /// Returns the file size on success.
+    #[inline(always)]
+    pub fn initrd_read(name_ptr: u64, name_len: u64, buf_ptr: u64, buf_len: u64) -> Result<u64, i64> {
+        let ret = syscall4(super::Syscall::InitrdRead as u64, name_ptr, name_len, buf_ptr, buf_len);
+        if (ret as i64) < 0 { Err(ret as i64) } else { Ok(ret) }
+    }
+
+    /// Write a BootInfo page into a target address space at 0xB00000.
+    /// `caps_ptr` points to an array of cap IDs, `cap_count` is the number.
+    #[inline(always)]
+    pub fn bootinfo_write(as_cap: u64, caps_ptr: u64, cap_count: u64) -> Result<(), i64> {
+        let ret = syscall3(super::Syscall::BootInfoWrite as u64, as_cap, caps_ptr, cap_count);
+        if (ret as i64) < 0 { Err(ret as i64) } else { Ok(()) }
+    }
+
+    /// Change page permissions (mprotect-like). W^X enforced by kernel.
+    /// `flags`: bit 1 = WRITABLE, bit 63 = NO_EXECUTE.
+    #[inline(always)]
+    pub fn protect(vaddr: u64, flags: u64) -> Result<(), i64> {
+        let ret = syscall2(super::Syscall::Protect as u64, vaddr, flags);
         if (ret as i64) < 0 { Err(ret as i64) } else { Ok(()) }
     }
 

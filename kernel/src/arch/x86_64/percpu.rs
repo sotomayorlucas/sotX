@@ -12,7 +12,9 @@ use alloc::boxed::Box;
 use x86_64::structures::tss::TaskStateSegment;
 
 /// Assembly-accessible offset constants.
+#[allow(dead_code)]
 pub const PERCPU_KSTACK: usize = 8;
+#[allow(dead_code)]
 pub const PERCPU_URSP: usize = 16;
 
 /// MSR number for IA32_GS_BASE.

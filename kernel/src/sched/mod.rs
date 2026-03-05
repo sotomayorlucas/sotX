@@ -75,6 +75,7 @@ core::arch::global_asm!(
 
 /// Trampoline for kernel threads. Called after context_switch pops regs.
 /// r12 = entry function pointer.
+#[allow(dead_code)]
 #[unsafe(naked)]
 unsafe extern "C" fn thread_trampoline() -> ! {
     core::arch::naked_asm!(
@@ -98,6 +99,7 @@ unsafe extern "C" fn user_thread_trampoline() -> ! {
 }
 
 /// Post-switch handler for kernel threads: finish_switch, then sti + call entry.
+#[allow(dead_code)]
 extern "C" fn finish_switch_and_enter_kernel(entry: u64) -> ! {
     let entry: fn() -> ! = unsafe { core::mem::transmute(entry) };
     finish_switch();
@@ -343,6 +345,7 @@ pub fn create_idle_thread() -> usize {
 }
 
 /// Spawn a new kernel thread.
+#[allow(dead_code)]
 pub fn spawn(entry: fn() -> !) -> ThreadId {
     let mut sched = SCHEDULER.lock();
     let id = sched.next_id;

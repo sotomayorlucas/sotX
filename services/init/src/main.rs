@@ -28,19 +28,21 @@ const MAP_WRITABLE: u64 = 2;
 /// LUCAS guest stack (4 pages).
 const LUCAS_GUEST_STACK: u64 = 0xE00000;
 const LUCAS_GUEST_STACK_PAGES: u64 = 4;
-/// LUCAS handler stack (4 pages).
-const LUCAS_HANDLER_STACK: u64 = 0xE04000;
-const LUCAS_HANDLER_STACK_PAGES: u64 = 4;
+/// LUCAS handler stack (16 pages = 64KB, large due to VFS/ObjectStore locals).
+const LUCAS_HANDLER_STACK: u64 = 0xE10000;
+const LUCAS_HANDLER_STACK_PAGES: u64 = 16;
 
 /// LUCAS endpoint cap — shared between handler and _start via atomic.
 static LUCAS_EP_CAP: AtomicU64 = AtomicU64::new(0);
 
+/// Net service IPC endpoint cap — looked up via svc_lookup("net").
+static NET_EP_CAP: AtomicU64 = AtomicU64::new(0);
+
 // ---------------------------------------------------------------------------
 // Root capability indices (must match kernel create_init_caps() order)
-// Keyboard caps removed — kbd runs as a separate process.
+// VMM and keyboard caps removed — they run as separate processes.
 // ---------------------------------------------------------------------------
-const CAP_VMM_NOTIFY: usize = 0;  // Notification (VMM page faults)
-const CAP_PCI: usize = 1;         // I/O port 0xCF8-0xCFF (PCI config)
+const CAP_PCI: usize = 0;         // I/O port 0xCF8-0xCFF (PCI config)
 
 fn print(s: &[u8]) {
     for &b in s {
@@ -83,9 +85,7 @@ pub extern "C" fn _start() -> ! {
     print_u64(cap_count);
     print(b" caps received\n");
 
-    // --- Spawn VMM service thread (must be early, before any demand paging) ---
-    // Keyboard driver is now a separate process (services/kbd).
-    spawn_service_thread(vmm_server as *const () as u64, VMM_STACK_BASE);
+    // VMM and keyboard driver are now separate processes (services/vmm, services/kbd).
 
     // --- Phase 2: SPSC channel test ---
     // 1. Allocate and map shared page for ring buffer
@@ -129,12 +129,394 @@ pub extern "C" fn _start() -> ! {
     // --- Phase 5: LUCAS syscall redirect demo ---
     run_lucas_demo(blk);
 
+    // --- Phase 6: Look up net service endpoint (before spawning subprocesses) ---
+    // Give net service time to register, then look it up.
+    for _ in 0..50 { sys::yield_now(); }
+    let net_name = b"net";
+    match sys::svc_lookup(net_name.as_ptr() as u64, net_name.len() as u64) {
+        Ok(cap) => {
+            NET_EP_CAP.store(cap, Ordering::Release);
+            print(b"INIT: net service endpoint cap = ");
+            print_u64(cap);
+            print(b"\n");
+        }
+        Err(_) => {
+            print(b"INIT: net service not found (networking disabled)\n");
+        }
+    }
+
+    // --- Phase 7: Userspace process spawning ---
+    spawn_process(b"hello");
+
+    // --- Phase 8: Dynamic linking test ---
+    test_dynamic_linking();
+
     // Give LUCAS threads time to complete before exiting init.
     for _ in 0..100 {
         sys::yield_now();
     }
 
     sys::thread_exit();
+}
+
+// ---------------------------------------------------------------------------
+// Userspace process spawning (Feature 3)
+// ---------------------------------------------------------------------------
+
+/// Temporary buffer region for reading ELF data from initrd.
+const SPAWN_BUF_BASE: u64 = 0x5000000;
+/// Max ELF size we support for spawning (256 KiB = 64 pages).
+const SPAWN_BUF_PAGES: u64 = 64;
+
+/// Spawn a new process from an initrd binary by name.
+///
+/// Uses InitrdRead to get ELF data, parses headers with the userspace ELF
+/// parser, creates a new address space, maps segments + stack, writes
+/// BootInfo, and launches the thread.
+fn spawn_process(name: &[u8]) {
+    use sotos_common::elf;
+
+    print(b"SPAWN: loading '");
+    print(name);
+    print(b"' from initrd...\n");
+
+    // Step 1: Map temporary buffer pages into our address space.
+    let mut buf_frames = [0u64; SPAWN_BUF_PAGES as usize];
+    for i in 0..SPAWN_BUF_PAGES {
+        let frame_cap = match sys::frame_alloc() {
+            Ok(f) => f,
+            Err(_) => {
+                print(b"SPAWN: frame_alloc failed for buffer\n");
+                return;
+            }
+        };
+        buf_frames[i as usize] = frame_cap;
+        if sys::map(SPAWN_BUF_BASE + i * 0x1000, frame_cap, MAP_WRITABLE).is_err() {
+            print(b"SPAWN: map buffer page failed\n");
+            return;
+        }
+    }
+
+    // Step 2: Read ELF from initrd into our buffer.
+    let file_size = match sys::initrd_read(
+        name.as_ptr() as u64,
+        name.len() as u64,
+        SPAWN_BUF_BASE,
+        SPAWN_BUF_PAGES * 0x1000,
+    ) {
+        Ok(sz) => sz as usize,
+        Err(_) => {
+            print(b"SPAWN: initrd_read failed (not found?)\n");
+            // Cleanup buffer pages.
+            for i in 0..SPAWN_BUF_PAGES {
+                let _ = sys::unmap(SPAWN_BUF_BASE + i * 0x1000);
+            }
+            return;
+        }
+    };
+
+    print(b"SPAWN: ELF size = ");
+    print_u64(file_size as u64);
+    print(b" bytes\n");
+
+    // Step 3: Parse ELF header.
+    let elf_data = unsafe { core::slice::from_raw_parts(SPAWN_BUF_BASE as *const u8, file_size) };
+    let elf_info = match elf::parse(elf_data) {
+        Ok(info) => info,
+        Err(e) => {
+            print(b"SPAWN: ELF parse error: ");
+            print(e.as_bytes());
+            print(b"\n");
+            for i in 0..SPAWN_BUF_PAGES {
+                let _ = sys::unmap(SPAWN_BUF_BASE + i * 0x1000);
+            }
+            return;
+        }
+    };
+
+    print(b"SPAWN: entry = 0x");
+    print_hex64(elf_info.entry);
+    print(b"\n");
+
+    // Step 4: Create new address space.
+    let as_cap = match sys::addr_space_create() {
+        Ok(cap) => cap,
+        Err(_) => {
+            print(b"SPAWN: addr_space_create failed\n");
+            for i in 0..SPAWN_BUF_PAGES {
+                let _ = sys::unmap(SPAWN_BUF_BASE + i * 0x1000);
+            }
+            return;
+        }
+    };
+
+    // Step 5: Parse and map each PT_LOAD segment into the new AS.
+    let mut segments = [const { elf::LoadSegment { offset: 0, vaddr: 0, filesz: 0, memsz: 0, flags: 0 } }; elf::MAX_LOAD_SEGMENTS];
+    let seg_count = elf::load_segments(elf_data, &elf_info, &mut segments);
+
+    for si in 0..seg_count {
+        let seg = &segments[si];
+        if seg.memsz == 0 {
+            continue;
+        }
+        let seg_start = seg.vaddr & !0xFFF;
+        let seg_end = (seg.vaddr + seg.memsz as u64 + 0xFFF) & !0xFFF;
+        let is_writable = (seg.flags & 2) != 0; // PF_W
+
+        let mut page_vaddr = seg_start;
+        while page_vaddr < seg_end {
+            // Allocate a frame.
+            let frame_cap = match sys::frame_alloc() {
+                Ok(f) => f,
+                Err(_) => {
+                    print(b"SPAWN: frame_alloc failed for segment\n");
+                    return;
+                }
+            };
+
+            // Map temporarily into our AS to copy data.
+            let temp_vaddr = 0x5100000u64; // Just past our buffer
+            if sys::map(temp_vaddr, frame_cap, MAP_WRITABLE).is_err() {
+                print(b"SPAWN: temp map failed\n");
+                return;
+            }
+
+            // Zero the page first.
+            unsafe {
+                core::ptr::write_bytes(temp_vaddr as *mut u8, 0, 4096);
+            }
+
+            // Copy overlapping file data.
+            let page_start = page_vaddr;
+            let page_end = page_vaddr + 4096;
+            let file_region_start = seg.vaddr;
+            let file_region_end = seg.vaddr + seg.filesz as u64;
+            let copy_start = page_start.max(file_region_start);
+            let copy_end = page_end.min(file_region_end);
+
+            if copy_start < copy_end {
+                let dst_offset = (copy_start - page_start) as usize;
+                let src_offset = seg.offset + (copy_start - seg.vaddr) as usize;
+                let count = (copy_end - copy_start) as usize;
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        (SPAWN_BUF_BASE as *const u8).add(src_offset),
+                        (temp_vaddr as *mut u8).add(dst_offset),
+                        count,
+                    );
+                }
+            }
+
+            // Unmap from our AS.
+            let _ = sys::unmap(temp_vaddr);
+
+            // Map into the target AS.
+            let flags = if is_writable { MAP_WRITABLE } else { 0 };
+            if sys::map_into(as_cap, page_vaddr, frame_cap, flags).is_err() {
+                print(b"SPAWN: map_into failed\n");
+                return;
+            }
+
+            page_vaddr += 4096;
+        }
+    }
+
+    // Step 6: Allocate stack (4 pages at 0x900000) with guard page below.
+    let stack_base: u64 = 0x900000;
+    let stack_pages: u64 = 4;
+    // Guard page: present but not user-accessible — triggers fault on overflow.
+    if let Ok(guard_cap) = sys::frame_alloc() {
+        // Map with flags=0 (no WRITABLE) — PAGE_PRESENT|PAGE_USER set by kernel,
+        // but no WRITABLE means any write triggers a fault.
+        let _ = sys::map_into(as_cap, stack_base - 0x1000, guard_cap, 0);
+    }
+    for i in 0..stack_pages {
+        let frame_cap = match sys::frame_alloc() {
+            Ok(f) => f,
+            Err(_) => {
+                print(b"SPAWN: frame_alloc failed for stack\n");
+                return;
+            }
+        };
+        if sys::map_into(as_cap, stack_base + i * 0x1000, frame_cap, MAP_WRITABLE).is_err() {
+            print(b"SPAWN: map_into stack failed\n");
+            return;
+        }
+    }
+    let stack_top = stack_base + stack_pages * 0x1000;
+
+    // Step 7: Write BootInfo into target AS (no caps for hello).
+    let caps: [u64; 0] = [];
+    if sys::bootinfo_write(as_cap, caps.as_ptr() as u64, 0).is_err() {
+        print(b"SPAWN: bootinfo_write failed\n");
+        return;
+    }
+
+    // Step 8: Create thread in target AS.
+    match sys::thread_create_in(as_cap, elf_info.entry, stack_top) {
+        Ok(tid) => {
+            print(b"SPAWN: '");
+            print(name);
+            print(b"' launched (tid cap = ");
+            print_u64(tid);
+            print(b")\n");
+        }
+        Err(_) => {
+            print(b"SPAWN: thread_create_in failed\n");
+        }
+    }
+
+    // Cleanup: unmap our temporary buffer pages.
+    for i in 0..SPAWN_BUF_PAGES {
+        let _ = sys::unmap(SPAWN_BUF_BASE + i * 0x1000);
+    }
+}
+
+fn print_hex64(mut n: u64) {
+    if n == 0 {
+        sys::debug_print(b'0');
+        unsafe { fb_putchar(b'0'); }
+        return;
+    }
+    let mut buf = [0u8; 16];
+    let mut i = 0;
+    while n > 0 {
+        let digit = (n & 0xF) as u8;
+        buf[i] = if digit < 10 { b'0' + digit } else { b'a' + digit - 10 };
+        n >>= 4;
+        i += 1;
+    }
+    while i > 0 {
+        i -= 1;
+        sys::debug_print(buf[i]);
+        unsafe { fb_putchar(buf[i]); }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic linking test (Feature 4)
+// ---------------------------------------------------------------------------
+
+/// Base address for loading shared libraries.
+const DL_LOAD_BASE: u64 = 0x6000000;
+/// Buffer region for reading .so data from initrd.
+const DL_BUF_BASE: u64 = 0x5200000;
+/// Max .so size (128 KiB = 32 pages).
+const DL_BUF_PAGES: u64 = 32;
+
+fn test_dynamic_linking() {
+    print(b"DLOPEN: loading libtest.so...\n");
+
+    // Step 1: Map buffer pages for reading the .so.
+    for i in 0..DL_BUF_PAGES {
+        let frame_cap = match sys::frame_alloc() {
+            Ok(f) => f,
+            Err(_) => {
+                print(b"DLOPEN: frame_alloc failed for buffer\n");
+                return;
+            }
+        };
+        if sys::map(DL_BUF_BASE + i * 0x1000, frame_cap, MAP_WRITABLE).is_err() {
+            print(b"DLOPEN: map buffer page failed\n");
+            return;
+        }
+    }
+
+    // Step 2: Read .so from initrd.
+    let name = b"libtest.so";
+    let file_size = match sys::initrd_read(
+        name.as_ptr() as u64,
+        name.len() as u64,
+        DL_BUF_BASE,
+        DL_BUF_PAGES * 0x1000,
+    ) {
+        Ok(sz) => sz as usize,
+        Err(_) => {
+            print(b"DLOPEN: initrd_read failed for libtest.so\n");
+            for i in 0..DL_BUF_PAGES {
+                let _ = sys::unmap(DL_BUF_BASE + i * 0x1000);
+            }
+            return;
+        }
+    };
+
+    print(b"DLOPEN: libtest.so size = ");
+    print_u64(file_size as u64);
+    print(b" bytes\n");
+
+    // Step 3: Load and relocate the shared library.
+    let elf_data = unsafe { core::slice::from_raw_parts(DL_BUF_BASE as *const u8, file_size) };
+    let handle = match sotos_ld::dl_open(elf_data, DL_LOAD_BASE) {
+        Ok(h) => h,
+        Err(e) => {
+            print(b"DLOPEN: dl_open failed: ");
+            print(e.as_bytes());
+            print(b"\n");
+            for i in 0..DL_BUF_PAGES {
+                let _ = sys::unmap(DL_BUF_BASE + i * 0x1000);
+            }
+            return;
+        }
+    };
+
+    print(b"DLOPEN: loaded at base 0x");
+    print_hex64(handle.base);
+    print(b"\n");
+
+    // Step 4: Look up the "add" symbol.
+    match sotos_ld::dl_sym(&handle, b"add") {
+        Some(add_addr) => {
+            print(b"DLSYM: add = 0x");
+            print_hex64(add_addr);
+            print(b"\n");
+
+            // Call add(3, 4) — should return 7.
+            let add_fn: extern "C" fn(u64, u64) -> u64 = unsafe {
+                core::mem::transmute(add_addr)
+            };
+            let result = add_fn(3, 4);
+            print(b"DLCALL: add(3, 4) = ");
+            print_u64(result);
+            print(b"\n");
+
+            if result == 7 {
+                print(b"DLTEST: PASS - dynamic linking works!\n");
+            } else {
+                print(b"DLTEST: FAIL - expected 7\n");
+            }
+        }
+        None => {
+            print(b"DLSYM: 'add' not found\n");
+        }
+    }
+
+    // Step 5: Also test "mul" symbol.
+    match sotos_ld::dl_sym(&handle, b"mul") {
+        Some(mul_addr) => {
+            let mul_fn: extern "C" fn(u64, u64) -> u64 = unsafe {
+                core::mem::transmute(mul_addr)
+            };
+            let result = mul_fn(6, 7);
+            print(b"DLCALL: mul(6, 7) = ");
+            print_u64(result);
+            print(b"\n");
+
+            if result == 42 {
+                print(b"DLTEST: mul PASS\n");
+            } else {
+                print(b"DLTEST: mul FAIL - expected 42\n");
+            }
+        }
+        None => {
+            print(b"DLSYM: 'mul' not found\n");
+        }
+    }
+
+    // Step 6: Cleanup.
+    sotos_ld::dl_close(&handle);
+    for i in 0..DL_BUF_PAGES {
+        let _ = sys::unmap(DL_BUF_BASE + i * 0x1000);
+    }
 }
 
 /// Producer entry point — runs in a separate thread, same address space.
@@ -145,45 +527,6 @@ pub extern "C" fn producer() -> ! {
         spsc::send(ring, i);
     }
     sys::thread_exit();
-}
-
-// ---------------------------------------------------------------------------
-// VMM server + Keyboard driver (migrated from assembly blobs)
-// ---------------------------------------------------------------------------
-
-/// VMM server stack (1 page, allocated by init).
-const VMM_STACK_BASE: u64 = 0x520000;
-
-/// Allocate a stack page and spawn a service thread.
-fn spawn_service_thread(entry: u64, stack_base: u64) {
-    let f = sys::frame_alloc().unwrap_or_else(|_| panic_halt());
-    sys::map(stack_base, f, MAP_WRITABLE).unwrap_or_else(|_| panic_halt());
-    sys::thread_create(entry, stack_base + 0x1000).unwrap_or_else(|_| panic_halt());
-}
-
-/// VMM server — handles page faults by allocating frames and mapping them.
-/// Replaces the 60-line assembly blob `user_vmm`.
-#[unsafe(no_mangle)]
-pub extern "C" fn vmm_server() -> ! {
-    let boot_info = unsafe { &*(BOOT_INFO_ADDR as *const BootInfo) };
-    let notify_cap = boot_info.caps[CAP_VMM_NOTIFY];
-
-    sys::fault_register(notify_cap).unwrap_or_else(|_| panic_halt());
-
-    loop {
-        sys::notify_wait(notify_cap);
-        loop {
-            match sys::fault_recv() {
-                Ok(fault) => {
-                    let frame = sys::frame_alloc().unwrap_or_else(|_| panic_halt());
-                    let vaddr = fault.addr & !0xFFF;
-                    sys::map(vaddr, frame, MAP_WRITABLE).unwrap_or_else(|_| panic_halt());
-                    sys::thread_resume(fault.tid as u64).unwrap_or_else(|_| panic_halt());
-                }
-                Err(_) => break,
-            }
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -647,9 +990,16 @@ static SCANCODE_TO_ASCII_SHIFT: [u8; 128] = [
     0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0,
 ];
 
-/// Read one ASCII character from the keyboard ring buffer (non-blocking).
+/// Read one ASCII character from the keyboard ring buffer OR serial (non-blocking).
+/// Checks PS/2 keyboard ring first, then falls back to serial input.
 /// Handles Shift/Ctrl modifier tracking, returns None if no key available.
 unsafe fn kb_read_char() -> Option<u8> {
+    // Check serial input first (works in headless mode).
+    if let Some(b) = sys::debug_read() {
+        // Convert \r to \n for terminal compatibility.
+        return Some(if b == b'\r' { b'\n' } else { b });
+    }
+
     let ring = KB_RING_ADDR as *mut u32;
     loop {
         let write_idx = core::ptr::read_volatile(ring);
@@ -975,7 +1325,7 @@ fn run_objstore_demo(blk: VirtioBlk) -> Option<VirtioBlk> {
 // ---------------------------------------------------------------------------
 
 /// Address where VirtioBlk is stored for the LUCAS handler (1 page).
-const LUCAS_BLK_STORE: u64 = 0xE08000;
+const LUCAS_BLK_STORE: u64 = 0xE20000;
 
 /// Flag: VirtioBlk stored and ready at LUCAS_BLK_STORE.
 static LUCAS_VFS_READY: AtomicU64 = AtomicU64::new(0);
@@ -1012,7 +1362,7 @@ static BOOT_TSC: AtomicU64 = AtomicU64::new(0);
 /// Next PID to allocate (monotonically increasing, starts at 1).
 static NEXT_PID: AtomicU64 = AtomicU64::new(1);
 /// Next vaddr for child stacks (guest + handler interleaved, 0x2000 apart).
-static NEXT_CHILD_STACK: AtomicU64 = AtomicU64::new(0xE10000);
+static NEXT_CHILD_STACK: AtomicU64 = AtomicU64::new(0xE30000);
 
 // Handshake statics for passing setup info to child handler thread.
 static CHILD_SETUP_EP: AtomicU64 = AtomicU64::new(0);
@@ -1136,19 +1486,30 @@ enum FdKind {
     Stdout = 2,
     VfsFile = 3,
     DirList = 4,
+    Socket = 5,
 }
 
 #[derive(Clone, Copy)]
 struct FdEntry {
     kind: FdKind,
     vfs_fd: u32,
+    /// For Socket FDs: connection ID in the net service.
+    net_conn_id: u32,
 }
 
 impl FdEntry {
     const fn free() -> Self {
-        Self { kind: FdKind::Free, vfs_fd: 0 }
+        Self { kind: FdKind::Free, vfs_fd: 0, net_conn_id: 0 }
     }
 }
+
+// IPC command constants for net service (must match services/net).
+const NET_CMD_PING: u64 = 1;
+const NET_CMD_DNS_QUERY: u64 = 2;
+const NET_CMD_TCP_CONNECT: u64 = 3;
+const NET_CMD_TCP_SEND: u64 = 4;
+const NET_CMD_TCP_RECV: u64 = 5;
+const NET_CMD_TCP_CLOSE: u64 = 6;
 
 #[derive(Clone, Copy)]
 struct MmapEntry {
@@ -1435,9 +1796,9 @@ pub extern "C" fn lucas_handler() -> ! {
 
     // FD table: 0=stdin, 1=stdout, 2=stderr(→stdout)
     let mut fds = [FdEntry::free(); MAX_FDS];
-    fds[0] = FdEntry { kind: FdKind::Stdin, vfs_fd: 0 };
-    fds[1] = FdEntry { kind: FdKind::Stdout, vfs_fd: 0 };
-    fds[2] = FdEntry { kind: FdKind::Stdout, vfs_fd: 0 };
+    fds[0] = FdEntry { kind: FdKind::Stdin, vfs_fd: 0, net_conn_id: 0 };
+    fds[1] = FdEntry { kind: FdKind::Stdout, vfs_fd: 0, net_conn_id: 0 };
+    fds[2] = FdEntry { kind: FdKind::Stdout, vfs_fd: 0, net_conn_id: 0 };
 
     // Directory listing buffer and state
     let mut dir_buf = [0u8; 1024];
@@ -1501,7 +1862,13 @@ pub extern "C" fn lucas_handler() -> ! {
                                 }
                                 Some(ch) => {
                                     unsafe { *(buf_ptr as *mut u8) = ch; }
-                                    reply_val(ep_cap, 1);
+                                    // Also return byte in reply regs[1] so kernel
+                                    // can write it (workaround for cross-thread visibility).
+                                    let reply = sotos_common::IpcMsg {
+                                        tag: 0,
+                                        regs: [1, ch as u64, 0, 0, 0, 0, 0, 0],
+                                    };
+                                    let _ = sys::send(ep_cap, &reply);
                                     break;
                                 }
                                 None => { sys::yield_now(); }
@@ -1535,6 +1902,30 @@ pub extern "C" fn lucas_handler() -> ! {
                     }
                     FdKind::Stdout => {
                         reply_val(ep_cap, -9); // can't read stdout
+                    }
+                    FdKind::Socket => {
+                        // Read from socket → TCP recv via net service.
+                        let net_cap = NET_EP_CAP.load(Ordering::Acquire);
+                        let conn_id = fds[fd].net_conn_id as u64;
+                        let recv_len = len.min(40);
+                        let req = sotos_common::IpcMsg {
+                            tag: NET_CMD_TCP_RECV,
+                            regs: [conn_id, recv_len as u64, 0, 0, 0, 0, 0, 0],
+                        };
+                        match sys::call(net_cap, &req) {
+                            Ok(resp) => {
+                                let n = resp.regs[0] as usize;
+                                if n > 0 && n <= recv_len {
+                                    let dst = unsafe { core::slice::from_raw_parts_mut(buf_ptr as *mut u8, n) };
+                                    unsafe {
+                                        let src = &resp.regs[1] as *const u64 as *const u8;
+                                        core::ptr::copy_nonoverlapping(src, dst.as_mut_ptr(), n);
+                                    }
+                                }
+                                reply_val(ep_cap, n as i64);
+                            }
+                            Err(_) => reply_val(ep_cap, 0), // EOF
+                        }
                     }
                     FdKind::Free => unreachable!(),
                 }
@@ -1571,6 +1962,25 @@ pub extern "C" fn lucas_handler() -> ! {
                                 }
                             }
                             None => reply_val(ep_cap, -9),
+                        }
+                    }
+                    FdKind::Socket => {
+                        // Write to socket → TCP send via net service.
+                        let net_cap = NET_EP_CAP.load(Ordering::Acquire);
+                        let conn_id = fds[fd].net_conn_id as u64;
+                        let send_len = len.min(40);
+                        let mut req = sotos_common::IpcMsg {
+                            tag: NET_CMD_TCP_SEND,
+                            regs: [conn_id, 0, send_len as u64, 0, 0, 0, 0, 0],
+                        };
+                        let data = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, send_len) };
+                        unsafe {
+                            let dst = &mut req.regs[3] as *mut u64 as *mut u8;
+                            core::ptr::copy_nonoverlapping(data.as_ptr(), dst, send_len);
+                        }
+                        match sys::call(net_cap, &req) {
+                            Ok(resp) => reply_val(ep_cap, resp.regs[0] as i64),
+                            Err(_) => reply_val(ep_cap, -5),
                         }
                     }
                     _ => {
@@ -1620,7 +2030,7 @@ pub extern "C" fn lucas_handler() -> ! {
                             dir_len += 1;
                         }
                     }
-                    fds[new_fd] = FdEntry { kind: FdKind::DirList, vfs_fd: 0 };
+                    fds[new_fd] = FdEntry { kind: FdKind::DirList, vfs_fd: 0, net_conn_id: 0 };
                     reply_val(ep_cap, new_fd as i64);
                     continue;
                 }
@@ -1688,7 +2098,7 @@ pub extern "C" fn lucas_handler() -> ! {
                         continue;
                     }
 
-                    fds[new_fd] = FdEntry { kind: FdKind::DirList, vfs_fd: 0 };
+                    fds[new_fd] = FdEntry { kind: FdKind::DirList, vfs_fd: 0, net_conn_id: 0 };
                     reply_val(ep_cap, new_fd as i64);
                     continue;
                 }
@@ -1715,7 +2125,7 @@ pub extern "C" fn lucas_handler() -> ! {
 
                         match result {
                             Ok(vfs_fd) => {
-                                fds[new_fd] = FdEntry { kind: FdKind::VfsFile, vfs_fd };
+                                fds[new_fd] = FdEntry { kind: FdKind::VfsFile, vfs_fd, net_conn_id: 0 };
                                 reply_val(ep_cap, new_fd as i64);
                             }
                             Err(_) => reply_val(ep_cap, -2),
@@ -1742,6 +2152,17 @@ pub extern "C" fn lucas_handler() -> ! {
                     FdKind::DirList => {
                         dir_len = 0;
                         dir_pos = 0;
+                    }
+                    FdKind::Socket => {
+                        // Close TCP connection via net service.
+                        let net_cap = NET_EP_CAP.load(Ordering::Acquire);
+                        if net_cap != 0 {
+                            let req = sotos_common::IpcMsg {
+                                tag: NET_CMD_TCP_CLOSE,
+                                regs: [fds[fd].net_conn_id as u64, 0, 0, 0, 0, 0, 0, 0],
+                            };
+                            let _ = sys::call(net_cap, &req);
+                        }
                     }
                     _ => {}
                 }
@@ -1817,6 +2238,14 @@ pub extern "C" fn lucas_handler() -> ! {
                             }
                             None => reply_val(ep_cap, -9),
                         }
+                    }
+                    FdKind::Socket => {
+                        // Socket stat: report as socket type.
+                        let buf = unsafe { core::slice::from_raw_parts_mut(stat_ptr as *mut u8, 144) };
+                        for b in buf.iter_mut() { *b = 0; }
+                        let mode: u32 = 0o140600; // S_IFSOCK | rw
+                        buf[24..28].copy_from_slice(&mode.to_le_bytes());
+                        reply_val(ep_cap, 0);
                     }
                     FdKind::Free => reply_val(ep_cap, -9),
                 }
@@ -2162,6 +2591,183 @@ pub extern "C" fn lucas_handler() -> ! {
             // SYS_getppid
             110 => {
                 reply_val(ep_cap, 0); // PID 1 has no parent
+            }
+
+            // SYS_socket(domain, type, protocol)
+            41 => {
+                let domain = msg.regs[0] as u32;
+                let sock_type = msg.regs[1] as u32;
+                // AF_INET=2, SOCK_STREAM=1
+                if domain == 2 && (sock_type & 0xFF) == 1 {
+                    let net_cap = NET_EP_CAP.load(Ordering::Acquire);
+                    if net_cap == 0 {
+                        reply_val(ep_cap, -99); // -EADDRNOTAVAIL
+                    } else {
+                        match alloc_fd(&fds, 3) {
+                            Some(fd) => {
+                                fds[fd] = FdEntry {
+                                    kind: FdKind::Socket,
+                                    vfs_fd: 0,
+                                    net_conn_id: 0xFFFF, // not connected yet
+                                };
+                                reply_val(ep_cap, fd as i64);
+                            }
+                            None => reply_val(ep_cap, -24), // -EMFILE
+                        }
+                    }
+                } else {
+                    reply_val(ep_cap, -97); // -EAFNOSUPPORT
+                }
+            }
+
+            // SYS_connect(fd, sockaddr_ptr, addrlen)
+            42 => {
+                let fd = msg.regs[0] as usize;
+                let sockaddr_ptr = msg.regs[1];
+                let _addrlen = msg.regs[2];
+
+                if fd >= MAX_FDS || fds[fd].kind != FdKind::Socket {
+                    reply_val(ep_cap, -9); // -EBADF
+                } else {
+                    let net_cap = NET_EP_CAP.load(Ordering::Acquire);
+                    if net_cap == 0 {
+                        reply_val(ep_cap, -99);
+                    } else {
+                        // Parse sockaddr_in: family(2) + port(2) + ip(4)
+                        let sa = unsafe { core::slice::from_raw_parts(sockaddr_ptr as *const u8, 8) };
+                        let port = u16::from_be_bytes([sa[2], sa[3]]);
+                        let ip = u32::from_be_bytes([sa[4], sa[5], sa[6], sa[7]]);
+
+                        // Send CMD_TCP_CONNECT to net service.
+                        let req = sotos_common::IpcMsg {
+                            tag: NET_CMD_TCP_CONNECT,
+                            regs: [ip as u64, port as u64, 0, 0, 0, 0, 0, 0],
+                        };
+                        match sys::call(net_cap, &req) {
+                            Ok(resp) => {
+                                let conn_id = resp.regs[0];
+                                if conn_id as i64 >= 0 {
+                                    fds[fd].net_conn_id = conn_id as u32;
+                                    reply_val(ep_cap, 0);
+                                } else {
+                                    reply_val(ep_cap, -111); // -ECONNREFUSED
+                                }
+                            }
+                            Err(_) => reply_val(ep_cap, -111),
+                        }
+                    }
+                }
+            }
+
+            // SYS_sendto(fd, buf, len, flags, dest_addr, addrlen) = 44
+            // Also handle SYS_write(fd=socket) in the write handler above.
+            44 => {
+                let fd = msg.regs[0] as usize;
+                let buf_ptr = msg.regs[1];
+                let len = msg.regs[2] as usize;
+
+                if fd >= MAX_FDS || fds[fd].kind != FdKind::Socket {
+                    reply_val(ep_cap, -9);
+                } else {
+                    let net_cap = NET_EP_CAP.load(Ordering::Acquire);
+                    let conn_id = fds[fd].net_conn_id as u64;
+                    let send_len = len.min(40); // Max inline data in IPC regs
+                    let mut req = sotos_common::IpcMsg {
+                        tag: NET_CMD_TCP_SEND,
+                        regs: [conn_id, 0, send_len as u64, 0, 0, 0, 0, 0],
+                    };
+                    // Pack data into regs[3..] (up to 40 bytes).
+                    let data = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, send_len) };
+                    unsafe {
+                        let dst = &mut req.regs[3] as *mut u64 as *mut u8;
+                        core::ptr::copy_nonoverlapping(data.as_ptr(), dst, send_len);
+                    }
+                    match sys::call(net_cap, &req) {
+                        Ok(resp) => {
+                            let result = resp.regs[0] as i64;
+                            reply_val(ep_cap, result);
+                        }
+                        Err(_) => reply_val(ep_cap, -5),
+                    }
+                }
+            }
+
+            // SYS_recvfrom(fd, buf, len, flags, src_addr, addrlen) = 45
+            45 => {
+                let fd = msg.regs[0] as usize;
+                let buf_ptr = msg.regs[1];
+                let len = msg.regs[2] as usize;
+
+                if fd >= MAX_FDS || fds[fd].kind != FdKind::Socket {
+                    reply_val(ep_cap, -9);
+                } else {
+                    let net_cap = NET_EP_CAP.load(Ordering::Acquire);
+                    let conn_id = fds[fd].net_conn_id as u64;
+                    let recv_len = len.min(40); // Max inline data
+                    let req = sotos_common::IpcMsg {
+                        tag: NET_CMD_TCP_RECV,
+                        regs: [conn_id, recv_len as u64, 0, 0, 0, 0, 0, 0],
+                    };
+                    match sys::call(net_cap, &req) {
+                        Ok(resp) => {
+                            let n = resp.regs[0] as usize;
+                            if n > 0 && n <= recv_len {
+                                // Copy data from regs[1..] back to user buffer.
+                                let dst = unsafe { core::slice::from_raw_parts_mut(buf_ptr as *mut u8, n) };
+                                unsafe {
+                                    let src = &resp.regs[1] as *const u64 as *const u8;
+                                    core::ptr::copy_nonoverlapping(src, dst.as_mut_ptr(), n);
+                                }
+                            }
+                            reply_val(ep_cap, n as i64);
+                        }
+                        Err(_) => reply_val(ep_cap, -5),
+                    }
+                }
+            }
+
+            // Custom syscall 200: DNS resolve (hostname_ptr, hostname_len) → IP (big-endian u32)
+            200 => {
+                let name_ptr = msg.regs[0];
+                let name_len = msg.regs[1] as usize;
+                let net_cap = NET_EP_CAP.load(Ordering::Acquire);
+                if net_cap == 0 || name_len == 0 || name_len > 48 {
+                    reply_val(ep_cap, 0); // 0 = resolution failed
+                } else {
+                    // Pack hostname into IPC regs[2..] (up to 48 bytes).
+                    let name = unsafe { core::slice::from_raw_parts(name_ptr as *const u8, name_len) };
+                    let mut req = sotos_common::IpcMsg {
+                        tag: NET_CMD_DNS_QUERY,
+                        regs: [0, name_len as u64, 0, 0, 0, 0, 0, 0],
+                    };
+                    unsafe {
+                        let dst = &mut req.regs[2] as *mut u64 as *mut u8;
+                        core::ptr::copy_nonoverlapping(name.as_ptr(), dst, name_len);
+                    }
+                    match sys::call(net_cap, &req) {
+                        Ok(resp) => reply_val(ep_cap, resp.regs[0] as i64),
+                        Err(_) => reply_val(ep_cap, 0),
+                    }
+                }
+            }
+
+            // Custom syscall 201: traceroute hop (dst_ip, ttl) → responder_ip | (reached << 32)
+            201 => {
+                let dst_ip = msg.regs[0];
+                let ttl = msg.regs[1];
+                let net_cap = NET_EP_CAP.load(Ordering::Acquire);
+                if net_cap == 0 {
+                    reply_val(ep_cap, 0);
+                } else {
+                    let req = sotos_common::IpcMsg {
+                        tag: 7, // CMD_TRACEROUTE_HOP
+                        regs: [dst_ip, ttl, 0, 0, 0, 0, 0, 0],
+                    };
+                    match sys::call(net_cap, &req) {
+                        Ok(resp) => reply_val(ep_cap, resp.regs[0] as i64),
+                        Err(_) => reply_val(ep_cap, 0),
+                    }
+                }
             }
 
             // Unknown Linux syscall → -ENOSYS

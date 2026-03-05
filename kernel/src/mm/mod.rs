@@ -26,3 +26,25 @@ pub fn init(memory_map: &MemoryMapResponse, hhdm_offset: u64) {
     HHDM_OFFSET.store(hhdm_offset, Ordering::Relaxed);
     frame::init(memory_map, hhdm_offset);
 }
+
+/// Simple RDTSC-seeded xorshift64 PRNG for ASLR jitter.
+static PRNG_STATE: AtomicU64 = AtomicU64::new(0);
+
+/// Return a pseudo-random u64 (RDTSC-seeded xorshift64).
+pub fn random_u64() -> u64 {
+    let mut s = PRNG_STATE.load(Ordering::Relaxed);
+    if s == 0 {
+        // Seed from RDTSC.
+        let lo: u32;
+        let hi: u32;
+        unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi, options(nomem, nostack)); }
+        s = ((hi as u64) << 32) | (lo as u64);
+        if s == 0 { s = 1; }
+    }
+    // xorshift64
+    s ^= s << 13;
+    s ^= s >> 7;
+    s ^= s << 17;
+    PRNG_STATE.store(s, Ordering::Relaxed);
+    s
+}

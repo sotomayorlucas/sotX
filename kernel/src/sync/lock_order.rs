@@ -17,6 +17,7 @@
 //!   7: SlabAllocator     (mm/slab.rs)
 //!   8: FrameAllocator    (mm/frame.rs)
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum LockLevel {
@@ -33,6 +34,7 @@ pub enum LockLevel {
 
 /// Check that no lock at level >= `level` is currently held.
 /// Panics on violation (debug builds only).
+#[allow(dead_code)]
 #[cfg(debug_assertions)]
 pub fn check_lock_order(level: LockLevel) {
     // Guard: percpu may not be initialized during early boot (slab allocates
@@ -65,10 +67,12 @@ pub fn check_lock_order(level: LockLevel) {
 }
 
 #[cfg(not(debug_assertions))]
+#[allow(dead_code)]
 #[inline(always)]
 pub fn check_lock_order(_level: LockLevel) {}
 
 /// Mark a lock level as held.
+#[allow(dead_code)]
 #[cfg(debug_assertions)]
 pub fn mark_lock_held(level: LockLevel) {
     let self_ptr: u64;
@@ -87,10 +91,12 @@ pub fn mark_lock_held(level: LockLevel) {
 }
 
 #[cfg(not(debug_assertions))]
+#[allow(dead_code)]
 #[inline(always)]
 pub fn mark_lock_held(_level: LockLevel) {}
 
 /// Mark a lock level as released.
+#[allow(dead_code)]
 #[cfg(debug_assertions)]
 pub fn mark_lock_released(level: LockLevel) {
     let self_ptr: u64;
@@ -109,5 +115,6 @@ pub fn mark_lock_released(level: LockLevel) {
 }
 
 #[cfg(not(debug_assertions))]
+#[allow(dead_code)]
 #[inline(always)]
 pub fn mark_lock_released(_level: LockLevel) {}

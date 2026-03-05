@@ -17,6 +17,7 @@ pub enum IpcRole {
     /// Blocked waiting to receive.
     Receiver,
     /// Blocked in a call (send then receive).
+    #[allow(dead_code)]
     Caller,
 }
 
@@ -62,6 +63,7 @@ const STACK_SIZE: usize = STACK_FRAMES * 4096;
 
 /// Thread Control Block.
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
 pub struct Thread {
     pub id: ThreadId,
     pub state: ThreadState,
@@ -106,6 +108,7 @@ impl Thread {
     /// The initial stack frame is set up so that `context_switch` into this thread
     /// will pop callee-saved registers and `ret` into `trampoline`, which reads
     /// the entry function from r12 and calls it.
+    #[allow(dead_code)]
     pub fn new(id: u32, entry: fn() -> !, priority: u8, trampoline: unsafe extern "C" fn() -> !) -> Self {
         let (stack_virt, stack_top) = alloc_kernel_stack();
 

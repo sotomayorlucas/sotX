@@ -235,4 +235,43 @@ impl AddressSpace {
         *pte = 0;
         true
     }
+
+    /// Update the flags of an already-mapped page (mprotect-like).
+    ///
+    /// Walks the page table to find the leaf PTE, preserves the physical
+    /// address, and replaces the flags. Returns `true` if the page was
+    /// present and has been updated, `false` otherwise.
+    pub fn protect_page(&self, virt: u64, new_flags: u64) -> bool {
+        let hhdm = hhdm_offset();
+
+        let pml4 = (self.pml4_phys + hhdm) as *const u64;
+        let pml4e = unsafe { *pml4.add(pml4_index(virt)) };
+        if pml4e & PAGE_PRESENT == 0 {
+            return false;
+        }
+        let pdp_phys = pml4e & 0x000F_FFFF_FFFF_F000;
+
+        let pdp = (pdp_phys + hhdm) as *const u64;
+        let pdpe = unsafe { *pdp.add(pdp_index(virt)) };
+        if pdpe & PAGE_PRESENT == 0 {
+            return false;
+        }
+        let pd_phys = pdpe & 0x000F_FFFF_FFFF_F000;
+
+        let pd = (pd_phys + hhdm) as *const u64;
+        let pde = unsafe { *pd.add(pd_index(virt)) };
+        if pde & PAGE_PRESENT == 0 {
+            return false;
+        }
+        let pt_phys = pde & 0x000F_FFFF_FFFF_F000;
+
+        let pt = (pt_phys + hhdm) as *mut u64;
+        let pte = unsafe { &mut *pt.add(pt_index(virt)) };
+        if *pte & PAGE_PRESENT == 0 {
+            return false;
+        }
+        let phys = *pte & 0x000F_FFFF_FFFF_F000;
+        *pte = phys | new_flags;
+        true
+    }
 }

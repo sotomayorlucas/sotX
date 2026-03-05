@@ -1,8 +1,11 @@
 //! IRQ virtualization — notification-based binding for userspace drivers.
 //!
 //! Maps hardware IRQ lines to notification objects. When an IRQ fires,
-//! the kernel signals the bound notification; the driver calls
+//! the kernel signals all bound notifications; drivers call
 //! `NOTIFY_WAIT` to block and `IRQ_ACK` to unmask the line.
+//!
+//! Supports IRQ sharing: multiple drivers can register different
+//! notifications on the same IRQ line.
 //!
 //! Lock ordering: IRQ_TABLE dropped before calling ipc::notify (which
 //! acquires NOTIFICATIONS then SCHEDULER).
@@ -16,16 +19,32 @@ use spin::Mutex;
 /// Maximum IRQ lines managed (8259 PIC: 0-15).
 const MAX_IRQ: usize = 16;
 
-/// Per-IRQ binding: maps an IRQ line to a notification object.
+/// Maximum number of handlers sharing a single IRQ line.
+const MAX_SHARED: usize = 4;
+
+/// Per-IRQ binding: maps an IRQ line to one or more notification objects.
 #[derive(Clone, Copy)]
 struct IrqBinding {
-    /// Bound notification handle (None = unbound).
-    notify_handle: Option<PoolHandle>,
+    /// Bound notification handles. Supports up to MAX_SHARED per line.
+    handles: [Option<PoolHandle>; MAX_SHARED],
 }
 
 impl IrqBinding {
     const fn empty() -> Self {
-        Self { notify_handle: None }
+        Self {
+            handles: [None; MAX_SHARED],
+        }
+    }
+
+    /// Add a notification handle. Returns Err if full.
+    fn add(&mut self, handle: PoolHandle) -> Result<(), SysError> {
+        for slot in self.handles.iter_mut() {
+            if slot.is_none() {
+                *slot = Some(handle);
+                return Ok(());
+            }
+        }
+        Err(SysError::OutOfResources)
     }
 }
 
@@ -33,7 +52,8 @@ static IRQ_TABLE: Mutex<[IrqBinding; MAX_IRQ]> = Mutex::new([IrqBinding::empty()
 
 /// Bind an IRQ line to a notification object and unmask the line.
 ///
-/// Rejects IRQ 0 (kernel timer) and already-bound lines.
+/// Multiple drivers may share the same IRQ line (up to MAX_SHARED).
+/// Rejects IRQ 0 (kernel timer).
 pub fn register(irq: u8, notify_handle: PoolHandle) -> Result<(), SysError> {
     if irq == 0 || irq as usize >= MAX_IRQ {
         return Err(SysError::InvalidArg);
@@ -41,12 +61,7 @@ pub fn register(irq: u8, notify_handle: PoolHandle) -> Result<(), SysError> {
 
     let mut table = IRQ_TABLE.lock();
     let entry = &mut table[irq as usize];
-
-    if entry.notify_handle.is_some() {
-        return Err(SysError::OutOfResources);
-    }
-
-    entry.notify_handle = Some(notify_handle);
+    entry.add(notify_handle)?;
     pic::unmask(irq);
     Ok(())
 }
@@ -63,8 +78,8 @@ pub fn ack(irq: u8) -> Result<(), SysError> {
     Ok(())
 }
 
-/// Called from IDT interrupt handler (IF=0). Signals the bound
-/// notification object if one exists.
+/// Called from IDT interrupt handler (IF=0). Signals all bound
+/// notification objects for this IRQ line.
 ///
 /// The IRQ line is already masked by the IDT handler before calling this.
 pub fn notify(irq: u8) {
@@ -72,13 +87,13 @@ pub fn notify(irq: u8) {
         return;
     }
 
-    let notify_handle = {
+    let handles = {
         let table = IRQ_TABLE.lock();
-        table[irq as usize].notify_handle
+        table[irq as usize].handles
     };
     // IRQ_TABLE lock dropped — safe to call into notify subsystem.
 
-    if let Some(handle) = notify_handle {
-        let _ = notify::signal(handle);
+    for handle in handles.iter().flatten() {
+        let _ = notify::signal(*handle);
     }
 }

@@ -24,9 +24,37 @@ mod mm;
 mod panic;
 mod pool;
 mod sched;
+mod svc_registry;
 mod sync;
 mod syscall;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+// ---------------------------------------------------------------
+// Stack canary support — __stack_chk_guard / __stack_chk_fail
+// ---------------------------------------------------------------
+// When `-Z stack-protector=strong` is enabled, LLVM inserts a canary
+// check in function prologues/epilogues reading from __stack_chk_guard.
+// On mismatch, __stack_chk_fail is called.
+
+/// The stack canary value. Initialized with RDTSC entropy in kmain().
+#[used]
+#[no_mangle]
+pub static mut __stack_chk_guard: u64 = 0x00000aff0a0d0000; // sentinel until real init
+
+/// Called when a stack buffer overflow is detected.
+#[no_mangle]
+pub extern "C" fn __stack_chk_fail() -> ! {
+    // Use raw serial output — don't trust anything on the stack.
+    unsafe {
+        let msg = b"!!! STACK SMASH DETECTED (kernel) !!!\n";
+        for &b in msg {
+            x86_64::instructions::port::Port::<u8>::new(0x3F8).write(b);
+        }
+    }
+    x86_64::instructions::interrupts::disable();
+    arch::halt_loop()
+}
+
 use limine::BaseRevision;
 use limine::request::{FramebufferRequest, HhdmRequest, MemoryMapRequest, ModuleRequest, MpRequest, RequestsEndMarker, RequestsStartMarker};
 
@@ -232,11 +260,33 @@ fn boot_aps() {
         cpu_index += 1;
     }
 
-    // Spin-wait for all APs to signal ready.
-    while APS_READY.load(Ordering::Acquire) < ap_count as u32 {
+    // Spin-wait for all APs to signal ready, with TSC-based timeout.
+    let tsc_start = {
+        let lo: u32;
+        let hi: u32;
+        unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi, options(nomem, nostack)); }
+        ((hi as u64) << 32) | (lo as u64)
+    };
+    const TSC_TIMEOUT: u64 = 500_000_000; // ~250ms at 2 GHz
+    loop {
+        if APS_READY.load(Ordering::Acquire) >= ap_count as u32 {
+            break;
+        }
+        let tsc_now = {
+            let lo: u32;
+            let hi: u32;
+            unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi, options(nomem, nostack)); }
+            ((hi as u64) << 32) | (lo as u64)
+        };
+        if tsc_now.wrapping_sub(tsc_start) > TSC_TIMEOUT {
+            let ready = APS_READY.load(Ordering::Acquire);
+            kprintln!("  smp: TIMEOUT — {}/{} APs responded", ready, ap_count);
+            break;
+        }
         core::hint::spin_loop();
     }
-    kprintln!("  smp: all {} APs online", ap_count);
+    let online = APS_READY.load(Ordering::Acquire);
+    kprintln!("  smp: {} CPUs online ({} BSP + {} APs)", online + 1, 1, online);
 }
 
 /// Entry point for Application Processors, called by Limine after goto_address.write().
@@ -279,18 +329,11 @@ unsafe extern "C" fn ap_entry(cpu: &limine::mp::Cpu) -> ! {
 /// Virtual address for keyboard scancode ring buffer (shared between KB driver + LUCAS handler).
 const KB_RING_PAGE: u64 = 0x510000;
 
-/// Create root capabilities for init (keyboard caps removed — they go to kbd process).
+/// Create root capabilities for init (VMM and keyboard caps removed — they go to separate processes).
 ///
-/// Cap 0: Notification (VMM page faults)
-/// Cap 1: I/O port 0xCF8-0xCFF (PCI config)
+/// Cap 0: I/O port 0xCF8-0xCFF (PCI config)
 fn create_init_caps() {
-    // Cap 0: Notification — fault delivery (VMM)
-    let n_vmm = ipc::notify::create().expect("failed to create notification");
-    let n_vmm_cap = cap::insert(cap::CapObject::Notification { id: n_vmm.0.raw() }, cap::Rights::ALL, None)
-        .expect("failed to create notification cap");
-    kprintln!("  cap {}: notification (VMM faults)", n_vmm_cap.raw());
-
-    // Cap 1: PCI config space ports 0xCF8-0xCFF (8 bytes: address + data)
+    // Cap 0: PCI config space ports 0xCF8-0xCFF (8 bytes: address + data)
     let pci_cap = cap::insert(cap::CapObject::IoPort { base: 0xCF8, count: 8 }, cap::Rights::ALL, None)
         .expect("failed to create PCI ioport cap");
     kprintln!("  cap {}: port 0xCF8-0xCFF (PCI config)", pci_cap.raw());
@@ -345,6 +388,11 @@ fn load_initrd(cr3: u64) {
     };
     kprintln!("  initrd: {} bytes", module.size());
 
+    // Save initrd location for userspace InitrdRead syscall.
+    let hhdm = mm::hhdm_offset();
+    let initrd_phys = module.addr() as u64 - hhdm;
+    initrd::set_initrd(initrd_phys, module.size());
+
     // Find the "init" entry in the CPIO archive.
     let elf_data = match initrd::find(module_data, "init") {
         Some(d) => d,
@@ -380,9 +428,13 @@ fn load_initrd(cr3: u64) {
         }
     }
 
-    // Allocate a user stack at 0x900000 (4 pages = 16 KiB).
-    let stack_base: u64 = 0x900000;
+    // Allocate a user stack with ASLR jitter + guard page below.
+    let stack_rand = (mm::random_u64() % 16) * 0x1000; // 0..64 KiB jitter
+    let stack_base: u64 = 0x900000 + stack_rand;
     let stack_pages: u64 = 4;
+    // Guard page: present but not user-accessible — triggers fault on stack overflow.
+    let guard_frame = mm::alloc_frame().expect("no frame for stack guard");
+    addr_space.map_page(stack_base - 0x1000, guard_frame.addr(), PAGE_PRESENT);
     for i in 0..stack_pages {
         let sf = mm::alloc_frame().expect("no frame for ELF stack");
         let sp = sf.addr();
@@ -392,9 +444,18 @@ fn load_initrd(cr3: u64) {
         addr_space.map_page(stack_base + i * 0x1000, sp, PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
     }
     let stack_top = stack_base + stack_pages * 0x1000;
+    kprintln!("  init: stack = {:#x}..{:#x} (ASLR offset {:#x})", stack_base, stack_top, stack_rand);
 
     // Write BootInfo page at 0xB00000 (read-only for userspace).
-    write_boot_info(cr3, &addr_space);
+    write_boot_info(cr3, &addr_space, stack_top);
+
+    // --- Load "vmm" as a separate process BEFORE spawning init ---
+    // VMM must be in the run queue first so it registers for faults
+    // before init can page-fault.
+    if let Some(vmm_data) = initrd::find(module_data, "vmm") {
+        kprintln!("  initrd: found 'vmm' ({} bytes)", vmm_data.len());
+        load_vmm_process(vmm_data, cr3);
+    }
 
     sched::spawn_user(entry, stack_top, cr3);
 
@@ -403,12 +464,19 @@ fn load_initrd(cr3: u64) {
         kprintln!("  initrd: found 'kbd' ({} bytes)", kbd_data.len());
         load_kbd_process(kbd_data, cr3);
     }
+
+    // --- Load "net" as a separate process (if present in initrd) ---
+    if let Some(net_data) = initrd::find(module_data, "net") {
+        kprintln!("  initrd: found 'net' ({} bytes)", net_data.len());
+        load_net_process(net_data);
+    }
 }
 
 /// Write a BootInfo struct to 0xB00000 with all root capabilities granted to init.
 fn write_boot_info(
     _cr3: u64,
     addr_space: &mm::paging::AddressSpace,
+    stack_top: u64,
 ) {
     use mm::paging::{PAGE_PRESENT, PAGE_USER, PAGE_WRITABLE, PAGE_CACHE_DISABLE, PAGE_WRITE_THROUGH};
     use sotos_common::{BOOT_INFO_ADDR, BOOT_INFO_MAGIC, BootInfo};
@@ -471,6 +539,8 @@ fn write_boot_info(
         }
     }
 
+    info.stack_top = stack_top;
+
     // Write the struct via HHDM.
     unsafe {
         let ptr = (phys + hhdm) as *mut BootInfo;
@@ -478,6 +548,94 @@ fn write_boot_info(
     }
 
     kprintln!("  bootinfo: {} caps at {:#x}", count, BOOT_INFO_ADDR);
+}
+
+/// Load the VMM as a fully pre-mapped separate process.
+///
+/// Creates a new address space, loads the ELF, maps stack,
+/// creates VMM-specific capabilities, and spawns the thread.
+/// Must be spawned BEFORE init so it registers for faults first.
+fn load_vmm_process(vmm_data: &[u8], init_cr3: u64) {
+    use mm::paging::{AddressSpace, PAGE_PRESENT, PAGE_USER, PAGE_WRITABLE};
+
+    let vmm_as = AddressSpace::new_user();
+    let vmm_cr3 = vmm_as.cr3();
+
+    let vmm_entry = match elf::load(vmm_data, &vmm_as) {
+        Ok(e) => e,
+        Err(msg) => {
+            kprintln!("  vmm: ELF load failed: {}", msg);
+            return;
+        }
+    };
+    kprintln!("  vmm: entry = {:#x}", vmm_entry);
+
+    let hhdm = mm::hhdm_offset();
+
+    // Stack for VMM with ASLR jitter + guard page.
+    let stack_rand = (mm::random_u64() % 16) * 0x1000;
+    let stack_base: u64 = 0x900000 + stack_rand;
+    let stack_pages: u64 = 4;
+    let guard_frame = mm::alloc_frame().expect("no frame for vmm stack guard");
+    vmm_as.map_page(stack_base - 0x1000, guard_frame.addr(), PAGE_PRESENT);
+    for i in 0..stack_pages {
+        let sf = mm::alloc_frame().expect("no frame for vmm stack");
+        unsafe { core::ptr::write_bytes((sf.addr() + hhdm) as *mut u8, 0, 4096); }
+        vmm_as.map_page(stack_base + i * 0x1000, sf.addr(),
+            PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
+    }
+    let stack_top = stack_base + stack_pages * 0x1000;
+
+    write_vmm_boot_info(&vmm_as, init_cr3);
+
+    sched::spawn_user(vmm_entry, stack_top, vmm_cr3);
+    kprintln!("  vmm: separate process, cr3={:#x}", vmm_cr3);
+}
+
+/// Write BootInfo for the VMM process.
+///
+/// Creates fresh capabilities for VMM:
+///   Cap 0: Notification (fault delivery)
+///   Cap 1: AddrSpace (init's CR3) — for fault_register_as + map_into
+fn write_vmm_boot_info(
+    vmm_as: &mm::paging::AddressSpace,
+    init_cr3: u64,
+) {
+    use mm::paging::{PAGE_PRESENT, PAGE_USER};
+    use sotos_common::{BOOT_INFO_ADDR, BOOT_INFO_MAGIC, BootInfo};
+
+    let hhdm = mm::hhdm_offset();
+    let frame = mm::alloc_frame().expect("no frame for vmm BootInfo");
+    let phys = frame.addr();
+    unsafe {
+        core::ptr::write_bytes((phys + hhdm) as *mut u8, 0, 4096);
+    }
+
+    vmm_as.map_page(BOOT_INFO_ADDR, phys, PAGE_PRESENT | PAGE_USER);
+
+    // Cap 0: VMM notification (fault delivery).
+    let n_vmm = ipc::notify::create().expect("failed to create vmm notification");
+    let n_vmm_cap = cap::insert(cap::CapObject::Notification { id: n_vmm.0.raw() }, cap::Rights::ALL, None)
+        .expect("failed to create vmm notification cap");
+    kprintln!("  vmm cap {}: notification (fault delivery)", n_vmm_cap.raw());
+
+    // Cap 1: AddrSpace for init's CR3 (allows fault_register_as + map_into).
+    let init_as_cap = cap::insert(cap::CapObject::AddrSpace { cr3: init_cr3 }, cap::Rights::ALL, None)
+        .expect("failed to create init AS cap");
+    kprintln!("  vmm cap {}: addr_space (init cr3={:#x})", init_as_cap.raw(), init_cr3);
+
+    let mut info = BootInfo::empty();
+    info.magic = BOOT_INFO_MAGIC;
+    info.cap_count = 2;
+    info.caps[0] = n_vmm_cap.raw() as u64;
+    info.caps[1] = init_as_cap.raw() as u64;
+
+    unsafe {
+        let ptr = (phys + hhdm) as *mut BootInfo;
+        core::ptr::write(ptr, info);
+    }
+
+    kprintln!("  vmm bootinfo: 2 caps at {:#x}", BOOT_INFO_ADDR);
 }
 
 /// Load the keyboard driver as a fully pre-mapped separate process.
@@ -502,9 +660,12 @@ fn load_kbd_process(kbd_data: &[u8], init_cr3: u64) {
 
     let hhdm = mm::hhdm_offset();
 
-    // Stack for kbd (4 pages at 0x900000 in kbd's AS).
-    let stack_base: u64 = 0x900000;
+    // Stack for kbd with ASLR jitter + guard page.
+    let stack_rand = (mm::random_u64() % 16) * 0x1000;
+    let stack_base: u64 = 0x900000 + stack_rand;
     let stack_pages: u64 = 4;
+    let guard_frame = mm::alloc_frame().expect("no frame for kbd stack guard");
+    kbd_as.map_page(stack_base - 0x1000, guard_frame.addr(), PAGE_PRESENT);
     for i in 0..stack_pages {
         let sf = mm::alloc_frame().expect("no frame for kbd stack");
         unsafe { core::ptr::write_bytes((sf.addr() + hhdm) as *mut u8, 0, 4096); }
@@ -578,4 +739,87 @@ fn write_kbd_boot_info(
     }
 
     kprintln!("  kbd bootinfo: 3 caps at {:#x}", BOOT_INFO_ADDR);
+}
+
+/// Load the network driver as a fully pre-mapped separate process.
+///
+/// Creates a new address space, loads the ELF, maps stack,
+/// creates net-specific capabilities, and spawns the thread.
+fn load_net_process(net_data: &[u8]) {
+    use mm::paging::{AddressSpace, PAGE_PRESENT, PAGE_USER, PAGE_WRITABLE};
+
+    let net_as = AddressSpace::new_user();
+    let net_cr3 = net_as.cr3();
+
+    // Load ELF segments into the net address space.
+    let net_entry = match elf::load(net_data, &net_as) {
+        Ok(e) => e,
+        Err(msg) => {
+            kprintln!("  net: ELF load failed: {}", msg);
+            return;
+        }
+    };
+    kprintln!("  net: entry = {:#x}", net_entry);
+
+    let hhdm = mm::hhdm_offset();
+
+    // Stack for net with ASLR jitter + guard page.
+    let stack_rand = (mm::random_u64() % 16) * 0x1000;
+    let stack_base: u64 = 0x900000 + stack_rand;
+    let stack_pages: u64 = 4;
+    let guard_frame = mm::alloc_frame().expect("no frame for net stack guard");
+    net_as.map_page(stack_base - 0x1000, guard_frame.addr(), PAGE_PRESENT);
+    for i in 0..stack_pages {
+        let sf = mm::alloc_frame().expect("no frame for net stack");
+        unsafe { core::ptr::write_bytes((sf.addr() + hhdm) as *mut u8, 0, 4096); }
+        net_as.map_page(stack_base + i * 0x1000, sf.addr(),
+            PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
+    }
+    let stack_top = stack_base + stack_pages * 0x1000;
+
+    // Create net capabilities and write BootInfo.
+    write_net_boot_info(net_cr3, &net_as);
+
+    sched::spawn_user(net_entry, stack_top, net_cr3);
+    kprintln!("  net: separate process, cr3={:#x}", net_cr3);
+}
+
+/// Write BootInfo for the network driver process.
+///
+/// Creates fresh capabilities for net:
+///   Cap 0: I/O port 0xCF8-0xCFF (PCI config)
+fn write_net_boot_info(
+    _net_cr3: u64,
+    net_as: &mm::paging::AddressSpace,
+) {
+    use mm::paging::{PAGE_PRESENT, PAGE_USER};
+    use sotos_common::{BOOT_INFO_ADDR, BOOT_INFO_MAGIC, BootInfo};
+
+    let hhdm = mm::hhdm_offset();
+    let frame = mm::alloc_frame().expect("no frame for net BootInfo");
+    let phys = frame.addr();
+    unsafe {
+        core::ptr::write_bytes((phys + hhdm) as *mut u8, 0, 4096);
+    }
+
+    // Map read-only into net address space.
+    net_as.map_page(BOOT_INFO_ADDR, phys, PAGE_PRESENT | PAGE_USER);
+
+    // Create net-specific capabilities.
+    // Cap 0: PCI config space ports 0xCF8-0xCFF
+    let pci_cap = cap::insert(cap::CapObject::IoPort { base: 0xCF8, count: 8 }, cap::Rights::ALL, None)
+        .expect("failed to create net PCI ioport cap");
+    kprintln!("  net cap {}: port 0xCF8-0xCFF (PCI config)", pci_cap.raw());
+
+    let mut info = BootInfo::empty();
+    info.magic = BOOT_INFO_MAGIC;
+    info.cap_count = 1;
+    info.caps[0] = pci_cap.raw() as u64;
+
+    unsafe {
+        let ptr = (phys + hhdm) as *mut BootInfo;
+        core::ptr::write(ptr, info);
+    }
+
+    kprintln!("  net bootinfo: 1 cap at {:#x}", BOOT_INFO_ADDR);
 }

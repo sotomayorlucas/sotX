@@ -13,6 +13,9 @@ pub mod channel;
 pub mod endpoint;
 pub mod notify;
 
+#[allow(unused_imports)]
 pub use channel::ChannelId;
+#[allow(unused_imports)]
 pub use endpoint::{EndpointId, Message};
+#[allow(unused_imports)]
 pub use notify::NotifyId;

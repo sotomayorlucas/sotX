@@ -1,6 +1,9 @@
 //! 8253/8254 PIT (Programmable Interval Timer) driver.
 //!
 //! Configures channel 0 as a rate generator at ~100 Hz.
+//! Not currently used (LAPIC timer is used instead) but kept for fallback.
+
+#![allow(dead_code)]
 
 use super::io::outb;
 

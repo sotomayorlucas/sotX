@@ -6,11 +6,17 @@ members = [
     "libs/sotos-pci",
     "libs/sotos-virtio",
     "libs/sotos-objstore",
+    "libs/sotos-net",
+    "libs/sotos-ld",
 ]
 exclude = [
     "services/init",
     "services/lucas-shell",
     "services/kbd",
+    "services/net",
+    "services/vmm",
+    "services/hello",
+    "libs/sotos-testlib",
 ]
 
 [profile.dev]

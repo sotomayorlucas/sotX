@@ -50,6 +50,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sotos-ld"
+version = "0.1.0"
+dependencies = [
+ "sotos-common",
+]
+
+[[package]]
+name = "sotos-net"
+version = "0.1.0"
+
+[[package]]
 name = "sotos-objstore"
 version = "0.1.0"
 dependencies = [

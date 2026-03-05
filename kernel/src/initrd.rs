@@ -3,6 +3,30 @@
 //! Finds a named file inside a CPIO newc archive loaded by the bootloader.
 //! Used to extract the init ELF binary from the initramfs.
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
+/// Physical base address of the initrd (set once at boot).
+static INITRD_PHYS_BASE: AtomicU64 = AtomicU64::new(0);
+/// Size of the initrd in bytes.
+static INITRD_SIZE: AtomicU64 = AtomicU64::new(0);
+
+/// Store initrd location for later syscall access.
+pub fn set_initrd(base_phys: u64, size: u64) {
+    INITRD_PHYS_BASE.store(base_phys, Ordering::Release);
+    INITRD_SIZE.store(size, Ordering::Release);
+}
+
+/// Get the initrd physical base and size (if set).
+pub fn initrd_base_size() -> Option<(u64, u64)> {
+    let base = INITRD_PHYS_BASE.load(Ordering::Acquire);
+    let size = INITRD_SIZE.load(Ordering::Acquire);
+    if base != 0 && size != 0 {
+        Some((base, size))
+    } else {
+        None
+    }
+}
+
 /// Parse 8 hex ASCII characters at `offset` within `data`.
 fn parse_hex8(data: &[u8], offset: usize) -> u32 {
     let mut val: u32 = 0;

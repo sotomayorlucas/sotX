@@ -90,6 +90,7 @@ impl SchedDomain {
     }
 
     /// Check if a thread is a member.
+    #[allow(dead_code)]
     pub fn has_member(&self, idx: u32) -> bool {
         self.members[..].iter().any(|s| *s == Some(idx))
     }

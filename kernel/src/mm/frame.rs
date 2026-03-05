@@ -44,6 +44,7 @@ struct BitmapAllocator {
     /// Pointer to the bitmap in the HHDM region.
     bitmap: *mut u8,
     /// Number of bytes in the bitmap.
+    #[allow(dead_code)]
     bitmap_len: usize,
     /// Total number of physical frames tracked.
     total_frames: usize,

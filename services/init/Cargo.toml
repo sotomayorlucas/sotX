@@ -8,6 +8,7 @@ sotos-common = { path = "../../libs/sotos-common" }
 sotos-pci = { path = "../../libs/sotos-pci" }
 sotos-virtio = { path = "../../libs/sotos-virtio" }
 sotos-objstore = { path = "../../libs/sotos-objstore" }
+sotos-ld = { path = "../../libs/sotos-ld" }
 
 [profile.dev]
 panic = "abort"

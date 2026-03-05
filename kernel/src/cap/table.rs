@@ -40,11 +40,13 @@ pub struct Rights(u32);
 impl Rights {
     pub const READ: Self = Self(1 << 0);
     pub const WRITE: Self = Self(1 << 1);
+    #[allow(dead_code)]
     pub const EXECUTE: Self = Self(1 << 2);
     pub const GRANT: Self = Self(1 << 3);
     pub const REVOKE: Self = Self(1 << 4);
     pub const ALL: Self = Self(0x1F);
 
+    #[allow(dead_code)]
     pub const fn empty() -> Self {
         Self(0)
     }
@@ -93,6 +95,7 @@ pub enum CapObject {
     /// User address space (PML4).
     AddrSpace { cr3: u64 },
     /// Null / empty slot.
+    #[allow(dead_code)]
     Null,
 }
 

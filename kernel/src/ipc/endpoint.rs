@@ -21,6 +21,9 @@ const MAX_SEND_QUEUE: usize = 16;
 /// Number of message registers (64-bit words).
 pub const MSG_REGS: usize = 8;
 
+/// Bit flag in send queue entries to mark a caller (send+wait-for-reply).
+const CALLER_BIT: u32 = 0x8000_0000;
+
 /// Endpoint identifier (wraps a generation-checked PoolHandle).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EndpointId(pub PoolHandle);
@@ -63,9 +66,13 @@ struct Endpoint {
     state: EndpointState,
     /// Thread currently waiting to receive.
     receiver: Option<ThreadId>,
-    /// Queue of threads waiting to send.
+    /// Queue of threads waiting to send (high bit = CALLER_BIT).
     send_queue: [Option<ThreadId>; MAX_SEND_QUEUE],
     send_queue_len: usize,
+    /// Thread that has sent a message and is waiting for a reply (from call()).
+    /// When present, the next send() on this endpoint delivers to the caller
+    /// instead of following normal state machine logic.
+    caller: Option<ThreadId>,
 }
 
 impl Endpoint {
@@ -75,6 +82,7 @@ impl Endpoint {
             receiver: None,
             send_queue: [None; MAX_SEND_QUEUE],
             send_queue_len: 0,
+            caller: None,
         }
     }
 
@@ -140,26 +148,40 @@ pub fn send(ep_handle: PoolHandle, msg: Message) -> Result<(), SysError> {
         let mut eps = ENDPOINTS.lock();
         let ep = eps.get_mut(ep_handle).ok_or(SysError::NotFound)?;
 
-        match ep.state {
-            EndpointState::RecvWait => {
-                // Rendezvous: receiver already waiting — deliver directly.
-                let recv_tid = ep.receiver.take().unwrap();
-                ep.state = EndpointState::Idle;
-                SendAction::Rendezvous(recv_tid)
-            }
-            EndpointState::Idle | EndpointState::SendWait => {
-                // No receiver — enqueue self and block.
-                if !ep.enqueue_sender(my_tid.0) {
-                    return Err(SysError::OutOfResources);
+        // Check for a caller waiting for a reply (takes priority).
+        // This is the reply path: the handler sends a reply to a call().
+        if let Some(caller_tid) = ep.caller.take() {
+            SendAction::ReplyToCaller(caller_tid)
+        } else {
+            match ep.state {
+                EndpointState::RecvWait => {
+                    // Rendezvous: receiver already waiting — deliver directly.
+                    let recv_tid = ep.receiver.take().unwrap();
+                    ep.state = EndpointState::Idle;
+                    SendAction::Rendezvous(recv_tid)
                 }
-                ep.state = EndpointState::SendWait;
-                SendAction::Block
+                EndpointState::Idle | EndpointState::SendWait => {
+                    // No receiver — enqueue self and block.
+                    if !ep.enqueue_sender(my_tid.0) {
+                        return Err(SysError::OutOfResources);
+                    }
+                    ep.state = EndpointState::SendWait;
+                    SendAction::Block
+                }
             }
         }
     };
     // ENDPOINTS lock dropped here.
 
     match action {
+        SendAction::ReplyToCaller(caller_tid) => {
+            // Deliver reply to the caller that used call().
+            let mut msg = msg;
+            process_cap_transfer(&mut msg);
+            sched::write_ipc_msg(sched::ThreadId(caller_tid), msg);
+            sched::wake(sched::ThreadId(caller_tid));
+            Ok(())
+        }
         SendAction::Rendezvous(recv_tid) => {
             // Process cap transfer before delivering.
             let mut msg = msg;
@@ -192,11 +214,24 @@ pub fn recv(ep_handle: PoolHandle) -> Result<Message, SysError> {
         match ep.state {
             EndpointState::SendWait => {
                 // Rendezvous: sender(s) already waiting — take the first.
-                let send_tid = ep.dequeue_sender().unwrap();
-                if ep.send_queue_len == 0 {
-                    ep.state = EndpointState::Idle;
+                let raw_tid = ep.dequeue_sender().unwrap();
+                let is_caller = raw_tid & CALLER_BIT != 0;
+                let send_tid = raw_tid & !CALLER_BIT;
+
+                if is_caller {
+                    // This sender used call() — don't wake it after reading.
+                    // Register it as waiting for a reply.
+                    ep.caller = Some(send_tid);
+                    if ep.send_queue_len == 0 {
+                        ep.state = EndpointState::Idle;
+                    }
+                    RecvAction::RendezvousCaller(send_tid)
+                } else {
+                    if ep.send_queue_len == 0 {
+                        ep.state = EndpointState::Idle;
+                    }
+                    RecvAction::Rendezvous(send_tid)
                 }
-                RecvAction::Rendezvous(send_tid)
             }
             EndpointState::Idle => {
                 // No sender — register self as receiver and block.
@@ -220,6 +255,12 @@ pub fn recv(ep_handle: PoolHandle) -> Result<Message, SysError> {
             sched::wake(sched::ThreadId(send_tid));
             Ok(msg)
         }
+        RecvAction::RendezvousCaller(send_tid) => {
+            // Read the caller's message but DON'T wake it — it stays blocked
+            // waiting for the reply (which will be delivered by send()).
+            let msg = sched::read_ipc_msg(sched::ThreadId(send_tid));
+            Ok(msg)
+        }
         RecvAction::Block => {
             // Block — a sender will write to our ipc_msg and wake us.
             sched::set_current_ipc(ep_handle.raw(), sched::IpcRole::Receiver, Message::empty());
@@ -232,16 +273,77 @@ pub fn recv(ep_handle: PoolHandle) -> Result<Message, SysError> {
     }
 }
 
-/// Synchronous call: send a message, then receive a reply on the same endpoint.
-/// Simplified as send() + recv() — non-atomic but correct for the 2-thread test.
-/// TODO: atomic caller role transition for multi-threaded scenarios.
+/// Synchronous call: send a message, then wait for a reply on the same endpoint.
+///
+/// Atomic: the caller is registered for the reply in the same lock acquisition
+/// as the send, preventing a race where the handler replies before the caller
+/// reaches recv().
 pub fn call(ep_handle: PoolHandle, msg: Message) -> Result<Message, SysError> {
-    send(ep_handle, msg)?;
-    recv(ep_handle)
+    let my_tid = sched::current_tid().ok_or(SysError::InvalidArg)?;
+
+    let action = {
+        let mut eps = ENDPOINTS.lock();
+        let ep = eps.get_mut(ep_handle).ok_or(SysError::NotFound)?;
+
+        match ep.state {
+            EndpointState::RecvWait => {
+                // Handler is already waiting in recv(). Deliver our message
+                // and atomically register ourselves as the caller waiting
+                // for a reply.
+                let recv_tid = ep.receiver.take().unwrap();
+                ep.caller = Some(my_tid.0);
+                ep.state = EndpointState::Idle;
+                CallAction::RendezvousThenWait(recv_tid)
+            }
+            EndpointState::Idle | EndpointState::SendWait => {
+                // No receiver yet — enqueue with CALLER_BIT so recv() knows
+                // to keep us blocked for the reply.
+                if !ep.enqueue_sender(my_tid.0 | CALLER_BIT) {
+                    return Err(SysError::OutOfResources);
+                }
+                ep.state = EndpointState::SendWait;
+                CallAction::Block
+            }
+        }
+    };
+    // ENDPOINTS lock dropped here.
+
+    match action {
+        CallAction::RendezvousThenWait(recv_tid) => {
+            let mut msg = msg;
+            process_cap_transfer(&mut msg);
+            // Deliver message to handler and wake it.
+            sched::write_ipc_msg(sched::ThreadId(recv_tid), msg);
+            sched::wake(sched::ThreadId(recv_tid));
+            // Block waiting for the reply. The handler's send() will find
+            // ep.caller and deliver directly to us.
+            sched::set_current_ipc(ep_handle.raw(), sched::IpcRole::Caller, Message::empty());
+            sched::block_current();
+            let reply = sched::current_ipc_msg();
+            sched::clear_current_ipc();
+            Ok(reply)
+        }
+        CallAction::Block => {
+            // Store our message and block. When recv() picks us up from the
+            // send queue, it sees CALLER_BIT, reads our message, registers
+            // us as ep.caller, and doesn't wake us. The handler's reply
+            // send() then delivers to us.
+            let mut msg = msg;
+            process_cap_transfer(&mut msg);
+            sched::set_current_ipc(ep_handle.raw(), sched::IpcRole::Caller, msg);
+            sched::block_current();
+            // Woken when the reply is delivered to our ipc_msg.
+            let reply = sched::current_ipc_msg();
+            sched::clear_current_ipc();
+            Ok(reply)
+        }
+    }
 }
 
 /// Internal action after inspecting endpoint state in send().
 enum SendAction {
+    /// Reply to a caller waiting from call().
+    ReplyToCaller(ThreadId),
     /// Receiver was waiting — rendezvous immediately.
     Rendezvous(ThreadId),
     /// No receiver — caller must block.
@@ -252,6 +354,16 @@ enum SendAction {
 enum RecvAction {
     /// Sender was waiting — rendezvous immediately.
     Rendezvous(ThreadId),
+    /// Caller was waiting — rendezvous but don't wake (stays blocked for reply).
+    RendezvousCaller(ThreadId),
     /// No sender — caller must block.
+    Block,
+}
+
+/// Internal action after inspecting endpoint state in call().
+enum CallAction {
+    /// Handler was in recv() — deliver and wait for reply.
+    RendezvousThenWait(ThreadId),
+    /// No handler ready — enqueue and block.
     Block,
 }

@@ -46,6 +46,7 @@ pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 const DF_STACK_SIZE: usize = 4096 * 5;
 
 #[repr(align(16))]
+#[allow(dead_code)]
 struct DoubleFaultStack([u8; DF_STACK_SIZE]);
 static DOUBLE_FAULT_STACK: DoubleFaultStack = DoubleFaultStack([0; DF_STACK_SIZE]);
 

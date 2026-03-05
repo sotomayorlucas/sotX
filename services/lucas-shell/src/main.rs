@@ -2,6 +2,21 @@
 #![no_main]
 
 // ---------------------------------------------------------------------------
+// Stack canary support
+// ---------------------------------------------------------------------------
+
+#[used]
+#[no_mangle]
+static mut __stack_chk_guard: u64 = 0x00000aff0a0d0000;
+
+#[no_mangle]
+pub extern "C" fn __stack_chk_fail() -> ! {
+    let msg = b"!!! STACK SMASH DETECTED (shell) !!!\n";
+    linux_write(1, msg.as_ptr(), msg.len());
+    linux_exit(137);
+}
+
+// ---------------------------------------------------------------------------
 // Linux syscall wrappers (raw inline asm — the kernel redirects these via LUCAS)
 // ---------------------------------------------------------------------------
 
@@ -269,6 +284,80 @@ fn linux_execve(path: *const u8) -> i64 {
     ret
 }
 
+fn linux_socket(domain: u64, sock_type: u64, protocol: u64) -> i64 {
+    let ret: i64;
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            inlateout("rax") 41u64 => ret,
+            in("rdi") domain,
+            in("rsi") sock_type,
+            in("rdx") protocol,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+fn linux_connect(fd: u64, addr: *const u8, addrlen: u64) -> i64 {
+    let ret: i64;
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            inlateout("rax") 42u64 => ret,
+            in("rdi") fd,
+            in("rsi") addr as u64,
+            in("rdx") addrlen,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+fn linux_sendto(fd: u64, buf: *const u8, len: u64, flags: u64) -> i64 {
+    let ret: i64;
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            inlateout("rax") 44u64 => ret,
+            in("rdi") fd,
+            in("rsi") buf as u64,
+            in("rdx") len,
+            in("r10") flags,
+            in("r8") 0u64,  // dest_addr (null)
+            in("r9") 0u64,  // addrlen
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+fn linux_recvfrom(fd: u64, buf: *mut u8, len: u64, flags: u64) -> i64 {
+    let ret: i64;
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            inlateout("rax") 45u64 => ret,
+            in("rdi") fd,
+            in("rsi") buf as u64,
+            in("rdx") len,
+            in("r10") flags,
+            in("r8") 0u64,  // src_addr (null)
+            in("r9") 0u64,  // addrlen (null)
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
 fn linux_kill(pid: u64, sig: u64) -> i64 {
     let ret: i64;
     unsafe {
@@ -432,7 +521,7 @@ fn shell_loop() {
 
         // --- Command dispatch ---
         if eq(line, b"help") {
-            print(b"commands: help, echo, uname, uptime, caps, ls, cat, write, rm,\n         stat, hexdump, fork, getpid, exec, ps, kill, exit\n");
+            print(b"commands: help, echo, uname, uptime, caps, ls, cat, write, rm,\n         stat, hexdump, fork, getpid, exec, ps, kill,\n         resolve, ping, traceroute, wget, exit\n");
         } else if eq(line, b"uname") {
             print(b"sotOS 0.1.0 x86_64 LUCAS\n");
         } else if eq(line, b"uptime") {
@@ -510,6 +599,34 @@ fn shell_loop() {
                 print(b"usage: exec <program>\n");
             } else {
                 cmd_exec(name);
+            }
+        } else if starts_with(line, b"resolve ") {
+            let name = trim(&line[8..]);
+            if name.is_empty() {
+                print(b"usage: resolve <hostname>\n");
+            } else {
+                cmd_resolve(name);
+            }
+        } else if starts_with(line, b"ping ") {
+            let host = trim(&line[5..]);
+            if host.is_empty() {
+                print(b"usage: ping <host>\n");
+            } else {
+                cmd_ping(host);
+            }
+        } else if starts_with(line, b"traceroute ") {
+            let host = trim(&line[11..]);
+            if host.is_empty() {
+                print(b"usage: traceroute <host>\n");
+            } else {
+                cmd_traceroute(host);
+            }
+        } else if starts_with(line, b"wget ") {
+            let url = trim(&line[5..]);
+            if url.is_empty() {
+                print(b"usage: wget <url>\n");
+            } else {
+                cmd_wget(url);
             }
         } else if eq(line, b"exit") {
             print(b"bye!\n");
@@ -782,6 +899,290 @@ fn cmd_kill(args: &[u8]) {
             let ret = linux_kill(pid, 9);
             if ret < 0 {
                 print(b"kill: no such process\n");
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Custom sotOS syscalls (intercepted by LUCAS)
+// ---------------------------------------------------------------------------
+
+/// DNS resolve: syscall 200(hostname_ptr, hostname_len) → IP as u32 (0 = failed)
+fn linux_dns_resolve(name: *const u8, len: usize) -> u64 {
+    let ret: u64;
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            inlateout("rax") 200u64 => ret,
+            in("rdi") name as u64,
+            in("rsi") len as u64,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+/// Traceroute hop: syscall 201(dst_ip, ttl) → responder_ip | (reached_flag << 32)
+fn linux_traceroute_hop(dst_ip: u64, ttl: u64) -> u64 {
+    let ret: u64;
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            inlateout("rax") 201u64 => ret,
+            in("rdi") dst_ip,
+            in("rsi") ttl,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+// ---------------------------------------------------------------------------
+// Networking helpers
+// ---------------------------------------------------------------------------
+
+/// Print an IPv4 address in dotted-decimal.
+fn print_ip(ip: u32) {
+    let bytes = ip.to_be_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if i > 0 { print(b"."); }
+        print_u64(b as u64);
+    }
+}
+
+/// Resolve a hostname to an IP address. Tries parse_ip first, then DNS.
+fn resolve_host(host: &[u8]) -> Option<u32> {
+    if let Some(ip) = parse_ip(host) {
+        return Some(ip);
+    }
+    // Try DNS resolution.
+    let ip = linux_dns_resolve(host.as_ptr(), host.len());
+    if ip != 0 {
+        Some(ip as u32)
+    } else {
+        None
+    }
+}
+
+/// Parse an IPv4 dotted-decimal address. Returns big-endian u32.
+fn parse_ip(s: &[u8]) -> Option<u32> {
+    let mut octets = [0u8; 4];
+    let mut octet_idx = 0;
+    let mut val: u32 = 0;
+    let mut has_digit = false;
+
+    for &b in s {
+        if b >= b'0' && b <= b'9' {
+            val = val * 10 + (b - b'0') as u32;
+            if val > 255 { return None; }
+            has_digit = true;
+        } else if b == b'.' {
+            if !has_digit || octet_idx >= 3 { return None; }
+            octets[octet_idx] = val as u8;
+            octet_idx += 1;
+            val = 0;
+            has_digit = false;
+        } else {
+            return None;
+        }
+    }
+    if !has_digit || octet_idx != 3 { return None; }
+    octets[3] = val as u8;
+    Some(u32::from_be_bytes(octets))
+}
+
+/// Build a sockaddr_in structure.
+fn build_sockaddr(ip: u32, port: u16) -> [u8; 16] {
+    let mut sa = [0u8; 16];
+    sa[0] = 2; // AF_INET (low byte)
+    sa[1] = 0;
+    sa[2..4].copy_from_slice(&port.to_be_bytes());
+    sa[4..8].copy_from_slice(&ip.to_be_bytes());
+    sa
+}
+
+fn cmd_ping(host: &[u8]) {
+    let ip = match resolve_host(host) {
+        Some(ip) => ip,
+        None => {
+            print(b"ping: cannot resolve host\n");
+            return;
+        }
+    };
+
+    print(b"PING ");
+    print(host);
+    print(b" (");
+    print_ip(ip);
+    print(b")\n");
+
+    // Use a TCP socket connect to port 80 as a connectivity test.
+    let fd = linux_socket(2, 1, 0); // AF_INET, SOCK_STREAM
+    if fd < 0 {
+        print(b"ping: socket failed\n");
+        return;
+    }
+
+    let sa = build_sockaddr(ip, 80);
+    let ret = linux_connect(fd as u64, sa.as_ptr(), 16);
+    if ret == 0 {
+        print(b"  connection to port 80: OK\n");
+    } else {
+        print(b"  connection to port 80: FAILED\n");
+    }
+    linux_close(fd as u64);
+}
+
+fn cmd_wget(url: &[u8]) {
+    // Parse URL: http://host[:port]/path
+    if !starts_with(url, b"http://") {
+        print(b"wget: only http:// URLs supported\n");
+        return;
+    }
+    let after_scheme = &url[7..]; // skip "http://"
+
+    // Find host and path.
+    let mut host_end = after_scheme.len();
+    let mut path_start = after_scheme.len();
+    for i in 0..after_scheme.len() {
+        if after_scheme[i] == b'/' {
+            host_end = i;
+            path_start = i;
+            break;
+        }
+    }
+    let host = &after_scheme[..host_end];
+    let path = if path_start < after_scheme.len() {
+        &after_scheme[path_start..]
+    } else {
+        b"/" as &[u8]
+    };
+
+    // Parse host:port.
+    let mut port: u16 = 80;
+    let mut hostname = host;
+    for i in 0..host.len() {
+        if host[i] == b':' {
+            hostname = &host[..i];
+            port = parse_u64_simple(&host[i + 1..]) as u16;
+            break;
+        }
+    }
+
+    // Resolve hostname (IP or DNS).
+    let ip = match resolve_host(hostname) {
+        Some(ip) => ip,
+        None => {
+            print(b"wget: cannot resolve hostname\n");
+            return;
+        }
+    };
+
+    // Create socket.
+    let fd = linux_socket(2, 1, 0); // AF_INET, SOCK_STREAM
+    if fd < 0 {
+        print(b"wget: socket failed\n");
+        return;
+    }
+
+    // Connect.
+    let sa = build_sockaddr(ip, port);
+    if linux_connect(fd as u64, sa.as_ptr(), 16) < 0 {
+        print(b"wget: connect failed\n");
+        linux_close(fd as u64);
+        return;
+    }
+
+    // Build HTTP GET request.
+    let mut req = [0u8; 256];
+    let mut pos = 0;
+    let prefix = b"GET ";
+    req[pos..pos + prefix.len()].copy_from_slice(prefix);
+    pos += prefix.len();
+    let plen = path.len().min(128);
+    req[pos..pos + plen].copy_from_slice(&path[..plen]);
+    pos += plen;
+    let suffix = b" HTTP/1.0\r\nHost: ";
+    req[pos..pos + suffix.len()].copy_from_slice(suffix);
+    pos += suffix.len();
+    let hlen = hostname.len().min(64);
+    req[pos..pos + hlen].copy_from_slice(&hostname[..hlen]);
+    pos += hlen;
+    let end = b"\r\n\r\n";
+    req[pos..pos + end.len()].copy_from_slice(end);
+    pos += end.len();
+
+    // Send request.
+    let sent = linux_sendto(fd as u64, req.as_ptr(), pos as u64, 0);
+    if sent <= 0 {
+        print(b"wget: send failed\n");
+        linux_close(fd as u64);
+        return;
+    }
+
+    // Read response.
+    let mut buf = [0u8; 40]; // Limited by IPC inline data size
+    loop {
+        let n = linux_recvfrom(fd as u64, buf.as_mut_ptr(), buf.len() as u64, 0);
+        if n <= 0 { break; }
+        linux_write(1, buf.as_ptr(), n as usize);
+    }
+    print(b"\n");
+    linux_close(fd as u64);
+}
+
+fn cmd_resolve(name: &[u8]) {
+    match resolve_host(name) {
+        Some(ip) => {
+            print(name);
+            print(b" -> ");
+            print_ip(ip);
+            print(b"\n");
+        }
+        None => {
+            print(b"resolve: cannot resolve ");
+            print(name);
+            print(b"\n");
+        }
+    }
+}
+
+fn cmd_traceroute(host: &[u8]) {
+    let ip = match resolve_host(host) {
+        Some(ip) => ip,
+        None => {
+            print(b"traceroute: cannot resolve host\n");
+            return;
+        }
+    };
+
+    print(b"traceroute to ");
+    print(host);
+    print(b" (");
+    print_ip(ip);
+    print(b"), 30 hops max\n");
+
+    for ttl in 1..=30u64 {
+        // Print TTL number with padding.
+        if ttl < 10 { print(b" "); }
+        print_u64(ttl);
+        print(b"  ");
+
+        let result = linux_traceroute_hop(ip as u64, ttl);
+        if result == 0 {
+            print(b"* * *\n");
+        } else {
+            let hop_ip = (result & 0xFFFFFFFF) as u32;
+            let reached = (result >> 32) != 0;
+            print_ip(hop_ip);
+            print(b"\n");
+            if reached {
+                break;
             }
         }
     }

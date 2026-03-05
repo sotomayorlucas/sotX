@@ -1,0 +1,16 @@
+[package]
+name = "sotos-net-svc"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sotos-common = { path = "../../libs/sotos-common" }
+sotos-pci = { path = "../../libs/sotos-pci" }
+sotos-virtio = { path = "../../libs/sotos-virtio" }
+sotos-net = { path = "../../libs/sotos-net" }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

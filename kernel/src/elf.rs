@@ -4,7 +4,7 @@
 //! a user address space. Returns the entry point virtual address.
 
 use crate::mm::{self, hhdm_offset};
-use crate::mm::paging::{AddressSpace, PAGE_PRESENT, PAGE_USER, PAGE_WRITABLE};
+use crate::mm::paging::{AddressSpace, PAGE_PRESENT, PAGE_USER, PAGE_WRITABLE, PAGE_NO_EXECUTE};
 
 // ELF64 header field offsets
 const EI_MAG: usize = 0;        // 4 bytes: \x7fELF
@@ -26,6 +26,7 @@ const P_FILESZ: usize = 32;     // 8 bytes: size in file
 const P_MEMSZ: usize = 40;      // 8 bytes: size in memory
 
 const PT_LOAD: u32 = 1;
+const PF_X: u32 = 1;
 const PF_W: u32 = 2;
 
 fn read_u16(data: &[u8], off: usize) -> u16 {
@@ -101,10 +102,13 @@ pub fn load(data: &[u8], addr_space: &AddressSpace) -> Result<u64, &'static str>
         let seg_start = p_vaddr & !0xFFF;
         let seg_end = (p_vaddr + p_memsz as u64 + 0xFFF) & !0xFFF;
 
-        // Determine page flags
+        // Determine page flags (W^X: writable pages are never executable)
         let mut flags = PAGE_PRESENT | PAGE_USER;
         if p_flags & PF_W != 0 {
             flags |= PAGE_WRITABLE;
+        }
+        if p_flags & PF_X == 0 {
+            flags |= PAGE_NO_EXECUTE;
         }
 
         // Map each page

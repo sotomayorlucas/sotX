@@ -7,5 +7,5 @@ edition = "2021"
 limine = "0.5"
 x86_64 = "0.15"
 spin = { version = "0.9", default-features = false, features = ["lazy", "mutex", "spin_mutex"] }
-sotos-common = { path = "../libs/sotos-common" }
+sotos-common = { path = "../libs/sotos-common", features = ["kernel"] }
 

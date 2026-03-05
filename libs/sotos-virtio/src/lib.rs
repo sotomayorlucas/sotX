@@ -4,3 +4,4 @@
 
 pub mod virtqueue;
 pub mod blk;
+pub mod net;

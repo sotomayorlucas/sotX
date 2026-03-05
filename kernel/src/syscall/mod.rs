@@ -88,8 +88,21 @@ const SYS_MAP_INTO: u64 = 121;
 const SYS_THREAD_CREATE_IN: u64 = 122;
 const SYS_UNMAP_FROM: u64 = 123;
 
+/// Syscall numbers — service registry.
+const SYS_SVC_REGISTER: u64 = 130;
+const SYS_SVC_LOOKUP: u64 = 131;
+
+/// Syscall numbers — userspace process spawning.
+const SYS_INITRD_READ: u64 = 132;
+const SYS_BOOTINFO_WRITE: u64 = 133;
+
+/// Syscall number — page permission change (mprotect-like).
+const SYS_PROTECT: u64 = 134;
+
 /// Temporary syscall number for debug serial output.
 const SYS_DEBUG_PRINT: u64 = 255;
+/// Temporary syscall number for debug serial input (non-blocking).
+const SYS_DEBUG_READ: u64 = 253;
 
 /// Upper bound of user-space virtual addresses.
 const USER_ADDR_LIMIT: u64 = 0x0000_8000_0000_0000;
@@ -159,6 +172,18 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
         match endpoint::call(PoolHandle::from_raw(ep_raw), msg) {
             Ok(reply) => {
                 frame.rax = reply.regs[0]; // return value
+                // For SYS_read: handler returns byte data in regs[1].
+                // Write it to the user's buffer from kernel context.
+                // For SYS_read (tag=0): if handler returned inline byte
+                // data in regs[1], write it to the user buffer from kernel
+                // context as insurance (redundant with handler's write).
+                if msg.tag == 0 && reply.regs[0] > 0 {
+                    let buf_ptr = frame.rsi;
+                    let byte_count = reply.regs[0] as usize;
+                    if buf_ptr != 0 && buf_ptr < USER_ADDR_LIMIT && byte_count == 1 {
+                        unsafe { core::ptr::write_volatile(buf_ptr as *mut u8, reply.regs[1] as u8); }
+                    }
+                }
             }
             Err(e) => {
                 frame.rax = e as i64 as u64;
@@ -347,7 +372,11 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
                         kprintln!("SYS_MAP: InvalidArg vaddr={:#x}", vaddr);
                         frame.rax = SysError::InvalidArg as i64 as u64;
                     } else {
-                        let flags = PAGE_PRESENT | PAGE_USER | (user_flags & USER_FLAG_MASK);
+                        let mut flags = PAGE_PRESENT | PAGE_USER | (user_flags & USER_FLAG_MASK);
+                        // W^X: writable pages are never executable
+                        if flags & PAGE_WRITABLE != 0 && flags & PAGE_NO_EXECUTE == 0 {
+                            flags |= PAGE_NO_EXECUTE;
+                        }
                         let cr3 = paging::read_cr3();
                         let aspace = AddressSpace::from_cr3(cr3);
                         aspace.map_page(vaddr, paddr, flags);
@@ -815,7 +844,11 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
                         frame.rax = SysError::InvalidArg as i64 as u64;
                     } else {
                         let paddr = base + offset;
-                        let flags = PAGE_PRESENT | PAGE_USER | (user_flags & USER_FLAG_MASK);
+                        let mut flags = PAGE_PRESENT | PAGE_USER | (user_flags & USER_FLAG_MASK);
+                        // W^X: writable pages are never executable
+                        if flags & PAGE_WRITABLE != 0 && flags & PAGE_NO_EXECUTE == 0 {
+                            flags |= PAGE_NO_EXECUTE;
+                        }
                         let cr3 = paging::read_cr3();
                         let aspace = AddressSpace::from_cr3(cr3);
                         aspace.map_page(vaddr, paddr, flags);
@@ -825,6 +858,32 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
                 }
                 Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
                 Err(e) => frame.rax = e as i64 as u64,
+            }
+        }
+
+        // SYS_PROTECT — change page permissions (mprotect-like)
+        // rdi = vaddr (page-aligned), rsi = new flags
+        // W^X enforced: writable pages get NX, non-writable pages may be executable.
+        SYS_PROTECT => {
+            let vaddr = frame.rdi;
+            let user_flags = frame.rsi;
+
+            if vaddr & 0xFFF != 0 || vaddr >= USER_ADDR_LIMIT {
+                frame.rax = SysError::InvalidArg as i64 as u64;
+            } else {
+                let mut flags = PAGE_PRESENT | PAGE_USER | (user_flags & USER_FLAG_MASK);
+                // W^X: writable pages are never executable
+                if flags & PAGE_WRITABLE != 0 && flags & PAGE_NO_EXECUTE == 0 {
+                    flags |= PAGE_NO_EXECUTE;
+                }
+                let cr3 = paging::read_cr3();
+                let aspace = AddressSpace::from_cr3(cr3);
+                if aspace.protect_page(vaddr, flags) {
+                    paging::invlpg(vaddr);
+                    frame.rax = 0;
+                } else {
+                    frame.rax = SysError::InvalidArg as i64 as u64;
+                }
             }
         }
 
@@ -871,7 +930,11 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
                             if vaddr & 0xFFF != 0 || vaddr >= USER_ADDR_LIMIT {
                                 frame.rax = SysError::InvalidArg as i64 as u64;
                             } else {
-                                let flags = PAGE_PRESENT | PAGE_USER | (user_flags & USER_FLAG_MASK);
+                                let mut flags = PAGE_PRESENT | PAGE_USER | (user_flags & USER_FLAG_MASK);
+                                // W^X: writable pages are never executable
+                                if flags & PAGE_WRITABLE != 0 && flags & PAGE_NO_EXECUTE == 0 {
+                                    flags |= PAGE_NO_EXECUTE;
+                                }
                                 let aspace = paging::AddressSpace::from_cr3(cr3);
                                 aspace.map_page(vaddr, paddr, flags);
                                 // No invlpg needed — target AS may not be current CR3.
@@ -937,10 +1000,203 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
             }
         }
 
+        // SYS_SVC_REGISTER — register a service name → endpoint mapping
+        // rdi = name_ptr, rsi = name_len, rdx = ep_cap
+        SYS_SVC_REGISTER => {
+            let name_ptr = frame.rdi;
+            let name_len = frame.rsi as usize;
+            let ep_cap_id = frame.rdx as u32;
+
+            if name_len == 0 || name_len > 31 || name_ptr >= USER_ADDR_LIMIT {
+                frame.rax = SysError::InvalidArg as i64 as u64;
+            } else {
+                // Validate the endpoint capability.
+                match cap::validate(ep_cap_id, Rights::READ.or(Rights::WRITE)) {
+                    Ok(CapObject::Endpoint { id }) => {
+                        // Read the name from userspace (via HHDM for the current AS).
+                        let mut name_buf = [0u8; 31];
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(
+                                name_ptr as *const u8,
+                                name_buf.as_mut_ptr(),
+                                name_len,
+                            );
+                        }
+                        match crate::svc_registry::register(&name_buf[..name_len], id) {
+                            Ok(()) => frame.rax = 0,
+                            Err(e) => frame.rax = e as i64 as u64,
+                        }
+                    }
+                    Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
+                    Err(e) => frame.rax = e as i64 as u64,
+                }
+            }
+        }
+
+        // SYS_SVC_LOOKUP — look up a service by name, return derived endpoint cap
+        // rdi = name_ptr, rsi = name_len
+        SYS_SVC_LOOKUP => {
+            let name_ptr = frame.rdi;
+            let name_len = frame.rsi as usize;
+
+            if name_len == 0 || name_len > 31 || name_ptr >= USER_ADDR_LIMIT {
+                frame.rax = SysError::InvalidArg as i64 as u64;
+            } else {
+                let mut name_buf = [0u8; 31];
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        name_ptr as *const u8,
+                        name_buf.as_mut_ptr(),
+                        name_len,
+                    );
+                }
+                match crate::svc_registry::lookup(&name_buf[..name_len]) {
+                    Ok(ep_id) => {
+                        // Create a derived endpoint cap with READ|WRITE for the caller.
+                        match cap::insert(
+                            CapObject::Endpoint { id: ep_id },
+                            Rights::READ.or(Rights::WRITE),
+                            None,
+                        ) {
+                            Some(cap_id) => frame.rax = cap_id.raw() as u64,
+                            None => frame.rax = SysError::OutOfResources as i64 as u64,
+                        }
+                    }
+                    Err(e) => frame.rax = e as i64 as u64,
+                }
+            }
+        }
+
+        // SYS_INITRD_READ — read a file from initrd CPIO into userspace buffer
+        // rdi = name_ptr, rsi = name_len, rdx = buf_ptr, r8 = buf_len
+        // Returns: rax = file size (or error)
+        SYS_INITRD_READ => {
+            let name_ptr = frame.rdi;
+            let name_len = frame.rsi as usize;
+            let buf_ptr = frame.rdx;
+            let buf_len = frame.r8 as usize;
+
+            if name_len == 0 || name_len > 63 || name_ptr >= USER_ADDR_LIMIT
+                || buf_ptr >= USER_ADDR_LIMIT
+            {
+                frame.rax = SysError::InvalidArg as i64 as u64;
+            } else {
+                // Read name from userspace.
+                let mut name_buf = [0u8; 63];
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        name_ptr as *const u8,
+                        name_buf.as_mut_ptr(),
+                        name_len,
+                    );
+                }
+                let name_str = core::str::from_utf8(&name_buf[..name_len]).unwrap_or("");
+
+                match crate::initrd::initrd_base_size() {
+                    Some((base_phys, size)) => {
+                        let hhdm = mm::hhdm_offset();
+                        let initrd_data = unsafe {
+                            core::slice::from_raw_parts(
+                                (base_phys + hhdm) as *const u8,
+                                size as usize,
+                            )
+                        };
+                        match crate::initrd::find(initrd_data, name_str) {
+                            Some(file_data) => {
+                                let file_size = file_data.len();
+                                let copy_len = file_size.min(buf_len);
+                                if copy_len > 0 {
+                                    unsafe {
+                                        core::ptr::copy_nonoverlapping(
+                                            file_data.as_ptr(),
+                                            buf_ptr as *mut u8,
+                                            copy_len,
+                                        );
+                                    }
+                                }
+                                frame.rax = file_size as u64;
+                            }
+                            None => frame.rax = SysError::NotFound as i64 as u64,
+                        }
+                    }
+                    None => frame.rax = SysError::NotFound as i64 as u64,
+                }
+            }
+        }
+
+        // SYS_BOOTINFO_WRITE — write BootInfo page into target AS at 0xB00000
+        // rdi = as_cap, rsi = caps_ptr (array of u64 cap IDs), rdx = cap_count
+        SYS_BOOTINFO_WRITE => {
+            match cap::validate(frame.rdi as u32, Rights::WRITE) {
+                Ok(CapObject::AddrSpace { cr3 }) => {
+                    let caps_ptr = frame.rsi;
+                    let cap_count = frame.rdx as usize;
+
+                    if cap_count > sotos_common::BOOT_INFO_MAX_CAPS || caps_ptr >= USER_ADDR_LIMIT {
+                        frame.rax = SysError::InvalidArg as i64 as u64;
+                    } else {
+                        let hhdm = mm::hhdm_offset();
+
+                        // Allocate and zero a frame for BootInfo.
+                        match mm::alloc_frame() {
+                            Some(f) => {
+                                let phys = f.addr();
+                                unsafe {
+                                    core::ptr::write_bytes((phys + hhdm) as *mut u8, 0, 4096);
+                                }
+
+                                // Build BootInfo.
+                                let mut info = sotos_common::BootInfo::empty();
+                                info.magic = sotos_common::BOOT_INFO_MAGIC;
+                                info.cap_count = cap_count as u64;
+
+                                // Copy cap IDs from userspace.
+                                if cap_count > 0 {
+                                    unsafe {
+                                        core::ptr::copy_nonoverlapping(
+                                            caps_ptr as *const u64,
+                                            info.caps.as_mut_ptr(),
+                                            cap_count,
+                                        );
+                                    }
+                                }
+
+                                // Write BootInfo into the frame.
+                                unsafe {
+                                    let ptr = (phys + hhdm) as *mut sotos_common::BootInfo;
+                                    core::ptr::write(ptr, info);
+                                }
+
+                                // Map read-only at 0xB00000 in target AS.
+                                let target_as = paging::AddressSpace::from_cr3(cr3);
+                                target_as.map_page(
+                                    sotos_common::BOOT_INFO_ADDR,
+                                    phys,
+                                    PAGE_PRESENT | PAGE_USER,
+                                );
+
+                                frame.rax = 0;
+                            }
+                            None => frame.rax = SysError::OutOfResources as i64 as u64,
+                        }
+                    }
+                }
+                Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
+                Err(e) => frame.rax = e as i64 as u64,
+            }
+        }
+
         // SYS_DEBUG_PRINT — write a single byte to serial (temporary)
         SYS_DEBUG_PRINT => {
             serial::write_byte(frame.rdi as u8);
             frame.rax = 0;
+        }
+
+        // SYS_DEBUG_READ — non-blocking read one byte from serial (returns -1 if none)
+        SYS_DEBUG_READ => {
+            frame.rax = serial::read_byte_nonblocking()
+                .map(|b| b as u64)
+                .unwrap_or(u64::MAX); // -1 as unsigned = no data
         }
 
         // SYS_DEBUG_PHYS_READ (254) — read u64 from physical address via HHDM (temporary debug)

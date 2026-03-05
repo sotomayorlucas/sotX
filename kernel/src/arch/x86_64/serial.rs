@@ -32,6 +32,18 @@ pub fn write_byte(byte: u8) {
     }
 }
 
+/// Non-blocking read: returns Some(byte) if data available, None otherwise.
+pub fn read_byte_nonblocking() -> Option<u8> {
+    unsafe {
+        // Check Line Status Register bit 0 (Data Ready).
+        if inb(COM1 + 5) & 0x01 != 0 {
+            Some(inb(COM1))
+        } else {
+            None
+        }
+    }
+}
+
 pub struct SerialWriter;
 
 impl fmt::Write for SerialWriter {
