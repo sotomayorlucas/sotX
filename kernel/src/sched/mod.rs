@@ -238,68 +238,12 @@ fn dequeue_from_any(my_cpu: usize) -> Option<usize> {
 /// to a depleted domain, park it in the domain's suspended list and try the
 /// next one. GPU/NPU-targeted threads are re-enqueued (they await offload).
 ///
-/// EDF priority: deadline threads (deadline_ticks > 0) are checked first.
-/// Among them, the one with the earliest deadline wins.
+/// Dequeue a runnable thread, respecting compute targets and scheduling domains.
+/// EDF deadline scheduling fields exist on threads (deadline_ticks, period_ticks)
+/// and are managed by set_deadline() / tick(), but the dequeue path uses the
+/// standard priority MLQ to avoid locking all PER_CPU_QUEUES under SCHEDULER
+/// (which causes re-entrant lock issues with timer interrupts on SMP).
 fn dequeue_non_depleted(my_cpu: usize, sched: &mut Scheduler) -> Option<usize> {
-    // --- Phase 1: EDF scan for deadline threads ---
-    // Scan all per-CPU queues for the ready thread with the earliest deadline.
-    let mut best_idx: Option<usize> = None;
-    let mut best_deadline: u64 = u64::MAX;
-    let mut best_cpu: usize = 0;
-    let mut best_level: usize = 0;
-    let mut best_pos: usize = 0;
-
-    for offset in 0..MAX_CPUS {
-        let cpu = (my_cpu + offset) % MAX_CPUS;
-        let q = PER_CPU_QUEUES[cpu].lock();
-        for (level, queue) in q.levels.iter().enumerate() {
-            for (pos, &tidx) in queue.iter().enumerate() {
-                if let Some(t) = sched.threads.get_by_index(tidx as u32) {
-                    if t.deadline_ticks > 0
-                        && t.deadline_ticks < best_deadline
-                        && t.compute_target == ComputeTarget::Cpu
-                    {
-                        // Check domain is not depleted.
-                        let domain_ok = match t.domain_idx {
-                            None => true,
-                            Some(dom_idx) => sched.domains.get_by_index(dom_idx)
-                                .map_or(true, |d| d.state == DomainState::Active),
-                        };
-                        if domain_ok {
-                            best_deadline = t.deadline_ticks;
-                            best_idx = Some(tidx);
-                            best_cpu = cpu;
-                            best_level = level;
-                            best_pos = pos;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // If we found a deadline thread, remove it from its queue and return it.
-    if let Some(idx) = best_idx {
-        let mut q = PER_CPU_QUEUES[best_cpu].lock();
-        // Remove by position from the specific level.
-        if best_pos < q.levels[best_level].len() {
-            // Verify it's still the same thread (queue may have changed).
-            if q.levels[best_level].get(best_pos) == Some(&idx) {
-                q.levels[best_level].remove(best_pos);
-                return Some(idx);
-            }
-        }
-        // Fallback: linear scan to find and remove it.
-        for (level, queue) in q.levels.iter_mut().enumerate() {
-            if let Some(pos) = queue.iter().position(|&x| x == idx) {
-                queue.remove(pos);
-                return Some(idx);
-            }
-            let _ = level;
-        }
-    }
-
-    // --- Phase 2: Normal priority-based dequeue (original logic) ---
     for _ in 0..MAX_THREADS {
         let idx = dequeue_from_any(my_cpu)?;
 

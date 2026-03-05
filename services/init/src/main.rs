@@ -81,6 +81,12 @@ pub extern "C" fn _start() -> ! {
         0
     };
 
+    // --- Initialize framebuffer console early (before demos) ---
+    if boot_info.fb_addr != 0 {
+        unsafe { fb_init(boot_info); }
+        print(b"[FB OK]\n");
+    }
+
     print(b"INIT: boot complete, ");
     print_u64(cap_count);
     print(b" caps received\n");
@@ -126,11 +132,7 @@ pub extern "C" fn _start() -> ! {
     // --- Phase 4: Virtio-BLK demo + Object Store ---
     let blk = run_virtio_blk_demo(boot_info);
 
-    // --- Phase 5: LUCAS syscall redirect demo ---
-    run_lucas_demo(blk);
-
-    // --- Phase 6: Look up net service endpoint (before spawning subprocesses) ---
-    // Give net service time to register, then look it up.
+    // --- Phase 5: Look up net service endpoint ---
     for _ in 0..50 { sys::yield_now(); }
     let net_name = b"net";
     match sys::svc_lookup(net_name.as_ptr() as u64, net_name.len() as u64) {
@@ -145,17 +147,19 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
-    // --- Phase 7: Userspace process spawning ---
+    // --- Phase 6: Userspace process spawning ---
     spawn_process(b"hello");
 
-    // --- Phase 8: Dynamic linking test ---
+    // --- Phase 7: Dynamic linking test ---
     test_dynamic_linking();
 
-    // Give LUCAS threads time to complete before exiting init.
-    for _ in 0..100 {
-        sys::yield_now();
-    }
+    // --- Wait for spawned processes to finish ---
+    for _ in 0..200 { sys::yield_now(); }
 
+    // --- Phase 8: LUCAS shell (LAST — interactive, takes over serial+framebuffer) ---
+    run_lucas_demo(blk);
+
+    // LUCAS threads run forever; main thread exits.
     sys::thread_exit();
 }
 
@@ -3035,11 +3039,7 @@ pub extern "C" fn lucas_handler() -> ! {
 fn run_lucas_demo(blk: Option<VirtioBlk>) {
     let boot_info = unsafe { &*(BOOT_INFO_ADDR as *const BootInfo) };
 
-    // Initialize framebuffer console if available.
-    if boot_info.fb_addr != 0 {
-        unsafe { fb_init(boot_info); }
-        print(b"[FB OK]\n");
-    }
+    // Framebuffer already initialized in _start().
 
     let guest_entry = boot_info.guest_entry;
     if guest_entry == 0 {

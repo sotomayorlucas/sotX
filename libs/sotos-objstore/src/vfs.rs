@@ -208,11 +208,6 @@ impl Vfs {
     pub fn close(&mut self, fd: u32) -> Result<(), &'static str> {
         let _ = self.get_handle(fd)?;
         self.handles[fd as usize] = FileHandle::unused();
-
-        dbg(b"VFS: close fd=");
-        dbg_u64(fd as u64);
-        dbg(b"\n");
-
         Ok(())
     }
 
