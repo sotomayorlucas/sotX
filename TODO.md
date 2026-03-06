@@ -30,6 +30,8 @@
 - [x] Multi-address-space support (per-process CR3, MapInto, ThreadCreateIn)
 - [x] Dynamic linking (sotos-ld, dl_open/dl_sym/dl_close, PIC .so support)
 - [x] Userspace process spawning (InitrdRead/BootInfoWrite syscalls, spawn_process())
+- [x] Dynamic binary execution — PT_INTERP, ld-musl loader, file-backed mmap, initrd FDs
+- [x] GNU nano 8.2 running as dynamically-linked musl binary (read-only mode)
 
 ### Security
 - [x] W^X enforcement (NX on writable pages, SYS_PROTECT for mprotect-like)
@@ -104,11 +106,16 @@
 ## CRITICO (bloqueadores de calidad)
 - [x] C1: Testing framework — 18-test Linux ABI suite (hello-linux), auto-run on boot
 - [ ] C2: SMP scheduler race — hang intermitente con >1 CPU (known issue, reliable single-core)
+- [ ] C3: nano file write — child_handler necesita open(O_WRONLY|O_CREAT|O_TRUNC), write(fd), ftruncate, rename para que nano pueda guardar archivos (actualmente solo read-only desde initrd)
+- [ ] C4: CWD en child processes — getcwd devuelve "/" pero stat(".") falla; nano muestra "Directory '.' does not exist". Necesita que fstatat/stat de "." devuelva un directorio válido
+- [ ] C5: PF log noise — page faults de demand paging (dynamic linker stack growth) contaminan la salida serial. Suprimir PF logs para faults manejados exitosamente en userspace
+- [ ] C6: VFS access desde child processes — child_handler no tiene acceso al VFS/ObjectStore; necesita IPC al lucas_handler o acceso directo para crear/escribir/leer archivos persistentes
 
 ## ALTO (funcionalidad seria)
 - [x] A1: child_handler completo — brk/mmap/munmap/mprotect, FD table, /dev/null+zero, dup/dup2, pipe, openat, getrandom, prlimit64, ioctl, getcwd, gettimeofday, sysinfo
 - [x] A2: Signals reales — rt_sigaction stores handlers, sigprocmask tracks masks, SIGCHLD delivery, default actions, -EINTR on pending signals
-- [ ] A3: Busybox milestone — correr un binario musl-static real bajo LUCAS
+- [x] A3: Binario dinámico musl — hello_dynamic + nano 8.2 corren bajo LUCAS via PT_INTERP + ld-musl
+- [ ] A4: Busybox milestone — correr un binario musl-static real bajo LUCAS (hello-musl placeholder, 64 bytes)
 
 ## MEDIO (completitud UNIX)
 - [x] M1: mmap file-backed — seek to offset, read file content into mapped pages, restore position

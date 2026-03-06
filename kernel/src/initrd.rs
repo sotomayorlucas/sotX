@@ -61,8 +61,10 @@ pub fn find<'a>(data: &'a [u8], name: &str) -> Option<&'a [u8]> {
             return None;
         }
 
-        // Verify magic "070701".
-        if &data[pos..pos + 6] != b"070701" {
+        // Verify magic "070701" — compare byte-by-byte to avoid memcmp UB checks.
+        let magic_ok = data[pos] == b'0' && data[pos+1] == b'7' && data[pos+2] == b'0'
+            && data[pos+3] == b'7' && data[pos+4] == b'0' && data[pos+5] == b'1';
+        if !magic_ok {
             return None;
         }
 
@@ -86,13 +88,33 @@ pub fn find<'a>(data: &'a [u8], name: &str) -> Option<&'a [u8]> {
             return None;
         }
 
-        // Check for trailer sentinel.
-        if entry_name == b"TRAILER!!!" {
+        // Check for trailer sentinel — byte-by-byte.
+        if entry_name.len() == 10
+            && entry_name[0] == b'T' && entry_name[1] == b'R'
+            && entry_name[2] == b'A' && entry_name[3] == b'I'
+            && entry_name[4] == b'L' && entry_name[5] == b'E'
+            && entry_name[6] == b'R' && entry_name[7] == b'!'
+            && entry_name[8] == b'!' && entry_name[9] == b'!'
+        {
             return None;
         }
 
-        // Match?
-        if entry_name == name.as_bytes() {
+        // Match? — byte-by-byte to avoid compiler_builtins memcmp UB checks.
+        let target = name.as_bytes();
+        let matched = if entry_name.len() == target.len() {
+            let mut eq = true;
+            for i in 0..entry_name.len() {
+                if entry_name[i] != target[i] {
+                    eq = false;
+                    break;
+                }
+            }
+            eq
+        } else {
+            false
+        };
+
+        if matched {
             return Some(&data[data_start..data_end]);
         }
 

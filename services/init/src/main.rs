@@ -193,6 +193,9 @@ pub extern "C" fn _start() -> ! {
     // --- Phase 7.6: musl-static binary test (Busybox milestone) ---
     run_musl_test();
 
+    // --- Phase 7.7: dynamically-linked binary test ---
+    run_dynamic_test();
+
     // --- Phase 8: LUCAS shell (LAST — interactive, takes over serial+framebuffer) ---
     start_lucas(blk);
 
@@ -1104,6 +1107,332 @@ fn run_musl_test() {
     print(b"MUSL-TEST: complete\n");
 }
 
+/// Run a dynamically-linked musl binary (hello_dynamic) via LUCAS.
+/// Tests the dynamic linker loading infrastructure: PT_INTERP, file-backed mmap, etc.
+fn run_dynamic_test() {
+    print(b"DYNAMIC-TEST: loading hello_dynamic...\n");
+
+    while EXEC_LOCK.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Relaxed).is_err() {
+        sys::yield_now();
+    }
+
+    let ep_cap = match exec_from_initrd(b"hello_dynamic") {
+        Ok(ep) => {
+            EXEC_LOCK.store(0, Ordering::Release);
+            ep
+        }
+        Err(e) => {
+            EXEC_LOCK.store(0, Ordering::Release);
+            print(b"DYNAMIC-TEST: failed to load (errno=");
+            print_u64((-e) as u64);
+            print(b")\n");
+            return;
+        }
+    };
+
+    print(b"DYNAMIC-TEST: running dynamic binary...\n");
+
+    // Re-use child brk/mmap for this test — use a dedicated region
+    let mut current_brk: u64 = 0x9000000;
+    let mut mmap_next: u64 = 0x9100000;
+
+    // Initrd file tracking
+    const DYN_MAX_FDS: usize = 32;
+    let mut child_fds = [0u8; DYN_MAX_FDS];
+    child_fds[0] = 1; // stdin
+    child_fds[1] = 2; // stdout
+    child_fds[2] = 2; // stderr
+
+    const DYN_MAX_INITRD_FILES: usize = 8;
+    let mut initrd_files: [[u64; 4]; DYN_MAX_INITRD_FILES] = [[0; 4]; DYN_MAX_INITRD_FILES];
+    let initrd_file_buf_base: u64 = 0x9200000;
+
+    loop {
+        let msg = match sys::recv(ep_cap) {
+            Ok(m) => m,
+            Err(_) => break,
+        };
+
+        let nr = msg.tag;
+        match nr {
+            // write(fd, buf, len)
+            1 => {
+                let buf_ptr = msg.regs[1];
+                let len = msg.regs[2] as usize;
+                if len > 0 && buf_ptr != 0 && buf_ptr < 0x0000_8000_0000_0000 {
+                    let data = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, len) };
+                    for &b in data { sys::debug_print(b); unsafe { fb_putchar(b); } }
+                }
+                reply_val(ep_cap, len as i64);
+            }
+            // read(fd, buf, len)
+            0 => {
+                let fd = msg.regs[0] as usize;
+                if fd < DYN_MAX_FDS && child_fds[fd] == 12 {
+                    // Initrd file read
+                    let buf_ptr = msg.regs[1];
+                    let len = msg.regs[2] as usize;
+                    let mut found = false;
+                    for s in 0..DYN_MAX_INITRD_FILES {
+                        if initrd_files[s][3] == fd as u64 && initrd_files[s][0] != 0 {
+                            let data_base = initrd_files[s][0];
+                            let file_size = initrd_files[s][1];
+                            let pos = initrd_files[s][2];
+                            let avail = if pos < file_size { file_size - pos } else { 0 };
+                            let to_read = (len as u64).min(avail) as usize;
+                            if to_read > 0 {
+                                unsafe {
+                                    core::ptr::copy_nonoverlapping(
+                                        (data_base + pos) as *const u8,
+                                        buf_ptr as *mut u8,
+                                        to_read,
+                                    );
+                                }
+                                initrd_files[s][2] = pos + to_read as u64;
+                            }
+                            reply_val(ep_cap, to_read as i64);
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found { reply_val(ep_cap, 0); }
+                } else {
+                    reply_val(ep_cap, 0); // EOF
+                }
+            }
+            // open(path, flags, mode) — musl dynamic linker uses SYS_open
+            2 => {
+                let path_ptr = msg.regs[0];
+                let mut path = [0u8; 128];
+                let path_len = copy_guest_path(path_ptr, &mut path);
+                let name = &path[..path_len];
+
+                // Try initrd by basename
+                let mut basename_start = 0usize;
+                for idx in 0..path_len {
+                    if name[idx] == b'/' { basename_start = idx + 1; }
+                }
+                let basename = &name[basename_start..];
+
+                let mut slot = None;
+                for s in 0..DYN_MAX_INITRD_FILES {
+                    if initrd_files[s][0] == 0 { slot = Some(s); break; }
+                }
+
+                if basename.is_empty() || slot.is_none() {
+                    reply_val(ep_cap, -2);
+                    continue;
+                }
+                let slot = slot.unwrap();
+
+                let file_buf = initrd_file_buf_base + (slot as u64) * 0x100000;
+                const FILE_BUF_PAGES_DYN: u64 = 256;
+                let mut buf_ok = true;
+                for p in 0..FILE_BUF_PAGES_DYN {
+                    if let Ok(f) = sys::frame_alloc() {
+                        if sys::map(file_buf + p * 0x1000, f, MAP_WRITABLE).is_err() {
+                            buf_ok = false; break;
+                        }
+                    } else { buf_ok = false; break; }
+                }
+                if !buf_ok { reply_val(ep_cap, -12); continue; }
+
+                match sys::initrd_read(
+                    basename.as_ptr() as u64,
+                    basename.len() as u64,
+                    file_buf,
+                    FILE_BUF_PAGES_DYN * 0x1000,
+                ) {
+                    Ok(sz) => {
+                        let mut fd = None;
+                        for i in 3..DYN_MAX_FDS { if child_fds[i] == 0 { fd = Some(i); break; } }
+                        if let Some(f) = fd {
+                            child_fds[f] = 12;
+                            initrd_files[slot] = [file_buf, sz, 0, f as u64];
+                            print(b"DYNAMIC: open(");
+                            for &b in basename { sys::debug_print(b); unsafe { fb_putchar(b); } }
+                            print(b") = fd ");
+                            print_u64(f as u64);
+                            print(b" size=");
+                            print_u64(sz);
+                            print(b"\n");
+                            reply_val(ep_cap, f as i64);
+                        } else {
+                            for p in 0..FILE_BUF_PAGES_DYN { let _ = sys::unmap(file_buf + p * 0x1000); }
+                            reply_val(ep_cap, -24);
+                        }
+                    }
+                    Err(_) => {
+                        for p in 0..FILE_BUF_PAGES_DYN { let _ = sys::unmap(file_buf + p * 0x1000); }
+                        reply_val(ep_cap, -2);
+                    }
+                }
+            }
+            // close
+            3 => {
+                let fd = msg.regs[0] as usize;
+                if fd < DYN_MAX_FDS && child_fds[fd] == 12 {
+                    for s in 0..DYN_MAX_INITRD_FILES {
+                        if initrd_files[s][3] == fd as u64 {
+                            initrd_files[s][3] = u64::MAX;
+                            break;
+                        }
+                    }
+                }
+                if fd < DYN_MAX_FDS { child_fds[fd] = 0; }
+                reply_val(ep_cap, 0);
+            }
+            // fstat
+            5 => {
+                let fd = msg.regs[0] as usize;
+                let stat_ptr = msg.regs[1];
+                if fd < DYN_MAX_FDS && child_fds[fd] == 12 {
+                    let mut size = 0u64;
+                    for s in 0..DYN_MAX_INITRD_FILES {
+                        if initrd_files[s][3] == fd as u64 && initrd_files[s][0] != 0 {
+                            size = initrd_files[s][1];
+                            break;
+                        }
+                    }
+                    write_linux_stat(stat_ptr, fd as u64, size, false);
+                } else {
+                    write_linux_stat(stat_ptr, fd as u64, 0, false);
+                }
+                reply_val(ep_cap, 0);
+            }
+            // poll
+            7 => reply_val(ep_cap, 0),
+            // mmap(addr, len, prot, flags, fd, offset)
+            9 => {
+                let req_addr = msg.regs[0];
+                let len = msg.regs[1];
+                let flags = msg.regs[3] as u32;
+                let fd = msg.regs[4] as i64;
+                let offset = msg.regs[5];
+
+                let map_fixed = (flags & 0x10) != 0;
+                let pages = ((len + 0xFFF) & !0xFFF) / 0x1000;
+
+                let base = if map_fixed && req_addr != 0 {
+                    for p in 0..pages { let _ = sys::unmap(req_addr + p * 0x1000); }
+                    req_addr
+                } else {
+                    let b = mmap_next;
+                    mmap_next += pages * 0x1000;
+                    b
+                };
+
+                // Allocate pages
+                let mut ok = true;
+                for p in 0..pages {
+                    if let Ok(f) = sys::frame_alloc() {
+                        if sys::map(base + p * 0x1000, f, MAP_WRITABLE).is_err() { ok = false; break; }
+                    } else { ok = false; break; }
+                }
+                if !ok { reply_val(ep_cap, -12); continue; }
+
+                // Zero the region
+                unsafe { core::ptr::write_bytes(base as *mut u8, 0, (pages * 0x1000) as usize); }
+
+                // If file-backed, copy data from initrd file
+                if fd >= 0 {
+                    let fdu = fd as usize;
+                    let mut file_data: u64 = 0;
+                    let mut file_size: u64 = 0;
+                    for s in 0..DYN_MAX_INITRD_FILES {
+                        if initrd_files[s][0] != 0 && (initrd_files[s][3] == fdu as u64 || initrd_files[s][3] == u64::MAX) {
+                            if initrd_files[s][3] == fdu as u64 {
+                                file_data = initrd_files[s][0];
+                                file_size = initrd_files[s][1];
+                                break;
+                            }
+                        }
+                    }
+                    if file_data != 0 {
+                        let file_off = offset as usize;
+                        let avail = if file_off < file_size as usize { file_size as usize - file_off } else { 0 };
+                        let to_copy = ((pages * 0x1000) as usize).min(avail);
+                        if to_copy > 0 {
+                            unsafe {
+                                core::ptr::copy_nonoverlapping(
+                                    (file_data + file_off as u64) as *const u8,
+                                    base as *mut u8,
+                                    to_copy,
+                                );
+                            }
+                        }
+                    }
+                }
+
+                reply_val(ep_cap, base as i64);
+            }
+            // mprotect
+            10 => reply_val(ep_cap, 0),
+            // munmap
+            11 => {
+                let addr = msg.regs[0];
+                let len = msg.regs[1];
+                let pages = ((len + 0xFFF) & !0xFFF) / 0x1000;
+                for p in 0..pages { let _ = sys::unmap(addr + p * 0x1000); }
+                reply_val(ep_cap, 0);
+            }
+            // brk
+            12 => {
+                let addr = msg.regs[0];
+                if addr == 0 || addr <= current_brk {
+                    reply_val(ep_cap, current_brk as i64);
+                } else {
+                    let new_brk = (addr + 0xFFF) & !0xFFF;
+                    let mut pg = (current_brk + 0xFFF) & !0xFFF;
+                    let mut ok = true;
+                    while pg < new_brk {
+                        if let Ok(f) = sys::frame_alloc() {
+                            if sys::map(pg, f, MAP_WRITABLE).is_err() { ok = false; break; }
+                        } else { ok = false; break; }
+                        pg += 0x1000;
+                    }
+                    if ok { current_brk = new_brk; }
+                    reply_val(ep_cap, current_brk as i64);
+                }
+            }
+            // rt_sigaction
+            13 => reply_val(ep_cap, 0),
+            // rt_sigprocmask
+            14 => reply_val(ep_cap, 0),
+            // fcntl
+            72 => reply_val(ep_cap, 0),
+            // getpid
+            39 => reply_val(ep_cap, 999),
+            // arch_prctl — kernel intercepts, shouldn't reach
+            158 => reply_val(ep_cap, 0),
+            // set_tid_address
+            218 => reply_val(ep_cap, 999),
+            // exit / exit_group
+            60 | 231 => {
+                let status = msg.regs[0] as i64;
+                print(b"DYNAMIC-TEST: exited with status ");
+                print_u64(status as u64);
+                print(b"\n");
+                if status == 0 {
+                    print(b"DYNAMIC-TEST: SUCCESS -- dynamically-linked musl binary ran under LUCAS!\n");
+                } else {
+                    print(b"DYNAMIC-TEST: FAILED\n");
+                }
+                break;
+            }
+            // Unknown
+            _ => {
+                print(b"DYNAMIC: unhandled syscall ");
+                print_u64(nr);
+                print(b"\n");
+                reply_val(ep_cap, -38);
+            }
+        }
+    }
+
+    print(b"DYNAMIC-TEST: complete\n");
+}
+
 /// Producer entry point — runs in a separate thread, same address space.
 #[unsafe(no_mangle)]
 pub extern "C" fn producer() -> ! {
@@ -1862,7 +2191,29 @@ static SCANCODE_TO_ASCII_SHIFT: [u8; 128] = [
 /// Read one ASCII character from the keyboard ring buffer OR serial (non-blocking).
 /// Checks PS/2 keyboard ring first, then falls back to serial input.
 /// Handles Shift/Ctrl modifier tracking, returns None if no key available.
+/// Buffered byte from serial peek (0 = empty, otherwise byte value).
+static KB_PEEK_BUF: AtomicU64 = AtomicU64::new(0);
+
+/// Check if a character is available without consuming it.
+unsafe fn kb_has_char() -> bool {
+    if KB_PEEK_BUF.load(Ordering::Relaxed) != 0 { return true; }
+    if let Some(b) = sys::debug_read() {
+        let ch = if b == b'\r' { b'\n' } else { b };
+        KB_PEEK_BUF.store(ch as u64, Ordering::Relaxed);
+        return true;
+    }
+    let ring = KB_RING_ADDR as *mut u32;
+    let write_idx = core::ptr::read_volatile(ring);
+    let read_idx = core::ptr::read_volatile(ring.add(1));
+    read_idx != write_idx
+}
+
 unsafe fn kb_read_char() -> Option<u8> {
+    // Return buffered peek byte first.
+    let peeked = KB_PEEK_BUF.swap(0, Ordering::Relaxed);
+    if peeked != 0 {
+        return Some(peeked as u8);
+    }
     // Check serial input first (works in headless mode).
     if let Some(b) = sys::debug_read() {
         // Convert \r to \n for terminal compatibility.
@@ -2386,6 +2737,11 @@ static EXEC_LOCK: AtomicU64 = AtomicU64::new(0);
 const EXEC_BUF_BASE: u64 = 0x5400000;
 const EXEC_BUF_PAGES: u64 = 128; // 512 KiB
 const EXEC_TEMP_MAP: u64 = 0x5480000; // past EXEC_BUF_BASE + 128*4K
+/// Temp buffer for loading the interpreter ELF (for dynamic binaries).
+const INTERP_BUF_BASE: u64 = 0xA000000; // Far from other regions
+const INTERP_BUF_PAGES: u64 = 220; // ~900 KiB, enough for ld-musl (~845 KiB)
+/// Load base for the dynamic interpreter (ET_DYN, position-independent).
+const INTERP_LOAD_BASE: u64 = 0x6000000;
 
 /// Send an IPC reply with a single return value.
 fn reply_val(ep_cap: u64, val: i64) {
@@ -2440,77 +2796,31 @@ fn starts_with(hay: &[u8], needle: &[u8]) -> bool {
     hay.len() >= needle.len() && &hay[..needle.len()] == needle
 }
 
-/// Load an ELF from initrd into the current address space, create a thread
-/// with syscall redirect, and return the new endpoint cap.
-/// Caller must hold EXEC_LOCK.
-fn exec_from_initrd(bin_name: &[u8]) -> Result<u64, i64> {
-    use sotos_common::elf;
-
-    // Step 1: Map temp buffer pages
-    let mut mapped_pages: u64 = 0;
-    for i in 0..EXEC_BUF_PAGES {
-        let frame_cap = match sys::frame_alloc() {
-            Ok(f) => f,
-            Err(_) => {
-                for j in 0..mapped_pages { let _ = sys::unmap(EXEC_BUF_BASE + j * 0x1000); }
-                return Err(-12);
-            }
-        };
-        if sys::map(EXEC_BUF_BASE + i * 0x1000, frame_cap, MAP_WRITABLE).is_err() {
-            for j in 0..mapped_pages { let _ = sys::unmap(EXEC_BUF_BASE + j * 0x1000); }
-            return Err(-12);
-        }
-        mapped_pages += 1;
-    }
-
-    // Step 2: Read ELF from initrd
-    let file_size = match sys::initrd_read(
-        bin_name.as_ptr() as u64,
-        bin_name.len() as u64,
-        EXEC_BUF_BASE,
-        EXEC_BUF_PAGES * 0x1000,
-    ) {
-        Ok(sz) => sz as usize,
-        Err(_) => {
-            for i in 0..EXEC_BUF_PAGES { let _ = sys::unmap(EXEC_BUF_BASE + i * 0x1000); }
-            return Err(-2); // ENOENT
-        }
-    };
-
-    // Step 3: Parse ELF
-    let elf_data = unsafe { core::slice::from_raw_parts(EXEC_BUF_BASE as *const u8, file_size) };
-    let elf_info = match elf::parse(elf_data) {
-        Ok(info) => info,
-        Err(_) => {
-            for i in 0..EXEC_BUF_PAGES { let _ = sys::unmap(EXEC_BUF_BASE + i * 0x1000); }
-            return Err(-8); // ENOEXEC
-        }
-    };
-
-    // Step 4: Map each PT_LOAD segment into current AS
-    let mut segments = [const { elf::LoadSegment { offset: 0, vaddr: 0, filesz: 0, memsz: 0, flags: 0 } }; elf::MAX_LOAD_SEGMENTS];
-    let seg_count = elf::load_segments(elf_data, &elf_info, &mut segments);
-
+/// Map ELF PT_LOAD segments from a buffer into the current address space.
+/// For ET_DYN (position-independent), vaddrs are offset by `base`.
+/// For ET_EXEC, `base` should be 0.
+/// `buf_base` is the virtual address where the ELF file data is mapped.
+fn map_elf_segments(
+    buf_base: u64,
+    elf_info: &sotos_common::elf::ElfInfo,
+    segments: &[sotos_common::elf::LoadSegment; sotos_common::elf::MAX_LOAD_SEGMENTS],
+    seg_count: usize,
+    base: u64,
+) -> Result<(), i64> {
     for si in 0..seg_count {
         let seg = &segments[si];
         if seg.memsz == 0 { continue; }
-        let seg_start = seg.vaddr & !0xFFF;
-        let seg_end = (seg.vaddr + seg.memsz as u64 + 0xFFF) & !0xFFF;
+        let load_vaddr = base + seg.vaddr;
+        let seg_start = load_vaddr & !0xFFF;
+        let seg_end = (load_vaddr + seg.memsz as u64 + 0xFFF) & !0xFFF;
         let is_writable = (seg.flags & 2) != 0;
 
         let mut page_vaddr = seg_start;
         while page_vaddr < seg_end {
-            let frame_cap = match sys::frame_alloc() {
-                Ok(f) => f,
-                Err(_) => {
-                    for i in 0..EXEC_BUF_PAGES { let _ = sys::unmap(EXEC_BUF_BASE + i * 0x1000); }
-                    return Err(-12);
-                }
-            };
+            let frame_cap = sys::frame_alloc().map_err(|_| -12i64)?;
 
             // Map temporarily to copy data
             if sys::map(EXEC_TEMP_MAP, frame_cap, MAP_WRITABLE).is_err() {
-                for i in 0..EXEC_BUF_PAGES { let _ = sys::unmap(EXEC_BUF_BASE + i * 0x1000); }
                 return Err(-12);
             }
 
@@ -2519,18 +2829,18 @@ fn exec_from_initrd(bin_name: &[u8]) -> Result<u64, i64> {
             // Copy file data for this page
             let page_start = page_vaddr;
             let page_end = page_vaddr + 4096;
-            let file_region_start = seg.vaddr;
-            let file_region_end = seg.vaddr + seg.filesz as u64;
+            let file_region_start = load_vaddr;
+            let file_region_end = load_vaddr + seg.filesz as u64;
             let copy_start = page_start.max(file_region_start);
             let copy_end = page_end.min(file_region_end);
 
             if copy_start < copy_end {
                 let dst_offset = (copy_start - page_start) as usize;
-                let src_offset = seg.offset + (copy_start - seg.vaddr) as usize;
+                let src_offset = seg.offset + (copy_start - load_vaddr) as usize;
                 let count = (copy_end - copy_start) as usize;
                 unsafe {
                     core::ptr::copy_nonoverlapping(
-                        (EXEC_BUF_BASE as *const u8).add(src_offset),
+                        (buf_base as *const u8).add(src_offset),
                         (EXEC_TEMP_MAP as *mut u8).add(dst_offset),
                         count,
                     );
@@ -2539,61 +2849,173 @@ fn exec_from_initrd(bin_name: &[u8]) -> Result<u64, i64> {
 
             let _ = sys::unmap(EXEC_TEMP_MAP);
 
-            // Map into current AS at the ELF's vaddr
             let flags = if is_writable { MAP_WRITABLE } else { 0 };
             if sys::map(page_vaddr, frame_cap, flags).is_err() {
-                for i in 0..EXEC_BUF_PAGES { let _ = sys::unmap(EXEC_BUF_BASE + i * 0x1000); }
-                return Err(-12); // address conflict or OOM
+                return Err(-12);
             }
 
             page_vaddr += 4096;
         }
     }
+    Ok(())
+}
 
-    // Step 5: Allocate stack (2 pages for musl stack space)
-    let stack_addr = NEXT_CHILD_STACK.fetch_add(0x4000, Ordering::SeqCst);
-    for pg in 0..4u64 {
-        let f = match sys::frame_alloc() {
-            Ok(f) => f,
+/// Map a temporary buffer for reading ELF files from initrd.
+fn map_temp_buf(base: u64, pages: u64) -> Result<(), i64> {
+    for i in 0..pages {
+        let f = sys::frame_alloc().map_err(|_| -12i64)?;
+        if sys::map(base + i * 0x1000, f, MAP_WRITABLE).is_err() {
+            for j in 0..i { let _ = sys::unmap(base + j * 0x1000); }
+            return Err(-12);
+        }
+    }
+    Ok(())
+}
+
+/// Unmap a temporary buffer.
+fn unmap_temp_buf(base: u64, pages: u64) {
+    for i in 0..pages { let _ = sys::unmap(base + i * 0x1000); }
+}
+
+/// Load an ELF from initrd into the current address space, create a thread
+/// with syscall redirect, and return the new endpoint cap.
+/// Supports both static (ET_EXEC) and dynamic (ET_DYN with PT_INTERP) binaries.
+/// Caller must hold EXEC_LOCK.
+fn exec_from_initrd(bin_name: &[u8]) -> Result<u64, i64> {
+    use sotos_common::elf;
+
+    // Step 1: Map temp buffer and read main ELF
+    map_temp_buf(EXEC_BUF_BASE, EXEC_BUF_PAGES)?;
+
+    let file_size = match sys::initrd_read(
+        bin_name.as_ptr() as u64,
+        bin_name.len() as u64,
+        EXEC_BUF_BASE,
+        EXEC_BUF_PAGES * 0x1000,
+    ) {
+        Ok(sz) => sz as usize,
+        Err(_) => {
+            unmap_temp_buf(EXEC_BUF_BASE, EXEC_BUF_PAGES);
+            return Err(-2);
+        }
+    };
+
+    // Step 2: Parse main ELF
+    let elf_data = unsafe { core::slice::from_raw_parts(EXEC_BUF_BASE as *const u8, file_size) };
+    let elf_info = match elf::parse(elf_data) {
+        Ok(info) => info,
+        Err(_) => {
+            unmap_temp_buf(EXEC_BUF_BASE, EXEC_BUF_PAGES);
+            return Err(-8);
+        }
+    };
+
+    let mut segments = [const { elf::LoadSegment { offset: 0, vaddr: 0, filesz: 0, memsz: 0, flags: 0 } }; elf::MAX_LOAD_SEGMENTS];
+    let seg_count = elf::load_segments(elf_data, &elf_info, &mut segments);
+
+    // Step 3: Check for PT_INTERP (dynamic binary)
+    let interp_info = elf::parse_interp(elf_data, &elf_info);
+    let is_dynamic = interp_info.is_some();
+
+    // For ET_DYN main binary, we load it at a fixed base to avoid address 0
+    let main_base: u64 = if elf_info.elf_type == 3 { 0x400000 } else { 0 };
+
+    // Step 4: Map main binary segments
+    if let Err(e) = map_elf_segments(EXEC_BUF_BASE, &elf_info, &segments, seg_count, main_base) {
+        unmap_temp_buf(EXEC_BUF_BASE, EXEC_BUF_PAGES);
+        return Err(e);
+    }
+
+    // Step 5: If dynamic, load the interpreter too
+    let mut exec_entry = main_base + elf_info.entry;
+    let mut interp_base: u64 = 0;
+
+    if let Some(ref interp) = interp_info {
+        // Extract interpreter filename (basename from path like /lib/ld-musl-x86_64.so.1)
+        // Copy to stack buffer before we potentially use the exec buf for anything else
+        let mut interp_name_buf = [0u8; 64];
+        let interp_path = &elf_data[interp.offset..interp.offset + interp.len];
+        let mut basename_start = 0;
+        for idx in 0..interp.len {
+            if interp_path[idx] == b'/' { basename_start = idx + 1; }
+        }
+        let interp_name_len = interp.len - basename_start;
+        let safe_len = interp_name_len.min(63);
+        interp_name_buf[..safe_len].copy_from_slice(&interp_path[basename_start..basename_start + safe_len]);
+        let interp_name = &interp_name_buf[..safe_len];
+
+        // Map interpreter buffer and read from initrd
+        if let Err(e) = map_temp_buf(INTERP_BUF_BASE, INTERP_BUF_PAGES) {
+            unmap_temp_buf(EXEC_BUF_BASE, EXEC_BUF_PAGES);
+            return Err(e);
+        }
+
+        let interp_size = match sys::initrd_read(
+            interp_name.as_ptr() as u64,
+            interp_name.len() as u64,
+            INTERP_BUF_BASE,
+            INTERP_BUF_PAGES * 0x1000,
+        ) {
+            Ok(sz) => sz as usize,
             Err(_) => {
-                for i in 0..EXEC_BUF_PAGES { let _ = sys::unmap(EXEC_BUF_BASE + i * 0x1000); }
-                return Err(-12);
+                print(b"EXEC: interpreter not found in initrd\n");
+                unmap_temp_buf(INTERP_BUF_BASE, INTERP_BUF_PAGES);
+                unmap_temp_buf(EXEC_BUF_BASE, EXEC_BUF_PAGES);
+                return Err(-2);
             }
         };
+
+        let interp_data = unsafe { core::slice::from_raw_parts(INTERP_BUF_BASE as *const u8, interp_size) };
+        let interp_elf = match elf::parse(interp_data) {
+            Ok(info) => info,
+            Err(_) => {
+                unmap_temp_buf(INTERP_BUF_BASE, INTERP_BUF_PAGES);
+                unmap_temp_buf(EXEC_BUF_BASE, EXEC_BUF_PAGES);
+                return Err(-8);
+            }
+        };
+
+        let mut interp_segs = [const { elf::LoadSegment { offset: 0, vaddr: 0, filesz: 0, memsz: 0, flags: 0 } }; elf::MAX_LOAD_SEGMENTS];
+        let interp_seg_count = elf::load_segments(interp_data, &interp_elf, &mut interp_segs);
+
+        // Load interpreter at INTERP_LOAD_BASE (it's ET_DYN, position-independent)
+        interp_base = INTERP_LOAD_BASE;
+        if let Err(e) = map_elf_segments(INTERP_BUF_BASE, &interp_elf, &interp_segs, interp_seg_count, interp_base) {
+            unmap_temp_buf(INTERP_BUF_BASE, INTERP_BUF_PAGES);
+            unmap_temp_buf(EXEC_BUF_BASE, EXEC_BUF_PAGES);
+            return Err(e);
+        }
+
+        // Execution starts at interpreter's entry point
+        exec_entry = interp_base + interp_elf.entry;
+
+        unmap_temp_buf(INTERP_BUF_BASE, INTERP_BUF_PAGES);
+    }
+
+    // Step 6: Allocate stack (4 pages)
+    let stack_addr = NEXT_CHILD_STACK.fetch_add(0x4000, Ordering::SeqCst);
+    for pg in 0..4u64 {
+        let f = sys::frame_alloc().map_err(|_| -12i64)?;
         if sys::map(stack_addr + pg * 0x1000, f, MAP_WRITABLE).is_err() {
-            for i in 0..EXEC_BUF_PAGES { let _ = sys::unmap(EXEC_BUF_BASE + i * 0x1000); }
+            unmap_temp_buf(EXEC_BUF_BASE, EXEC_BUF_PAGES);
             return Err(-12);
         }
     }
 
-    // Step 5b: Set up Linux-style initial stack (for musl _start compatibility)
-    // Layout (growing downward from stack_top):
-    //   [string data]  "progname\0"
-    //   AT_NULL(0, 0)
-    //   AT_PAGESZ(6, 0x1000)
-    //   AT_ENTRY(9, entry)
-    //   AT_PHNUM(5, phnum)
-    //   AT_PHENT(4, 56)
-    //   AT_PHDR(3, phdr_vaddr)
-    //   NULL  (end of envp)
-    //   NULL  (end of argv)
-    //   argv[0]  (pointer to name string)
-    //   argc = 1
-    //   ← RSP
+    // Step 7: Set up Linux-style initial stack
     let stack_top = stack_addr + 0x4000;
-    let _stack_ptr = stack_top as *mut u64;
 
     // Write program name string and AT_RANDOM data at top of stack
     let name_len = bin_name.len();
-    let name_start = stack_top - 256; // reserve 256 bytes for strings/data
+    let name_start = stack_top - 256;
     unsafe {
         let dst = name_start as *mut u8;
         core::ptr::copy_nonoverlapping(bin_name.as_ptr(), dst, name_len);
-        *dst.add(name_len) = 0; // NUL terminate
+        *dst.add(name_len) = 0;
     }
 
-    // Write 16 bytes of pseudo-random data for AT_RANDOM (used by musl's __init_ssp)
-    let random_addr = name_start + 128; // 128 bytes after name, still in reserved area
+    // Write 16 bytes of pseudo-random data for AT_RANDOM
+    let random_addr = name_start + 128;
     unsafe {
         let rp = random_addr as *mut u64;
         let mut seed = rdtsc();
@@ -2603,90 +3025,104 @@ fn exec_from_initrd(bin_name: &[u8]) -> Result<u64, i64> {
         *rp.add(1) = seed;
     }
 
-    // Find phdr vaddr: the ELF header is at the base of the first LOAD segment,
-    // and program headers are at e_phoff from that base.
-    let elf_base = if seg_count > 0 { segments[0].vaddr & !0xFFF } else { 0 };
+    // Find phdr vaddr for main binary
+    let elf_base = main_base + if seg_count > 0 { segments[0].vaddr & !0xFFF } else { 0 };
     let phdr_vaddr = elf_base + elf_info.phoff as u64;
 
-    // Build the stack from top down
-    // We need 16-byte alignment for the final RSP
-    // Stack entries (8 bytes each):
-    //   auxv: 6 pairs (12 entries) + 2 for AT_NULL = 14
-    //   envp: 1 (NULL)
-    //   argv: 2 (argv[0], NULL)
-    //   argc: 1
-    // Total: 18 entries = 144 bytes
-    let entries: u64 = 18;
-    let rsp = name_start - entries * 8;
-    // Align to 16 bytes
-    let rsp = rsp & !0xF;
+    // Write environment strings just below the program name
+    let env_term = b"TERM=xterm\0";
+    let env_home = b"HOME=/\0";
+    let env_terminfo = b"TERMINFO=/usr/share/terminfo\0";
+    let env_term_addr = random_addr + 16;
+    let env_home_addr = env_term_addr + env_term.len() as u64;
+    let env_terminfo_addr = env_home_addr + env_home.len() as u64;
+    unsafe {
+        core::ptr::copy_nonoverlapping(env_term.as_ptr(), env_term_addr as *mut u8, env_term.len());
+        core::ptr::copy_nonoverlapping(env_home.as_ptr(), env_home_addr as *mut u8, env_home.len());
+        core::ptr::copy_nonoverlapping(env_terminfo.as_ptr(), env_terminfo_addr as *mut u8, env_terminfo.len());
+    }
+
+    // Build auxv — for dynamic binaries we add AT_BASE (interpreter load address)
+    // auxv pairs: AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_RANDOM, AT_ENTRY, [AT_BASE], AT_NULL
+    let auxv_pairs: u64 = if is_dynamic { 8 } else { 7 }; // 7 or 8 pairs
+    let env_count: u64 = 3; // TERM, HOME, TERMINFO
+    let entries: u64 = 4 + env_count + auxv_pairs * 2; // argc + argv[0] + NULL + env[0..n] + NULL + auxv
+    let rsp = (name_start - entries * 8) & !0xF;
 
     unsafe {
         let sp = rsp as *mut u64;
         let mut i: usize = 0;
         // argc
         *sp.add(i) = 1; i += 1;
-        // argv[0] = pointer to program name
+        // argv[0]
         *sp.add(i) = name_start; i += 1;
         // argv terminator
         *sp.add(i) = 0; i += 1;
+        // envp[0] = TERM=xterm
+        *sp.add(i) = env_term_addr; i += 1;
+        // envp[1] = HOME=/
+        *sp.add(i) = env_home_addr; i += 1;
+        // envp[2] = TERMINFO=/usr/share/terminfo
+        *sp.add(i) = env_terminfo_addr; i += 1;
         // envp terminator
         *sp.add(i) = 0; i += 1;
-        // auxv: AT_PHDR(3) = address of program headers in memory
+        // AT_PHDR(3)
         *sp.add(i) = 3; i += 1;
         *sp.add(i) = phdr_vaddr; i += 1;
-        // auxv: AT_PHENT(4) = 56
+        // AT_PHENT(4) = 56
         *sp.add(i) = 4; i += 1;
         *sp.add(i) = 56; i += 1;
-        // auxv: AT_PHNUM(5)
+        // AT_PHNUM(5)
         *sp.add(i) = 5; i += 1;
         *sp.add(i) = elf_info.phnum as u64; i += 1;
-        // auxv: AT_PAGESZ(6) = 4096
+        // AT_PAGESZ(6)
         *sp.add(i) = 6; i += 1;
         *sp.add(i) = 4096; i += 1;
-        // auxv: AT_RANDOM(25) = pointer to 16 random bytes (for stack canary)
+        // AT_RANDOM(25)
         *sp.add(i) = 25; i += 1;
         *sp.add(i) = random_addr; i += 1;
-        // auxv: AT_ENTRY(9) = entry point
+        // AT_ENTRY(9) = main binary's entry (not interpreter's)
         *sp.add(i) = 9; i += 1;
-        *sp.add(i) = elf_info.entry; i += 1;
-        // auxv: AT_NULL(0) = terminator
+        *sp.add(i) = main_base + elf_info.entry; i += 1;
+        // AT_BASE(7) = interpreter load address (only for dynamic binaries)
+        if is_dynamic {
+            *sp.add(i) = 7; i += 1;
+            *sp.add(i) = interp_base; i += 1;
+        }
+        // AT_NULL(0)
         *sp.add(i) = 0; i += 1;
         *sp.add(i) = 0;
     }
 
-    // Debug: log stack setup
     print(b"EXEC: entry=0x");
-    print_hex64(elf_info.entry);
+    print_hex64(exec_entry);
     print(b" rsp=0x");
     print_hex64(rsp);
-    print(b" stack=0x");
-    print_hex64(stack_addr);
-    print(b"..0x");
-    print_hex64(stack_top);
-    print(b" phdr=0x");
-    print_hex64(phdr_vaddr);
+    if is_dynamic {
+        print(b" [dynamic] AT_BASE=0x");
+        print_hex64(interp_base);
+        print(b" AT_ENTRY=0x");
+        print_hex64(main_base + elf_info.entry);
+    }
     print(b"\n");
 
-    // Step 6: Create endpoint, then thread with redirect pre-set (atomic, no race)
+    // Step 8: Create endpoint + redirected thread
     let new_ep = match sys::endpoint_create() {
         Ok(e) => e,
         Err(_) => {
-            for i in 0..EXEC_BUF_PAGES { let _ = sys::unmap(EXEC_BUF_BASE + i * 0x1000); }
+            unmap_temp_buf(EXEC_BUF_BASE, EXEC_BUF_PAGES);
             return Err(-12);
         }
     };
-    let _new_thread = match sys::thread_create_redirected(elf_info.entry, rsp, new_ep) {
+    let _new_thread = match sys::thread_create_redirected(exec_entry, rsp, new_ep) {
         Ok(t) => t,
         Err(_) => {
-            for i in 0..EXEC_BUF_PAGES { let _ = sys::unmap(EXEC_BUF_BASE + i * 0x1000); }
+            unmap_temp_buf(EXEC_BUF_BASE, EXEC_BUF_PAGES);
             return Err(-12);
         }
     };
 
-    // Cleanup temp buffer
-    for i in 0..EXEC_BUF_PAGES { let _ = sys::unmap(EXEC_BUF_BASE + i * 0x1000); }
-
+    unmap_temp_buf(EXEC_BUF_BASE, EXEC_BUF_PAGES);
     Ok(new_ep)
 }
 
@@ -2824,8 +3260,8 @@ fn write_linux_stat(stat_ptr: u64, oid: u64, size: u64, is_dir: bool) {
     // st_mode at offset 24 (u32): S_IFREG=0o100644 or S_IFDIR=0o40755
     let mode: u32 = if is_dir { 0o40755 } else { 0o100644 };
     buf[24..28].copy_from_slice(&mode.to_le_bytes());
-    // st_nlink at offset 28 (u64) — but only lower 32 bits matter
-    buf[28] = 1;
+    // st_nlink at offset 16 (u64)
+    buf[16] = 1;
     // st_size at offset 48 (i64)
     let size_bytes = size.to_le_bytes();
     buf[48..56].copy_from_slice(&size_bytes);
@@ -2862,13 +3298,22 @@ pub extern "C" fn child_handler() -> ! {
     let my_mmap_base = my_brk_base + CHILD_MMAP_OFFSET;
     let mut mmap_next: u64 = my_mmap_base;
 
-    // Simple FD table for child: 0=stdin, 1=stdout, 2=stderr, 3+=devnull or free
-    // FdKind: 0=free, 1=stdin, 2=stdout, 8=devnull, 9=devzero
+    // FD table for child:
+    // kind: 0=free, 1=stdin, 2=stdout, 8=devnull, 9=devzero, 12=initrd_file
     const CHILD_MAX_FDS: usize = 32;
     let mut child_fds = [0u8; CHILD_MAX_FDS];
     child_fds[0] = 1; // stdin
     child_fds[1] = 2; // stdout
     child_fds[2] = 2; // stderr
+
+    // Initrd file tracking: for FDs with kind=12, track data pointer + size + position.
+    // Used by the dynamic linker to open/read/mmap shared libraries from initrd.
+    const MAX_INITRD_FILES: usize = 8;
+    // Each initrd file slot: [data_vaddr, file_size, read_position, fd_index]
+    let mut initrd_files: [[u64; 4]; MAX_INITRD_FILES] = [[0; 4]; MAX_INITRD_FILES];
+    // Virtual address base for mapping initrd file contents (per child, 1MiB each file max)
+    // Use space after the child's mmap region: child_mmap_end = my_brk_base + 0x200000
+    let initrd_file_buf_base = my_brk_base + CHILD_REGION_SIZE; // e.g., 0x7200000 for pid=1
 
     loop {
         let msg = match sys::recv(ep_cap) {
@@ -2918,6 +3363,33 @@ pub extern "C" fn child_handler() -> ! {
                     }
                     9 => reply_val(ep_cap, 0), // /dev/zero → read zeros (simplified: EOF)
                     8 => reply_val(ep_cap, 0), // /dev/null → EOF
+                    12 => {
+                        // Initrd file: find the slot for this FD
+                        let mut found = false;
+                        for s in 0..MAX_INITRD_FILES {
+                            if initrd_files[s][3] == fd as u64 && initrd_files[s][0] != 0 {
+                                let data_base = initrd_files[s][0];
+                                let file_size = initrd_files[s][1];
+                                let pos = initrd_files[s][2];
+                                let avail = if pos < file_size { file_size - pos } else { 0 };
+                                let to_read = (len as u64).min(avail) as usize;
+                                if to_read > 0 {
+                                    unsafe {
+                                        core::ptr::copy_nonoverlapping(
+                                            (data_base + pos) as *const u8,
+                                            buf_ptr as *mut u8,
+                                            to_read,
+                                        );
+                                    }
+                                    initrd_files[s][2] = pos + to_read as u64;
+                                }
+                                reply_val(ep_cap, to_read as i64);
+                                found = true;
+                                break;
+                            }
+                        }
+                        if !found { reply_val(ep_cap, -9); }
+                    }
                     _ => reply_val(ep_cap, -9),
                 }
             }
@@ -2947,9 +3419,101 @@ pub extern "C" fn child_handler() -> ! {
             3 => {
                 let fd = msg.regs[0] as usize;
                 if fd < CHILD_MAX_FDS && child_fds[fd] != 0 {
+                    // If it's an initrd file, clean up the slot (but keep buffer mapped for mmap)
+                    if child_fds[fd] == 12 {
+                        for s in 0..MAX_INITRD_FILES {
+                            if initrd_files[s][3] == fd as u64 {
+                                // Don't unmap — the data might still be needed for mmap'd regions
+                                // Just clear the FD association
+                                initrd_files[s][3] = u64::MAX; // mark FD closed but data alive
+                                break;
+                            }
+                        }
+                    }
                     child_fds[fd] = 0;
                 }
                 reply_val(ep_cap, 0);
+            }
+
+            // SYS_open(path, flags, mode) — used by musl dynamic linker
+            2 => {
+                let path_ptr = msg.regs[0];
+                let mut path = [0u8; 128];
+                let path_len = copy_guest_path(path_ptr, &mut path);
+                let name = &path[..path_len];
+
+                let kind = if name == b"/dev/null" { 8u8 }
+                    else if name == b"/dev/zero" { 9u8 }
+                    else if name == b"/dev/urandom" || name == b"/dev/random" { 9u8 }
+                    else { 0u8 };
+
+                if kind != 0 {
+                    let mut fd = None;
+                    for i in 3..CHILD_MAX_FDS { if child_fds[i] == 0 { fd = Some(i); break; } }
+                    if let Some(f) = fd {
+                        child_fds[f] = kind;
+                        reply_val(ep_cap, f as i64);
+                    } else {
+                        reply_val(ep_cap, -24);
+                    }
+                } else {
+                    // Try initrd — extract basename
+                    let mut basename_start = 0usize;
+                    for idx in 0..path_len {
+                        if name[idx] == b'/' { basename_start = idx + 1; }
+                    }
+                    let basename = &name[basename_start..];
+
+                    let mut slot = None;
+                    for s in 0..MAX_INITRD_FILES {
+                        if initrd_files[s][0] == 0 { slot = Some(s); break; }
+                    }
+
+                    if basename.is_empty() || slot.is_none() {
+                        reply_val(ep_cap, -2);
+                        continue;
+                    }
+                    let slot = slot.unwrap();
+
+                    let file_buf = initrd_file_buf_base + (slot as u64) * 0x100000;
+                    const FILE_BUF_PAGES_OPEN: u64 = 256;
+                    let mut buf_ok = true;
+                    for p in 0..FILE_BUF_PAGES_OPEN {
+                        if let Ok(f) = sys::frame_alloc() {
+                            if sys::map(file_buf + p * 0x1000, f, MAP_WRITABLE).is_err() {
+                                buf_ok = false; break;
+                            }
+                        } else { buf_ok = false; break; }
+                    }
+                    if !buf_ok {
+                        reply_val(ep_cap, -12);
+                        continue;
+                    }
+
+                    match sys::initrd_read(
+                        basename.as_ptr() as u64,
+                        basename.len() as u64,
+                        file_buf,
+                        FILE_BUF_PAGES_OPEN * 0x1000,
+                    ) {
+                        Ok(sz) => {
+                            let mut fd = None;
+                            for i in 3..CHILD_MAX_FDS { if child_fds[i] == 0 { fd = Some(i); break; } }
+                            if let Some(f) = fd {
+                                child_fds[f] = 12;
+                                initrd_files[slot] = [file_buf, sz, 0, f as u64];
+                                reply_val(ep_cap, f as i64);
+                            } else {
+                                for p in 0..FILE_BUF_PAGES_OPEN { let _ = sys::unmap(file_buf + p * 0x1000); }
+                                reply_val(ep_cap, -24);
+                            }
+                        }
+                        Err(_) => {
+                            for p in 0..FILE_BUF_PAGES_OPEN { let _ = sys::unmap(file_buf + p * 0x1000); }
+                            reply_val(ep_cap, -2);
+                        }
+                    }
+                }
             }
 
             // SYS_fstat(fd, stat_buf)
@@ -2958,25 +3522,283 @@ pub extern "C" fn child_handler() -> ! {
                 let stat_ptr = msg.regs[1];
                 if fd >= CHILD_MAX_FDS || child_fds[fd] == 0 {
                     reply_val(ep_cap, -9);
+                } else if child_fds[fd] == 12 {
+                    // Initrd file: report actual file size
+                    let mut size = 0u64;
+                    for s in 0..MAX_INITRD_FILES {
+                        if initrd_files[s][3] == fd as u64 && initrd_files[s][0] != 0 {
+                            size = initrd_files[s][1];
+                            break;
+                        }
+                    }
+                    write_linux_stat(stat_ptr, fd as u64, size, false);
+                    reply_val(ep_cap, 0);
                 } else {
                     write_linux_stat(stat_ptr, fd as u64, 0, false);
                     reply_val(ep_cap, 0);
                 }
             }
 
-            // SYS_poll — stub (returns 0 = no events)
-            7 => reply_val(ep_cap, 0),
+            // SYS_stat(path, statbuf) — check if path exists (for terminfo etc.)
+            4 => {
+                let path_ptr = msg.regs[0];
+                let stat_ptr = msg.regs[1];
+                let mut path = [0u8; 128];
+                let path_len = copy_guest_path(path_ptr, &mut path);
+                let name = &path[..path_len];
+
+                // First try initrd by basename (files take priority over directory stubs)
+                let mut basename_start = 0usize;
+                for idx in 0..path_len { if name[idx] == b'/' { basename_start = idx + 1; } }
+                let basename = &name[basename_start..];
+                if !basename.is_empty() {
+                    if let Ok(sz) = sys::initrd_read(basename.as_ptr() as u64, basename.len() as u64, 0, 0) {
+                        write_linux_stat(stat_ptr, 0, sz, false);
+                        reply_val(ep_cap, 0);
+                        continue;
+                    }
+                }
+
+                // Fall back to directory stubs
+                let is_dir = starts_with(name, b"/usr") || starts_with(name, b"/etc")
+                    || starts_with(name, b"/lib") || name == b"/";
+                if is_dir {
+                    write_linux_stat(stat_ptr, 0, 4096, true);
+                    reply_val(ep_cap, 0);
+                } else {
+                    reply_val(ep_cap, -2);
+                }
+            }
+
+            // SYS_lstat(path, statbuf) — same as stat (no symlinks)
+            6 => {
+                let path_ptr = msg.regs[0];
+                let stat_ptr = msg.regs[1];
+                let mut path = [0u8; 128];
+                let path_len = copy_guest_path(path_ptr, &mut path);
+                let name = &path[..path_len];
+                let mut basename_start = 0usize;
+                for idx in 0..path_len { if name[idx] == b'/' { basename_start = idx + 1; } }
+                let basename = &name[basename_start..];
+                if !basename.is_empty() {
+                    if let Ok(sz) = sys::initrd_read(basename.as_ptr() as u64, basename.len() as u64, 0, 0) {
+                        write_linux_stat(stat_ptr, 0, sz, false);
+                        reply_val(ep_cap, 0);
+                        continue;
+                    }
+                }
+                // Fall back to directory stubs
+                let is_dir = starts_with(name, b"/usr") || starts_with(name, b"/etc")
+                    || starts_with(name, b"/lib") || name == b"/";
+                if is_dir {
+                    write_linux_stat(stat_ptr, 0, 4096, true);
+                    reply_val(ep_cap, 0);
+                } else {
+                    reply_val(ep_cap, -2);
+                }
+            }
+
+            // SYS_poll(fds, nfds, timeout)
+            7 => {
+                let fds_ptr = msg.regs[0] as *mut u8;
+                let nfds = msg.regs[1] as usize;
+                let timeout = msg.regs[2] as i32;
+                let mut ready = 0u32;
+                // struct pollfd { int fd; short events; short revents; } = 8 bytes each
+                for i in 0..nfds.min(16) {
+                    let pfd = unsafe { fds_ptr.add(i * 8) };
+                    let fd = unsafe { *(pfd as *const i32) };
+                    let events = unsafe { *((pfd.add(4)) as *const i16) };
+                    let mut revents: i16 = 0;
+                    if fd >= 0 && (fd as usize) < CHILD_MAX_FDS && child_fds[fd as usize] != 0 {
+                        // POLLIN = 1
+                        if events & 1 != 0 {
+                            if fd == 0 && child_fds[0] == 1 {
+                                // stdin — check if char available
+                                if unsafe { kb_has_char() } { revents |= 1; }
+                            } else {
+                                // Other readable FDs: always ready
+                                revents |= 1;
+                            }
+                        }
+                        // POLLOUT = 4
+                        if events & 4 != 0 { revents |= 4; } // stdout always writable
+                    } else if fd >= 0 {
+                        revents = 0x20; // POLLNVAL
+                    }
+                    unsafe { *((pfd.add(6)) as *mut i16) = revents; }
+                    if revents != 0 { ready += 1; }
+                }
+                if ready > 0 || timeout == 0 {
+                    reply_val(ep_cap, ready as i64);
+                } else {
+                    // Blocking poll — spin-wait (with yield) until input
+                    let mut waited = 0u32;
+                    let max_iters = if timeout > 0 { (timeout as u32) * 100 } else { u32::MAX };
+                    let mut interrupted = false;
+                    loop {
+                        if unsafe { kb_has_char() } {
+                            // Re-check all fds
+                            ready = 0;
+                            for i in 0..nfds.min(16) {
+                                let pfd = unsafe { fds_ptr.add(i * 8) };
+                                let fd = unsafe { *(pfd as *const i32) };
+                                let events = unsafe { *((pfd.add(4)) as *const i16) };
+                                let mut revents: i16 = 0;
+                                if fd == 0 && (events & 1 != 0) { revents |= 1; }
+                                if events & 4 != 0 { revents |= 4; }
+                                unsafe { *((pfd.add(6)) as *mut i16) = revents; }
+                                if revents != 0 { ready += 1; }
+                            }
+                            break;
+                        }
+                        let s = sig_dequeue(pid);
+                        if s != 0 && sig_dispatch(pid, s) >= 1 {
+                            interrupted = true;
+                            break;
+                        }
+                        sys::yield_now();
+                        waited += 1;
+                        if waited >= max_iters { break; }
+                    }
+                    if interrupted {
+                        reply_val(ep_cap, -4); // -EINTR
+                    } else {
+                        reply_val(ep_cap, ready as i64);
+                    }
+                }
+            }
+
+            // SYS_lseek(fd, offset, whence)
+            8 => {
+                let fd = msg.regs[0] as usize;
+                let offset_val = msg.regs[1] as i64;
+                let whence = msg.regs[2] as u32;
+                if fd >= CHILD_MAX_FDS || child_fds[fd] == 0 {
+                    reply_val(ep_cap, -9); // -EBADF
+                } else if child_fds[fd] == 12 {
+                    let mut found = false;
+                    for s in 0..MAX_INITRD_FILES {
+                        if initrd_files[s][3] == fd as u64 && initrd_files[s][0] != 0 {
+                            let file_size = initrd_files[s][1] as i64;
+                            let cur_pos = initrd_files[s][2] as i64;
+                            let new_pos = match whence {
+                                0 => offset_val,                    // SEEK_SET
+                                1 => cur_pos + offset_val,          // SEEK_CUR
+                                2 => file_size + offset_val,        // SEEK_END
+                                _ => { reply_val(ep_cap, -22); found = true; break; }
+                            };
+                            if new_pos < 0 {
+                                reply_val(ep_cap, -22); // -EINVAL
+                            } else {
+                                initrd_files[s][2] = new_pos as u64;
+                                reply_val(ep_cap, new_pos);
+                            }
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found { reply_val(ep_cap, -9); }
+                } else {
+                    reply_val(ep_cap, -29); // -ESPIPE (not seekable)
+                }
+            }
 
             // SYS_mmap(addr, len, prot, flags, fd, offset)
             9 => {
+                let req_addr = msg.regs[0];
                 let len = msg.regs[1];
+                let prot = msg.regs[2]; // PROT_READ=1, PROT_WRITE=2, PROT_EXEC=4
+                let flags = msg.regs[3] as u32;
                 let fd = msg.regs[4] as i64;
-                if fd >= 0 {
-                    reply_val(ep_cap, -22); // no file-backed mmap
+                let offset = msg.regs[5];
+
+                let map_fixed = (flags & 0x10) != 0; // MAP_FIXED
+                let map_anon = (flags & 0x20) != 0; // MAP_ANONYMOUS
+                let pages = ((len + 0xFFF) & !0xFFF) / 0x1000;
+
+                // Determine base address
+                let base = if map_fixed && req_addr != 0 {
+                    // MAP_FIXED: use the exact requested address
+                    // First unmap any existing pages at that range
+                    for p in 0..pages {
+                        let _ = sys::unmap(req_addr + p * 0x1000);
+                    }
+                    req_addr
+                } else {
+                    let b = mmap_next;
+                    mmap_next += pages * 0x1000;
+                    b
+                };
+
+                // Helper: apply final page permissions based on prot flags.
+                // Pages were mapped writable for data copy; now fix permissions.
+                // Must be a closure to capture base, pages, prot.
+                let mmap_fixup_prot = |base: u64, pages: u64, prot: u64| {
+                    if prot & 2 == 0 {
+                        // Not writable — need to change from writable to read-only
+                        let pflags = if prot & 4 != 0 { 0u64 } else { 1u64 << 63 }; // exec → 0; read-only → NX
+                        for p in 0..pages {
+                            let _ = sys::protect(base + p * 0x1000, pflags);
+                        }
+                    }
+                    // If writable, kernel already set NX (W^X), nothing to do
+                };
+
+                if fd >= 0 && !map_anon {
+                    // File-backed mmap: find initrd file data for this FD
+                    let fdu = fd as usize;
+                    let mut file_data: u64 = 0;
+                    let mut file_size: u64 = 0;
+
+                    if fdu < CHILD_MAX_FDS {
+                        for s in 0..MAX_INITRD_FILES {
+                            if initrd_files[s][0] != 0 && (initrd_files[s][3] == fdu as u64 || initrd_files[s][3] == u64::MAX) {
+                                file_data = initrd_files[s][0];
+                                file_size = initrd_files[s][1];
+                                break;
+                            }
+                        }
+                    }
+
+                    if file_data == 0 {
+                        reply_val(ep_cap, -9); // -EBADF
+                        continue;
+                    }
+
+                    // Map pages and copy file data
+                    let mut ok = true;
+                    for p in 0..pages {
+                        if let Ok(f) = sys::frame_alloc() {
+                            if sys::map(base + p * 0x1000, f, MAP_WRITABLE).is_err() {
+                                ok = false; break;
+                            }
+                        } else { ok = false; break; }
+                    }
+                    if ok {
+                        let map_size = (pages * 0x1000) as usize;
+                        unsafe { core::ptr::write_bytes(base as *mut u8, 0, map_size); }
+                        let file_off = offset as usize;
+                        let avail = if file_off < file_size as usize { file_size as usize - file_off } else { 0 };
+                        let to_copy = map_size.min(avail);
+                        if to_copy > 0 {
+                            unsafe {
+                                core::ptr::copy_nonoverlapping(
+                                    (file_data + file_off as u64) as *const u8,
+                                    base as *mut u8,
+                                    to_copy,
+                                );
+                            }
+                        }
+                        mmap_fixup_prot(base, pages, prot);
+                        reply_val(ep_cap, base as i64);
+                    } else {
+                        reply_val(ep_cap, -12);
+                    }
                     continue;
                 }
-                let pages = ((len + 0xFFF) & !0xFFF) / 0x1000;
-                let base = mmap_next;
+
+                // Anonymous mmap
                 let mut ok = true;
                 for p in 0..pages {
                     if let Ok(f) = sys::frame_alloc() {
@@ -2986,15 +3808,76 @@ pub extern "C" fn child_handler() -> ! {
                     } else { ok = false; break; }
                 }
                 if ok {
-                    mmap_next += pages * 0x1000;
+                    // Zero anonymous pages
+                    unsafe { core::ptr::write_bytes(base as *mut u8, 0, (pages * 0x1000) as usize); }
+                    mmap_fixup_prot(base, pages, prot);
                     reply_val(ep_cap, base as i64);
                 } else {
                     reply_val(ep_cap, -12);
                 }
             }
 
-            // SYS_mprotect — stub (W^X handled by kernel)
-            10 => reply_val(ep_cap, 0),
+            // SYS_mprotect(addr, len, prot) — change page permissions
+            10 => {
+                let addr = msg.regs[0] & !0xFFF;
+                let len = msg.regs[1];
+                let prot = msg.regs[2]; // PROT_READ=1, PROT_WRITE=2, PROT_EXEC=4
+                let pages = ((len + 0xFFF) & !0xFFF) / 0x1000;
+                // Convert Linux prot to kernel flags:
+                // PROT_WRITE → MAP_WRITABLE (kernel sets NX for W^X)
+                // PROT_EXEC without PROT_WRITE → flags=0 (read-only, executable)
+                // PROT_READ only → PAGE_NO_EXECUTE (read-only, not executable)
+                let flags = if prot & 2 != 0 {
+                    MAP_WRITABLE // writable → kernel auto-sets NX (W^X)
+                } else if prot & 4 != 0 {
+                    0u64 // executable, not writable → no NX
+                } else {
+                    1u64 << 63 // PAGE_NO_EXECUTE: read-only, not executable
+                };
+                let mut ok = true;
+                for p in 0..pages {
+                    if sys::protect(addr + p * 0x1000, flags).is_err() {
+                        ok = false;
+                    }
+                }
+                reply_val(ep_cap, if ok { 0 } else { -22 });
+            }
+
+            // SYS_pread64(fd, buf, count, offset)
+            17 => {
+                let fd = msg.regs[0] as usize;
+                let buf_ptr = msg.regs[1];
+                let count = msg.regs[2] as usize;
+                let off = msg.regs[3];
+                if fd >= CHILD_MAX_FDS || child_fds[fd] == 0 {
+                    reply_val(ep_cap, -9);
+                } else if child_fds[fd] == 12 {
+                    let mut found = false;
+                    for s in 0..MAX_INITRD_FILES {
+                        if initrd_files[s][3] == fd as u64 && initrd_files[s][0] != 0 {
+                            let data_base = initrd_files[s][0];
+                            let file_size = initrd_files[s][1];
+                            let avail = if off < file_size { (file_size - off) as usize } else { 0 };
+                            let to_read = count.min(avail);
+                            if to_read > 0 {
+                                unsafe {
+                                    core::ptr::copy_nonoverlapping(
+                                        (data_base + off) as *const u8,
+                                        buf_ptr as *mut u8,
+                                        to_read,
+                                    );
+                                }
+                            }
+                            reply_val(ep_cap, to_read as i64);
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found { reply_val(ep_cap, -9); }
+                } else {
+                    reply_val(ep_cap, -9);
+                }
+            }
 
             // SYS_munmap
             11 => {
@@ -3095,32 +3978,157 @@ pub extern "C" fn child_handler() -> ! {
                 reply_val(ep_cap, 0);
             }
 
-            // SYS_ioctl — stub
+            // SYS_ioctl — terminal emulation for nano
             16 => {
                 let fd = msg.regs[0] as usize;
                 let req = msg.regs[1];
                 if fd <= 2 {
-                    // TCGETS/TIOCGWINSZ for terminals
-                    if req == 0x5401 { reply_val(ep_cap, -25); } // -ENOTTY
-                    else if req == 0x5413 {
-                        // TIOCGWINSZ — return 80x25
-                        let buf = msg.regs[2] as *mut u16;
-                        if !buf.is_null() {
-                            unsafe { *buf = 25; *buf.add(1) = 80; *buf.add(2) = 0; *buf.add(3) = 0; }
+                    match req {
+                        // TCGETS — get termios struct (60 bytes on Linux x86_64)
+                        0x5401 => {
+                            let buf = msg.regs[2] as *mut u8;
+                            if !buf.is_null() {
+                                // Zero the struct first (60 bytes: c_iflag(4)+c_oflag(4)+c_cflag(4)+c_lflag(4)+c_line(1)+c_cc(32)+pad(3)+c_ispeed(4)+c_ospeed(4))
+                                unsafe { core::ptr::write_bytes(buf, 0, 60); }
+                                let p = buf as *mut u32;
+                                unsafe {
+                                    // c_iflag: ICRNL | IXON
+                                    *p = 0x0100 | 0x0400;
+                                    // c_oflag: OPOST | ONLCR
+                                    *p.add(1) = 0x0001 | 0x0004;
+                                    // c_cflag: CS8 | CREAD | B38400
+                                    *p.add(2) = 0x0030 | 0x0080 | 0x000F;
+                                    // c_lflag: ECHO | ECHOE | ECHOK | ICANON | ISIG | IEXTEN | ECHOCTL | ECHOKE
+                                    *p.add(3) = 0x0008 | 0x0010 | 0x0020 | 0x0002 | 0x0001 | 0x8000 | 0x0200 | 0x0800;
+                                }
+                                // c_cc: set key control chars
+                                let cc = unsafe { buf.add(17) }; // offset 17 = after 4*4+1
+                                unsafe {
+                                    *cc.add(0) = 0x03; // VINTR = Ctrl-C
+                                    *cc.add(1) = 0x1C; // VQUIT = Ctrl-backslash
+                                    *cc.add(2) = 0x7F; // VERASE = DEL
+                                    *cc.add(3) = 0x15; // VKILL = Ctrl-U
+                                    *cc.add(4) = 0x04; // VEOF = Ctrl-D
+                                    *cc.add(5) = 0x00; // VTIME
+                                    *cc.add(6) = 0x01; // VMIN = 1
+                                    *cc.add(11) = 0x00; // VSTART
+                                    *cc.add(12) = 0x00; // VSTOP
+                                    *cc.add(13) = 0x1A; // VSUSP = Ctrl-Z
+                                }
+                            }
+                            reply_val(ep_cap, 0);
                         }
-                        reply_val(ep_cap, 0);
-                    } else { reply_val(ep_cap, -25); }
+                        // TCSETS / TCSETSW / TCSETSF — set termios (nano switches to raw mode)
+                        0x5402 | 0x5403 | 0x5404 => {
+                            // Accept silently — we always run in "raw" mode anyway
+                            // (our read returns bytes one at a time)
+                            reply_val(ep_cap, 0);
+                        }
+                        // TIOCGWINSZ — return 80x25 terminal size
+                        0x5413 => {
+                            let buf = msg.regs[2] as *mut u16;
+                            if !buf.is_null() {
+                                unsafe { *buf = 25; *buf.add(1) = 80; *buf.add(2) = 0; *buf.add(3) = 0; }
+                            }
+                            reply_val(ep_cap, 0);
+                        }
+                        // TIOCSWINSZ — set terminal size (accept silently)
+                        0x5414 => reply_val(ep_cap, 0),
+                        // TIOCGPGRP / TIOCSPGRP — process group
+                        0x540F | 0x5410 => {
+                            if req == 0x540F {
+                                let buf = msg.regs[2] as *mut i32;
+                                if !buf.is_null() { unsafe { *buf = pid as i32; } }
+                            }
+                            reply_val(ep_cap, 0);
+                        }
+                        // FIONREAD — bytes available to read
+                        0x541B => {
+                            let buf = msg.regs[2] as *mut i32;
+                            if !buf.is_null() {
+                                let avail = if unsafe { kb_has_char() } { 1i32 } else { 0i32 };
+                                unsafe { *buf = avail; }
+                            }
+                            reply_val(ep_cap, 0);
+                        }
+                        _ => reply_val(ep_cap, -25), // -ENOTTY
+                    }
                 } else { reply_val(ep_cap, -9); }
             }
 
-            // SYS_readv
+            // SYS_readv(fd, iov, iovcnt) — scatter read
             19 => {
                 let fd = msg.regs[0] as usize;
-                if fd == 0 && fd < CHILD_MAX_FDS && child_fds[fd] == 1 {
-                    // stdin readv: simplified, read 1 char
-                    reply_val(ep_cap, 0); // stub: 0 bytes
-                } else {
+                let iov_ptr = msg.regs[1];
+                let iovcnt = msg.regs[2] as usize;
+                if fd >= CHILD_MAX_FDS || child_fds[fd] == 0 {
+                    reply_val(ep_cap, -9); // -EBADF
+                } else if child_fds[fd] == 1 {
+                    // stdin readv: read one char into first iovec
+                    if iovcnt > 0 && iov_ptr < 0x0000_8000_0000_0000 {
+                        let base = unsafe { *(iov_ptr as *const u64) };
+                        loop {
+                            let s = sig_dequeue(pid);
+                            if s != 0 && sig_dispatch(pid, s) >= 1 {
+                                reply_val(ep_cap, -4); break;
+                            }
+                            match unsafe { kb_read_char() } {
+                                Some(ch) => {
+                                    if base != 0 { unsafe { *(base as *mut u8) = ch; } }
+                                    reply_val(ep_cap, 1); break;
+                                }
+                                None => { unsafe { poll_mouse(); } sys::yield_now(); }
+                            }
+                        }
+                    } else {
+                        reply_val(ep_cap, 0);
+                    }
+                } else if child_fds[fd] == 12 {
+                    // Initrd file readv
+                    let mut total: usize = 0;
+                    let mut found = false;
+                    for s_idx in 0..MAX_INITRD_FILES {
+                        if initrd_files[s_idx][3] == fd as u64 && initrd_files[s_idx][0] != 0 {
+                            let data_base = initrd_files[s_idx][0];
+                            let file_size = initrd_files[s_idx][1];
+                            let mut pos = initrd_files[s_idx][2];
+                            let cnt = iovcnt.min(16);
+                            for i in 0..cnt {
+                                let entry = iov_ptr + (i as u64) * 16;
+                                if entry + 16 > 0x0000_8000_0000_0000 { break; }
+                                let base = unsafe { *(entry as *const u64) };
+                                let len = unsafe { *((entry + 8) as *const u64) } as usize;
+                                if base == 0 || len == 0 { continue; }
+                                let avail = if pos < file_size { (file_size - pos) as usize } else { 0 };
+                                let to_read = len.min(avail);
+                                if to_read > 0 {
+                                    unsafe {
+                                        core::ptr::copy_nonoverlapping(
+                                            (data_base + pos) as *const u8,
+                                            base as *mut u8,
+                                            to_read,
+                                        );
+                                    }
+                                    pos += to_read as u64;
+                                    total += to_read;
+                                }
+                                if to_read < len { break; } // EOF mid-iovec
+                            }
+                            initrd_files[s_idx][2] = pos;
+                            found = true;
+                            break;
+                        }
+                    }
+                    if found {
+                        reply_val(ep_cap, total as i64);
+                    } else {
+                        reply_val(ep_cap, -9);
+                    }
+                } else if child_fds[fd] == 2 {
+                    // stdout/stderr readv → -EBADF (write-only)
                     reply_val(ep_cap, -9);
+                } else {
+                    reply_val(ep_cap, 0); // other FD types: EOF
                 }
             }
 
@@ -3159,8 +4167,32 @@ pub extern "C" fn child_handler() -> ! {
                 }
             }
 
-            // SYS_access / SYS_faccessat
-            21 | 269 => reply_val(ep_cap, -2), // -ENOENT
+            // SYS_access / SYS_faccessat — check file accessibility
+            21 | 269 => {
+                let path_ptr = if syscall_nr == 269 { msg.regs[1] } else { msg.regs[0] };
+                let mut path = [0u8; 128];
+                let path_len = copy_guest_path(path_ptr, &mut path);
+                let name = &path[..path_len];
+                // Directories
+                let is_dir = starts_with(name, b"/usr") || starts_with(name, b"/etc")
+                    || starts_with(name, b"/lib") || name == b"/";
+                if is_dir {
+                    reply_val(ep_cap, 0);
+                } else {
+                    // Check initrd by basename
+                    let mut basename_start = 0usize;
+                    for idx in 0..path_len { if name[idx] == b'/' { basename_start = idx + 1; } }
+                    let basename = &name[basename_start..];
+                    if !basename.is_empty() {
+                        match sys::initrd_read(basename.as_ptr() as u64, basename.len() as u64, 0, 0) {
+                            Ok(_) => reply_val(ep_cap, 0),
+                            Err(_) => reply_val(ep_cap, -2),
+                        }
+                    } else {
+                        reply_val(ep_cap, -2);
+                    }
+                }
+            }
 
             // SYS_pipe
             22 => {
@@ -3357,8 +4389,20 @@ pub extern "C" fn child_handler() -> ! {
             // SYS_getuid/geteuid/getgid/getegid
             102 | 104 | 107 | 108 => reply_val(ep_cap, 0),
 
+            // SYS_setpgid
+            109 => reply_val(ep_cap, 0),
+
             // SYS_getppid
             110 => reply_val(ep_cap, parent_pid as i64),
+
+            // SYS_getpgrp
+            111 => reply_val(ep_cap, pid as i64),
+
+            // SYS_setsid
+            112 => reply_val(ep_cap, pid as i64),
+
+            // SYS_setfsuid / SYS_setfsgid — return previous (0)
+            122 | 123 => reply_val(ep_cap, 0),
 
             // SYS_sigaltstack — stub
             131 => {
@@ -3371,10 +4415,10 @@ pub extern "C" fn child_handler() -> ! {
                 reply_val(ep_cap, 0);
             }
 
-            // SYS_openat — /dev/null, /dev/zero, /dev/urandom support
+            // SYS_openat — /dev files + initrd files (for dynamic linker)
             257 => {
                 let path_ptr = msg.regs[1];
-                let mut path = [0u8; 48];
+                let mut path = [0u8; 128];
                 let path_len = copy_guest_path(path_ptr, &mut path);
                 let name = &path[..path_len];
 
@@ -3393,7 +4437,67 @@ pub extern "C" fn child_handler() -> ! {
                         reply_val(ep_cap, -24);
                     }
                 } else {
-                    reply_val(ep_cap, -2); // -ENOENT
+                    // Try to open from initrd — extract basename from path
+                    let mut basename_start = 0usize;
+                    for idx in 0..path_len {
+                        if name[idx] == b'/' { basename_start = idx + 1; }
+                    }
+                    let basename = &name[basename_start..];
+
+                    // Find a free initrd file slot
+                    let mut slot = None;
+                    for s in 0..MAX_INITRD_FILES {
+                        if initrd_files[s][0] == 0 { slot = Some(s); break; }
+                    }
+
+                    if basename.is_empty() || slot.is_none() {
+                        reply_val(ep_cap, -2); // -ENOENT
+                        continue;
+                    }
+                    let slot = slot.unwrap();
+
+                    // Map temp pages for reading initrd
+                    let file_buf = initrd_file_buf_base + (slot as u64) * 0x100000; // 1MiB per file
+                    const FILE_BUF_PAGES: u64 = 256; // 1 MiB
+                    let mut buf_ok = true;
+                    for p in 0..FILE_BUF_PAGES {
+                        if let Ok(f) = sys::frame_alloc() {
+                            if sys::map(file_buf + p * 0x1000, f, MAP_WRITABLE).is_err() {
+                                buf_ok = false; break;
+                            }
+                        } else { buf_ok = false; break; }
+                    }
+                    if !buf_ok {
+                        reply_val(ep_cap, -12); // -ENOMEM
+                        continue;
+                    }
+
+                    match sys::initrd_read(
+                        basename.as_ptr() as u64,
+                        basename.len() as u64,
+                        file_buf,
+                        FILE_BUF_PAGES * 0x1000,
+                    ) {
+                        Ok(sz) => {
+                            // Allocate FD
+                            let mut fd = None;
+                            for i in 3..CHILD_MAX_FDS { if child_fds[i] == 0 { fd = Some(i); break; } }
+                            if let Some(f) = fd {
+                                child_fds[f] = 12; // initrd file
+                                initrd_files[slot] = [file_buf, sz, 0, f as u64];
+                                reply_val(ep_cap, f as i64);
+                            } else {
+                                // No free FD — unmap buffer
+                                for p in 0..FILE_BUF_PAGES { let _ = sys::unmap(file_buf + p * 0x1000); }
+                                reply_val(ep_cap, -24); // -EMFILE
+                            }
+                        }
+                        Err(_) => {
+                            // Not in initrd — unmap buffer
+                            for p in 0..FILE_BUF_PAGES { let _ = sys::unmap(file_buf + p * 0x1000); }
+                            reply_val(ep_cap, -2); // -ENOENT
+                        }
+                    }
                 }
             }
 
@@ -3427,11 +4531,59 @@ pub extern "C" fn child_handler() -> ! {
                 break;
             }
 
-            // SYS_fstatat
+            // SYS_fstatat(dirfd, path, statbuf, flags)
             262 => {
+                let dirfd = msg.regs[0] as i64;
+                let path_ptr = msg.regs[1];
                 let stat_ptr = msg.regs[2];
-                write_linux_stat(stat_ptr, 0, 0, false);
-                reply_val(ep_cap, -2); // -ENOENT (no VFS in child)
+                let flags = msg.regs[3] as u32;
+                let mut path = [0u8; 128];
+                let path_len = copy_guest_path(path_ptr, &mut path);
+                let name = &path[..path_len];
+
+                // AT_EMPTY_PATH (0x1000): use dirfd as the file descriptor
+                if (flags & 0x1000) != 0 && path_len == 0 {
+                    let fd = dirfd as usize;
+                    if fd < CHILD_MAX_FDS && child_fds[fd] != 0 {
+                        if child_fds[fd] == 12 {
+                            let mut size = 0u64;
+                            for s in 0..MAX_INITRD_FILES {
+                                if initrd_files[s][3] == fd as u64 && initrd_files[s][0] != 0 {
+                                    size = initrd_files[s][1];
+                                    break;
+                                }
+                            }
+                            write_linux_stat(stat_ptr, fd as u64, size, false);
+                        } else {
+                            write_linux_stat(stat_ptr, fd as u64, 0, false);
+                        }
+                        reply_val(ep_cap, 0);
+                    } else {
+                        reply_val(ep_cap, -9); // -EBADF
+                    }
+                    continue;
+                }
+
+                // First try initrd by basename (files take priority)
+                let mut basename_start = 0usize;
+                for idx in 0..path_len { if name[idx] == b'/' { basename_start = idx + 1; } }
+                let basename = &name[basename_start..];
+                if !basename.is_empty() {
+                    if let Ok(sz) = sys::initrd_read(basename.as_ptr() as u64, basename.len() as u64, 0, 0) {
+                        write_linux_stat(stat_ptr, 0, sz, false);
+                        reply_val(ep_cap, 0);
+                        continue;
+                    }
+                }
+                // Fall back to directory stubs
+                let is_dir = starts_with(name, b"/usr") || starts_with(name, b"/etc")
+                    || starts_with(name, b"/lib") || name == b"/";
+                if is_dir {
+                    write_linux_stat(stat_ptr, 0, 4096, true);
+                    reply_val(ep_cap, 0);
+                } else {
+                    reply_val(ep_cap, -2);
+                }
             }
 
             // SYS_readlinkat — /proc/self/exe
@@ -3465,11 +4617,102 @@ pub extern "C" fn child_handler() -> ! {
                 reply_val(ep_cap, buflen as i64);
             }
 
+            // SYS_futex — stub (single-threaded, just return)
+            202 => reply_val(ep_cap, 0),
+
+            // SYS_sched_getaffinity — return 1 CPU
+            204 => {
+                let mask_ptr = msg.regs[2] as *mut u8;
+                let len = msg.regs[1] as usize;
+                if !mask_ptr.is_null() && len > 0 {
+                    unsafe {
+                        core::ptr::write_bytes(mask_ptr, 0, len.min(128));
+                        *mask_ptr = 1; // CPU 0
+                    }
+                }
+                reply_val(ep_cap, len.min(128) as i64);
+            }
+
+            // SYS_getdents64(fd, dirp, count) — empty directory for now
+            217 => reply_val(ep_cap, 0),
+
+            // SYS_fadvise64 — stub
+            221 => reply_val(ep_cap, 0),
+
+            // SYS_ppoll — like poll but with signal mask
+            271 => {
+                // Treat exactly like poll for now
+                let fds_ptr = msg.regs[0] as *mut u8;
+                let nfds = msg.regs[1] as usize;
+                let mut ready = 0u32;
+                for i in 0..nfds.min(16) {
+                    let pfd = unsafe { fds_ptr.add(i * 8) };
+                    let fd = unsafe { *(pfd as *const i32) };
+                    let events = unsafe { *((pfd.add(4)) as *const i16) };
+                    let mut revents: i16 = 0;
+                    if fd >= 0 && (fd as usize) < CHILD_MAX_FDS && child_fds[fd as usize] != 0 {
+                        if events & 1 != 0 {
+                            if fd == 0 && child_fds[0] == 1 {
+                                if unsafe { kb_has_char() } { revents |= 1; }
+                            } else { revents |= 1; }
+                        }
+                        if events & 4 != 0 { revents |= 4; }
+                    } else if fd >= 0 { revents = 0x20; }
+                    unsafe { *((pfd.add(6)) as *mut i16) = revents; }
+                    if revents != 0 { ready += 1; }
+                }
+                if ready > 0 {
+                    reply_val(ep_cap, ready as i64);
+                } else {
+                    // Block waiting for input
+                    let mut interrupted = false;
+                    loop {
+                        if unsafe { kb_has_char() } {
+                            ready = 0;
+                            for i in 0..nfds.min(16) {
+                                let pfd = unsafe { fds_ptr.add(i * 8) };
+                                let fd = unsafe { *(pfd as *const i32) };
+                                let events = unsafe { *((pfd.add(4)) as *const i16) };
+                                let mut revents: i16 = 0;
+                                if fd == 0 && (events & 1 != 0) { revents |= 1; }
+                                if events & 4 != 0 { revents |= 4; }
+                                unsafe { *((pfd.add(6)) as *mut i16) = revents; }
+                                if revents != 0 { ready += 1; }
+                            }
+                            break;
+                        }
+                        let s = sig_dequeue(pid);
+                        if s != 0 && sig_dispatch(pid, s) >= 1 {
+                            interrupted = true;
+                            break;
+                        }
+                        sys::yield_now();
+                    }
+                    if interrupted {
+                        reply_val(ep_cap, -4);
+                    } else {
+                        reply_val(ep_cap, ready as i64);
+                    }
+                }
+            }
+
+            // SYS_statx — not supported, force musl to fall back to fstatat
+            332 => reply_val(ep_cap, -38), // -ENOSYS
+
+            // SYS_rseq — restartable sequences (musl may use)
+            334 => reply_val(ep_cap, -38), // -ENOSYS is fine
+
             // Unknown → -ENOSYS (with logging)
             _ => {
                 print(b"LUCAS child: unhandled syscall ");
                 print_u64(syscall_nr);
-                print(b"\n");
+                print(b" regs=[");
+                print_u64(msg.regs[0]);
+                print(b",");
+                print_u64(msg.regs[1]);
+                print(b",");
+                print_u64(msg.regs[2]);
+                print(b"]\n");
                 reply_val(ep_cap, -38);
             }
         }
@@ -4344,12 +5587,12 @@ pub extern "C" fn lucas_handler() -> ! {
             56 => {
                 let child_fn = msg.regs[0];
 
-                // Allocate child stacks (guest + handler, interleaved)
-                let stack_base = NEXT_CHILD_STACK.fetch_add(0x2000, Ordering::SeqCst);
+                // Allocate child stacks: 1 page guest + 4 pages handler
+                let stack_base = NEXT_CHILD_STACK.fetch_add(0x5000, Ordering::SeqCst);
                 let guest_stack = stack_base;
                 let handler_stack = stack_base + 0x1000;
 
-                // Map guest stack
+                // Map guest stack (1 page)
                 let gf = match sys::frame_alloc() {
                     Ok(f) => f,
                     Err(_) => { reply_val(ep_cap, -12); continue; }
@@ -4359,12 +5602,18 @@ pub extern "C" fn lucas_handler() -> ! {
                     continue;
                 }
 
-                // Map handler stack
-                let hf = match sys::frame_alloc() {
-                    Ok(f) => f,
-                    Err(_) => { reply_val(ep_cap, -12); continue; }
-                };
-                if sys::map(handler_stack, hf, MAP_WRITABLE).is_err() {
+                // Map handler stack (4 pages)
+                let mut hok = true;
+                for hp in 0..4u64 {
+                    let hf = match sys::frame_alloc() {
+                        Ok(f) => f,
+                        Err(_) => { hok = false; break; }
+                    };
+                    if sys::map(handler_stack + hp * 0x1000, hf, MAP_WRITABLE).is_err() {
+                        hok = false; break;
+                    }
+                }
+                if !hok {
                     reply_val(ep_cap, -12);
                     continue;
                 }
@@ -4386,10 +5635,10 @@ pub extern "C" fn lucas_handler() -> ! {
                 CHILD_SETUP_PID.store(child_pid, Ordering::Release);
                 CHILD_SETUP_READY.store(1, Ordering::Release);
 
-                // Spawn child handler thread
+                // Spawn child handler thread (stack top = handler_stack + 4 pages)
                 if sys::thread_create(
                     child_handler as *const () as u64,
-                    handler_stack + 0x1000,
+                    handler_stack + 0x4000,
                 ).is_err() {
                     CHILD_SETUP_READY.store(0, Ordering::Release);
                     reply_val(ep_cap, -12);

@@ -52,6 +52,38 @@ const P_MEMSZ: usize = 40;
 
 const PT_LOAD: u32 = 1;
 const PT_DYNAMIC: u32 = 2;
+const PT_INTERP: u32 = 3;
+
+/// Information about the PT_INTERP segment (dynamic linker path).
+pub struct InterpInfo {
+    /// File offset of the interpreter path string.
+    pub offset: usize,
+    /// Length of the interpreter path string.
+    pub len: usize,
+}
+
+/// Extract PT_INTERP path from a parsed ELF.
+/// Returns None if no PT_INTERP segment exists (static binary).
+pub fn parse_interp(data: &[u8], info: &ElfInfo) -> Option<InterpInfo> {
+    for i in 0..info.phnum {
+        let ph = info.phoff + i * info.phentsize;
+        if ph + info.phentsize > data.len() {
+            break;
+        }
+        if read_u32(data, ph + P_TYPE) == PT_INTERP {
+            let offset = read_u64(data, ph + P_OFFSET) as usize;
+            let filesz = read_u64(data, ph + P_FILESZ) as usize;
+            // Strip trailing NUL if present
+            let len = if filesz > 0 && offset + filesz <= data.len() && data[offset + filesz - 1] == 0 {
+                filesz - 1
+            } else {
+                filesz
+            };
+            return Some(InterpInfo { offset, len });
+        }
+    }
+    None
+}
 
 fn read_u16(data: &[u8], off: usize) -> u16 {
     u16::from_le_bytes([data[off], data[off + 1]])

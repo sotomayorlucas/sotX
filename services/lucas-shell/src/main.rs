@@ -3580,14 +3580,46 @@ fn cmd_fork() {
     print(b"\n");
 }
 
-fn cmd_exec(name: &[u8]) {
-    let mut path_buf = [0u8; 64];
-    let path = null_terminate(name, &mut path_buf);
-    let ret = linux_execve(path);
-    // If execve returns, it failed
-    print(b"exec: failed (");
+/// Buffer for passing exec name to child_exec_main.
+static mut EXEC_NAME_BUF: [u8; 64] = [0u8; 64];
+static mut EXEC_NAME_LEN: usize = 0;
+
+/// Child function that immediately calls execve with the name in EXEC_NAME_BUF.
+extern "C" fn child_exec_main() -> ! {
+    let name = unsafe { &EXEC_NAME_BUF[..EXEC_NAME_LEN + 1] }; // includes NUL
+    let ret = linux_execve(name.as_ptr());
+    // execve failed — print error and exit
+    print(b"exec: failed (errno=");
     print_u64((-ret) as u64);
     print(b")\n");
+    linux_exit(1);
+}
+
+fn cmd_exec(name: &[u8]) {
+    // Build /bin/<name>\0 into EXEC_NAME_BUF
+    let prefix = b"/bin/";
+    let total = prefix.len() + name.len();
+    if total >= 63 {
+        print(b"exec: name too long\n");
+        return;
+    }
+    unsafe {
+        EXEC_NAME_BUF[..prefix.len()].copy_from_slice(prefix);
+        EXEC_NAME_BUF[prefix.len()..prefix.len() + name.len()].copy_from_slice(name);
+        EXEC_NAME_BUF[total] = 0; // NUL terminate
+        EXEC_NAME_LEN = total;
+    }
+
+    // Fork child, which immediately does execve
+    let child_pid = linux_clone(child_exec_main as *const () as u64);
+    if child_pid < 0 {
+        print(b"exec: fork failed\n");
+        return;
+    }
+
+    // Wait for child to complete
+    let status = linux_waitpid(child_pid as u64);
+    let _ = status;
 }
 
 fn cmd_ps() {
