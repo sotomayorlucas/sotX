@@ -924,6 +924,13 @@ impl ObjectStore {
         unsafe { core::ptr::read(blk_ptr) }
     }
 
+    /// Recover the VirtioBlk after a failed mount() or format().
+    /// mount/format store blk at the static STORE_VADDR before they can fail,
+    /// so this reads it back out for retry.
+    pub fn recover_blk() -> VirtioBlk {
+        unsafe { core::ptr::read(&(*(STORE_VADDR as *const ObjectStore)).blk) }
+    }
+
     // ---------------------------------------------------------------
     // Private helpers
     // ---------------------------------------------------------------

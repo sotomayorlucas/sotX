@@ -2415,141 +2415,39 @@ fn init_block_storage(boot_info: &BootInfo) -> Option<VirtioBlk> {
 }
 
 fn init_objstore(blk: VirtioBlk) -> Option<VirtioBlk> {
-    // 1. Format a new filesystem.
-    let store = match ObjectStore::format(blk) {
-        Ok(s) => s,
-        Err(e) => {
-            print(b"OBJSTORE: format failed: ");
-            print(e.as_bytes());
-            print(b"\n");
-            return None;
+    // Try to mount existing filesystem first (preserves data across reboots).
+    match ObjectStore::mount(blk) {
+        Ok(store) => {
+            let mut entries = [DirEntry::zeroed(); DIR_ENTRY_COUNT];
+            let count = store.list(&mut entries);
+            print(b"OBJSTORE: mounted (");
+            print_u64(count as u64);
+            print(b" files)\n");
+            for i in 0..count {
+                print(b"  ");
+                print(entries[i].name_as_str());
+                print(b" size=");
+                print_u64(entries[i].size);
+                print(b"\n");
+            }
+            Some(store.into_blk())
         }
-    };
-
-    // 2. Create VFS.
-    let mut vfs = Vfs::new(store);
-
-    // 3. Create and write hello.txt.
-    let fd = match vfs.create(b"hello.txt") {
-        Ok(f) => f,
-        Err(e) => {
-            print(b"VFS CREATE ERR: ");
-            print(e.as_bytes());
-            print(b"\n");
-            return None;
-        }
-    };
-    if let Err(e) = vfs.write(fd, b"Hello from sotOS!") {
-        print(b"VFS WRITE ERR: ");
-        print(e.as_bytes());
-        print(b"\n");
-        return None;
-    }
-    let _ = vfs.close(fd);
-
-    // 4. Read back hello.txt.
-    let fd = match vfs.open(b"hello.txt", 1) {
-        Ok(f) => f,
-        Err(e) => {
-            print(b"VFS OPEN ERR: ");
-            print(e.as_bytes());
-            print(b"\n");
-            return None;
-        }
-    };
-    let mut buf = [0u8; 64];
-    match vfs.read(fd, &mut buf) {
-        Ok(n) => {
-            print(b"VFS READ: ");
-            print(&buf[..n]);
-            print(b"\n");
-        }
-        Err(e) => {
-            print(b"VFS READ ERR: ");
-            print(e.as_bytes());
-            print(b"\n");
+        Err(_) => {
+            // No valid filesystem — recover blk and format a new one.
+            let blk = ObjectStore::recover_blk();
+            let store = match ObjectStore::format(blk) {
+                Ok(s) => s,
+                Err(e) => {
+                    print(b"OBJSTORE: format failed: ");
+                    print(e.as_bytes());
+                    print(b"\n");
+                    return None;
+                }
+            };
+            print(b"OBJSTORE: formatted new filesystem\n");
+            Some(store.into_blk())
         }
     }
-    let _ = vfs.close(fd);
-
-    // 5. Create data.bin with binary data.
-    let fd = match vfs.create(b"data.bin") {
-        Ok(f) => f,
-        Err(e) => {
-            print(b"VFS CREATE ERR: ");
-            print(e.as_bytes());
-            print(b"\n");
-            return None;
-        }
-    };
-    let _ = vfs.write(fd, b"sotOS VFS test data\n");
-    let _ = vfs.close(fd);
-
-    // 6. List files.
-    let mut entries = [DirEntry::zeroed(); DIR_ENTRY_COUNT];
-    let count = vfs.store().list(&mut entries);
-    print(b"VFS LIST: ");
-    print_u64(count as u64);
-    print(b" files\n");
-    for i in 0..count {
-        print(b"  ");
-        print(entries[i].name_as_str());
-        print(b" oid=");
-        print_u64(entries[i].oid);
-        print(b" size=");
-        print_u64(entries[i].size);
-        print(b"\n");
-    }
-
-    // 7. Delete data.bin.
-    if let Err(e) = vfs.delete(b"data.bin") {
-        print(b"VFS DELETE ERR: ");
-        print(e.as_bytes());
-        print(b"\n");
-    }
-    let remain = vfs.store().list(&mut entries);
-    print(b"VFS: ");
-    print_u64(remain as u64);
-    print(b" files remain\n");
-
-    // 8. Re-mount from disk and verify persistence.
-    let blk = vfs.store_mut().into_blk();
-    let store = match ObjectStore::mount(blk) {
-        Ok(s) => s,
-        Err(e) => {
-            print(b"OBJSTORE: mount failed: ");
-            print(e.as_bytes());
-            print(b"\n");
-            return None;
-        }
-    };
-    let mut vfs = Vfs::new(store);
-    let fd = match vfs.open(b"hello.txt", 1) {
-        Ok(f) => f,
-        Err(e) => {
-            print(b"VFS REMOUNT OPEN ERR: ");
-            print(e.as_bytes());
-            print(b"\n");
-            return None;
-        }
-    };
-    let mut buf2 = [0u8; 64];
-    match vfs.read(fd, &mut buf2) {
-        Ok(n) => {
-            print(b"VFS REMOUNT READ: ");
-            print(&buf2[..n]);
-            print(b"\n");
-        }
-        Err(e) => {
-            print(b"VFS REMOUNT READ ERR: ");
-            print(e.as_bytes());
-            print(b"\n");
-        }
-    }
-    let _ = vfs.close(fd);
-
-    // Return VirtioBlk for LUCAS handler use.
-    Some(vfs.store_mut().into_blk())
 }
 
 // ---------------------------------------------------------------------------
