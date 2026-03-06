@@ -488,11 +488,9 @@ impl TcpTable {
                 if hdr.flags & ACK != 0 {
                     let c = &mut self.conns[ci];
                     c.state = TcpState::Closed;
-                    // Re-arm listener on same port.
-                    c.state = TcpState::Listen;
-                    c.remote_ip = 0;
-                    c.remote_port = 0;
-                    c.recv_len = 0;
+                    c.active = false;
+                    // Don't clear recv_len — let pending data drain via read().
+                    // Connection will be re-armed when close() is called.
                 }
                 None
             }

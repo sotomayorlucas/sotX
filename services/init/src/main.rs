@@ -3755,6 +3755,14 @@ pub extern "C" fn child_handler() -> ! {
     let current_brk: &mut u64 = unsafe { &mut GRP_BRK[memg] };
     let mmap_next: &mut u64 = unsafe { &mut GRP_MMAP_NEXT[memg] };
 
+    // Socket state (parallel arrays indexed by FD number)
+    // FD kind 16=TCP socket, 17=UDP socket
+    let mut sock_conn_id: [u32; GRP_MAX_FDS] = [0xFFFF; GRP_MAX_FDS];
+    let mut sock_udp_local_port: [u16; GRP_MAX_FDS] = [0; GRP_MAX_FDS];
+    let mut sock_udp_remote_ip: [u32; GRP_MAX_FDS] = [0; GRP_MAX_FDS];
+    let mut sock_udp_remote_port: [u16; GRP_MAX_FDS] = [0; GRP_MAX_FDS];
+    static NEXT_UDP_PORT: AtomicU64 = AtomicU64::new(49152);
+
     loop {
         let msg = match sys::recv(ep_cap) {
             Ok(m) => m,
@@ -3885,6 +3893,69 @@ pub extern "C" fn child_handler() -> ! {
                         }
                         reply_val(ep_cap, to_read as i64);
                     }
+                    16 => {
+                        // TCP socket read → NET_CMD_TCP_RECV (retry up to 500 times)
+                        let net_cap = NET_EP_CAP.load(Ordering::Acquire);
+                        let conn_id = sock_conn_id[fd] as u64;
+                        let recv_len = len.min(56);
+                        let mut got = 0usize;
+                        let mut tcp_retries = 0u32;
+                        while tcp_retries < 500 {
+                            let req = sotos_common::IpcMsg {
+                                tag: NET_CMD_TCP_RECV,
+                                regs: [conn_id, recv_len as u64, 0, 0, 0, 0, 0, 0],
+                            };
+                            match sys::call_timeout(net_cap, &req, 50) {
+                                Ok(resp) => {
+                                    let n = resp.regs[0] as usize;
+                                    if n > 0 && n <= recv_len {
+                                        unsafe {
+                                            let src = &resp.regs[1] as *const u64 as *const u8;
+                                            core::ptr::copy_nonoverlapping(src, buf_ptr as *mut u8, n);
+                                        }
+                                        got = n;
+                                        break;
+                                    }
+                                    // n==0: no data yet, retry
+                                }
+                                Err(_) => {} // timeout, retry
+                            }
+                            sys::yield_now();
+                            tcp_retries += 1;
+                        }
+                        if got > 0 {
+                            reply_val(ep_cap, got as i64);
+                        } else {
+                            reply_val(ep_cap, -11); // -EAGAIN after exhausting retries
+                        }
+                    }
+                    17 => {
+                        // UDP socket read → NET_CMD_UDP_RECV
+                        let net_cap = NET_EP_CAP.load(Ordering::Acquire);
+                        let port = sock_udp_local_port[fd];
+                        let recv_len = len.min(56);
+                        if net_cap == 0 || port == 0 {
+                            reply_val(ep_cap, -9);
+                        } else {
+                            let req = sotos_common::IpcMsg {
+                                tag: NET_CMD_UDP_RECV,
+                                regs: [port as u64, recv_len as u64, 0, 0, 0, 0, 0, 0],
+                            };
+                            match sys::call_timeout(net_cap, &req, 500) {
+                                Ok(resp) => {
+                                    let n = resp.regs[0] as usize;
+                                    if n > 0 && n <= recv_len {
+                                        unsafe {
+                                            let src = &resp.regs[1] as *const u64 as *const u8;
+                                            core::ptr::copy_nonoverlapping(src, buf_ptr as *mut u8, n);
+                                        }
+                                    }
+                                    reply_val(ep_cap, n as i64);
+                                }
+                                Err(_) => reply_val(ep_cap, 0),
+                            }
+                        }
+                    }
                     _ => reply_val(ep_cap, -9),
                 }
             }
@@ -3906,6 +3977,50 @@ pub extern "C" fn child_handler() -> ! {
                         reply_val(ep_cap, len as i64);
                     }
                     8 => reply_val(ep_cap, len as i64), // /dev/null → discard
+                    16 => {
+                        // TCP socket write → NET_CMD_TCP_SEND
+                        let net_cap = NET_EP_CAP.load(Ordering::Acquire);
+                        let conn_id = sock_conn_id[fd] as u64;
+                        let send_len = len.min(40);
+                        let mut req = sotos_common::IpcMsg {
+                            tag: NET_CMD_TCP_SEND,
+                            regs: [conn_id, 0, send_len as u64, 0, 0, 0, 0, 0],
+                        };
+                        let data = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, send_len) };
+                        unsafe {
+                            let dst = &mut req.regs[3] as *mut u64 as *mut u8;
+                            core::ptr::copy_nonoverlapping(data.as_ptr(), dst, send_len);
+                        }
+                        match sys::call_timeout(net_cap, &req, 500) {
+                            Ok(resp) => reply_val(ep_cap, resp.regs[0] as i64),
+                            Err(_) => reply_val(ep_cap, -5),
+                        }
+                    }
+                    17 => {
+                        // UDP socket write → NET_CMD_UDP_SENDTO with stored remote addr
+                        let net_cap = NET_EP_CAP.load(Ordering::Acquire);
+                        let remote_ip = sock_udp_remote_ip[fd];
+                        let remote_port = sock_udp_remote_port[fd];
+                        let src_port = sock_udp_local_port[fd];
+                        if net_cap == 0 || remote_ip == 0 {
+                            reply_val(ep_cap, -89); // -EDESTADDRREQ
+                        } else {
+                            let send_len = len.min(32);
+                            let mut req = sotos_common::IpcMsg {
+                                tag: NET_CMD_UDP_SENDTO,
+                                regs: [remote_ip as u64, remote_port as u64, src_port as u64, send_len as u64, 0, 0, 0, 0],
+                            };
+                            let data = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, send_len) };
+                            unsafe {
+                                let dst = &mut req.regs[4] as *mut u64 as *mut u8;
+                                core::ptr::copy_nonoverlapping(data.as_ptr(), dst, send_len);
+                            }
+                            match sys::call_timeout(net_cap, &req, 500) {
+                                Ok(resp) => reply_val(ep_cap, resp.regs[0] as i64),
+                                Err(_) => reply_val(ep_cap, -5),
+                            }
+                        }
+                    }
                     13 => {
                         // VFS file: write via shared ObjectStore
                         let mut found = false;
@@ -3953,6 +4068,18 @@ pub extern "C" fn child_handler() -> ! {
                         for s in 0..MAX_VFS_FILES {
                             if vfs_files[s][3] == fd as u64 { vfs_files[s] = [0; 4]; break; }
                         }
+                    } else if child_fds[fd] == 16 {
+                        // TCP socket close → NET_CMD_TCP_CLOSE
+                        let net_cap = NET_EP_CAP.load(Ordering::Acquire);
+                        let cid = sock_conn_id[fd];
+                        if net_cap != 0 && cid != 0xFFFF {
+                            let req = sotos_common::IpcMsg {
+                                tag: NET_CMD_TCP_CLOSE,
+                                regs: [cid as u64, 0, 0, 0, 0, 0, 0, 0],
+                            };
+                            let _ = sys::call_timeout(net_cap, &req, 500);
+                        }
+                        sock_conn_id[fd] = 0xFFFF;
                     }
                     child_fds[fd] = 0;
                 }
@@ -5740,6 +5867,210 @@ pub extern "C" fn child_handler() -> ! {
                 } else {
                     reply_val(ep_cap, 0);
                 }
+            }
+
+            // SYS_socket(domain, type, protocol) — child socket proxy
+            41 => {
+                let domain = msg.regs[0] as u32;
+                let sock_type = msg.regs[1] as u32;
+                let base_type = sock_type & 0xFF;
+                if domain == 2 && (base_type == 1 || base_type == 2 || base_type == 3) {
+                    let net_cap = NET_EP_CAP.load(Ordering::Acquire);
+                    if net_cap == 0 {
+                        reply_val(ep_cap, -99);
+                    } else {
+                        // Find free FD (start from 3)
+                        let mut fd = None;
+                        for f in 3..CHILD_MAX_FDS {
+                            if child_fds[f] == 0 { fd = Some(f); break; }
+                        }
+                        match fd {
+                            Some(f) => {
+                                if base_type == 1 {
+                                    child_fds[f] = 16; // TCP
+                                    sock_conn_id[f] = 0xFFFF;
+                                } else {
+                                    child_fds[f] = 17; // UDP
+                                    // Auto-bind ephemeral port
+                                    let port = NEXT_UDP_PORT.fetch_add(1, Ordering::SeqCst) as u16;
+                                    sock_udp_local_port[f] = port;
+                                    // Tell net service to bind
+                                    let bind_req = sotos_common::IpcMsg {
+                                        tag: NET_CMD_UDP_BIND,
+                                        regs: [port as u64, 0, 0, 0, 0, 0, 0, 0],
+                                    };
+                                    let _ = sys::call_timeout(net_cap, &bind_req, 500);
+                                }
+                                reply_val(ep_cap, f as i64);
+                            }
+                            None => reply_val(ep_cap, -24), // -EMFILE
+                        }
+                    }
+                } else {
+                    reply_val(ep_cap, -97); // -EAFNOSUPPORT
+                }
+            }
+
+            // SYS_connect(fd, sockaddr_ptr, addrlen) — child socket proxy
+            42 => {
+                let fd = msg.regs[0] as usize;
+                let sockaddr_ptr = msg.regs[1];
+                if fd >= CHILD_MAX_FDS || (child_fds[fd] != 16 && child_fds[fd] != 17) {
+                    reply_val(ep_cap, -9);
+                } else {
+                    let sa = unsafe { core::slice::from_raw_parts(sockaddr_ptr as *const u8, 8) };
+                    let port = u16::from_be_bytes([sa[2], sa[3]]);
+                    let ip = u32::from_be_bytes([sa[4], sa[5], sa[6], sa[7]]);
+
+                    if child_fds[fd] == 17 {
+                        // UDP: store remote address
+                        sock_udp_remote_ip[fd] = ip;
+                        sock_udp_remote_port[fd] = port;
+                        reply_val(ep_cap, 0);
+                    } else {
+                        // TCP connect
+                        let net_cap = NET_EP_CAP.load(Ordering::Acquire);
+                        if net_cap == 0 { reply_val(ep_cap, -99); continue; }
+                        let req = sotos_common::IpcMsg {
+                            tag: NET_CMD_TCP_CONNECT,
+                            regs: [ip as u64, port as u64, 0, 0, 0, 0, 0, 0],
+                        };
+                        match sys::call_timeout(net_cap, &req, 500) {
+                            Ok(resp) => {
+                                let conn_id = resp.regs[0];
+                                if conn_id as i64 >= 0 {
+                                    sock_conn_id[fd] = conn_id as u32;
+                                    reply_val(ep_cap, 0);
+                                } else {
+                                    reply_val(ep_cap, -111); // -ECONNREFUSED
+                                }
+                            }
+                            Err(_) => reply_val(ep_cap, -111),
+                        }
+                    }
+                }
+            }
+
+            // SYS_sendto / SYS_sendmsg — child socket proxy
+            44 | 46 => {
+                let fd = msg.regs[0] as usize;
+                let buf_ptr = msg.regs[1];
+                let len = msg.regs[2] as usize;
+                let dest_ptr = msg.regs[4];
+
+                if fd >= CHILD_MAX_FDS || (child_fds[fd] != 16 && child_fds[fd] != 17) {
+                    reply_val(ep_cap, -9);
+                } else if child_fds[fd] == 17 {
+                    // UDP sendto
+                    let net_cap = NET_EP_CAP.load(Ordering::Acquire);
+                    if net_cap == 0 { reply_val(ep_cap, -99); continue; }
+                    let (dst_ip, dst_port) = if dest_ptr != 0 {
+                        let sa = unsafe { core::slice::from_raw_parts(dest_ptr as *const u8, 8) };
+                        (u32::from_be_bytes([sa[4], sa[5], sa[6], sa[7]]),
+                         u16::from_be_bytes([sa[2], sa[3]]))
+                    } else {
+                        (sock_udp_remote_ip[fd], sock_udp_remote_port[fd])
+                    };
+                    let src_port = sock_udp_local_port[fd];
+                    let send_len = len.min(40);
+                    let mut req = sotos_common::IpcMsg {
+                        tag: NET_CMD_UDP_SENDTO,
+                        regs: [dst_ip as u64, dst_port as u64, src_port as u64, send_len as u64, 0, 0, 0, 0],
+                    };
+                    let data = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, send_len) };
+                    unsafe {
+                        let dst = &mut req.regs[4] as *mut u64 as *mut u8;
+                        core::ptr::copy_nonoverlapping(data.as_ptr(), dst, send_len);
+                    }
+                    match sys::call_timeout(net_cap, &req, 500) {
+                        Ok(resp) => reply_val(ep_cap, resp.regs[0] as i64),
+                        Err(_) => reply_val(ep_cap, -5),
+                    }
+                } else {
+                    // TCP send
+                    let net_cap = NET_EP_CAP.load(Ordering::Acquire);
+                    let conn_id = sock_conn_id[fd] as u64;
+                    let send_len = len.min(40);
+                    let mut req = sotos_common::IpcMsg {
+                        tag: NET_CMD_TCP_SEND,
+                        regs: [conn_id, 0, send_len as u64, 0, 0, 0, 0, 0],
+                    };
+                    let data = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, send_len) };
+                    unsafe {
+                        let dst = &mut req.regs[3] as *mut u64 as *mut u8;
+                        core::ptr::copy_nonoverlapping(data.as_ptr(), dst, send_len);
+                    }
+                    match sys::call_timeout(net_cap, &req, 500) {
+                        Ok(resp) => reply_val(ep_cap, resp.regs[0] as i64),
+                        Err(_) => reply_val(ep_cap, -5),
+                    }
+                }
+            }
+
+            // SYS_recvfrom / SYS_recvmsg — child socket proxy
+            45 | 47 => {
+                let fd = msg.regs[0] as usize;
+                let buf_ptr = msg.regs[1];
+                let len = msg.regs[2] as usize;
+
+                if fd >= CHILD_MAX_FDS || (child_fds[fd] != 16 && child_fds[fd] != 17) {
+                    reply_val(ep_cap, -9);
+                } else if child_fds[fd] == 17 {
+                    // UDP recvfrom
+                    let net_cap = NET_EP_CAP.load(Ordering::Acquire);
+                    if net_cap == 0 { reply_val(ep_cap, -99); continue; }
+                    let src_port = sock_udp_local_port[fd];
+                    let recv_len = len.min(48);
+                    let req = sotos_common::IpcMsg {
+                        tag: NET_CMD_UDP_RECV,
+                        regs: [src_port as u64, recv_len as u64, 0, 0, 0, 0, 0, 0],
+                    };
+                    match sys::call_timeout(net_cap, &req, 500) {
+                        Ok(resp) => {
+                            let n = resp.regs[0] as usize;
+                            if n > 0 && n <= recv_len {
+                                unsafe {
+                                    let src = &resp.regs[2] as *const u64 as *const u8;
+                                    core::ptr::copy_nonoverlapping(src, buf_ptr as *mut u8, n);
+                                }
+                            }
+                            reply_val(ep_cap, n as i64);
+                        }
+                        Err(_) => reply_val(ep_cap, 0),
+                    }
+                } else {
+                    // TCP recvfrom
+                    let net_cap = NET_EP_CAP.load(Ordering::Acquire);
+                    let conn_id = sock_conn_id[fd] as u64;
+                    let recv_len = len.min(56);
+                    let req = sotos_common::IpcMsg {
+                        tag: NET_CMD_TCP_RECV,
+                        regs: [conn_id, recv_len as u64, 0, 0, 0, 0, 0, 0],
+                    };
+                    match sys::call_timeout(net_cap, &req, 500) {
+                        Ok(resp) => {
+                            let n = resp.regs[0] as usize;
+                            if n > 0 && n <= recv_len {
+                                unsafe {
+                                    let src = &resp.regs[1] as *const u64 as *const u8;
+                                    core::ptr::copy_nonoverlapping(src, buf_ptr as *mut u8, n);
+                                }
+                            }
+                            reply_val(ep_cap, n as i64);
+                        }
+                        Err(_) => reply_val(ep_cap, 0),
+                    }
+                }
+            }
+
+            // SYS_bind(49), SYS_listen(50), SYS_getsockname(51), SYS_setsockopt(54), SYS_getsockopt(55) — stubs
+            49 | 50 | 51 | 52 | 54 | 55 => {
+                reply_val(ep_cap, 0);
+            }
+
+            // SYS_shutdown(48)
+            48 => {
+                reply_val(ep_cap, 0);
             }
 
             // Unknown → -ENOSYS (with logging)

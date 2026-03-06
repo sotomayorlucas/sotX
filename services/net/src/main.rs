@@ -403,9 +403,10 @@ pub extern "C" fn _start() -> ! {
             net.rx_done(buf_idx);
         }
 
-        // Check for TCP connections with data to echo back.
+        // Echo server: only echo data on port 7 (not outbound connections).
         for i in 0..16 {
             if tcp_table.conns[i].active
+                && tcp_table.conns[i].local_port == 7
                 && tcp_table.conns[i].state == sotos_net::tcp::TcpState::Established
                 && tcp_table.conns[i].recv_len > 0
             {

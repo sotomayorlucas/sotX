@@ -30,6 +30,7 @@ exclude = [
     "services/hello",
     "services/hello-linux",
     "services/hello-musl",
+    "services/net-test",
     "libs/sotos-testlib",
 ]
 
