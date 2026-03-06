@@ -101,6 +101,21 @@
 
 ---
 
+## CRITICO (bloqueadores de calidad)
+- [x] C1: Testing framework — 18-test Linux ABI suite (hello-linux), auto-run on boot
+- [ ] C2: SMP scheduler race — hang intermitente con >1 CPU (known issue, reliable single-core)
+
+## ALTO (funcionalidad seria)
+- [x] A1: child_handler completo — brk/mmap/munmap/mprotect, FD table, /dev/null+zero, dup/dup2, pipe, openat, getrandom, prlimit64, ioctl, getcwd, gettimeofday, sysinfo
+- [x] A2: Signals reales — rt_sigaction stores handlers, sigprocmask tracks masks, SIGCHLD delivery, default actions, -EINTR on pending signals
+- [ ] A3: Busybox milestone — correr un binario musl-static real bajo LUCAS
+
+## MEDIO (completitud UNIX)
+- [x] M1: mmap file-backed — seek to offset, read file content into mapped pages, restore position
+- [x] M2: /dev/null, /dev/zero, /dev/urandom — supported in both lucas_handler and child_handler openat
+
+---
+
 ## Research & Development: Evolución a SO de 4ta Generación
 
 ### Multikernel Architecture

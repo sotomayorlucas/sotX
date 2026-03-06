@@ -99,6 +99,14 @@ const SYS_BOOTINFO_WRITE: u64 = 133;
 /// Syscall number — page permission change (mprotect-like).
 const SYS_PROTECT: u64 = 134;
 
+/// Syscall number — IPC call with timeout.
+const SYS_CALL_TIMEOUT: u64 = 135;
+
+/// Syscall number — set FS_BASE for current thread (TLS support).
+const SYS_SET_FSBASE: u64 = 160;
+/// Syscall number — get FS_BASE for current thread.
+const SYS_GET_FSBASE: u64 = 161;
+
 /// Syscall numbers — file permission management.
 const SYS_CHMOD: u64 = 150;
 const SYS_CHOWN: u64 = 151;
@@ -108,9 +116,9 @@ const SYS_THREAD_INFO: u64 = 140;
 const SYS_RESOURCE_LIMIT: u64 = 141;
 const SYS_THREAD_COUNT: u64 = 142;
 
-/// Temporary syscall number for debug serial output.
+/// Debug syscall: write a single byte to serial (COM1).
 const SYS_DEBUG_PRINT: u64 = 255;
-/// Temporary syscall number for debug serial input (non-blocking).
+/// Debug syscall: non-blocking serial input (returns 0 if no data).
 const SYS_DEBUG_READ: u64 = 253;
 
 /// Upper bound of user-space virtual addresses.
@@ -172,6 +180,26 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
     // as an IPC message to the LUCAS handler. The handler translates Linux
     // syscalls to sotOS primitives and replies with the result.
     if let Some(ep_raw) = sched::get_current_redirect_ep() {
+        // Intercept arch_prctl — requires Ring 0 (FS_BASE/GS_BASE MSR writes).
+        // Linux syscall 158 = arch_prctl: rdi = subcommand, rsi = addr.
+        if frame.rax == 158 {
+            match frame.rdi {
+                0x1002 => { // ARCH_SET_FS
+                    kdebug!("arch_prctl(ARCH_SET_FS, {:#x})", frame.rsi);
+                    sched::set_current_fs_base(frame.rsi);
+                    frame.rax = 0;
+                }
+                0x1003 => { // ARCH_GET_FS
+                    frame.rax = sched::get_current_fs_base();
+                }
+                _ => {
+                    frame.rax = (-22i64) as u64; // -EINVAL
+                }
+            }
+            percpu::current_percpu().user_rsp_save = saved_user_rsp;
+            return;
+        }
+
         let tid = sched::current_tid().map(|t| t.0 as u64).unwrap_or(0);
         let msg = Message {
             tag: frame.rax, // Linux syscall number
@@ -247,6 +275,27 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
                 Ok(CapObject::Endpoint { id }) => {
                     let msg = msg_from_frame(frame);
                     match endpoint::call(PoolHandle::from_raw(id), msg) {
+                        Ok(reply) => {
+                            frame.rax = 0;
+                            msg_to_frame(frame, &reply);
+                        }
+                        Err(e) => frame.rax = e as i64 as u64,
+                    }
+                }
+                Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
+                Err(e) => frame.rax = e as i64 as u64,
+            }
+        }
+
+        // SYS_CALL_TIMEOUT — call with timeout (ep_cap in rdi[31:0], timeout in rdi[63:32])
+        SYS_CALL_TIMEOUT => {
+            let ep_cap = (frame.rdi & 0xFFFFFFFF) as u32;
+            let timeout_ticks = (frame.rdi >> 32) as u64;
+            match cap::validate(ep_cap, Rights::READ.or(Rights::WRITE)) {
+                Ok(CapObject::Endpoint { id }) => {
+                    let msg = msg_from_frame(frame);
+                    let timeout = if timeout_ticks == 0 { u64::MAX } else { timeout_ticks };
+                    match endpoint::call_timeout(PoolHandle::from_raw(id), msg, timeout) {
                         Ok(reply) => {
                             frame.rax = 0;
                             msg_to_frame(frame, &reply);
@@ -542,15 +591,33 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
         }
 
         // SYS_THREAD_CREATE — create a new user thread in caller's address space
-        // rdi = entry RIP, rsi = stack RSP; returns thread cap_id
+        // rdi = entry RIP, rsi = stack RSP, rdx = optional redirect endpoint cap (0 = none)
+        // returns thread cap_id
         SYS_THREAD_CREATE => {
             let rip = frame.rdi;
             let rsp = frame.rsi;
+            let redirect_cap = frame.rdx;
             if rip == 0 || rsp == 0 || rip >= USER_ADDR_LIMIT || rsp >= USER_ADDR_LIMIT {
                 frame.rax = SysError::InvalidArg as i64 as u64;
             } else {
+                // Validate optional redirect endpoint cap
+                let redirect_ep = if redirect_cap != 0 {
+                    match cap::validate(redirect_cap as u32, Rights::READ.or(Rights::WRITE)) {
+                        Ok(CapObject::Endpoint { id: ep_id }) => Some(ep_id),
+                        _ => {
+                            frame.rax = SysError::InvalidCap as i64 as u64;
+                            return;
+                        }
+                    }
+                } else {
+                    None
+                };
                 let cr3 = paging::read_cr3();
-                let tid = sched::spawn_user(rip, rsp, cr3);
+                let tid = if let Some(ep_id) = redirect_ep {
+                    sched::spawn_user_with_redirect(rip, rsp, cr3, ep_id)
+                } else {
+                    sched::spawn_user(rip, rsp, cr3)
+                };
                 match cap::insert(CapObject::Thread { id: tid.0 }, Rights::ALL, None) {
                     Some(cap_id) => frame.rax = cap_id.raw() as u64,
                     None => frame.rax = SysError::OutOfResources as i64 as u64,
@@ -1274,7 +1341,19 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
             }
         }
 
-        // SYS_DEBUG_PRINT — write a single byte to serial (temporary)
+        // SYS_SET_FSBASE — set FS_BASE MSR for current thread (TLS)
+        // rdi = new FS base address
+        SYS_SET_FSBASE => {
+            sched::set_current_fs_base(frame.rdi);
+            frame.rax = 0;
+        }
+
+        // SYS_GET_FSBASE — get FS_BASE of current thread
+        SYS_GET_FSBASE => {
+            frame.rax = sched::get_current_fs_base();
+        }
+
+        // SYS_DEBUG_PRINT — write a single byte to serial
         SYS_DEBUG_PRINT => {
             serial::write_byte(frame.rdi as u8);
             frame.rax = 0;
@@ -1287,7 +1366,7 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
                 .unwrap_or(u64::MAX); // -1 as unsigned = no data
         }
 
-        // SYS_DEBUG_PHYS_READ (254) — read u64 from physical address via HHDM (temporary debug)
+        // SYS_DEBUG_PHYS_READ (254) — read u64 from physical address via HHDM
         254 => {
             let phys_addr = frame.rdi;
             let hhdm = mm::hhdm_offset();

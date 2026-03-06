@@ -31,7 +31,7 @@ pub const MSG_REGS: usize = 8;
 const CALLER_BIT: u32 = 0x8000_0000;
 
 // --- Per-core pool constants ---
-const MAX_CPUS: usize = 16;
+use sotos_common::MAX_CPUS;
 const MAX_EP_PER_CORE: usize = 64;
 
 /// Handle encoding constants.
@@ -418,6 +418,105 @@ pub fn call(ep_handle: PoolHandle, msg: Message) -> Result<Message, SysError> {
             let reply = sched::current_ipc_msg();
             sched::clear_current_ipc();
             Ok(reply)
+        }
+    }
+}
+
+/// Synchronous call with timeout: send a message, wait for reply up to `timeout_ticks`.
+/// Returns `Err(SysError::Timeout)` if the reply doesn't arrive in time.
+/// `timeout_ticks` is relative (number of ticks from now).
+pub fn call_timeout(ep_handle: PoolHandle, msg: Message, timeout_ticks: u64) -> Result<Message, SysError> {
+    let my_tid = sched::current_tid().ok_or(SysError::InvalidArg)?;
+    let raw = ep_handle.raw();
+    let (core_id, local) = decode_handle(raw);
+
+    let action = {
+        let mut pool = PER_CORE_ENDPOINTS[core_id].lock();
+        let ep = pool.get_mut(local).ok_or(SysError::NotFound)?;
+
+        match ep.state {
+            EndpointState::RecvWait => {
+                let recv_tid = ep.receiver.take().unwrap();
+                ep.caller = Some(my_tid.0);
+                ep.state = EndpointState::Idle;
+                CallAction::RendezvousThenWait(recv_tid)
+            }
+            EndpointState::Idle | EndpointState::SendWait => {
+                if !ep.enqueue_sender(my_tid.0 | CALLER_BIT) {
+                    return Err(SysError::OutOfResources);
+                }
+                ep.state = EndpointState::SendWait;
+                CallAction::Block
+            }
+        }
+    };
+
+    // Set timeout deadline before blocking.
+    let deadline = sched::global_ticks() + timeout_ticks;
+
+    match action {
+        CallAction::RendezvousThenWait(recv_tid) => {
+            let mut msg = msg;
+            process_cap_transfer(&mut msg);
+            sched::write_ipc_msg(sched::ThreadId(recv_tid), msg);
+            sched::wake(sched::ThreadId(recv_tid));
+            sched::set_current_ipc(ep_handle.raw(), sched::IpcRole::Caller, Message::empty());
+            sched::set_current_ipc_timeout(deadline);
+            sched::block_current();
+            if sched::check_and_clear_ipc_timeout() {
+                cancel_caller(raw, my_tid.0);
+                sched::clear_current_ipc();
+                return Err(SysError::Timeout);
+            }
+            let reply = sched::current_ipc_msg();
+            sched::clear_current_ipc();
+            Ok(reply)
+        }
+        CallAction::Block => {
+            let mut msg = msg;
+            process_cap_transfer(&mut msg);
+            sched::set_current_ipc(ep_handle.raw(), sched::IpcRole::Caller, msg);
+            sched::set_current_ipc_timeout(deadline);
+            sched::block_current();
+            if sched::check_and_clear_ipc_timeout() {
+                cancel_caller(raw, my_tid.0);
+                sched::clear_current_ipc();
+                return Err(SysError::Timeout);
+            }
+            let reply = sched::current_ipc_msg();
+            sched::clear_current_ipc();
+            Ok(reply)
+        }
+    }
+}
+
+/// Remove a timed-out caller from an endpoint's state.
+fn cancel_caller(ep_raw: u32, tid: ThreadId) {
+    let (core_id, local) = decode_handle(ep_raw);
+    let mut pool = PER_CORE_ENDPOINTS[core_id].lock();
+    if let Some(ep) = pool.get_mut(local) {
+        // Clear from caller slot.
+        if ep.caller == Some(tid) {
+            ep.caller = None;
+        }
+        // Remove from send queue.
+        let mut i = 0;
+        while i < ep.send_queue_len {
+            if let Some(qtid) = ep.send_queue[i] {
+                if (qtid & !CALLER_BIT) == tid {
+                    for j in (i + 1)..ep.send_queue_len {
+                        ep.send_queue[j - 1] = ep.send_queue[j];
+                    }
+                    ep.send_queue_len -= 1;
+                    ep.send_queue[ep.send_queue_len] = None;
+                    break;
+                }
+            }
+            i += 1;
+        }
+        // Fix endpoint state if queue is now empty.
+        if ep.send_queue_len == 0 && ep.state == EndpointState::SendWait {
+            ep.state = EndpointState::Idle;
         }
     }
 }

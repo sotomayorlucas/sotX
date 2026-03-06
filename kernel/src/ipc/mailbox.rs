@@ -12,7 +12,7 @@ use crate::ipc::endpoint::Message;
 use crate::sync::ticket::TicketMutex;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-const MAX_CPUS: usize = 16;
+use sotos_common::MAX_CPUS;
 const MAILBOX_SIZE: usize = 32;
 
 /// A cross-core IPC request deposited into a target core's mailbox.

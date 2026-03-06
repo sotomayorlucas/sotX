@@ -74,7 +74,7 @@ fn process_rela(
             }
             R_X86_64_64 | R_X86_64_GLOB_DAT | R_X86_64_JUMP_SLOT => {
                 // These need symbol resolution (S + A or S).
-                // For now, if sym index is 0, use base + addend.
+                // If sym index is 0 (no symbol), use base + addend (relative reloc).
                 if _r_sym == 0 {
                     let val = (base as i64 + r_addend) as u64;
                     write_u64(target, val);

@@ -157,7 +157,7 @@ impl CapabilityTable {
         }
 
         // Walk the pool and revoke all children whose parent was revoked.
-        // This is O(n*depth) in the worst case — acceptable for now.
+        // This is O(n*depth) in the worst case — acceptable for bounded pool sizes.
         let mut to_revoke: Vec<PoolHandle> = Vec::new();
         let mut changed = true;
         while changed {

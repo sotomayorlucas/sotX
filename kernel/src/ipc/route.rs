@@ -212,7 +212,7 @@ pub fn try_remote_send(endpoint_raw: u32, msg: &Message) -> bool {
         // 2. The net service sends it over the network to the target node
         // 3. The target node deserializes and delivers locally
         //
-        // For now, remote routing is registered but delivery requires
+        // Remote routing is registered; delivery requires
         // the net service to poll for outbound messages.
         //
         // The routing infrastructure is in place — the actual network

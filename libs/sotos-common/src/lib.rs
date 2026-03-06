@@ -135,6 +135,10 @@ pub enum Syscall {
     BootInfoWrite = 133,
     /// Change page permissions (mprotect-like, W^X enforced).
     Protect = 134,
+    /// Set FS_BASE MSR for current thread (TLS support).
+    SetFsBase = 160,
+    /// Get FS_BASE MSR of current thread.
+    GetFsBase = 161,
     /// Change file permissions (chmod).
     Chmod = 150,
     /// Change file ownership (chown).
@@ -145,7 +149,9 @@ pub enum Syscall {
     ResourceLimit = 141,
     /// Get total live thread count.
     ThreadCount = 142,
-    /// Write a single byte to serial (temporary debug aid).
+    /// Combined send+receive with timeout (ticks in extra reg).
+    CallTimeout = 135,
+    /// Write a single byte to serial (COM1).
     DebugPrint = 255,
     /// Non-blocking serial read (returns byte or u64::MAX if none).
     DebugRead = 253,
@@ -169,7 +175,21 @@ pub enum SysError {
     WouldBlock = -5,
     /// Object not found.
     NotFound = -6,
+    /// IPC call timed out.
+    Timeout = -7,
 }
+
+// ---------------------------------------------------------------
+// Platform constants (centralized to avoid duplication)
+// ---------------------------------------------------------------
+
+/// Maximum supported CPUs (used by kernel scheduler, IPC, slab, watchdog).
+pub const MAX_CPUS: usize = 16;
+
+/// Keyboard scancode ring buffer virtual address (shared: kernel, kbd, init, xhci).
+pub const KB_RING_ADDR: u64 = 0x510000;
+/// Mouse event ring buffer virtual address (shared: kernel, kbd, init).
+pub const MOUSE_RING_ADDR: u64 = 0x520000;
 
 /// Well-known virtual address of the BootInfo page (mapped read-only for init).
 pub const BOOT_INFO_ADDR: u64 = 0xB00000;
@@ -394,7 +414,15 @@ pub mod sys {
     /// Create a new thread. Returns the thread capability ID.
     #[inline(always)]
     pub fn thread_create(rip: u64, rsp: u64) -> Result<u64, i64> {
-        let ret = syscall2(super::Syscall::ThreadCreate as u64, rip, rsp);
+        let ret = syscall3(super::Syscall::ThreadCreate as u64, rip, rsp, 0);
+        if (ret as i64) < 0 { Err(ret as i64) } else { Ok(ret) }
+    }
+
+    /// Create a new thread with a pre-set syscall redirect endpoint (for LUCAS).
+    /// The redirect is set atomically before the thread is scheduled.
+    #[inline(always)]
+    pub fn thread_create_redirected(rip: u64, rsp: u64, ep_cap: u64) -> Result<u64, i64> {
+        let ret = syscall3(super::Syscall::ThreadCreate as u64, rip, rsp, ep_cap);
         if (ret as i64) < 0 { Err(ret as i64) } else { Ok(ret) }
     }
 
@@ -540,6 +568,43 @@ pub mod sys {
                 "syscall",
                 inlateout("rax") super::Syscall::Call as u64 => ret,
                 in("rdi") ep_cap,
+                inlateout("rsi") msg.tag => tag,
+                inlateout("rdx") msg.regs[0] => r0,
+                inlateout("r8") msg.regs[1] => r1,
+                inlateout("r9") msg.regs[2] => r2,
+                inlateout("r10") msg.regs[3] => r3,
+                inlateout("r12") msg.regs[4] => r4,
+                inlateout("r13") msg.regs[5] => r5,
+                inlateout("r14") msg.regs[6] => r6,
+                inlateout("r15") msg.regs[7] => r7,
+                lateout("rcx") _,
+                lateout("r11") _,
+                options(nostack),
+            );
+        }
+        if (ret as i64) < 0 {
+            Err(ret as i64)
+        } else {
+            Ok(super::IpcMsg { tag, regs: [r0, r1, r2, r3, r4, r5, r6, r7] })
+        }
+    }
+
+    /// Combined send+receive with timeout on a synchronous IPC endpoint.
+    /// `timeout_ticks` is relative (number of scheduler ticks; 100 ticks ≈ 1s at 100Hz).
+    /// Returns `Err(-7)` on timeout (SysError::Timeout).
+    #[inline(always)]
+    pub fn call_timeout(ep_cap: u64, msg: &super::IpcMsg, timeout_ticks: u32) -> Result<super::IpcMsg, i64> {
+        // Encode timeout in upper 32 bits of rdi.
+        let rdi_val = (ep_cap & 0xFFFFFFFF) | ((timeout_ticks as u64) << 32);
+        let ret: u64;
+        let tag: u64;
+        let r0: u64; let r1: u64; let r2: u64; let r3: u64;
+        let r4: u64; let r5: u64; let r6: u64; let r7: u64;
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                inlateout("rax") super::Syscall::CallTimeout as u64 => ret,
+                in("rdi") rdi_val,
                 inlateout("rsi") msg.tag => tag,
                 inlateout("rdx") msg.regs[0] => r0,
                 inlateout("r8") msg.regs[1] => r1,
@@ -956,7 +1021,20 @@ pub mod sys {
         syscall0(super::Syscall::ThreadCount as u64)
     }
 
-    /// Temporary debug: read u64 from physical address via kernel HHDM.
+    /// Set the FS_BASE MSR for the current thread (TLS support).
+    #[inline(always)]
+    pub fn set_fs_base(addr: u64) -> Result<(), i64> {
+        let ret = syscall1(super::Syscall::SetFsBase as u64, addr);
+        if (ret as i64) < 0 { Err(ret as i64) } else { Ok(()) }
+    }
+
+    /// Get the FS_BASE MSR of the current thread.
+    #[inline(always)]
+    pub fn get_fs_base() -> u64 {
+        syscall0(super::Syscall::GetFsBase as u64)
+    }
+
+    /// Debug: read u64 from physical address via kernel HHDM.
     #[inline(always)]
     pub fn debug_phys_read(phys_addr: u64) -> u64 {
         syscall1(254, phys_addr)

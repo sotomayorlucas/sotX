@@ -158,7 +158,7 @@ impl NvmeController {
         let id_cmd = cmd::identify_controller(dma.identify_phys);
         ctrl.admin_submit_and_wait(id_cmd, wait)?;
 
-        // Parse serial number (bytes 4-23) — not critical, skip for now.
+        // Serial number at bytes 4-23 — informational only, not parsed.
 
         // 5b. Identify Namespace 1.
         let ns_cmd = cmd::identify_namespace(1, dma.identify_phys);

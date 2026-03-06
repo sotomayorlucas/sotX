@@ -29,6 +29,23 @@ use domain::{DomainState, SchedDomain};
 use spin::Mutex;
 use x86_64::VirtAddr;
 
+/// MSR number for IA32_FS_BASE — used for TLS (Thread-Local Storage).
+const IA32_FS_BASE: u32 = 0xC000_0100;
+
+/// Write the IA32_FS_BASE MSR.
+#[inline]
+fn write_fs_base_msr(value: u64) {
+    unsafe {
+        core::arch::asm!(
+            "wrmsr",
+            in("ecx") IA32_FS_BASE,
+            in("eax") value as u32,
+            in("edx") (value >> 32) as u32,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+}
+
 /// Global tick counter — incremented unconditionally on every timer tick.
 /// Used as the clock source for domain period refills.
 static GLOBAL_TICKS: AtomicU64 = AtomicU64::new(0);
@@ -153,7 +170,7 @@ fn finish_switch() {
 // Per-core run queues
 // ---------------------------------------------------------------------------
 
-const MAX_CPUS: usize = 16;
+use sotos_common::MAX_CPUS;
 
 struct CpuQueue {
     /// Multi-level priority queues: index 0 = highest priority (realtime).
@@ -376,6 +393,9 @@ pub fn init() {
         compute_target: ComputeTarget::Cpu,
         deadline_ticks: 0,
         period_ticks: 0,
+        ipc_timeout: 0,
+        ipc_timed_out: false,
+        fs_base: 0,
     };
     let tid = ThreadId(sched.next_id);
     let handle = sched.threads.alloc(idle);
@@ -419,6 +439,9 @@ pub fn create_idle_thread() -> usize {
         compute_target: ComputeTarget::Cpu,
         deadline_ticks: 0,
         period_ticks: 0,
+        ipc_timeout: 0,
+        ipc_timed_out: false,
+        fs_base: 0,
     };
     let handle = sched.threads.alloc(idle);
     let slot = handle.index();
@@ -447,12 +470,24 @@ pub fn spawn(entry: fn() -> !) -> ThreadId {
 
 /// Spawn a new user thread that enters Ring 3 at `user_rip`.
 pub fn spawn_user(user_rip: u64, user_rsp: u64, cr3: u64) -> ThreadId {
+    spawn_user_opt(user_rip, user_rsp, cr3, None)
+}
+
+/// Spawn a new user thread with an optional pre-set redirect endpoint.
+/// The redirect is set atomically before the thread is enqueued, avoiding
+/// race conditions where the thread runs before redirect_set is called.
+pub fn spawn_user_with_redirect(user_rip: u64, user_rsp: u64, cr3: u64, ep_id: u32) -> ThreadId {
+    spawn_user_opt(user_rip, user_rsp, cr3, Some(ep_id))
+}
+
+fn spawn_user_opt(user_rip: u64, user_rsp: u64, cr3: u64, redirect_ep: Option<u32>) -> ThreadId {
     let mut sched = SCHEDULER.lock();
     let id = sched.next_id;
     sched.next_id += 1;
 
     let mut t = Thread::new_user(id, user_rip, user_rsp, cr3, user_thread_trampoline);
     t.timeslice = TIMESLICE;
+    t.redirect_ep = redirect_ep;
     let tid = t.id;
 
     let handle = sched.threads.alloc(t);
@@ -577,13 +612,53 @@ pub fn clear_current_ipc() {
 }
 
 /// Write a message into a specific thread's IPC buffer. O(1).
-pub fn write_ipc_msg(tid: ThreadId, msg: Message) {
+/// Returns false if the thread is no longer Blocked (e.g., timed out).
+pub fn write_ipc_msg(tid: ThreadId, msg: Message) -> bool {
     let mut sched = SCHEDULER.lock();
     if let Some(slot) = sched.slot_of(tid) {
         if let Some(t) = sched.threads.get_mut_by_index(slot) {
-            t.ipc_msg = msg;
+            if t.state == ThreadState::Blocked {
+                t.ipc_msg = msg;
+                return true;
+            }
         }
     }
+    false
+}
+
+/// Set IPC timeout on the current thread. `deadline` is an absolute tick count.
+pub fn set_current_ipc_timeout(deadline: u64) {
+    let percpu = percpu::current_percpu();
+    let idx = percpu.current_thread;
+    if idx != usize::MAX {
+        let mut sched = SCHEDULER.lock();
+        if let Some(t) = sched.threads.get_mut_by_index(idx as u32) {
+            t.ipc_timeout = deadline;
+            t.ipc_timed_out = false;
+        }
+    }
+}
+
+/// Check and clear the IPC timeout flag on the current thread.
+/// Returns true if the thread was woken by timeout rather than a reply.
+pub fn check_and_clear_ipc_timeout() -> bool {
+    let percpu = percpu::current_percpu();
+    let idx = percpu.current_thread;
+    if idx != usize::MAX {
+        let mut sched = SCHEDULER.lock();
+        if let Some(t) = sched.threads.get_mut_by_index(idx as u32) {
+            let timed_out = t.ipc_timed_out;
+            t.ipc_timed_out = false;
+            t.ipc_timeout = 0;
+            return timed_out;
+        }
+    }
+    false
+}
+
+/// Get the current global tick counter.
+pub fn global_ticks() -> u64 {
+    GLOBAL_TICKS.load(Ordering::Relaxed)
 }
 
 /// Read the message from a specific thread's IPC buffer. O(1).
@@ -747,6 +822,36 @@ pub fn set_thread_redirect_ep(tid: ThreadId, ep_id: u32) {
 }
 
 // ---------------------------------------------------------------------------
+// FS_BASE (TLS) API
+// ---------------------------------------------------------------------------
+
+/// Set the current thread's FS_BASE value and write the MSR immediately.
+pub fn set_current_fs_base(value: u64) {
+    let percpu = percpu::current_percpu();
+    let idx = percpu.current_thread;
+    if idx != usize::MAX {
+        let mut sched = SCHEDULER.lock();
+        if let Some(t) = sched.threads.get_mut_by_index(idx as u32) {
+            t.fs_base = value;
+        }
+    }
+    write_fs_base_msr(value);
+}
+
+/// Get the current thread's FS_BASE value.
+pub fn get_current_fs_base() -> u64 {
+    let percpu = percpu::current_percpu();
+    let idx = percpu.current_thread;
+    if idx != usize::MAX {
+        let sched = SCHEDULER.lock();
+        if let Some(t) = sched.threads.get_by_index(idx as u32) {
+            return t.fs_base;
+        }
+    }
+    0
+}
+
+// ---------------------------------------------------------------------------
 // Scheduling Domain API
 // ---------------------------------------------------------------------------
 
@@ -881,11 +986,29 @@ pub fn tick() {
         // Check all domain refills.
         check_domain_refills(&mut sched, global_now);
 
+        // Check IPC timeouts on blocked threads.
+        check_ipc_timeouts(&mut sched, global_now);
+
         resched
     };
 
     if needs_reschedule {
         schedule();
+    }
+}
+
+/// Wake any blocked threads whose IPC timeout has expired.
+fn check_ipc_timeouts(sched: &mut Scheduler, global_now: u64) {
+    for idx in 0..MAX_THREADS as u32 {
+        if let Some(t) = sched.threads.get_mut_by_index(idx) {
+            if t.state == ThreadState::Blocked && t.ipc_timeout > 0 && global_now >= t.ipc_timeout {
+                t.ipc_timeout = 0;
+                t.ipc_timed_out = true;
+                t.state = ThreadState::Ready;
+                t.timeslice = TIMESLICE;
+                sched.enqueue(idx as usize);
+            }
+        }
     }
 }
 
@@ -931,8 +1054,8 @@ fn check_domain_refills(sched: &mut Scheduler, global_now: u64) {
 /// is called by the new thread). This avoids a race where another CPU could
 /// dequeue and run the old thread before its RSP is saved.
 pub fn schedule() {
-    // Stack-local dummy for dead threads (whose slot is freed before switch).
-    let mut dummy_rsp: u64 = 0;
+    // Discard target for dead threads (slot freed before context switch).
+    let mut discard_rsp: u64 = 0;
 
     let switch_info: Option<(*mut u64, u64)> = {
         let mut sched = SCHEDULER.lock();
@@ -991,7 +1114,7 @@ pub fn schedule() {
             sched.threads.free_by_index(old_idx as u32);
             percpu.switch_needs_enqueue = false;
             percpu.switch_old_idx = usize::MAX;
-            &mut dummy_rsp as *mut u64
+            &mut discard_rsp as *mut u64
         } else {
             let old_rsp_ptr = &mut sched.threads.get_mut_by_index(old_idx as u32).unwrap().context.rsp as *mut u64;
             let is_idle = old_idx == percpu.idle_thread;
@@ -1047,6 +1170,12 @@ pub fn schedule() {
                     );
                 }
             }
+        }
+
+        // Restore FS_BASE MSR for TLS support.
+        let new_fs_base = new_t.fs_base;
+        if new_fs_base != 0 {
+            write_fs_base_msr(new_fs_base);
         }
 
         Some((old_rsp_ptr, new_rsp))

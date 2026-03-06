@@ -107,6 +107,24 @@ static APS_READY: AtomicU32 = AtomicU32::new(0);
 /// Guest (LUCAS shell) ELF entry point, set by load_initrd().
 static GUEST_ENTRY: AtomicU64 = AtomicU64::new(0);
 
+/// Enable SSE/SSE2 by clearing CR0.EM, setting CR0.MP, and setting
+/// CR4.OSFXSR + CR4.OSXMMEXCPT. Required for userspace code (e.g. musl)
+/// that uses SSE instructions like movaps/movups.
+fn enable_sse() {
+    use x86_64::registers::control::{Cr0, Cr0Flags, Cr4, Cr4Flags};
+    unsafe {
+        // CR0: clear EM (emulation), set MP (monitor coprocessor)
+        let mut cr0 = Cr0::read();
+        cr0.remove(Cr0Flags::EMULATE_COPROCESSOR);
+        cr0.insert(Cr0Flags::MONITOR_COPROCESSOR);
+        Cr0::write(cr0);
+        // CR4: enable FXSAVE/FXRSTOR and SIMD exceptions
+        let mut cr4 = Cr4::read();
+        cr4.insert(Cr4Flags::OSFXSR | Cr4Flags::OSXMMEXCPT_ENABLE);
+        Cr4::write(cr4);
+    }
+}
+
 /// Kernel entry point — called by the Limine bootloader.
 #[no_mangle]
 extern "C" fn kmain() -> ! {
@@ -122,6 +140,10 @@ extern "C" fn kmain() -> ! {
     // CPU structures.
     arch::gdt::init();
     kdebug!("[ok] GDT");
+
+    // Enable SSE/SSE2 so userspace can use SIMD instructions (musl requires it).
+    enable_sse();
+    kdebug!("[ok] SSE");
 
     arch::idt::init();
     kdebug!("[ok] IDT");
@@ -308,6 +330,9 @@ unsafe extern "C" fn ap_entry(cpu: &limine::mp::Cpu) -> ! {
     // Allocate per-CPU GDT + TSS.
     arch::gdt::init_percpu(percpu);
 
+    // Enable SSE/SSE2 for this CPU.
+    enable_sse();
+
     // Program SYSCALL/SYSRET MSRs (per-CPU).
     arch::syscall::init();
 
@@ -330,8 +355,7 @@ unsafe extern "C" fn ap_entry(cpu: &limine::mp::Cpu) -> ! {
     }
 }
 
-/// Virtual address for keyboard scancode ring buffer (shared between KB driver + LUCAS handler).
-const KB_RING_PAGE: u64 = 0x510000;
+use sotos_common::{KB_RING_ADDR as KB_RING_PAGE, MOUSE_RING_ADDR as MOUSE_RING_PAGE};
 
 /// Create root capabilities for init (VMM and keyboard caps removed — they go to separate processes).
 ///
@@ -358,6 +382,12 @@ fn spawn_init_process() -> u64 {
     let kb_ring_phys = kb_ring_frame.addr();
     unsafe { core::ptr::write_bytes((kb_ring_phys + hhdm) as *mut u8, 0, 4096); }
     addr_space.map_page(KB_RING_PAGE, kb_ring_phys, PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
+
+    // Map mouse ring buffer page at 0x520000 (shared between mouse driver + desktop).
+    let mouse_ring_frame = mm::alloc_frame().expect("no frame for mouse ring");
+    let mouse_ring_phys = mouse_ring_frame.addr();
+    unsafe { core::ptr::write_bytes((mouse_ring_phys + hhdm) as *mut u8, 0, 4096); }
+    addr_space.map_page(MOUSE_RING_PAGE, mouse_ring_phys, PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
 
     // Create root capabilities.
     create_init_caps();
@@ -691,11 +721,16 @@ fn load_kbd_process(kbd_data: &[u8], init_cr3: u64) {
     let stack_top = stack_base + stack_pages * 0x1000;
 
     // Map shared KB ring page into kbd's AS at 0x510000.
-    // Find the physical address of init's 0x510000 (already mapped).
     let init_as = AddressSpace::from_cr3(init_cr3);
     let kb_ring_phys = init_as.lookup_phys(KB_RING_PAGE)
         .expect("init's KB ring page not mapped");
     kbd_as.map_page(KB_RING_PAGE, kb_ring_phys,
+        PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
+
+    // Map shared mouse ring page into kbd's AS at 0x520000.
+    let mouse_ring_phys = init_as.lookup_phys(MOUSE_RING_PAGE)
+        .expect("init's mouse ring page not mapped");
+    kbd_as.map_page(MOUSE_RING_PAGE, mouse_ring_phys,
         PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
 
     // Create kbd capabilities and write BootInfo.
@@ -709,8 +744,9 @@ fn load_kbd_process(kbd_data: &[u8], init_cr3: u64) {
 ///
 /// Creates fresh capabilities for kbd:
 ///   Cap 0: IRQ 1 (keyboard)
-///   Cap 1: I/O port 0x60 (keyboard data)
-///   Cap 2: Notification (KB IRQ delivery)
+///   Cap 1: I/O port 0x60–0x64 (PS/2 data + command)
+///   Cap 2: Notification (KB+mouse IRQ delivery)
+///   Cap 3: IRQ 12 (mouse)
 fn write_kbd_boot_info(
     _kbd_cr3: u64,
     kbd_as: &mm::paging::AddressSpace,
@@ -733,28 +769,35 @@ fn write_kbd_boot_info(
         .expect("failed to create kbd irq cap");
     kdebug!("  kbd cap {}: IRQ 1 (keyboard)", irq_cap.raw());
 
-    let port_cap = cap::insert(cap::CapObject::IoPort { base: 0x60, count: 1 }, cap::Rights::ALL, None)
+    // Port 0x60 (data) and 0x64 (command/status) — count=5 covers 0x60..0x64.
+    let port_cap = cap::insert(cap::CapObject::IoPort { base: 0x60, count: 5 }, cap::Rights::ALL, None)
         .expect("failed to create kbd ioport cap");
-    kdebug!("  kbd cap {}: port 0x60", port_cap.raw());
+    kdebug!("  kbd cap {}: port 0x60-0x64", port_cap.raw());
 
     let n_kb = ipc::notify::create().expect("failed to create kbd notification");
     let n_kb_cap = cap::insert(cap::CapObject::Notification { id: n_kb.0.raw() }, cap::Rights::ALL, None)
         .expect("failed to create kbd notification cap");
-    kdebug!("  kbd cap {}: notification (KB IRQ)", n_kb_cap.raw());
+    kdebug!("  kbd cap {}: notification (KB+mouse IRQ)", n_kb_cap.raw());
+
+    // IRQ 12 for PS/2 mouse.
+    let mouse_irq_cap = cap::insert(cap::CapObject::Irq { line: 12 }, cap::Rights::ALL, None)
+        .expect("failed to create mouse irq cap");
+    kdebug!("  kbd cap {}: IRQ 12 (mouse)", mouse_irq_cap.raw());
 
     let mut info = BootInfo::empty();
     info.magic = BOOT_INFO_MAGIC;
-    info.cap_count = 3;
+    info.cap_count = 4;
     info.caps[0] = irq_cap.raw() as u64;
     info.caps[1] = port_cap.raw() as u64;
     info.caps[2] = n_kb_cap.raw() as u64;
+    info.caps[3] = mouse_irq_cap.raw() as u64;
 
     unsafe {
         let ptr = (phys + hhdm) as *mut BootInfo;
         core::ptr::write(ptr, info);
     }
 
-    kdebug!("  kbd bootinfo: 3 caps at {:#x}", BOOT_INFO_ADDR);
+    kdebug!("  kbd bootinfo: 4 caps at {:#x}", BOOT_INFO_ADDR);
 }
 
 /// Load the network driver as a fully pre-mapped separate process.

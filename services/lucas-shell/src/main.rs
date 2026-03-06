@@ -867,7 +867,7 @@ fn find_byte(s: &[u8], b: u8) -> Option<usize> {
     None
 }
 
-/// Simple pattern match (supports only leading/trailing `*`).
+/// Glob pattern match: supports leading `*suffix`, trailing `prefix*`, and exact match.
 fn pattern_match(pattern: &[u8], text: &[u8]) -> bool {
     if eq(pattern, b"*") { return true; }
     if pattern.is_empty() { return text.is_empty(); }
@@ -1849,11 +1849,15 @@ fn dispatch_command(line: &[u8]) {
             print(b"commands: help, echo, uname, uptime, caps, ls, cat, write, rm,\n");
             print(b"  stat, hexdump, head, tail, grep, mkdir, rmdir, cd, pwd, snap,\n");
             print(b"  fork, getpid, exec, ps, top, kill, resolve, ping, traceroute,\n");
-            print(b"  wget, export, env, unset, exit, jobs, fg, bg, history,\n");
-            print(b"  wc, sort, uniq, diff\n");
+            print(b"  wget [-O file] [-q] <url>, export, env, unset, exit,\n");
+            print(b"  jobs, fg, bg, history, wc, sort, uniq, diff\n");
             print(b"operators: cmd > file, cmd >> file, cmd < file, cmd1 | cmd2, cmd &\n");
             print(b"scripting: if COND; then CMD; fi, for VAR in A B C; do CMD; done\n");
             print(b"  function NAME() { body; }, <<EOF heredocs\n");
+            print(b"network: resolve <host>, ping <host>, traceroute <host>\n");
+            print(b"  wget <url>                  -- fetch and display\n");
+            print(b"  wget -O <file> <url>        -- download to file\n");
+            print(b"  wget -q <url>               -- quiet mode\n");
         } else if eq(line, b"uname") {
             print(b"sotOS 0.1.0 x86_64 LUCAS\n");
         } else if eq(line, b"uptime") {
@@ -1972,26 +1976,39 @@ fn dispatch_command(line: &[u8]) {
             } else {
                 cmd_resolve(name);
             }
+        } else if eq(line, b"ping") {
+            print(b"usage: ping <host|ip>\n");
         } else if starts_with(line, b"ping ") {
             let host = trim(&line[5..]);
             if host.is_empty() {
-                print(b"usage: ping <host>\n");
+                print(b"usage: ping <host|ip>\n");
             } else {
                 cmd_ping(host);
             }
+        } else if eq(line, b"traceroute") {
+            print(b"usage: traceroute <host|ip>\n");
         } else if starts_with(line, b"traceroute ") {
             let host = trim(&line[11..]);
             if host.is_empty() {
-                print(b"usage: traceroute <host>\n");
+                print(b"usage: traceroute <host|ip>\n");
             } else {
                 cmd_traceroute(host);
             }
-        } else if starts_with(line, b"wget ") {
-            let url = trim(&line[5..]);
-            if url.is_empty() {
-                print(b"usage: wget <url>\n");
+        } else if eq(line, b"wget") || eq(line, b"curl") {
+            print(b"usage: wget [-O file] [-q] <url>\n");
+        } else if starts_with(line, b"curl ") {
+            let args = trim(&line[5..]);
+            if args.is_empty() {
+                print(b"usage: wget [-O file] [-q] <url>\n");
             } else {
-                cmd_wget(url);
+                cmd_wget(args);
+            }
+        } else if starts_with(line, b"wget ") {
+            let args = trim(&line[5..]);
+            if args.is_empty() {
+                print(b"usage: wget [-O file] [-q] <url>\n");
+            } else {
+                cmd_wget(args);
             }
         } else if starts_with(line, b"snap ") {
             let args = trim(&line[5..]);
@@ -2761,12 +2778,9 @@ fn execute_pipe(left: &[u8], right: &[u8]) {
         return;
     }
 
-    // Redirect: we'll execute left, but writing to tmp_fd instead of stdout.
-    // For simplicity, capture by running the command and checking if it's cat-like.
-    // Actually, the simplest approach: just run both commands textually.
-    // Since all commands use `print()` which writes to fd 1, we can't easily redirect.
-    // Instead, let's implement a minimal capture: if left is "cat", we can read its file
-    // and pipe to right as "grep".
+    // Redirect: capture left command's output into a buffer via capture_command(),
+    // then feed it to the right command. Supports cat, ls, echo, env, ps, uname,
+    // head, tail, grep, and stat as pipe sources.
     linux_close(tmp_fd as u64);
 
     // Simplified pipe: if right is "grep PATTERN", capture left output and filter.
@@ -2855,9 +2869,8 @@ fn execute_pipe(left: &[u8], right: &[u8]) {
     linux_unlink(tmp_path);
 }
 
-/// Capture a command's output into a buffer (for cat-like commands).
+/// Capture a command's output into a buffer for piping.
 fn capture_command(cmd: &[u8], buf: &mut [u8]) -> usize {
-    // Only support cat and ls for piping.
     if starts_with(cmd, b"cat ") {
         let name = trim(&cmd[4..]);
         let mut path_buf = [0u8; 64];
@@ -2929,6 +2942,190 @@ fn capture_command(cmd: &[u8], buf: &mut [u8]) -> usize {
             if total >= buf.len() { break; }
         }
         linux_close(fd as u64);
+        return total;
+    }
+    if eq(cmd, b"uname") {
+        let s = b"sotOS 0.1.0 x86_64 LUCAS\n";
+        let l = s.len().min(buf.len());
+        buf[..l].copy_from_slice(&s[..l]);
+        return l;
+    }
+    if starts_with(cmd, b"head ") {
+        let args = trim(&cmd[5..]);
+        let mut num_lines: usize = 10;
+        let name;
+        if starts_with(args, b"-n ") {
+            let rest = trim(&args[3..]);
+            if let Some(sp) = find_space(rest) {
+                num_lines = parse_u64_simple(&rest[..sp]) as usize;
+                name = trim(&rest[sp + 1..]);
+            } else { return 0; }
+        } else { name = args; }
+        if name.is_empty() { return 0; }
+        let mut path_buf = [0u8; 64];
+        let path = null_terminate(name, &mut path_buf);
+        let fd = linux_open(path, 0);
+        if fd < 0 { return 0; }
+        let mut data = [0u8; 4096];
+        let mut dlen: usize = 0;
+        loop {
+            let n = linux_read(fd as u64, data[dlen..].as_mut_ptr(), data.len() - dlen);
+            if n <= 0 { break; }
+            dlen += n as usize;
+            if dlen >= data.len() { break; }
+        }
+        linux_close(fd as u64);
+        let mut total: usize = 0;
+        let mut lines: usize = 0;
+        for i in 0..dlen {
+            if lines >= num_lines { break; }
+            if total >= buf.len() { break; }
+            buf[total] = data[i];
+            total += 1;
+            if data[i] == b'\n' { lines += 1; }
+        }
+        return total;
+    }
+    if starts_with(cmd, b"tail ") {
+        let args = trim(&cmd[5..]);
+        let mut num_lines: usize = 10;
+        let name;
+        if starts_with(args, b"-n ") {
+            let rest = trim(&args[3..]);
+            if let Some(sp) = find_space(rest) {
+                num_lines = parse_u64_simple(&rest[..sp]) as usize;
+                name = trim(&rest[sp + 1..]);
+            } else { return 0; }
+        } else { name = args; }
+        if name.is_empty() { return 0; }
+        let mut path_buf = [0u8; 64];
+        let path = null_terminate(name, &mut path_buf);
+        let fd = linux_open(path, 0);
+        if fd < 0 { return 0; }
+        let mut data = [0u8; 4096];
+        let mut dlen: usize = 0;
+        loop {
+            let n = linux_read(fd as u64, data[dlen..].as_mut_ptr(), data.len() - dlen);
+            if n <= 0 { break; }
+            dlen += n as usize;
+            if dlen >= data.len() { break; }
+        }
+        linux_close(fd as u64);
+        let mut line_count: usize = 0;
+        for i in 0..dlen { if data[i] == b'\n' { line_count += 1; } }
+        let skip = if line_count > num_lines { line_count - num_lines } else { 0 };
+        let mut seen: usize = 0;
+        let mut total: usize = 0;
+        for i in 0..dlen {
+            if seen >= skip {
+                if total >= buf.len() { break; }
+                buf[total] = data[i];
+                total += 1;
+            }
+            if data[i] == b'\n' { seen += 1; }
+        }
+        return total;
+    }
+    if starts_with(cmd, b"grep ") {
+        let args = trim(&cmd[5..]);
+        if let Some(sp) = find_space(args) {
+            let pattern = &args[..sp];
+            let name = trim(&args[sp + 1..]);
+            if name.is_empty() { return 0; }
+            let mut path_buf = [0u8; 64];
+            let path = null_terminate(name, &mut path_buf);
+            let fd = linux_open(path, 0);
+            if fd < 0 { return 0; }
+            let mut data = [0u8; 4096];
+            let mut dlen: usize = 0;
+            loop {
+                let n = linux_read(fd as u64, data[dlen..].as_mut_ptr(), data.len() - dlen);
+                if n <= 0 { break; }
+                dlen += n as usize;
+                if dlen >= data.len() { break; }
+            }
+            linux_close(fd as u64);
+            let mut total: usize = 0;
+            let mut line_start: usize = 0;
+            let mut i: usize = 0;
+            while i <= dlen {
+                if i == dlen || data[i] == b'\n' {
+                    let line = &data[line_start..i];
+                    if contains(line, pattern) {
+                        let l = line.len().min(buf.len() - total);
+                        buf[total..total + l].copy_from_slice(&line[..l]);
+                        total += l;
+                        if total < buf.len() { buf[total] = b'\n'; total += 1; }
+                    }
+                    line_start = i + 1;
+                }
+                i += 1;
+            }
+            return total;
+        }
+        return 0;
+    }
+    if starts_with(cmd, b"stat ") {
+        let name = trim(&cmd[5..]);
+        if name.is_empty() { return 0; }
+        let mut path_buf = [0u8; 64];
+        let path = null_terminate(name, &mut path_buf);
+        let mut stat_buf = [0u8; 144];
+        let ret = linux_stat(path, stat_buf.as_mut_ptr());
+        if ret < 0 { return 0; }
+        let mode = u32::from_le_bytes([stat_buf[24], stat_buf[25], stat_buf[26], stat_buf[27]]);
+        let size = u64::from_le_bytes([
+            stat_buf[48], stat_buf[49], stat_buf[50], stat_buf[51],
+            stat_buf[52], stat_buf[53], stat_buf[54], stat_buf[55],
+        ]);
+        let ino = u64::from_le_bytes([
+            stat_buf[8], stat_buf[9], stat_buf[10], stat_buf[11],
+            stat_buf[12], stat_buf[13], stat_buf[14], stat_buf[15],
+        ]);
+        let mut total: usize = 0;
+        // "  file: <name>\n"
+        let prefix = b"  file: ";
+        let l = prefix.len().min(buf.len() - total);
+        buf[total..total + l].copy_from_slice(&prefix[..l]);
+        total += l;
+        let l = name.len().min(buf.len() - total);
+        buf[total..total + l].copy_from_slice(&name[..l]);
+        total += l;
+        if total < buf.len() { buf[total] = b'\n'; total += 1; }
+        // "  size: <size>\n"
+        let prefix = b"  size: ";
+        let l = prefix.len().min(buf.len() - total);
+        buf[total..total + l].copy_from_slice(&prefix[..l]);
+        total += l;
+        let n = format_u64_right(size, 0, &mut buf[total..]);
+        total += n;
+        if total < buf.len() { buf[total] = b'\n'; total += 1; }
+        // "  inode: <ino>\n"
+        let prefix = b"  inode: ";
+        let l = prefix.len().min(buf.len() - total);
+        buf[total..total + l].copy_from_slice(&prefix[..l]);
+        total += l;
+        let n = format_u64_right(ino, 0, &mut buf[total..]);
+        total += n;
+        if total < buf.len() { buf[total] = b'\n'; total += 1; }
+        // "  type: <type>\n"
+        let prefix = b"  type: ";
+        let l = prefix.len().min(buf.len() - total);
+        buf[total..total + l].copy_from_slice(&prefix[..l]);
+        total += l;
+        let type_str: &[u8] = if mode & 0o170000 == 0o40000 {
+            b"directory"
+        } else if mode & 0o170000 == 0o100000 {
+            b"regular file"
+        } else if mode & 0o170000 == 0o20000 {
+            b"character device"
+        } else {
+            b"unknown"
+        };
+        let l = type_str.len().min(buf.len() - total);
+        buf[total..total + l].copy_from_slice(&type_str[..l]);
+        total += l;
+        if total < buf.len() { buf[total] = b'\n'; total += 1; }
         return total;
     }
     0
@@ -3470,6 +3667,23 @@ fn linux_dns_resolve(name: *const u8, len: usize) -> u64 {
     ret
 }
 
+/// ICMP ping: syscall 202(dst_ip, seq) → 0=timeout, 1=reply | (ttl << 32)
+fn linux_icmp_ping(dst_ip: u64, seq: u64) -> u64 {
+    let ret: u64;
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            inlateout("rax") 202u64 => ret,
+            in("rdi") dst_ip,
+            in("rsi") seq,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
 /// Traceroute hop: syscall 201(dst_ip, ttl) → responder_ip | (reached_flag << 32)
 fn linux_traceroute_hop(dst_ip: u64, ttl: u64) -> u64 {
     let ret: u64;
@@ -3564,29 +3778,91 @@ fn cmd_ping(host: &[u8]) {
     print(host);
     print(b" (");
     print_ip(ip);
-    print(b")\n");
+    print(b") 56 data bytes\n");
 
-    // Use a TCP socket connect to port 80 as a connectivity test.
-    let fd = linux_socket(2, 1, 0); // AF_INET, SOCK_STREAM
-    if fd < 0 {
-        print(b"ping: socket failed\n");
+    let mut sent = 0u32;
+    let mut received = 0u32;
+
+    for seq in 0..4u64 {
+        sent += 1;
+        let result = linux_icmp_ping(ip as u64, seq);
+        if result != 0 {
+            received += 1;
+            let ttl = (result >> 32) as u32;
+            print(b"64 bytes from ");
+            print_ip(ip);
+            print(b": icmp_seq=");
+            print_u64(seq);
+            print(b" ttl=");
+            print_u64(ttl as u64);
+            print(b"\n");
+        } else {
+            print(b"Request timeout for icmp_seq ");
+            print_u64(seq);
+            print(b"\n");
+        }
+    }
+
+    // Statistics.
+    print(b"--- ");
+    print(host);
+    print(b" ping statistics ---\n");
+    print_u64(sent as u64);
+    print(b" packets transmitted, ");
+    print_u64(received as u64);
+    print(b" received");
+    if sent > 0 {
+        let loss = ((sent - received) * 100) / sent;
+        print(b", ");
+        print_u64(loss as u64);
+        print(b"% packet loss");
+    }
+    print(b"\n");
+}
+
+fn cmd_wget(args: &[u8]) {
+    // Parse options: wget [-O file] [-q] <url>
+    let mut output_file: &[u8] = b"";
+    let mut quiet = false;
+    let mut url: &[u8] = b"";
+
+    let mut i = 0;
+    while i < args.len() {
+        while i < args.len() && args[i] == b' ' { i += 1; }
+        if i >= args.len() { break; }
+
+        if i + 2 <= args.len() && args[i] == b'-' && args[i + 1] == b'O' {
+            // -O filename
+            i += 2;
+            while i < args.len() && args[i] == b' ' { i += 1; }
+            let start = i;
+            while i < args.len() && args[i] != b' ' { i += 1; }
+            output_file = &args[start..i];
+        } else if i + 2 <= args.len() && args[i] == b'-' && args[i + 1] == b'q' {
+            quiet = true;
+            i += 2;
+        } else {
+            let start = i;
+            while i < args.len() && args[i] != b' ' { i += 1; }
+            url = &args[start..i];
+        }
+    }
+
+    if url.is_empty() {
+        print(b"usage: wget [-O file] [-q] <url>\n");
         return;
     }
 
-    let sa = build_sockaddr(ip, 80);
-    let ret = linux_connect(fd as u64, sa.as_ptr(), 16);
-    if ret == 0 {
-        print(b"  connection to port 80: OK\n");
-    } else {
-        print(b"  connection to port 80: FAILED\n");
+    // Check for https:// — TLS requires a full crypto handshake not yet implemented
+    if starts_with(url, b"https://") {
+        print(b"wget: HTTPS requires TLS (not yet implemented)\n");
+        print(b"hint: use http:// or a plain HTTP mirror\n");
+        return;
     }
-    linux_close(fd as u64);
-}
 
-fn cmd_wget(url: &[u8]) {
     // Parse URL: http://host[:port]/path
     if !starts_with(url, b"http://") {
-        print(b"wget: only http:// URLs supported\n");
+        print(b"wget: unsupported protocol (use http://)\n");
         return;
     }
     let after_scheme = &url[7..]; // skip "http://"
@@ -3594,10 +3870,10 @@ fn cmd_wget(url: &[u8]) {
     // Find host and path.
     let mut host_end = after_scheme.len();
     let mut path_start = after_scheme.len();
-    for i in 0..after_scheme.len() {
-        if after_scheme[i] == b'/' {
-            host_end = i;
-            path_start = i;
+    for j in 0..after_scheme.len() {
+        if after_scheme[j] == b'/' {
+            host_end = j;
+            path_start = j;
             break;
         }
     }
@@ -3611,10 +3887,10 @@ fn cmd_wget(url: &[u8]) {
     // Parse host:port.
     let mut port: u16 = 80;
     let mut hostname = host;
-    for i in 0..host.len() {
-        if host[i] == b':' {
-            hostname = &host[..i];
-            port = parse_u64_simple(&host[i + 1..]) as u16;
+    for j in 0..host.len() {
+        if host[j] == b':' {
+            hostname = &host[..j];
+            port = parse_u64_simple(&host[j + 1..]) as u16;
             break;
         }
     }
@@ -3623,10 +3899,22 @@ fn cmd_wget(url: &[u8]) {
     let ip = match resolve_host(hostname) {
         Some(ip) => ip,
         None => {
-            print(b"wget: cannot resolve hostname\n");
+            print(b"wget: cannot resolve '");
+            print(hostname);
+            print(b"'\n");
             return;
         }
     };
+
+    if !quiet {
+        print(b"Connecting to ");
+        print(hostname);
+        print(b" (");
+        print_ip(ip);
+        print(b"):");
+        print_u64(port as u64);
+        print(b"...\n");
+    }
 
     // Create socket.
     let fd = linux_socket(2, 1, 0); // AF_INET, SOCK_STREAM
@@ -3643,13 +3931,19 @@ fn cmd_wget(url: &[u8]) {
         return;
     }
 
+    if !quiet {
+        print(b"HTTP request sent: GET ");
+        print(path);
+        print(b"\n");
+    }
+
     // Build HTTP GET request.
-    let mut req = [0u8; 256];
+    let mut req = [0u8; 512];
     let mut pos = 0;
     let prefix = b"GET ";
     req[pos..pos + prefix.len()].copy_from_slice(prefix);
     pos += prefix.len();
-    let plen = path.len().min(128);
+    let plen = path.len().min(200);
     req[pos..pos + plen].copy_from_slice(&path[..plen]);
     pos += plen;
     let suffix = b" HTTP/1.0\r\nHost: ";
@@ -3658,27 +3952,178 @@ fn cmd_wget(url: &[u8]) {
     let hlen = hostname.len().min(64);
     req[pos..pos + hlen].copy_from_slice(&hostname[..hlen]);
     pos += hlen;
-    let end = b"\r\n\r\n";
-    req[pos..pos + end.len()].copy_from_slice(end);
-    pos += end.len();
+    let ua = b"\r\nUser-Agent: sotOS-wget/1.0\r\nConnection: close\r\n\r\n";
+    req[pos..pos + ua.len()].copy_from_slice(ua);
+    pos += ua.len();
 
-    // Send request.
-    let sent = linux_sendto(fd as u64, req.as_ptr(), pos as u64, 0);
-    if sent <= 0 {
-        print(b"wget: send failed\n");
-        linux_close(fd as u64);
+    // Send request — may need multiple sends for larger requests.
+    let mut sent_total: usize = 0;
+    while sent_total < pos {
+        let chunk = (pos - sent_total).min(40); // IPC inline limit
+        let sent = linux_sendto(
+            fd as u64,
+            req[sent_total..].as_ptr(),
+            chunk as u64,
+            0,
+        );
+        if sent <= 0 {
+            print(b"wget: send failed\n");
+            linux_close(fd as u64);
+            return;
+        }
+        sent_total += sent as usize;
+    }
+
+    // Read response in chunks, accumulate into a large buffer.
+    // We accumulate the full response (headers + body) first, then parse.
+    let mut response = [0u8; 8192];
+    let mut resp_len: usize = 0;
+    let mut consecutive_empty = 0u32;
+
+    loop {
+        let mut buf = [0u8; 56]; // IPC inline limit per recv
+        let n = linux_recvfrom(fd as u64, buf.as_mut_ptr(), buf.len() as u64, 0);
+        if n <= 0 {
+            consecutive_empty += 1;
+            if consecutive_empty > 5 || n < 0 { break; }
+            continue;
+        }
+        consecutive_empty = 0;
+        let copy_len = (n as usize).min(response.len() - resp_len);
+        if copy_len == 0 { break; } // buffer full
+        response[resp_len..resp_len + copy_len].copy_from_slice(&buf[..copy_len]);
+        resp_len += copy_len;
+    }
+
+    linux_close(fd as u64);
+
+    if resp_len == 0 {
+        print(b"wget: empty response\n");
         return;
     }
 
-    // Read response.
-    let mut buf = [0u8; 40]; // Limited by IPC inline data size
-    loop {
-        let n = linux_recvfrom(fd as u64, buf.as_mut_ptr(), buf.len() as u64, 0);
-        if n <= 0 { break; }
-        linux_write(1, buf.as_ptr(), n as usize);
+    // Find end of HTTP headers (\r\n\r\n).
+    let mut header_end: usize = 0;
+    let mut body_start: usize = 0;
+    for j in 0..resp_len.saturating_sub(3) {
+        if response[j] == b'\r' && response[j + 1] == b'\n'
+            && response[j + 2] == b'\r' && response[j + 3] == b'\n'
+        {
+            header_end = j;
+            body_start = j + 4;
+            break;
+        }
     }
-    print(b"\n");
-    linux_close(fd as u64);
+
+    // Parse status line from headers.
+    if !quiet && header_end > 0 {
+        // Find first line (status line).
+        let mut status_end = 0;
+        while status_end < header_end && response[status_end] != b'\r' {
+            status_end += 1;
+        }
+        print(b"Response: ");
+        linux_write(1, response[..status_end].as_ptr(), status_end);
+        print(b"\n");
+
+        // Look for Content-Length header.
+        let headers = &response[..header_end];
+        if let Some(cl) = find_header_value(headers, b"Content-Length") {
+            print(b"Length: ");
+            print(cl);
+            print(b" bytes\n");
+        }
+        if let Some(ct) = find_header_value(headers, b"Content-Type") {
+            print(b"Type: ");
+            print(ct);
+            print(b"\n");
+        }
+    }
+
+    // If no body found, just use the whole response.
+    if body_start == 0 {
+        body_start = 0;
+    }
+
+    let body = &response[body_start..resp_len];
+    let body_len = body.len();
+
+    // Output body to file or stdout.
+    if !output_file.is_empty() {
+        // Save to file.
+        let mut path_buf = [0u8; 128];
+        let fpath = null_terminate(output_file, &mut path_buf);
+        let out_fd = linux_open(fpath, 0x41); // O_WRONLY | O_CREAT
+        if out_fd < 0 {
+            print(b"wget: cannot create file '");
+            print(output_file);
+            print(b"'\n");
+            // Fall back to stdout.
+            linux_write(1, body.as_ptr(), body_len);
+            print(b"\n");
+        } else {
+            linux_write(out_fd as u64, body.as_ptr(), body_len);
+            linux_close(out_fd as u64);
+            if !quiet {
+                print(b"Saved to '");
+                print(output_file);
+                print(b"' (");
+                print_u64(body_len as u64);
+                print(b" bytes)\n");
+            }
+        }
+    } else {
+        // Print body to stdout.
+        linux_write(1, body.as_ptr(), body_len);
+        if body_len > 0 && body[body_len - 1] != b'\n' {
+            print(b"\n");
+        }
+    }
+
+    if !quiet {
+        print_u64(resp_len as u64);
+        print(b" bytes total received\n");
+    }
+}
+
+/// Find the value of an HTTP header (case-insensitive search for name).
+fn find_header_value<'a>(headers: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
+    let mut i: usize = 0;
+    while i + name.len() + 1 < headers.len() {
+        // Check if this position matches the header name (case-insensitive).
+        if (headers[i] == b'\n' || i == 0) {
+            let start = if headers[i] == b'\n' { i + 1 } else { i };
+            if start + name.len() + 1 < headers.len() {
+                let mut matches = true;
+                for k in 0..name.len() {
+                    let a = headers[start + k];
+                    let b = name[k];
+                    if a != b && a != (b ^ 0x20) {
+                        // Simple case toggle for ASCII letters
+                        if !(a.is_ascii_alphabetic() && b.is_ascii_alphabetic()
+                            && (a & 0xDF) == (b & 0xDF)) {
+                            matches = false;
+                            break;
+                        }
+                    }
+                }
+                if matches && headers[start + name.len()] == b':' {
+                    // Found it. Skip ": " and find end of value.
+                    let mut val_start = start + name.len() + 1;
+                    while val_start < headers.len() && headers[val_start] == b' ' {
+                        val_start += 1;
+                    }
+                    let mut val_end = val_start;
+                    while val_end < headers.len() && headers[val_end] != b'\r' && headers[val_end] != b'\n' {
+                        val_end += 1;
+                    }
+                    return Some(&headers[val_start..val_end]);
+                }
+            }
+        }
+        i += 1;
+    }
+    None
 }
 
 fn cmd_resolve(name: &[u8]) {

@@ -128,6 +128,13 @@ pub struct Thread {
     /// Period for periodic deadline tasks (0 = aperiodic).
     /// After a deadline fires, the next deadline = current + period.
     pub period_ticks: u64,
+    /// Absolute tick at which a blocked IPC call should timeout (0 = no timeout).
+    pub ipc_timeout: u64,
+    /// Set to true by the scheduler when an IPC timeout fires.
+    pub ipc_timed_out: bool,
+    /// FS segment base (IA32_FS_BASE MSR) for TLS support.
+    /// Set by arch_prctl(ARCH_SET_FS) or SYS_SET_FSBASE syscall.
+    pub fs_base: u64,
 }
 
 impl Thread {
@@ -181,6 +188,9 @@ impl Thread {
             compute_target: ComputeTarget::Cpu,
             deadline_ticks: 0,
             period_ticks: 0,
+            ipc_timeout: 0,
+            ipc_timed_out: false,
+            fs_base: 0,
         }
     }
 
@@ -238,6 +248,9 @@ impl Thread {
             compute_target: ComputeTarget::Cpu,
             deadline_ticks: 0,
             period_ticks: 0,
+            ipc_timeout: 0,
+            ipc_timed_out: false,
+            fs_base: 0,
         }
     }
 }

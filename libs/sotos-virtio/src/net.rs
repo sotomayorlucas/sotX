@@ -273,7 +273,10 @@ impl VirtioNet {
     }
 
     /// Re-post an RX buffer after processing.
+    /// `idx` is the descriptor ID returned by `poll_rx`.
     pub fn rx_done(&mut self, idx: usize) {
+        // Free the old descriptor before allocating a new one.
+        self.rx_vq.free_desc(idx as u16);
         self.post_rx_buf(idx);
         unsafe { core::arch::asm!("mfence", options(nostack, preserves_flags)); }
         let _ = sys::port_out16(self.bar_cap, self.bar_base + VIRTIO_QUEUE_NOTIFY, 0);

@@ -919,8 +919,7 @@ impl ObjectStore {
     }
 
     pub fn into_blk(&mut self) -> VirtioBlk {
-        // Safety: we move the blk out, replacing with a zeroed placeholder.
-        // Caller must not use `self` after this.
+        // Safety: bitwise copy of VirtioBlk; caller must not use `self` afterward.
         let blk_ptr = &self.blk as *const VirtioBlk;
         unsafe { core::ptr::read(blk_ptr) }
     }

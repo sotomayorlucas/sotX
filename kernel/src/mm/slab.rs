@@ -21,7 +21,7 @@ use super::frame::{PhysFrame, FRAME_SIZE};
 const PAGE_SIZE: usize = FRAME_SIZE;
 const NUM_CLASSES: usize = 8;
 const SIZE_CLASSES: [usize; NUM_CLASSES] = [8, 16, 32, 64, 128, 256, 512, 1024];
-const MAX_CPUS: usize = 16;
+use sotos_common::MAX_CPUS;
 
 /// Set to true after percpu::init_bsp() completes.
 static PERCPU_READY: AtomicBool = AtomicBool::new(false);

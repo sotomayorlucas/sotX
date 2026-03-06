@@ -8,8 +8,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use crate::kdebug;
 use crate::kprintln;
 
-/// Maximum number of CPUs tracked by the watchdog.
-const MAX_CPUS: usize = 16;
+use sotos_common::MAX_CPUS;
 
 /// Number of ticks without a heartbeat before a CPU is considered stale.
 const WATCHDOG_TIMEOUT_TICKS: u64 = 500;

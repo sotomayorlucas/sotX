@@ -74,8 +74,9 @@ traditional microkernel toward a 4th-generation OS architecture featuring:
 (4)~heterogeneous compute scheduling with typed tensor/shader IPC payloads,
 (5)~a full driver stack (NVMe, AHCI/SATA, USB mass storage, AC97 audio, xHCI with hub/hotplug, PS/2+USB mouse),
 (6)~a complete networking stack (IPv4/IPv6, TCP with Reno congestion control, TLS crypto, HTTP client),
-(7)~a Linux-ABI shell with job control, functions, redirects, and an embedded Lua interpreter, and
-(8)~TLA+ formal specifications proving safety properties of core protocols.
+(7)~a Linux-ABI shell with job control, functions, redirects, and an embedded Lua interpreter,
+(8)~real musl-static Linux binary execution via LUCAS syscall translation, and
+(9)~TLA+ formal specifications proving safety properties of core protocols.
 The system boots on 1--4 CPU cores with 512~MB RAM, supports multiuser accounts,
 a GUI window compositor, and a package manager. Over 30,000 lines of Rust.
 \end{abstract}
@@ -573,6 +574,9 @@ sotOS implements defense-in-depth security:
           post-mapping with W\^{}X enforced.
     \item \textbf{Stack Guard Pages}: An unmapped page below each process
           stack triggers a page fault on stack overflow.
+    \item \textbf{Per-CPU IST Stacks}: Four dedicated Interrupt Stack Table
+          entries per CPU (double-fault, page-fault, GP-fault, misc-fault)
+          prevent exception-chain escalation to triple faults.
     \item \textbf{ASLR}: Stack base addresses are randomized using a
           RDTSC-seeded xorshift64 PRNG with 0--64~KiB jitter.
     \item \textbf{Stack Canaries}: Built with \texttt{-Z stack-protector=strong},
@@ -717,6 +721,34 @@ The Linux-ABI compatible shell (3,700+ lines) provides:
     \item \textbf{40+ builtins}: including \texttt{wc}, \texttt{sort}, \texttt{uniq}, \texttt{diff}
 \end{itemize}
 
+\subsection{musl-static Binary Support (Busybox Milestone)}
+
+LUCAS can run real Linux musl-static binaries compiled with
+\texttt{x86\_64-unknown-linux-musl}. This is achieved through:
+
+\begin{enumerate}[nosep]
+    \item \textbf{ELF loader}: parses PT\_LOAD segments, maps them at the correct
+          virtual addresses, sets up a Linux-compatible initial stack with
+          \texttt{argc}, \texttt{argv}, \texttt{envp}, and auxiliary vector entries
+          (AT\_PHDR, AT\_PHENT, AT\_PHNUM, AT\_PAGESZ, AT\_ENTRY, AT\_RANDOM).
+    \item \textbf{Atomic thread creation with redirect}: the kernel's
+          \texttt{spawn\_user\_with\_redirect()} sets the IPC redirect endpoint
+          \emph{before} the thread is enqueued, eliminating a race condition where
+          early syscalls (e.g., \texttt{arch\_prctl}) would bypass the LUCAS handler.
+    \item \textbf{SSE/SSE2 enablement}: CR0.EM cleared, CR4.OSFXSR and
+          CR4.OSXMMEXCPT set on all CPUs, allowing musl/Rust binaries to use
+          SIMD instructions (movaps, etc.).
+    \item \textbf{40+ Linux syscall stubs}: including \texttt{set\_tid\_address},
+          \texttt{poll}, \texttt{rt\_sigaction}, \texttt{rt\_sigprocmask},
+          \texttt{sigaltstack}, \texttt{mmap}, \texttt{mprotect}, \texttt{brk},
+          \texttt{write}/\texttt{writev}, \texttt{clock\_gettime},
+          \texttt{getrandom}, and \texttt{exit\_group}.
+\end{enumerate}
+
+The complete initialization sequence of musl-libc executes correctly under
+LUCAS, demonstrating that the Linux ABI emulation is sufficient to run
+real-world C/Rust programs compiled against musl.
+
 \subsection{Lua Interpreter}
 
 A Lua 5.4-compatible interpreter (\texttt{libs/sotos-lua/}) with:
@@ -824,6 +856,7 @@ per-core architecture. Key contributions:
     \item \textbf{Complete networking}: IPv4/IPv6, TCP with Reno congestion control and window scaling, SHA-256/ChaCha20/X25519 crypto, HTTP/1.1 client
     \item \textbf{Distributed computing}: network-transparent IPC routing, live process migration with checkpoint/restore, distributed VFS with conflict resolution
     \item \textbf{Linux-ABI shell}: job control, command history, tab completion, redirects, here-docs, shell functions, 40+ builtins
+    \item \textbf{musl-static binary execution}: real Linux binaries (compiled with musl-libc) run under LUCAS via syscall translation, atomic thread redirect, and SSE enablement
     \item \textbf{Embedded applications}: Lua 5.4 interpreter, GUI window compositor, package manager
     \item \textbf{Security}: W\^{}X enforcement, ASLR, stack canaries, multiuser accounts with SHA-256 auth, chmod/chown
     \item \textbf{Formal verification}: TLA+ specifications of IPC, capabilities, and scheduler with safety proofs

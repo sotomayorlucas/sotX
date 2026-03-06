@@ -68,9 +68,53 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
             .set_stack_index(DOUBLE_FAULT_IST_INDEX);
     }
 
-    idt.general_protection_fault
-        .set_handler_fn(general_protection_handler);
-    idt.page_fault.set_handler_fn(page_fault_handler);
+    unsafe {
+        idt.general_protection_fault
+            .set_handler_fn(general_protection_handler)
+            .set_stack_index(super::gdt::GP_FAULT_IST_INDEX);
+    }
+    unsafe {
+        idt.page_fault
+            .set_handler_fn(page_fault_handler)
+            .set_stack_index(super::gdt::PAGE_FAULT_IST_INDEX);
+    }
+
+    // Contributory exceptions on IST 3 — catch them before they chain into #DF
+    unsafe {
+        idt.divide_error
+            .set_handler_fn(divide_error_handler)
+            .set_stack_index(super::gdt::MISC_FAULT_IST_INDEX);
+    }
+    unsafe {
+        idt.invalid_opcode
+            .set_handler_fn(invalid_opcode_handler)
+            .set_stack_index(super::gdt::MISC_FAULT_IST_INDEX);
+    }
+    unsafe {
+        idt.device_not_available
+            .set_handler_fn(device_not_available_handler)
+            .set_stack_index(super::gdt::MISC_FAULT_IST_INDEX);
+    }
+    unsafe {
+        idt.invalid_tss
+            .set_handler_fn(invalid_tss_handler)
+            .set_stack_index(super::gdt::MISC_FAULT_IST_INDEX);
+    }
+    unsafe {
+        idt.segment_not_present
+            .set_handler_fn(segment_not_present_handler)
+            .set_stack_index(super::gdt::MISC_FAULT_IST_INDEX);
+    }
+    unsafe {
+        idt.stack_segment_fault
+            .set_handler_fn(stack_segment_fault_handler)
+            .set_stack_index(super::gdt::MISC_FAULT_IST_INDEX);
+    }
+    unsafe {
+        idt.alignment_check
+            .set_handler_fn(alignment_check_handler)
+            .set_stack_index(super::gdt::MISC_FAULT_IST_INDEX);
+    }
 
     // PIT timer (vector 32) — still registered for fallback / early boot
     idt[PIT_TIMER_VECTOR].set_handler_fn(pit_timer_handler);
@@ -123,7 +167,17 @@ extern "x86-interrupt" fn breakpoint_handler(frame: InterruptStackFrame) {
 }
 
 extern "x86-interrupt" fn double_fault_handler(frame: InterruptStackFrame, _code: u64) -> ! {
-    panic!("EXCEPTION: double fault\n{:#?}", frame);
+    let cr2 = Cr2::read_raw();
+    let cr3 = crate::mm::paging::read_cr3();
+    let percpu = crate::arch::x86_64::percpu::current_percpu();
+    let kstack = percpu.kernel_stack_top;
+    let tss = unsafe { &*percpu.tss };
+    let tss_rsp0 = tss.privilege_stack_table[0].as_u64();
+    let ist0 = tss.interrupt_stack_table[0].as_u64();
+    let ist1 = tss.interrupt_stack_table[1].as_u64();
+    let ist2 = tss.interrupt_stack_table[2].as_u64();
+    panic!("EXCEPTION: double fault cr2={:#x} cr3={:#x} rsp0={:#x} ist0={:#x} ist1={:#x} ist2={:#x}\n{:#?}",
+        cr2, cr3, tss_rsp0, ist0, ist1, ist2, frame);
 }
 
 extern "x86-interrupt" fn general_protection_handler(frame: InterruptStackFrame, code: u64) {
@@ -137,6 +191,10 @@ extern "x86-interrupt" fn page_fault_handler(
     let addr = Cr2::read_raw();
 
     if code.contains(PageFaultErrorCode::USER_MODE) {
+        kprintln!(
+            "PF: addr={:#x} code={:?} rip={:#x}",
+            addr, code, frame.instruction_pointer.as_u64()
+        );
         let tid = crate::sched::current_tid().map(|t| t.0).unwrap_or(0);
         let cr3 = crate::mm::paging::read_cr3();
         if crate::fault::push_fault(tid, addr, code.bits(), cr3) {
@@ -154,6 +212,45 @@ extern "x86-interrupt" fn page_fault_handler(
             addr, code, frame
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Contributory exception handlers (IST 3) — identify what chains into #DF
+// ---------------------------------------------------------------------------
+
+extern "x86-interrupt" fn divide_error_handler(frame: InterruptStackFrame) {
+    panic!("EXCEPTION: #DE divide error at rip={:#x}\n{:#?}",
+        frame.instruction_pointer.as_u64(), frame);
+}
+
+extern "x86-interrupt" fn invalid_opcode_handler(frame: InterruptStackFrame) {
+    panic!("EXCEPTION: #UD invalid opcode at rip={:#x}\n{:#?}",
+        frame.instruction_pointer.as_u64(), frame);
+}
+
+extern "x86-interrupt" fn device_not_available_handler(frame: InterruptStackFrame) {
+    panic!("EXCEPTION: #NM device not available at rip={:#x}\n{:#?}",
+        frame.instruction_pointer.as_u64(), frame);
+}
+
+extern "x86-interrupt" fn invalid_tss_handler(frame: InterruptStackFrame, code: u64) {
+    panic!("EXCEPTION: #TS invalid TSS (code {}) at rip={:#x}\n{:#?}",
+        code, frame.instruction_pointer.as_u64(), frame);
+}
+
+extern "x86-interrupt" fn segment_not_present_handler(frame: InterruptStackFrame, code: u64) {
+    panic!("EXCEPTION: #NP segment not present (code {}) at rip={:#x}\n{:#?}",
+        code, frame.instruction_pointer.as_u64(), frame);
+}
+
+extern "x86-interrupt" fn stack_segment_fault_handler(frame: InterruptStackFrame, code: u64) {
+    panic!("EXCEPTION: #SS stack segment fault (code {}) at rip={:#x}\n{:#?}",
+        code, frame.instruction_pointer.as_u64(), frame);
+}
+
+extern "x86-interrupt" fn alignment_check_handler(frame: InterruptStackFrame, code: u64) {
+    panic!("EXCEPTION: #AC alignment check (code {}) at rip={:#x}\n{:#?}",
+        code, frame.instruction_pointer.as_u64(), frame);
 }
 
 // ---------------------------------------------------------------------------

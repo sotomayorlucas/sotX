@@ -61,7 +61,7 @@ pub struct TcpConn {
     pub snd_una: u32,  // oldest unacknowledged
     pub rcv_nxt: u32,  // next expected from remote
     /// Receive buffer.
-    pub recv_buf: [u8; 512],
+    pub recv_buf: [u8; 2048],
     pub recv_len: usize,
     pub active: bool,
     /// Retransmit state: saved last unACKed segment.
@@ -99,7 +99,7 @@ impl TcpConn {
             snd_nxt: 0,
             snd_una: 0,
             rcv_nxt: 0,
-            recv_buf: [0; 512],
+            recv_buf: [0; 2048],
             recv_len: 0,
             active: false,
             retransmit_buf: [0; RETRANSMIT_BUF_SIZE],
@@ -319,6 +319,14 @@ impl TcpTable {
                 None
             }
             TcpState::SynSent => {
+                // RST received — abort connection.
+                if hdr.flags & RST != 0 {
+                    let c = &mut self.conns[ci];
+                    c.state = TcpState::Closed;
+                    c.active = false;
+                    c.retransmit_len = 0;
+                    return None;
+                }
                 // Expecting SYN+ACK from remote.
                 if hdr.flags & SYN != 0 && hdr.flags & ACK != 0 {
                     let c = &mut self.conns[ci];
@@ -356,6 +364,14 @@ impl TcpTable {
             TcpState::Established => {
                 let c = &mut self.conns[ci];
 
+                // RST received — abort connection.
+                if hdr.flags & RST != 0 {
+                    c.state = TcpState::Closed;
+                    c.active = false;
+                    c.retransmit_len = 0;
+                    return None;
+                }
+
                 // Process ACK — clear retransmit if all data acknowledged.
                 if hdr.flags & ACK != 0 {
                     let old_una = c.snd_una;
@@ -372,6 +388,7 @@ impl TcpTable {
                 }
 
                 // Process incoming data.
+                let mut got_data = false;
                 if !payload.is_empty() && hdr.seq == c.rcv_nxt {
                     let space = c.recv_buf.len() - c.recv_len;
                     let copy_len = payload.len().min(space);
@@ -379,18 +396,10 @@ impl TcpTable {
                         .copy_from_slice(&payload[..copy_len]);
                     c.recv_len += copy_len;
                     c.rcv_nxt = c.rcv_nxt.wrapping_add(copy_len as u32);
-
-                    let win = c.advertised_window();
-                    // Send ACK.
-                    return Some(build_segment(
-                        reply_buf, our_ip, src_ip,
-                        c.local_port, c.remote_port,
-                        c.snd_nxt, c.rcv_nxt,
-                        ACK, win, &[],
-                    ));
+                    got_data = true;
                 }
 
-                // FIN received.
+                // FIN received (may arrive on the same segment as data).
                 if hdr.flags & FIN != 0 {
                     c.rcv_nxt = c.rcv_nxt.wrapping_add(1);
                     c.state = TcpState::CloseWait;
@@ -405,6 +414,17 @@ impl TcpTable {
                     c.snd_nxt = c.snd_nxt.wrapping_add(1);
                     c.state = TcpState::LastAck;
                     return Some(ack_len);
+                }
+
+                // Pure data (no FIN) — send ACK.
+                if got_data {
+                    let win = c.advertised_window();
+                    return Some(build_segment(
+                        reply_buf, our_ip, src_ip,
+                        c.local_port, c.remote_port,
+                        c.snd_nxt, c.rcv_nxt,
+                        ACK, win, &[],
+                    ));
                 }
 
                 None
@@ -431,10 +451,29 @@ impl TcpTable {
             }
             TcpState::FinWait2 => {
                 let c = &mut self.conns[ci];
+                // Buffer any incoming data before FIN.
+                if !payload.is_empty() && hdr.seq == c.rcv_nxt {
+                    let space = c.recv_buf.len() - c.recv_len;
+                    let copy_len = payload.len().min(space);
+                    c.recv_buf[c.recv_len..c.recv_len + copy_len]
+                        .copy_from_slice(&payload[..copy_len]);
+                    c.recv_len += copy_len;
+                    c.rcv_nxt = c.rcv_nxt.wrapping_add(copy_len as u32);
+                }
                 if hdr.flags & FIN != 0 {
                     c.rcv_nxt = c.rcv_nxt.wrapping_add(1);
                     c.state = TcpState::Closed;
                     c.active = false;
+                    let win = c.advertised_window();
+                    return Some(build_segment(
+                        reply_buf, our_ip, src_ip,
+                        c.local_port, c.remote_port,
+                        c.snd_nxt, c.rcv_nxt,
+                        ACK, win, &[],
+                    ));
+                }
+                // ACK data if we received some.
+                if !payload.is_empty() {
                     let win = c.advertised_window();
                     return Some(build_segment(
                         reply_buf, our_ip, src_ip,

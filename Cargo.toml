@@ -28,6 +28,8 @@ exclude = [
     "services/xhci",
     "services/vmm",
     "services/hello",
+    "services/hello-linux",
+    "services/hello-musl",
     "libs/sotos-testlib",
 ]
 

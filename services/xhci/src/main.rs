@@ -8,6 +8,7 @@
 #![no_main]
 
 use sotos_common::sys;
+use sotos_common::KB_RING_ADDR;
 use sotos_common::{BootInfo, BOOT_INFO_ADDR};
 use sotos_pci::PciBus;
 use sotos_xhci::controller::{XhciController, XhciDma};
@@ -37,7 +38,7 @@ const DATA_BUF_VADDR: u64 = 0xD30000;  // Data buffer page 0 (descriptors / cont
 const INT_BUF_VADDR: u64 = 0xD31000;   // Interrupt IN data buffer (HID reports)
 
 const SCRATCH_BUF_PAGES: usize = 16;
-const KB_RING_ADDR: u64 = 0x510000;    // Shared KB ring buffer (mapped by kernel)
+// KB_RING_ADDR imported from sotos_common
 
 fn print(s: &[u8]) {
     for &b in s { sys::debug_print(b); }

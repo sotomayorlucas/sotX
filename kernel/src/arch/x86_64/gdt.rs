@@ -41,6 +41,9 @@ pub const USER_CS: u16 = 0x23;
 // ---------------------------------------------------------------------------
 
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
+pub const PAGE_FAULT_IST_INDEX: u16 = 1;
+pub const GP_FAULT_IST_INDEX: u16 = 2;
+pub const MISC_FAULT_IST_INDEX: u16 = 3;
 
 /// Double-fault stack size per CPU (20 KiB).
 const DF_STACK_SIZE: usize = 4096 * 5;
@@ -49,6 +52,8 @@ const DF_STACK_SIZE: usize = 4096 * 5;
 #[allow(dead_code)]
 struct DoubleFaultStack([u8; DF_STACK_SIZE]);
 static DOUBLE_FAULT_STACK: DoubleFaultStack = DoubleFaultStack([0; DF_STACK_SIZE]);
+static PAGE_FAULT_STACK: DoubleFaultStack = DoubleFaultStack([0; DF_STACK_SIZE]);
+static GP_FAULT_STACK: DoubleFaultStack = DoubleFaultStack([0; DF_STACK_SIZE]);
 
 // ---------------------------------------------------------------------------
 // TSS — static for early boot, replaced by per-CPU heap TSS later
@@ -84,6 +89,22 @@ static GDT: Lazy<(GlobalDescriptorTable, Selectors)> = Lazy::new(|| {
     unsafe {
         (*TSS_STORAGE.0.get()).interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = {
             let stack_start = VirtAddr::from_ptr(&DOUBLE_FAULT_STACK);
+            let stack_size = core::mem::size_of::<DoubleFaultStack>() as u64;
+            stack_start + stack_size
+        };
+        (*TSS_STORAGE.0.get()).interrupt_stack_table[PAGE_FAULT_IST_INDEX as usize] = {
+            let stack_start = VirtAddr::from_ptr(&PAGE_FAULT_STACK);
+            let stack_size = core::mem::size_of::<DoubleFaultStack>() as u64;
+            stack_start + stack_size
+        };
+        (*TSS_STORAGE.0.get()).interrupt_stack_table[GP_FAULT_IST_INDEX as usize] = {
+            let stack_start = VirtAddr::from_ptr(&GP_FAULT_STACK);
+            let stack_size = core::mem::size_of::<DoubleFaultStack>() as u64;
+            stack_start + stack_size
+        };
+        // Reuse GP stack for misc faults in early boot (they all panic immediately)
+        (*TSS_STORAGE.0.get()).interrupt_stack_table[MISC_FAULT_IST_INDEX as usize] = {
+            let stack_start = VirtAddr::from_ptr(&GP_FAULT_STACK);
             let stack_size = core::mem::size_of::<DoubleFaultStack>() as u64;
             stack_start + stack_size
         };
@@ -140,6 +161,27 @@ pub fn init_percpu(percpu: &mut PerCpu) {
     let df_virt = df_base.addr() + crate::mm::hhdm_offset();
     let df_stack_top = VirtAddr::new(df_virt + DF_STACK_SIZE as u64);
     tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = df_stack_top;
+
+    // Allocate page-fault IST stack.
+    let pf_base = crate::mm::alloc_contiguous(df_frames)
+        .expect("out of frames for page-fault IST stack");
+    let pf_virt = pf_base.addr() + crate::mm::hhdm_offset();
+    let pf_stack_top = VirtAddr::new(pf_virt + DF_STACK_SIZE as u64);
+    tss.interrupt_stack_table[PAGE_FAULT_IST_INDEX as usize] = pf_stack_top;
+
+    // Allocate GP-fault IST stack.
+    let gp_base = crate::mm::alloc_contiguous(df_frames)
+        .expect("out of frames for GP-fault IST stack");
+    let gp_virt = gp_base.addr() + crate::mm::hhdm_offset();
+    let gp_stack_top = VirtAddr::new(gp_virt + DF_STACK_SIZE as u64);
+    tss.interrupt_stack_table[GP_FAULT_IST_INDEX as usize] = gp_stack_top;
+
+    // Allocate misc-fault IST stack (shared for #DE, #UD, #NM, #TS, #NP, #SS, #AC).
+    let misc_base = crate::mm::alloc_contiguous(df_frames)
+        .expect("out of frames for misc-fault IST stack");
+    let misc_virt = misc_base.addr() + crate::mm::hhdm_offset();
+    let misc_stack_top = VirtAddr::new(misc_virt + DF_STACK_SIZE as u64);
+    tss.interrupt_stack_table[MISC_FAULT_IST_INDEX as usize] = misc_stack_top;
 
     let tss = Box::leak(tss);
     percpu.tss = tss as *mut TaskStateSegment;

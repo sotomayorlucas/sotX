@@ -3,6 +3,10 @@
 //! Builds DHCP Discover and Request messages, parses Offer and Ack responses
 //! to obtain dynamic IP configuration (IP, subnet, gateway, DNS).
 
+use core::sync::atomic::{AtomicU32, Ordering};
+
+static DHCP_XID: AtomicU32 = AtomicU32::new(0x50540001); // "PT" prefix + counter
+
 /// DHCP message types (option 53).
 const DHCP_DISCOVER: u8 = 1;
 const DHCP_OFFER: u8 = 2;
@@ -50,11 +54,9 @@ pub fn build_discover(mac: &[u8; 6], buf: &mut [u8]) -> usize {
     buf[1] = 1;  // htype: Ethernet
     buf[2] = 6;  // hlen: MAC length
     buf[3] = 0;  // hops
-    // xid (transaction ID).
-    buf[4] = 0xDE;
-    buf[5] = 0xAD;
-    buf[6] = 0xBE;
-    buf[7] = 0xEF;
+    // xid (transaction ID) — counter-based for uniqueness across retries.
+    let xid = DHCP_XID.fetch_add(1, Ordering::Relaxed);
+    buf[4..8].copy_from_slice(&xid.to_be_bytes());
     // secs, flags = 0.
     buf[10] = 0x80; // broadcast flag
     // chaddr (client MAC).
@@ -102,10 +104,8 @@ pub fn build_request(offer: &DhcpOffer, mac: &[u8; 6], buf: &mut [u8]) -> usize 
     buf[0] = 1;  // BOOTREQUEST
     buf[1] = 1;  // Ethernet
     buf[2] = 6;  // MAC len
-    buf[4] = 0xDE;
-    buf[5] = 0xAD;
-    buf[6] = 0xBE;
-    buf[7] = 0xEF;
+    let xid = DHCP_XID.load(Ordering::Relaxed).wrapping_sub(1); // reuse discover's xid
+    buf[4..8].copy_from_slice(&xid.to_be_bytes());
     buf[10] = 0x80; // broadcast
     buf[28..34].copy_from_slice(mac);
 

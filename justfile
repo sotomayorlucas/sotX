@@ -14,6 +14,8 @@ USER_NVME := "services/nvme/target/x86_64-unknown-none/debug/sotos-nvme-svc"
 USER_XHCI := "services/xhci/target/x86_64-unknown-none/debug/sotos-xhci-svc"
 USER_VMM := "services/vmm/target/x86_64-unknown-none/debug/sotos-vmm"
 USER_HELLO := "services/hello/target/x86_64-unknown-none/debug/sotos-hello"
+USER_HELLO_LINUX := "services/hello-linux/target/x86_64-unknown-none/debug/sotos-hello-linux"
+USER_HELLO_MUSL := "target/hello-musl-raw"
 TESTLIB := "target/libtest.so"
 INITRD := "target/initrd.img"
 
@@ -52,6 +54,10 @@ build-nvme:
 build-xhci:
     cd services/xhci && CARGO_ENCODED_RUSTFLAGS="$(printf '%s\x1f%s\x1f%s' '-Clink-arg=-Tlinker.ld' '-Crelocation-model=static' '-Zstack-protector=strong')" cargo build
 
+# Build hello-linux (Linux ABI test binary for LUCAS)
+build-hello-linux:
+    cd services/hello-linux && CARGO_ENCODED_RUSTFLAGS="$(printf '%s\x1f%s\x1f%s' '-Clink-arg=-Tlinker.ld' '-Crelocation-model=static' '-Zstack-protector=strong')" cargo build
+
 # Build test shared library (for dynamic linking)
 build-testlib:
     cd libs/sotos-testlib && CARGO_ENCODED_RUSTFLAGS="$(printf '%s' '-Crelocation-model=pic')" cargo build
@@ -69,24 +75,23 @@ release:
     cargo build --package sotos-kernel --release
 
 # Create CPIO initrd from userspace binaries
-initrd: build-user build-shell build-kbd build-net build-nvme build-xhci build-vmm build-hello build-testlib
-    python scripts/mkinitrd.py --output {{INITRD}} --file init={{USER_INIT}} --file shell={{USER_SHELL}} --file kbd={{USER_KBD}} --file net={{USER_NET}} --file nvme={{USER_NVME}} --file xhci={{USER_XHCI}} --file vmm={{USER_VMM}} --file hello={{USER_HELLO}} --file libtest.so={{TESTLIB}}
+initrd: build-user build-shell build-kbd build-net build-nvme build-xhci build-vmm build-hello build-hello-linux build-testlib
+    python scripts/mkinitrd.py --output {{INITRD}} --file init={{USER_INIT}} --file shell={{USER_SHELL}} --file kbd={{USER_KBD}} --file net={{USER_NET}} --file nvme={{USER_NVME}} --file xhci={{USER_XHCI}} --file vmm={{USER_VMM}} --file hello={{USER_HELLO}} --file hello-linux={{USER_HELLO_LINUX}} --file hello-musl={{USER_HELLO_MUSL}} --file libtest.so={{TESTLIB}}
 
 # Create the bootable disk image (BIOS + Limine)
 image: build initrd
     python scripts/mkimage.py --kernel {{KERNEL}} --initrd {{INITRD}} --output {{IMAGE}}
 
-# Build and run in QEMU (serial output to terminal)
+# Build and run in QEMU (serial output to terminal, single CPU)
 run: image
     "{{QEMU}}" \
         -drive format=raw,file={{IMAGE}} \
         -serial stdio \
         -display none \
         -no-reboot \
-        -m 256M \
-        -smp 4
+        -m 256M
 
-# Run with SMP (4 CPUs)
+# Run with SMP (4 CPUs — may hang due to scheduler race, use for testing only)
 run-smp: image
     "{{QEMU}}" \
         -drive format=raw,file={{IMAGE}} \
@@ -96,7 +101,9 @@ run-smp: image
         -m 256M \
         -smp 4
 
-# Run with QEMU display window (for framebuffer/keyboard)
+# Run with QEMU display window (for framebuffer/keyboard/mouse)
+# Uses -display sdl to get PS/2 mouse input. Click inside window to grab mouse;
+# Ctrl+Alt+G to release mouse grab.
 run-gui: image create-test-disk
     "{{QEMU}}" \
         -drive format=raw,file={{IMAGE}} \
@@ -105,7 +112,8 @@ run-gui: image create-test-disk
         -serial stdio \
         -no-reboot \
         -m 256M \
-        -smp 4
+        -display sdl \
+        -machine usb=off
 
 # Run with GDB server for debugging (connect with gdb -ex "target remote :1234")
 debug: image
@@ -115,7 +123,6 @@ debug: image
         -display none \
         -no-reboot \
         -m 256M \
-        -smp 4 \
         -s -S
 
 # Create a 1 MiB test disk for virtio-blk
@@ -132,8 +139,7 @@ run-net: image create-test-disk
         -device virtio-net-pci,netdev=net0,disable-modern=on \
         -serial stdio \
         -no-reboot \
-        -m 256M \
-        -smp 4
+        -m 256M
 
 # Run with virtio-net + Wireshark packet capture (pcap)
 run-net-pcap: image create-test-disk
@@ -146,8 +152,7 @@ run-net-pcap: image create-test-disk
         -object filter-dump,id=dump0,netdev=net0,file=target/net.pcap \
         -serial stdio \
         -no-reboot \
-        -m 256M \
-        -smp 4
+        -m 256M
 
 # Run with virtio-blk test disk
 run-blk: image create-test-disk
@@ -157,8 +162,7 @@ run-blk: image create-test-disk
         -device virtio-blk-pci,drive=disk0,disable-modern=on \
         -serial stdio \
         -no-reboot \
-        -m 256M \
-        -smp 4
+        -m 256M
 
 # Create a 64 MiB NVMe test disk
 create-nvme-disk:
@@ -174,8 +178,7 @@ run-nvme: image create-test-disk create-nvme-disk
         -device nvme,serial=sotOS-NVMe,drive=nvme0 \
         -serial stdio \
         -no-reboot \
-        -m 256M \
-        -smp 4
+        -m 256M
 
 # Run with xHCI USB controller (and virtio-blk for ObjectStore)
 run-xhci: image create-test-disk
@@ -187,8 +190,7 @@ run-xhci: image create-test-disk
         -device usb-kbd,bus=xhci.0 \
         -serial stdio \
         -no-reboot \
-        -m 256M \
-        -smp 4
+        -m 256M
 
 # Run with ALL devices (virtio-blk, virtio-net, NVMe, xHCI USB kbd+mouse, AC97 audio, AHCI SATA, display)
 run-full: image create-test-disk create-nvme-disk
@@ -207,8 +209,7 @@ run-full: image create-test-disk create-nvme-disk
         -device ahci,id=ahci0 \
         -serial stdio \
         -no-reboot \
-        -m 512M \
-        -smp 4
+        -m 512M
 
 # Flash sotOS image to a disk/USB drive (usage: just flash DISK=/dev/sdX)
 flash DISK: image
