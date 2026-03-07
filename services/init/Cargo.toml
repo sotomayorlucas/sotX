@@ -11,6 +11,8 @@ sotos-objstore = { path = "../../libs/sotos-objstore" }
 sotos-ld = { path = "../../libs/sotos-ld" }
 sotos-gui = { path = "../../libs/sotos-gui" }
 goblin = { version = "0.8", default-features = false, features = ["elf32", "elf64", "endian_fd"] }
+rand_core = { version = "0.6", default-features = false }
+rand_chacha = { version = "0.3", default-features = false }
 
 [profile.dev]
 panic = "abort"

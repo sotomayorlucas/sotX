@@ -20,6 +20,26 @@ use crate::{NET_EP_CAP, vfs_lock, vfs_unlock, shared_store};
 
 const MAP_WRITABLE: u64 = 2;
 
+/// CSPRNG: ChaCha20-based, seeded from RDTSC.
+fn fill_random(buf: &mut [u8]) {
+    use rand_core::{RngCore, SeedableRng};
+    use rand_chacha::ChaCha20Rng;
+    static mut RNG: Option<ChaCha20Rng> = None;
+    unsafe {
+        if RNG.is_none() {
+            let mut seed = [0u8; 32];
+            let tsc = rdtsc();
+            seed[0..8].copy_from_slice(&tsc.to_le_bytes());
+            let tsc2 = rdtsc();
+            seed[8..16].copy_from_slice(&tsc2.to_le_bytes());
+            let tsc3 = rdtsc();
+            seed[16..24].copy_from_slice(&tsc3.to_le_bytes());
+            RNG = Some(ChaCha20Rng::from_seed(seed));
+        }
+        RNG.as_mut().unwrap().fill_bytes(buf);
+    }
+}
+
 /// Trampoline for clone(CLONE_THREAD) child threads.
 /// Stack layout set up by the handler: [fn_ptr, arg, tls_ptr] (growing upward from RSP).
 /// Calls arch_prctl(SET_FS, tls) if tls != 0, then calls fn(arg), then exit.
@@ -195,15 +215,11 @@ pub(crate) extern "C" fn child_handler() -> ! {
                         reply_val(ep_cap, n as i64);
                     }
                     20 => {
-                        // /dev/urandom → fill buffer with pseudo-random bytes
+                        // /dev/urandom → fill buffer with ChaCha20 CSPRNG
                         let n = len.min(4096);
                         if n > 0 {
                             let dst = unsafe { core::slice::from_raw_parts_mut(buf_ptr as *mut u8, n) };
-                            let mut rng = rdtsc();
-                            for b in dst.iter_mut() {
-                                rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
-                                *b = rng as u8;
-                            }
+                            fill_random(dst);
                         }
                         reply_val(ep_cap, n as i64);
                     }
@@ -2264,16 +2280,12 @@ pub(crate) extern "C" fn child_handler() -> ! {
                 reply_val(ep_cap, 0);
             }
 
-            // SYS_getrandom
+            // SYS_getrandom — ChaCha20 CSPRNG
             318 => {
                 let buf_ptr = msg.regs[0] as *mut u8;
                 let buflen = msg.regs[1] as usize;
-                let tsc = rdtsc();
-                let mut seed = tsc;
-                for i in 0..buflen {
-                    seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17;
-                    unsafe { *buf_ptr.add(i) = seed as u8; }
-                }
+                let dst = unsafe { core::slice::from_raw_parts_mut(buf_ptr, buflen) };
+                fill_random(dst);
                 reply_val(ep_cap, buflen as i64);
             }
 
