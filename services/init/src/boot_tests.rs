@@ -5,6 +5,7 @@
 
 use sotos_common::sys;
 use sotos_common::spsc;
+use sotos_common::linux_abi::*;
 use core::sync::atomic::Ordering;
 use crate::framebuffer::{print, print_u64, print_hex64, fb_putchar};
 use crate::exec::{reply_val, exec_from_initrd, exec_from_initrd_argv, rdtsc,

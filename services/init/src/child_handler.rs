@@ -5,6 +5,7 @@
 
 use sotos_common::sys;
 use sotos_common::{BootInfo, BOOT_INFO_ADDR};
+use sotos_common::linux_abi::*;
 use core::sync::atomic::{AtomicU64, Ordering};
 use crate::framebuffer::{print, print_u64, fb_putchar, kb_has_char, kb_read_char, poll_mouse};
 use crate::exec::{reply_val, rdtsc, exec_from_initrd, exec_from_initrd_argv,
@@ -174,7 +175,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
         syscall_log_record(pid as u16, syscall_nr as u16, msg.regs[0], 0);
         match syscall_nr {
             // SYS_read(fd, buf, len)
-            0 => {
+            SYS_READ => {
                 let fd = msg.regs[0] as usize;
                 let buf_ptr = msg.regs[1];
                 let len = msg.regs[2] as usize;
@@ -360,7 +361,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_write(fd, buf, len)
-            1 => {
+            SYS_WRITE => {
                 let fd = msg.regs[0] as usize;
                 let buf_ptr = msg.regs[1];
                 let len = msg.regs[2] as usize;
@@ -453,7 +454,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_close(fd)
-            3 => {
+            SYS_CLOSE => {
                 let fd = msg.regs[0] as usize;
                 if fd < CHILD_MAX_FDS && child_fds[fd] != 0 {
                     if child_fds[fd] == 12 {
@@ -486,7 +487,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_open(path, flags, mode) — used by musl dynamic linker
-            2 => {
+            SYS_OPEN => {
                 let path_ptr = msg.regs[0];
                 let mut path = [0u8; 128];
                 let path_len = copy_guest_path(path_ptr, &mut path);
@@ -567,7 +568,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_fstat(fd, stat_buf)
-            5 => {
+            SYS_FSTAT => {
                 let fd = msg.regs[0] as usize;
                 let stat_ptr = msg.regs[1];
                 if fd >= CHILD_MAX_FDS || child_fds[fd] == 0 {
@@ -612,7 +613,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_stat(path, statbuf) — check if path exists (for terminfo etc.)
-            4 | 6 => {
+            SYS_STAT | SYS_LSTAT => {
                 // SYS_stat(4) / SYS_lstat(6)
                 let path_ptr = msg.regs[0];
                 let stat_ptr = msg.regs[1];
@@ -661,7 +662,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_poll(fds, nfds, timeout)
-            7 => {
+            SYS_POLL => {
                 let fds_ptr = msg.regs[0] as *mut u8;
                 let nfds = msg.regs[1] as usize;
                 let timeout = msg.regs[2] as i32;
@@ -732,7 +733,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_lseek(fd, offset, whence)
-            8 => {
+            SYS_LSEEK => {
                 let fd = msg.regs[0] as usize;
                 let offset_val = msg.regs[1] as i64;
                 let whence = msg.regs[2] as u32;
@@ -791,7 +792,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_mmap(addr, len, prot, flags, fd, offset)
-            9 => {
+            SYS_MMAP => {
                 let req_addr = msg.regs[0];
                 let len = msg.regs[1];
                 let prot = msg.regs[2]; // PROT_READ=1, PROT_WRITE=2, PROT_EXEC=4
@@ -929,7 +930,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_mprotect(addr, len, prot) — change page permissions
-            10 => {
+            SYS_MPROTECT => {
                 let addr = msg.regs[0] & !0xFFF;
                 let len = msg.regs[1];
                 let prot = msg.regs[2]; // PROT_READ=1, PROT_WRITE=2, PROT_EXEC=4
@@ -952,7 +953,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_pread64(fd, buf, count, offset)
-            17 => {
+            SYS_PREAD64 => {
                 let fd = msg.regs[0] as usize;
                 let buf_ptr = msg.regs[1];
                 let count = msg.regs[2] as usize;
@@ -1008,7 +1009,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_munmap
-            11 => {
+            SYS_MUNMAP => {
                 let addr = msg.regs[0];
                 let len = msg.regs[1];
                 let pages = ((len + 0xFFF) & !0xFFF) / 0x1000;
@@ -1019,7 +1020,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_brk(addr)
-            12 => {
+            SYS_BRK => {
                 let addr = msg.regs[0];
                 if addr == 0 || addr <= *current_brk {
                     reply_val(ep_cap, *current_brk as i64);
@@ -1044,7 +1045,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_rt_sigaction(sig, act, oldact, sigsetsize)
-            13 => {
+            SYS_RT_SIGACTION => {
                 let signo = msg.regs[0] as usize;
                 let act_ptr = msg.regs[1];
                 let oldact = msg.regs[2];
@@ -1081,7 +1082,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_rt_sigprocmask(how, set, oldset, sigsetsize)
-            14 => {
+            SYS_RT_SIGPROCMASK => {
                 let how = msg.regs[0];
                 let set_ptr = msg.regs[1];
                 let oldset = msg.regs[2];
@@ -1107,7 +1108,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_ioctl — terminal emulation
-            16 => {
+            SYS_IOCTL => {
                 use sotos_common::linux_abi::*;
                 let fd = msg.regs[0] as usize;
                 let req = msg.regs[1] as u32;
@@ -1167,7 +1168,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_readv(fd, iov, iovcnt) — scatter read
-            19 => {
+            SYS_READV => {
                 let fd = msg.regs[0] as usize;
                 let iov_ptr = msg.regs[1];
                 let iovcnt = msg.regs[2] as usize;
@@ -1278,7 +1279,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_writev
-            20 => {
+            SYS_WRITEV => {
                 let fd = msg.regs[0] as usize;
                 let iov_ptr = msg.regs[1];
                 let iovcnt = msg.regs[2] as usize;
@@ -1313,8 +1314,8 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_access / SYS_faccessat — check file accessibility
-            21 | 269 => {
-                let path_ptr = if syscall_nr == 269 { msg.regs[1] } else { msg.regs[0] };
+            SYS_ACCESS | SYS_FACCESSAT => {
+                let path_ptr = if syscall_nr == SYS_FACCESSAT { msg.regs[1] } else { msg.regs[0] };
                 let mut path = [0u8; 128];
                 let path_len = copy_guest_path(path_ptr, &mut path);
                 let name = &path[..path_len];
@@ -1352,7 +1353,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_pipe
-            22 => {
+            SYS_PIPE => {
                 let pipefd = msg.regs[0] as *mut i32;
                 // Allocate two FDs for pipe (read=PipeRead, write=PipeWrite)
                 let mut r_fd = None;
@@ -1374,19 +1375,19 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_nanosleep
-            35 => reply_val(ep_cap, 0),
+            SYS_NANOSLEEP => reply_val(ep_cap, 0),
 
             // SYS_getpid — returns tgid (thread group ID), not tid
-            39 => {
+            SYS_GETPID => {
                 let tgid = PROC_TGID[pid - 1].load(Ordering::Acquire);
                 reply_val(ep_cap, if tgid != 0 { tgid as i64 } else { pid as i64 });
             }
 
             // SYS_gettid — returns actual thread ID
-            186 => reply_val(ep_cap, pid as i64),
+            SYS_GETTID => reply_val(ep_cap, pid as i64),
 
             // SYS_dup(oldfd)
-            32 => {
+            SYS_DUP => {
                 let oldfd = msg.regs[0] as usize;
                 if oldfd >= CHILD_MAX_FDS || child_fds[oldfd] == 0 {
                     reply_val(ep_cap, -9);
@@ -1405,7 +1406,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_dup2(oldfd, newfd)
-            33 => {
+            SYS_DUP2 => {
                 let oldfd = msg.regs[0] as usize;
                 let newfd = msg.regs[1] as usize;
                 if oldfd >= CHILD_MAX_FDS || child_fds[oldfd] == 0 || newfd >= CHILD_MAX_FDS {
@@ -1417,7 +1418,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_execve(path, argv, envp) — generic: loads any ELF from initrd
-            59 => {
+            SYS_EXECVE => {
                 let path_ptr = msg.regs[0];
                 let argv_ptr = msg.regs[1];
                 let mut path = [0u8; 48];
@@ -1481,7 +1482,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_exit(status)
-            60 => {
+            SYS_EXIT => {
                 let status = msg.regs[0];
                 if pid > 0 && pid <= MAX_PROCS {
                     // CLONE_CHILD_CLEARTID: write 0 to *clear_child_tid + futex_wake
@@ -1495,14 +1496,14 @@ pub(crate) extern "C" fn child_handler() -> ! {
                     // Deliver SIGCHLD to parent
                     let ppid = PROC_PARENT[pid - 1].load(Ordering::Acquire) as usize;
                     if ppid > 0 && ppid <= MAX_PROCS {
-                        sig_send(ppid, SIGCHLD);
+                        sig_send(ppid, SIGCHLD as u64);
                     }
                 }
                 break;
             }
 
             // SYS_kill(pid, sig)
-            62 => {
+            SYS_KILL => {
                 let target = msg.regs[0] as usize;
                 let sig = msg.regs[1];
                 if target == 0 || target > MAX_PROCS || PROC_STATE[target - 1].load(Ordering::Acquire) == 0 {
@@ -1514,7 +1515,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_clone(flags, child_stack, ptid, ctid, newtls) — create a thread
-            56 => {
+            SYS_CLONE => {
                 let flags = msg.regs[0];
                 let child_stack = msg.regs[1];
                 let ptid_ptr = msg.regs[2];
@@ -1625,7 +1626,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_uname
-            63 => {
+            SYS_UNAME => {
                 let buf_ptr = msg.regs[0];
                 if buf_ptr != 0 && buf_ptr < 0x0000_8000_0000_0000 {
                     let buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr as *mut u8, 390) };
@@ -1641,7 +1642,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_fcntl
-            72 => {
+            SYS_FCNTL => {
                 let fd = msg.regs[0] as usize;
                 let cmd = msg.regs[1] as u32;
                 match cmd {
@@ -1662,7 +1663,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_getcwd
-            79 => {
+            SYS_GETCWD => {
                 let buf = msg.regs[0] as *mut u8;
                 let size = msg.regs[1] as usize;
                 if size >= 2 {
@@ -1674,10 +1675,10 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_fsync / SYS_fdatasync — flush (no-op, data is already persistent)
-            74 | 75 => reply_val(ep_cap, 0),
+            SYS_FSYNC | SYS_FDATASYNC => reply_val(ep_cap, 0),
 
             // SYS_ftruncate(fd, length)
-            77 => {
+            SYS_FTRUNCATE => {
                 let fd = msg.regs[0] as usize;
                 let length = msg.regs[1] as usize;
                 if fd < CHILD_MAX_FDS && child_fds[fd] == 13 {
@@ -1697,7 +1698,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_rename(oldpath, newpath)
-            82 => {
+            SYS_RENAME => {
                 let old_ptr = msg.regs[0];
                 let new_ptr = msg.regs[1];
                 let mut old_path = [0u8; 128];
@@ -1732,7 +1733,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_gettimeofday (child_handler)
-            96 => {
+            SYS_GETTIMEOFDAY => {
                 let tv = msg.regs[0] as *mut u64;
                 if !tv.is_null() {
                     let tsc = rdtsc();
@@ -1746,7 +1747,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_sysinfo (child_handler)
-            99 => {
+            SYS_SYSINFO => {
                 let buf = msg.regs[0] as *mut u8;
                 if !buf.is_null() {
                     unsafe { core::ptr::write_bytes(buf, 0, 128); }
@@ -1759,25 +1760,25 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_getuid/geteuid/getgid/getegid
-            102 | 104 | 107 | 108 => reply_val(ep_cap, 0),
+            SYS_GETUID | SYS_GETGID | SYS_GETEUID | SYS_GETEGID => reply_val(ep_cap, 0),
 
             // SYS_setpgid
-            109 => reply_val(ep_cap, 0),
+            SYS_SETPGID => reply_val(ep_cap, 0),
 
             // SYS_getppid
-            110 => reply_val(ep_cap, parent_pid as i64),
+            SYS_GETPPID => reply_val(ep_cap, parent_pid as i64),
 
             // SYS_getpgrp
-            111 => reply_val(ep_cap, pid as i64),
+            SYS_GETPGRP => reply_val(ep_cap, pid as i64),
 
             // SYS_setsid
-            112 => reply_val(ep_cap, pid as i64),
+            SYS_SETSID => reply_val(ep_cap, pid as i64),
 
             // SYS_setfsuid / SYS_setfsgid — return previous (0)
-            122 | 123 => reply_val(ep_cap, 0),
+            SYS_SETFSUID | SYS_SETFSGID => reply_val(ep_cap, 0),
 
             // SYS_sigaltstack — stub
-            131 => {
+            SYS_SIGALTSTACK => {
                 let old_ss = msg.regs[1];
                 if old_ss != 0 && old_ss < 0x0000_8000_0000_0000 {
                     let buf = unsafe { core::slice::from_raw_parts_mut(old_ss as *mut u8, 24) };
@@ -1788,7 +1789,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_openat — /dev files + initrd files + VFS files
-            257 => {
+            SYS_OPENAT => {
                 let path_ptr = msg.regs[1];
                 let flags = msg.regs[2] as u32;
                 let mut path = [0u8; 128];
@@ -2130,14 +2131,14 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_set_tid_address — store clear_child_tid pointer, return TID
-            218 => {
+            SYS_SET_TID_ADDRESS => {
                 let tidptr = msg.regs[0];
                 PROC_CLEAR_TID[pid - 1].store(tidptr, Ordering::Release);
                 reply_val(ep_cap, pid as i64);
             }
 
             // SYS_clock_gettime (child_handler)
-            228 => {
+            SYS_CLOCK_GETTIME => {
                 let tp_ptr = msg.regs[1];
                 if tp_ptr != 0 && tp_ptr < 0x0000_8000_0000_0000 {
                     let tsc = rdtsc();
@@ -2152,7 +2153,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_exit_group
-            231 => {
+            SYS_EXIT_GROUP => {
                 let status = msg.regs[0] as i32;
                 // CLONE_CHILD_CLEARTID: write 0 to *clear_child_tid + futex_wake
                 let ctid_ptr = PROC_CLEAR_TID[pid - 1].load(Ordering::Acquire);
@@ -2165,13 +2166,13 @@ pub(crate) extern "C" fn child_handler() -> ! {
                 // Deliver SIGCHLD to parent
                 let ppid = PROC_PARENT[pid - 1].load(Ordering::Acquire) as usize;
                 if ppid > 0 && ppid <= MAX_PROCS {
-                    sig_send(ppid, SIGCHLD);
+                    sig_send(ppid, SIGCHLD as u64);
                 }
                 break;
             }
 
             // SYS_fstatat(dirfd, path, statbuf, flags)
-            262 => {
+            SYS_FSTATAT => {
                 let dirfd = msg.regs[0] as i64;
                 let path_ptr = msg.regs[1];
                 let stat_ptr = msg.regs[2];
@@ -2242,7 +2243,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_readlinkat(dirfd, path, buf, bufsiz)
-            267 => {
+            SYS_READLINKAT => {
                 let path_ptr = msg.regs[1];
                 let out_buf = msg.regs[2];
                 let bufsiz = msg.regs[3] as usize;
@@ -2266,7 +2267,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_prlimit64
-            302 => {
+            SYS_PRLIMIT64 => {
                 let new_limit = msg.regs[2];
                 let old_limit = msg.regs[3];
                 if old_limit != 0 && old_limit < 0x0000_8000_0000_0000 {
@@ -2281,7 +2282,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_getrandom — ChaCha20 CSPRNG
-            318 => {
+            SYS_GETRANDOM => {
                 let buf_ptr = msg.regs[0] as *mut u8;
                 let buflen = msg.regs[1] as usize;
                 let dst = unsafe { core::slice::from_raw_parts_mut(buf_ptr, buflen) };
@@ -2290,7 +2291,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_futex(uaddr, op, val, timeout, uaddr2, val3)
-            202 => {
+            SYS_FUTEX => {
                 let uaddr = msg.regs[0];
                 let op = (msg.regs[1] & 0x7F) as u32; // mask off FUTEX_PRIVATE_FLAG
                 let val = msg.regs[2] as u32;
@@ -2308,7 +2309,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_sched_getaffinity — return 1 CPU
-            204 => {
+            SYS_SCHED_GETAFFINITY => {
                 let mask_ptr = msg.regs[2] as *mut u8;
                 let len = msg.regs[1] as usize;
                 if !mask_ptr.is_null() && len > 0 {
@@ -2321,7 +2322,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_getdents64(fd, dirp, count)
-            217 => {
+            SYS_GETDENTS64 => {
                 use sotos_common::linux_abi::{DT_REG, DT_DIR};
                 let fd = msg.regs[0] as usize;
                 let dirp = msg.regs[1];
@@ -2388,10 +2389,10 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_fadvise64 — stub
-            221 => reply_val(ep_cap, 0),
+            SYS_FADVISE64 => reply_val(ep_cap, 0),
 
             // SYS_ppoll — like poll but with signal mask
-            271 => {
+            SYS_PPOLL => {
                 // Treat exactly like poll for now
                 let fds_ptr = msg.regs[0] as *mut u8;
                 let nfds = msg.regs[1] as usize;
@@ -2448,10 +2449,10 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_statx — not supported, force musl to fall back to fstatat
-            332 => reply_val(ep_cap, -38), // -ENOSYS
+            SYS_STATX => reply_val(ep_cap, -38), // -ENOSYS
 
             // SYS_rseq — restartable sequences (musl may use)
-            334 => reply_val(ep_cap, -38), // -ENOSYS is fine
+            SYS_RSEQ => reply_val(ep_cap, -38), // -ENOSYS is fine
 
             // SYS_SIGNAL_TRAMPOLINE (0x7F00) — async signal delivery
             0x7F00 => {
@@ -2513,7 +2514,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_socket(domain, type, protocol) — child socket proxy
-            41 => {
+            SYS_SOCKET => {
                 let domain = msg.regs[0] as u32;
                 let sock_type = msg.regs[1] as u32;
                 let base_type = sock_type & 0xFF;
@@ -2555,7 +2556,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_connect(fd, sockaddr_ptr, addrlen) — child socket proxy
-            42 => {
+            SYS_CONNECT => {
                 let fd = msg.regs[0] as usize;
                 let sockaddr_ptr = msg.regs[1];
                 if fd >= CHILD_MAX_FDS || (child_fds[fd] != 16 && child_fds[fd] != 17) {
@@ -2595,7 +2596,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_sendto / SYS_sendmsg — child socket proxy
-            44 | 46 => {
+            SYS_SENDTO | SYS_SENDMSG => {
                 let fd = msg.regs[0] as usize;
                 let buf_ptr = msg.regs[1];
                 let len = msg.regs[2] as usize;
@@ -2651,7 +2652,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_recvfrom / SYS_recvmsg — child socket proxy
-            45 | 47 => {
+            SYS_RECVFROM | SYS_RECVMSG => {
                 let fd = msg.regs[0] as usize;
                 let buf_ptr = msg.regs[1];
                 let len = msg.regs[2] as usize;
@@ -2707,10 +2708,10 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_bind(49), SYS_listen(50), SYS_setsockopt(54) — stubs
-            49 | 50 | 54 => reply_val(ep_cap, 0),
+            SYS_BIND | SYS_LISTEN | SYS_SETSOCKOPT => reply_val(ep_cap, 0),
 
             // SYS_getsockname(51) / SYS_getpeername(52)
-            51 | 52 => {
+            SYS_GETSOCKNAME | SYS_GETPEERNAME => {
                 let sockaddr_ptr = msg.regs[1];
                 let addrlen_ptr = msg.regs[2];
                 if sockaddr_ptr != 0 {
@@ -2719,7 +2720,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                     unsafe {
                         core::ptr::write_bytes(sa, 0, 16);
                         *(sa as *mut u16) = 2; // AF_INET
-                        if syscall_nr == 51 {
+                        if syscall_nr == SYS_GETSOCKNAME {
                             // Return local addr: 10.0.2.15
                             *sa.add(4) = 10; *sa.add(5) = 0; *sa.add(6) = 2; *sa.add(7) = 15;
                         } else if fd < CHILD_MAX_FDS && child_fds[fd] == 16 {
@@ -2735,7 +2736,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_getsockopt(fd, level, optname, optval, optlen) — return 0 for SO_ERROR
-            55 => {
+            SYS_GETSOCKOPT => {
                 let optval_ptr = msg.regs[3];
                 let optlen_ptr = msg.regs[4];
                 if optval_ptr != 0 {
@@ -2748,17 +2749,17 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_shutdown(48)
-            48 => {
+            SYS_SHUTDOWN => {
                 reply_val(ep_cap, 0);
             }
 
             // SYS_mkdir(83), SYS_chmod(90) — stubs: pretend success
-            83 | 90 => {
+            SYS_MKDIR | SYS_CHMOD => {
                 reply_val(ep_cap, 0);
             }
 
             // SYS_select(23) / SYS_pselect6(270) — check readability/writability
-            23 | 270 => {
+            SYS_SELECT | SYS_PSELECT6 => {
                 let nfds = (msg.regs[0] as usize).min(CHILD_MAX_FDS);
                 let readfds_ptr = msg.regs[1];
                 let writefds_ptr = msg.regs[2];
@@ -2769,7 +2770,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                 // Parse timeout (in milliseconds, 0 = poll, -1 = infinite)
                 let timeout_ms: i64 = if timeout_ptr == 0 {
                     -1 // infinite
-                } else if syscall_nr == 23 {
+                } else if syscall_nr == SYS_SELECT {
                     // timeval: { tv_sec: i64, tv_usec: i64 }
                     let sec = unsafe { *(timeout_ptr as *const i64) };
                     let usec = unsafe { *((timeout_ptr + 8) as *const i64) };
@@ -2836,7 +2837,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_epoll_create1(291) — stub: return a fake FD
-            291 => {
+            SYS_EPOLL_CREATE1 => {
                 // Find a free FD slot and mark it as epoll
                 let mut efd: i64 = -24; // -EMFILE
                 for f in 3..CHILD_MAX_FDS {
@@ -2850,12 +2851,12 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_epoll_ctl(233) — stub: always succeed
-            233 => {
+            SYS_EPOLL_CTL => {
                 reply_val(ep_cap, 0);
             }
 
             // SYS_epoll_wait(232), SYS_epoll_pwait(281) — stub: block on stdin
-            232 | 281 => {
+            SYS_EPOLL_WAIT | SYS_EPOLL_PWAIT => {
                 let events_ptr = msg.regs[1];
                 let timeout = msg.regs[3] as i32;
                 // If timeout is 0, return immediately with 0 events
@@ -2883,7 +2884,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_epoll_create(213) — old API, same as epoll_create1
-            213 => {
+            SYS_EPOLL_CREATE => {
                 let mut efd: i64 = -24;
                 for f in 3..CHILD_MAX_FDS {
                     if child_fds[f] == 0 {
@@ -2896,29 +2897,29 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_pidfd_open(293) — stub: not supported
-            293 => {
+            SYS_PIPE2 => {
                 reply_val(ep_cap, -38); // -ENOSYS
             }
 
             // --- glibc compatibility stubs ---
 
             // SYS_set_robust_list(273) — glibc pthread robust mutex tracking
-            273 => reply_val(ep_cap, 0),
+            SYS_SET_ROBUST_LIST => reply_val(ep_cap, 0),
 
             // SYS_get_robust_list(274)
-            274 => reply_val(ep_cap, -38),
+            SYS_GET_ROBUST_LIST => reply_val(ep_cap, -38),
 
             // SYS_madvise(28) — memory advisory (glibc malloc)
-            28 => reply_val(ep_cap, 0),
+            SYS_MADVISE => reply_val(ep_cap, 0),
 
             // SYS_sched_setaffinity(203) — stub
-            203 => reply_val(ep_cap, 0),
+            SYS_SCHED_SETAFFINITY => reply_val(ep_cap, 0),
 
             // SYS_sysinfo(99) — already handled above but add memory info
             // (already in match)
 
             // SYS_getrlimit(97) / SYS_setrlimit(160) — resource limits
-            97 => {
+            SYS_GETRLIMIT => {
                 let rlim_ptr = msg.regs[1];
                 if rlim_ptr != 0 {
                     // Return generous limits: rlim_cur = rlim_max = large value
@@ -2929,11 +2930,11 @@ pub(crate) extern "C" fn child_handler() -> ! {
                 }
                 reply_val(ep_cap, 0);
             }
-            160 => reply_val(ep_cap, 0), // setrlimit: pretend success
+            SYS_SETRLIMIT => reply_val(ep_cap, 0), // setrlimit: pretend success
 
 
             // SYS_prctl(157) — process control
-            157 => {
+            SYS_PRCTL => {
                 let option = msg.regs[0] as u32;
                 match option {
                     15 => { // PR_SET_NAME: ignore
@@ -2954,7 +2955,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
 
 
             // SYS_mremap(25) — glibc realloc sometimes uses this
-            25 => {
+            SYS_MREMAP => {
                 let old_addr = msg.regs[0];
                 let old_size = msg.regs[1];
                 let new_size = msg.regs[2];

@@ -4,6 +4,7 @@
 // ---------------------------------------------------------------------------
 
 use sotos_common::sys;
+use sotos_common::linux_abi::*;
 use sotos_objstore::{ObjectStore, Vfs, DirEntry, ROOT_OID};
 use sotos_virtio::blk::VirtioBlk;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -166,7 +167,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
         syscall_log_record(pid as u16, syscall_nr as u16, msg.regs[0], 0);
         match syscall_nr {
             // SYS_read(fd, buf, len)
-            0 => {
+            SYS_READ => {
                 let fd = msg.regs[0] as usize;
                 let buf_ptr = msg.regs[1];
                 let len = msg.regs[2] as usize;
@@ -326,7 +327,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_write(fd, buf, len)
-            1 => {
+            SYS_WRITE => {
                 let fd = msg.regs[0] as usize;
                 let buf_ptr = msg.regs[1];
                 let len = msg.regs[2] as usize;
@@ -413,7 +414,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_open(path, flags, mode)
-            2 => {
+            SYS_OPEN => {
                 let path_ptr = msg.regs[0];
                 let flags = msg.regs[1] as u32;
 
@@ -764,7 +765,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_close(fd)
-            3 => {
+            SYS_CLOSE => {
                 let fd = msg.regs[0] as usize;
                 if fd >= MAX_FDS || fds[fd].kind == FdKind::Free {
                     reply_val(ep_cap, -9);
@@ -800,7 +801,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_stat(path, statbuf)
-            4 => {
+            SYS_STAT => {
                 let path_ptr = msg.regs[0];
                 let stat_ptr = msg.regs[1];
 
@@ -836,7 +837,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_fstat(fd, statbuf)
-            5 => {
+            SYS_FSTAT => {
                 let fd = msg.regs[0] as usize;
                 let stat_ptr = msg.regs[1];
 
@@ -907,7 +908,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_lseek(fd, offset, whence)
-            8 => {
+            SYS_LSEEK => {
                 let fd = msg.regs[0] as usize;
                 let offset = msg.regs[1] as i64;
                 let whence = msg.regs[2] as u32;
@@ -948,7 +949,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_mmap(addr, len, prot, flags, fd, offset)
-            9 => {
+            SYS_MMAP => {
                 let _addr = msg.regs[0];
                 let len = msg.regs[1];
                 let _prot = msg.regs[2];
@@ -1030,7 +1031,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_munmap(addr, len)
-            11 => {
+            SYS_MUNMAP => {
                 let addr = msg.regs[0];
                 let mut found = false;
                 for i in 0..MAX_MMAPS {
@@ -1047,7 +1048,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_brk(addr)
-            12 => {
+            SYS_BRK => {
                 let addr = msg.regs[0];
                 if addr == 0 {
                     // Query current brk
@@ -1088,7 +1089,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_dup(oldfd)
-            32 => {
+            SYS_DUP => {
                 let oldfd = msg.regs[0] as usize;
                 if oldfd >= MAX_FDS || fds[oldfd].kind == FdKind::Free {
                     reply_val(ep_cap, -9);
@@ -1104,7 +1105,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_dup2(oldfd, newfd)
-            33 => {
+            SYS_DUP2 => {
                 let oldfd = msg.regs[0] as usize;
                 let newfd = msg.regs[1] as usize;
                 if oldfd >= MAX_FDS || fds[oldfd].kind == FdKind::Free || newfd >= MAX_FDS {
@@ -1122,12 +1123,12 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_getpid
-            39 => {
+            SYS_GETPID => {
                 reply_val(ep_cap, pid as i64);
             }
 
             // SYS_clone(child_fn) — fork a child process
-            56 => {
+            SYS_CLONE => {
                 let child_fn = msg.regs[0];
 
                 // Allocate child stacks: 1 page guest + 4 pages handler
@@ -1211,7 +1212,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_exit(status)
-            60 => {
+            SYS_EXIT => {
                 let status = msg.regs[0];
                 print(b"LUCAS: guest exit(");
                 print_u64(status);
@@ -1220,7 +1221,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_wait4(pid, ...) — waitpid
-            61 => {
+            SYS_WAIT4 => {
                 let target_pid = msg.regs[0] as i64;
                 if target_pid <= 0 || target_pid as usize > MAX_PROCS {
                     reply_val(ep_cap, -10); // -ECHILD
@@ -1237,7 +1238,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_kill(pid, sig)
-            62 => {
+            SYS_KILL => {
                 let target = msg.regs[0] as usize;
                 let sig = msg.regs[1];
                 if target == 0 || target > MAX_PROCS || PROC_STATE[target - 1].load(Ordering::Acquire) == 0 {
@@ -1249,7 +1250,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_getcwd(buf, size)
-            79 => {
+            SYS_GETCWD => {
                 let buf_ptr = msg.regs[0];
                 let buf_size = msg.regs[1] as usize;
 
@@ -1305,7 +1306,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_chdir(path)
-            80 => {
+            SYS_CHDIR => {
                 let path_ptr = msg.regs[0];
                 let mut path = [0u8; 48];
                 let path_len = copy_guest_path(path_ptr, &mut path);
@@ -1331,7 +1332,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_mkdir(path, mode)
-            83 => {
+            SYS_MKDIR => {
                 let path_ptr = msg.regs[0];
                 let mut path = [0u8; 48];
                 let path_len = copy_guest_path(path_ptr, &mut path);
@@ -1350,7 +1351,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_rmdir(path)
-            84 => {
+            SYS_RMDIR => {
                 let path_ptr = msg.regs[0];
                 let mut path = [0u8; 48];
                 let path_len = copy_guest_path(path_ptr, &mut path);
@@ -1369,7 +1370,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_unlink(path)
-            87 => {
+            SYS_UNLINK => {
                 let path_ptr = msg.regs[0];
                 let mut path = [0u8; 48];
                 let path_len = copy_guest_path(path_ptr, &mut path);
@@ -1388,12 +1389,12 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_getppid
-            110 => {
+            SYS_GETPPID => {
                 reply_val(ep_cap, 0); // PID 1 has no parent
             }
 
             // SYS_mprotect(addr, len, prot) — change page protections
-            10 => {
+            SYS_MPROTECT => {
                 let addr = msg.regs[0];
                 let len = msg.regs[1] as usize;
                 let prot = msg.regs[2]; // PROT_READ=1, PROT_WRITE=2, PROT_EXEC=4
@@ -1412,7 +1413,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_ioctl(fd, request, arg)
-            16 => {
+            SYS_IOCTL => {
                 let _fd = msg.regs[0];
                 let request = msg.regs[1];
                 match request {
@@ -1439,7 +1440,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_writev(fd, iov_ptr, iovcnt)
-            20 => {
+            SYS_WRITEV => {
                 let fd = msg.regs[0] as usize;
                 let iov_ptr = msg.regs[1];
                 let iovcnt = msg.regs[2] as usize;
@@ -1509,7 +1510,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_access(path, mode) — check file accessibility
-            21 => {
+            SYS_ACCESS => {
                 let path_ptr = msg.regs[0];
                 let _mode = msg.regs[1]; // F_OK=0, R_OK=4, W_OK=2, X_OK=1
                 let mut path = [0u8; 48];
@@ -1527,7 +1528,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_pipe(pipefd[2])
-            22 => {
+            SYS_PIPE => {
                 let pfd_ptr = msg.regs[0];
                 if pfd_ptr == 0 || pfd_ptr >= 0x0000_8000_0000_0000 {
                     reply_val(ep_cap, -14); // -EFAULT
@@ -1548,7 +1549,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_uname(buf) — system info
-            63 => {
+            SYS_UNAME => {
                 let buf_ptr = msg.regs[0];
                 if buf_ptr == 0 || buf_ptr >= 0x0000_8000_0000_0000 {
                     reply_val(ep_cap, -14);
@@ -1573,7 +1574,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_fcntl(fd, cmd, arg)
-            72 => {
+            SYS_FCNTL => {
                 let fd = msg.regs[0] as usize;
                 let cmd = msg.regs[1] as u32;
                 let _arg = msg.regs[2];
@@ -1600,18 +1601,18 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_getuid / SYS_geteuid / SYS_getgid / SYS_getegid
-            102 | 104 | 107 | 108 => {
+            SYS_GETUID | SYS_GETGID | SYS_GETEUID | SYS_GETEGID => {
                 reply_val(ep_cap, 0); // root
             }
 
             // SYS_set_tid_address(tidptr) — store clear_child_tid, return TID
-            218 => {
+            SYS_SET_TID_ADDRESS => {
                 // Just return the PID as TID (single-threaded LUCAS processes)
                 reply_val(ep_cap, pid as i64);
             }
 
             // SYS_clock_gettime(clock_id, timespec) — with 3-day uptime offset
-            228 => {
+            SYS_CLOCK_GETTIME => {
                 let _clock_id = msg.regs[0]; // CLOCK_REALTIME=0, CLOCK_MONOTONIC=1
                 let tp_ptr = msg.regs[1];
                 if tp_ptr == 0 || tp_ptr >= 0x0000_8000_0000_0000 {
@@ -1631,7 +1632,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_gettimeofday(tv, tz) — with 3-day uptime offset
-            96 => {
+            SYS_GETTIMEOFDAY => {
                 let tv_ptr = msg.regs[0];
                 if tv_ptr != 0 && tv_ptr < 0x0000_8000_0000_0000 {
                     let tsc = rdtsc();
@@ -1647,7 +1648,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_getdents64(fd, dirp, count) — read directory entries
-            217 => {
+            SYS_GETDENTS64 => {
                 let fd = msg.regs[0] as usize;
                 let dirp = msg.regs[1];
                 let count = msg.regs[2] as usize;
@@ -1698,7 +1699,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_openat(dirfd, path, flags, mode) — open relative to dirfd
-            257 => {
+            SYS_OPENAT => {
                 // Treat AT_FDCWD (-100) or any dirfd as CWD-relative
                 let path_ptr = msg.regs[1];
                 let flags = msg.regs[2] as u32;
@@ -1779,7 +1780,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_fstatat(dirfd, path, statbuf, flag) — stat relative to dirfd
-            262 => {
+            SYS_FSTATAT => {
                 let path_ptr = msg.regs[1];
                 let stat_ptr = msg.regs[2];
                 let mut path = [0u8; 48];
@@ -1805,12 +1806,12 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_readlinkat(dirfd, path, buf, bufsiz) — always -EINVAL (no symlinks)
-            267 => {
+            SYS_READLINKAT => {
                 reply_val(ep_cap, -22); // -EINVAL: no symlinks
             }
 
             // SYS_faccessat(dirfd, path, mode, flags) — check file accessibility
-            269 => {
+            SYS_FACCESSAT => {
                 let path_ptr = msg.regs[1];
                 let mut path = [0u8; 48];
                 let path_len = copy_guest_path(path_ptr, &mut path);
@@ -1827,7 +1828,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_prlimit64(pid, resource, new_rlim, old_rlim) — get/set resource limits
-            302 => {
+            SYS_PRLIMIT64 => {
                 let old_rlim = msg.regs[3];
                 if old_rlim != 0 && old_rlim < 0x0000_8000_0000_0000 {
                     // Return generous defaults: cur=RLIM_INFINITY, max=RLIM_INFINITY
@@ -1840,7 +1841,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_getrandom(buf, buflen, flags) — fill buffer with pseudo-random bytes
-            318 => {
+            SYS_GETRANDOM => {
                 let buf_ptr = msg.regs[0];
                 let buflen = msg.regs[1] as usize;
                 if buf_ptr == 0 || buf_ptr >= 0x0000_8000_0000_0000 {
@@ -1860,7 +1861,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_socket(domain, type, protocol)
-            41 => {
+            SYS_SOCKET => {
                 let domain = msg.regs[0] as u32;
                 let sock_type = msg.regs[1] as u32;
                 let base_type = sock_type & 0xFF;
@@ -1902,7 +1903,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_connect(fd, sockaddr_ptr, addrlen)
-            42 => {
+            SYS_CONNECT => {
                 let fd = msg.regs[0] as usize;
                 let sockaddr_ptr = msg.regs[1];
                 let _addrlen = msg.regs[2];
@@ -1949,7 +1950,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
 
             // SYS_sendto(fd, buf, len, flags, dest_addr, addrlen) = 44
             // SYS_sendmsg = 46 (treated as sendto for simple cases)
-            44 | 46 => {
+            SYS_SENDTO | SYS_SENDMSG => {
                 let fd = msg.regs[0] as usize;
                 let buf_ptr = msg.regs[1];
                 let len = msg.regs[2] as usize;
@@ -2010,7 +2011,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
 
             // SYS_recvfrom(fd, buf, len, flags, src_addr, addrlen) = 45
             // SYS_recvmsg = 47
-            45 | 47 => {
+            SYS_RECVFROM | SYS_RECVMSG => {
                 let fd = msg.regs[0] as usize;
                 let buf_ptr = msg.regs[1];
                 let len = msg.regs[2] as usize;
@@ -2068,7 +2069,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // Custom syscall 200: DNS resolve (hostname_ptr, hostname_len) → IP (big-endian u32)
-            200 => {
+            SYS_TKILL => {
                 let name_ptr = msg.regs[0];
                 let name_len = msg.regs[1] as usize;
                 let net_cap = NET_EP_CAP.load(Ordering::Acquire);
@@ -2093,7 +2094,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // Custom syscall 202: ICMP ping (dst_ip, seq) → 0=timeout, 1=reply | (ttl << 32)
-            202 => {
+            SYS_FUTEX => {
                 let dst_ip = msg.regs[0];
                 let seq = msg.regs[1];
                 let net_cap = NET_EP_CAP.load(Ordering::Acquire);
@@ -2112,7 +2113,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // Custom syscall 201: traceroute hop (dst_ip, ttl) → responder_ip | (reached << 32)
-            201 => {
+            SYS_TIME => {
                 let dst_ip = msg.regs[0];
                 let ttl = msg.regs[1];
                 let net_cap = NET_EP_CAP.load(Ordering::Acquire);
@@ -2131,7 +2132,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_rt_sigaction(sig, act, oldact, sigsetsize)
-            13 => {
+            SYS_RT_SIGACTION => {
                 let signo = msg.regs[0] as usize;
                 let act_ptr = msg.regs[1];
                 let oldact = msg.regs[2];
@@ -2168,7 +2169,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_rt_sigprocmask(how, set, oldset, sigsetsize)
-            14 => {
+            SYS_RT_SIGPROCMASK => {
                 let how = msg.regs[0];
                 let set_ptr = msg.regs[1];
                 let oldset = msg.regs[2];
@@ -2193,7 +2194,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_nanosleep(req, rem) — sleep for specified time
-            35 => {
+            SYS_NANOSLEEP => {
                 let req_ptr = msg.regs[0];
                 if req_ptr != 0 && req_ptr < 0x0000_8000_0000_0000 {
                     let secs = unsafe { *(req_ptr as *const i64) };
@@ -2206,7 +2207,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_sigaltstack(ss, old_ss) — set alternate signal stack
-            131 => {
+            SYS_SIGALTSTACK => {
                 let old_ss = msg.regs[1];
                 if old_ss != 0 && old_ss < 0x0000_8000_0000_0000 {
                     // Return empty stack_t: ss_sp=0, ss_flags=SS_DISABLE(2), ss_size=0
@@ -2218,20 +2219,20 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_exit_group(status) — exit all threads in the process
-            231 => {
+            SYS_EXIT_GROUP => {
                 let status = msg.regs[0] as i32;
                 PROC_EXIT[pid as usize - 1].store(status as u64, Ordering::Release);
                 PROC_STATE[pid as usize - 1].store(2, Ordering::Release);
                 // Deliver SIGCHLD to parent
                 let ppid = PROC_PARENT[pid as usize - 1].load(Ordering::Acquire) as usize;
                 if ppid > 0 && ppid <= MAX_PROCS {
-                    sig_send(ppid, SIGCHLD);
+                    sig_send(ppid, SIGCHLD as u64);
                 }
                 break;
             }
 
             // SYS_readv(fd, iov, iovcnt) — scatter read
-            19 => {
+            SYS_READV => {
                 let fd = msg.regs[0] as usize;
                 let iov_ptr = msg.regs[1];
                 let iovcnt = msg.regs[2] as usize;
@@ -2262,7 +2263,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_rename(oldpath, newpath) — rename file
-            82 => {
+            SYS_RENAME => {
                 let old_ptr = msg.regs[0];
                 let new_ptr = msg.regs[1];
                 let mut old_path = [0u8; 48];
@@ -2293,7 +2294,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_poll(fds_ptr, nfds, timeout) — wait for events on FDs
-            7 => {
+            SYS_POLL => {
                 let fds_ptr = msg.regs[0] as *mut u8;
                 let nfds = msg.regs[1] as usize;
                 let timeout = msg.regs[2] as i32;
@@ -2435,7 +2436,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_sysinfo(info) — system information
-            99 => {
+            SYS_SYSINFO => {
                 let info_ptr = msg.regs[0];
                 if info_ptr != 0 && info_ptr < 0x0000_8000_0000_0000 {
                     // struct sysinfo = 112 bytes
@@ -2525,7 +2526,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_bind(fd, sockaddr_ptr, addrlen) = 49
-            49 => {
+            SYS_BIND => {
                 let fd = msg.regs[0] as usize;
                 let sockaddr_ptr = msg.regs[1];
                 if fd >= MAX_FDS || (fds[fd].kind != FdKind::Socket && fds[fd].kind != FdKind::SocketUdp) {
@@ -2564,10 +2565,10 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_listen(fd, backlog) = 50 — stub for TCP
-            50 => reply_val(ep_cap, 0),
+            SYS_LISTEN => reply_val(ep_cap, 0),
 
             // SYS_getsockname(fd, sockaddr_ptr, addrlen_ptr) = 51
-            51 => {
+            SYS_GETSOCKNAME => {
                 let fd = msg.regs[0] as usize;
                 let sa_ptr = msg.regs[1];
                 let alen_ptr = msg.regs[2];
@@ -2588,7 +2589,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_getpeername(fd, sockaddr_ptr, addrlen_ptr) = 52
-            52 => {
+            SYS_GETPEERNAME => {
                 let fd = msg.regs[0] as usize;
                 let sa_ptr = msg.regs[1];
                 let alen_ptr = msg.regs[2];
@@ -2610,13 +2611,13 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_shutdown(fd, how) = 48
-            48 => reply_val(ep_cap, 0),
+            SYS_SHUTDOWN => reply_val(ep_cap, 0),
 
             // SYS_setsockopt(fd, level, optname, optval, optlen) = 54
-            54 => reply_val(ep_cap, 0),
+            SYS_SETSOCKOPT => reply_val(ep_cap, 0),
 
             // SYS_getsockopt(fd, level, optname, optval, optlen) = 55
-            55 => {
+            SYS_GETSOCKOPT => {
                 let optval_ptr = msg.regs[3];
                 let optlen_ptr = msg.regs[4];
                 // Return 0 (option value = 0, length = 4)
@@ -2630,7 +2631,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_epoll_create1(flags) = 291, SYS_epoll_create(size) = 213
-            291 | 213 => {
+            SYS_EPOLL_CREATE1 | SYS_EPOLL_CREATE => {
                 let idx = next_epoll_idx as usize;
                 if idx >= MAX_EPOLL_INSTANCES {
                     reply_val(ep_cap, -24); // -EMFILE
@@ -2650,7 +2651,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_epoll_ctl(epfd, op, fd, event) = 233
-            233 => {
+            SYS_EPOLL_CTL => {
                 let epfd = msg.regs[0] as usize;
                 let op = msg.regs[1] as u32;
                 let target_fd = msg.regs[2] as u32;
@@ -2697,7 +2698,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
 
             // SYS_epoll_wait(epfd, events, maxevents, timeout) = 232
             // SYS_epoll_pwait(epfd, events, maxevents, timeout, sigmask, sigsetsize) = 281
-            232 | 281 => {
+            SYS_EPOLL_WAIT | SYS_EPOLL_PWAIT => {
                 let epfd = msg.regs[0] as usize;
                 let events_ptr = msg.regs[1];
                 let maxevents = msg.regs[2] as usize;
@@ -2787,14 +2788,14 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
 
             // SYS_ppoll(fds, nfds, tmo, sigmask, sigsetsize) = 271
-            271 => {
+            SYS_PPOLL => {
                 // Treat like poll with 0 timeout → return 0
                 reply_val(ep_cap, 0);
             }
 
             // SYS_select(nfds, readfds, writefds, exceptfds, timeout) = 23
             // SYS_pselect6 = 270
-            23 | 270 => reply_val(ep_cap, 0),
+            SYS_SELECT | SYS_PSELECT6 => reply_val(ep_cap, 0),
 
             // Unknown Linux syscall → -ENOSYS (with logging)
             _ => {

@@ -4,6 +4,7 @@
 
 use sotos_common::sys;
 use sotos_common::{IpcMsg, SIG_REDIRECT_TAG, SIGNAL_FRAME_SIZE};
+use sotos_common::linux_abi;
 use core::sync::atomic::{AtomicU64, Ordering};
 use crate::exec::format_u64_into;
 use crate::fd::fd_grp_init;
@@ -65,14 +66,7 @@ pub(crate) static SIG_RESTORER: [[AtomicU64; 32]; MAX_PROCS] = {
 };
 
 // Signal constants
-pub(crate) const SIG_DFL: u64 = 0;
-pub(crate) const SIG_IGN: u64 = 1;
-pub(crate) const _SIGINT: u64 = 2;
-pub(crate) const SIGKILL: u64 = 9;
-pub(crate) const SIGCHLD: u64 = 17;
-pub(crate) const _SIGTERM: u64 = 15;
-pub(crate) const SA_RESTART: u64 = 0x10000000;
-pub(crate) const _SA_RESTORER: u64 = 0x04000000;
+// Signal/sigaction constants — sourced from linux_abi (linux-raw-sys)
 pub(crate) const _SA_NOCLDSTOP: u64 = 1;
 pub(crate) const _SA_NOCLDWAIT: u64 = 2;
 
@@ -186,7 +180,7 @@ pub(crate) fn sig_send(pid: usize, sig: u64) {
     if sig == 0 || sig >= 32 || pid == 0 || pid > MAX_PROCS { return; }
     SIG_PENDING[pid - 1].fetch_or(1 << sig, Ordering::Release);
     // SIGKILL always terminates immediately
-    if sig == SIGKILL {
+    if sig == linux_abi::SIGKILL as u64 {
         PROC_EXIT[pid - 1].store(128 + sig, Ordering::Release);
         PROC_STATE[pid - 1].store(2, Ordering::Release);
     }
@@ -223,7 +217,7 @@ pub(crate) fn sig_dispatch(pid: usize, sig: u64) -> u8 {
     let idx = pid - 1;
 
     // SIGKILL/SIGSTOP cannot be caught or ignored
-    if sig == SIGKILL {
+    if sig == linux_abi::SIGKILL as u64 {
         PROC_EXIT[idx].store(128 + sig, Ordering::Release);
         PROC_STATE[idx].store(2, Ordering::Release);
         return 1;
@@ -232,7 +226,7 @@ pub(crate) fn sig_dispatch(pid: usize, sig: u64) -> u8 {
     let handler = SIG_HANDLER[idx][sig as usize].load(Ordering::Acquire);
 
     match handler {
-        SIG_DFL => {
+        linux_abi::SIG_DFL => {
             // Apply default action
             match sig_default_action(sig) {
                 0 => {
@@ -247,7 +241,7 @@ pub(crate) fn sig_dispatch(pid: usize, sig: u64) -> u8 {
                 _ => 0,
             }
         }
-        SIG_IGN => 0, // Explicitly ignored
+        linux_abi::SIG_IGN => 0, // Explicitly ignored
         _handler_addr => {
             // User handler registered -- deliver via signal frame injection
             3

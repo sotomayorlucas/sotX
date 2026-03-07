@@ -1,11 +1,12 @@
 //! Linux x86_64 ABI types and constants.
 //!
-//! Canonical struct layouts for the Linux/x86_64 ABI so that LUCAS handlers
-//! never have to hard-code byte offsets or magic numbers again.
-//! All structs are `#[repr(C)]` and match the kernel headers exactly.
+//! All numeric constants sourced from `linux-raw-sys` for guaranteed kernel ABI accuracy.
+//! Custom struct types are validated at compile-time against official kernel definitions.
+
+use linux_raw_sys::general as k;
 
 // ---------------------------------------------------------------
-// struct stat (144 bytes on x86_64)
+// struct stat (144 bytes on x86_64) — validated against kernel headers
 // ---------------------------------------------------------------
 
 #[repr(C)]
@@ -32,6 +33,8 @@ pub struct Stat {
 }
 
 const _: () = assert!(core::mem::size_of::<Stat>() == 144);
+const _: () = assert!(core::mem::size_of::<Stat>() == core::mem::size_of::<k::stat>());
+const _: () = assert!(core::mem::align_of::<Stat>() == core::mem::align_of::<k::stat>());
 
 impl Stat {
     pub const fn zeroed() -> Self {
@@ -56,18 +59,18 @@ impl Stat {
 }
 
 // ---------------------------------------------------------------
-// File mode bits
+// File mode bits — sourced from linux-raw-sys
 // ---------------------------------------------------------------
 
-pub const S_IFMT: u32   = 0o170000;
-pub const S_IFREG: u32  = 0o100000;
-pub const S_IFDIR: u32  = 0o040000;
-pub const S_IFCHR: u32  = 0o020000;
-pub const S_IFIFO: u32  = 0o010000;
-pub const S_IFLNK: u32  = 0o120000;
+pub const S_IFMT: u32   = k::S_IFMT;
+pub const S_IFREG: u32  = k::S_IFREG;
+pub const S_IFDIR: u32  = k::S_IFDIR;
+pub const S_IFCHR: u32  = k::S_IFCHR;
+pub const S_IFIFO: u32  = k::S_IFIFO;
+pub const S_IFLNK: u32  = k::S_IFLNK;
 
 // ---------------------------------------------------------------
-// struct termios (60 bytes on x86_64)
+// struct termios (44 bytes on x86_64) — validated against kernel headers
 // ---------------------------------------------------------------
 
 #[repr(C)]
@@ -83,10 +86,9 @@ pub struct Termios {
     pub c_ospeed: u32,    // 40
 }
 
-// Pad to 60 bytes total (kernel struct ktermios is 44 bytes, but the ioctl
-// copies 60 bytes because musl's termios is 60 — the extra 16 bytes are
-// padding that musl expects).  We match musl's expectation here.
 const _: () = assert!(core::mem::size_of::<Termios>() == 44);
+// Our Termios matches kernel's termios2 (includes c_ispeed/c_ospeed)
+const _: () = assert!(core::mem::size_of::<Termios>() == core::mem::size_of::<k::termios2>());
 
 impl Termios {
     /// Sensible defaults for a dumb terminal (raw-ish mode).
@@ -114,21 +116,21 @@ impl Termios {
 }
 
 // ---------------------------------------------------------------
-// ioctl request codes
+// ioctl request codes — sourced from linux-raw-sys
 // ---------------------------------------------------------------
 
-pub const TCGETS: u32      = 0x5401;
-pub const TCSETS: u32      = 0x5402;
-pub const TCSETSW: u32     = 0x5403;
-pub const TCSETSF: u32     = 0x5404;
-pub const TIOCGWINSZ: u32  = 0x5413;
-pub const TIOCSWINSZ: u32  = 0x5414;
-pub const TIOCGPGRP: u32   = 0x540F;
-pub const TIOCSPGRP: u32   = 0x5410;
-pub const FIONREAD: u32    = 0x541B;
+pub const TCGETS: u32      = linux_raw_sys::ioctl::TCGETS;
+pub const TCSETS: u32      = linux_raw_sys::ioctl::TCSETS;
+pub const TCSETSW: u32     = linux_raw_sys::ioctl::TCSETSW;
+pub const TCSETSF: u32     = linux_raw_sys::ioctl::TCSETSF;
+pub const TIOCGWINSZ: u32  = linux_raw_sys::ioctl::TIOCGWINSZ;
+pub const TIOCSWINSZ: u32  = linux_raw_sys::ioctl::TIOCSWINSZ;
+pub const TIOCGPGRP: u32   = linux_raw_sys::ioctl::TIOCGPGRP;
+pub const TIOCSPGRP: u32   = linux_raw_sys::ioctl::TIOCSPGRP;
+pub const FIONREAD: u32    = linux_raw_sys::ioctl::FIONREAD;
 
 // ---------------------------------------------------------------
-// struct winsize (8 bytes)
+// struct winsize (8 bytes) — validated against kernel headers
 // ---------------------------------------------------------------
 
 #[repr(C)]
@@ -139,6 +141,9 @@ pub struct Winsize {
     pub ws_xpixel: u16,
     pub ws_ypixel: u16,
 }
+
+const _: () = assert!(core::mem::size_of::<Winsize>() == 8);
+const _: () = assert!(core::mem::size_of::<Winsize>() == core::mem::size_of::<k::winsize>());
 
 impl Winsize {
     pub const fn default_serial() -> Self {
@@ -159,9 +164,9 @@ pub struct LinuxDirent64 {
     // d_name follows (null-terminated, variable length)
 }
 
-pub const DT_REG: u8 = 8;
-pub const DT_DIR: u8 = 4;
-pub const DT_CHR: u8 = 2;
+pub const DT_REG: u8 = k::DT_REG as u8;
+pub const DT_DIR: u8 = k::DT_DIR as u8;
+pub const DT_CHR: u8 = k::DT_CHR as u8;
 
 // ---------------------------------------------------------------
 // rt_sigaction (kernel struct, 32 bytes with 8-byte sigset)
@@ -180,159 +185,230 @@ const _: () = assert!(core::mem::size_of::<KernelSigaction>() == 32);
 
 pub const SIG_DFL: u64 = 0;
 pub const SIG_IGN: u64 = 1;
-pub const SA_RESTORER: u64 = 0x04000000;
-pub const SA_SIGINFO: u64  = 0x00000004;
+pub const SA_RESTORER: u64 = k::SA_RESTORER as u64;
+pub const SA_SIGINFO: u64  = k::SA_SIGINFO as u64;
+pub const SA_RESTART: u64  = k::SA_RESTART as u64;
 
 // ---------------------------------------------------------------
-// Signal numbers
+// Signal numbers — sourced from linux-raw-sys
 // ---------------------------------------------------------------
 
-pub const SIGHUP: u32    = 1;
-pub const SIGINT: u32    = 2;
-pub const SIGQUIT: u32   = 3;
-pub const SIGILL: u32    = 4;
-pub const SIGABRT: u32   = 6;
-pub const SIGFPE: u32    = 8;
-pub const SIGKILL: u32   = 9;
-pub const SIGSEGV: u32   = 11;
-pub const SIGPIPE: u32   = 13;
-pub const SIGALRM: u32   = 14;
-pub const SIGTERM: u32   = 15;
-pub const SIGCHLD: u32   = 17;
-pub const SIGCONT: u32   = 18;
-pub const SIGSTOP: u32   = 19;
-pub const SIGTSTP: u32   = 20;
-pub const SIGWINCH: u32  = 28;
+pub const SIGHUP: u32    = k::SIGHUP;
+pub const SIGINT: u32    = k::SIGINT;
+pub const SIGQUIT: u32   = k::SIGQUIT;
+pub const SIGILL: u32    = k::SIGILL;
+pub const SIGABRT: u32   = k::SIGABRT;
+pub const SIGFPE: u32    = k::SIGFPE;
+pub const SIGKILL: u32   = k::SIGKILL;
+pub const SIGSEGV: u32   = k::SIGSEGV;
+pub const SIGPIPE: u32   = k::SIGPIPE;
+pub const SIGALRM: u32   = k::SIGALRM;
+pub const SIGTERM: u32   = k::SIGTERM;
+pub const SIGCHLD: u32   = k::SIGCHLD;
+pub const SIGCONT: u32   = k::SIGCONT;
+pub const SIGSTOP: u32   = k::SIGSTOP;
+pub const SIGTSTP: u32   = k::SIGTSTP;
+pub const SIGWINCH: u32  = k::SIGWINCH;
 
 // ---------------------------------------------------------------
 // errno (positive values — negate before returning to userspace)
+// sourced from linux-raw-sys
 // ---------------------------------------------------------------
 
-pub const EPERM: i64   = 1;
-pub const ENOENT: i64  = 2;
-pub const ESRCH: i64   = 3;
-pub const EINTR: i64   = 4;
-pub const EIO: i64     = 5;
-pub const ENXIO: i64   = 6;
-pub const EBADF: i64   = 9;
-pub const ECHILD: i64  = 10;
-pub const EAGAIN: i64  = 11;
-pub const ENOMEM: i64  = 12;
-pub const EACCES: i64  = 13;
-pub const EFAULT: i64  = 14;
-pub const EEXIST: i64  = 17;
-pub const ENOTDIR: i64 = 20;
-pub const EISDIR: i64  = 21;
-pub const EINVAL: i64  = 22;
-pub const EMFILE: i64  = 24;
-pub const ENOSPC: i64  = 28;
-pub const ESPIPE: i64  = 29;
-pub const EPIPE: i64   = 32;
-pub const ERANGE: i64  = 34;
-pub const ENOSYS: i64  = 38;
-pub const ENOTEMPTY: i64 = 39;
+use linux_raw_sys::errno as e;
+
+pub const EPERM: i64   = e::EPERM as i64;
+pub const ENOENT: i64  = e::ENOENT as i64;
+pub const ESRCH: i64   = e::ESRCH as i64;
+pub const EINTR: i64   = e::EINTR as i64;
+pub const EIO: i64     = e::EIO as i64;
+pub const ENXIO: i64   = e::ENXIO as i64;
+pub const EBADF: i64   = e::EBADF as i64;
+pub const ECHILD: i64  = e::ECHILD as i64;
+pub const EAGAIN: i64  = e::EAGAIN as i64;
+pub const ENOMEM: i64  = e::ENOMEM as i64;
+pub const EACCES: i64  = e::EACCES as i64;
+pub const EFAULT: i64  = e::EFAULT as i64;
+pub const EEXIST: i64  = e::EEXIST as i64;
+pub const ENODEV: i64  = e::ENODEV as i64;
+pub const ENOTDIR: i64 = e::ENOTDIR as i64;
+pub const EISDIR: i64  = e::EISDIR as i64;
+pub const EINVAL: i64  = e::EINVAL as i64;
+pub const EMFILE: i64  = e::EMFILE as i64;
+pub const ENOTTY: i64  = e::ENOTTY as i64;
+pub const ENOSPC: i64  = e::ENOSPC as i64;
+pub const ESPIPE: i64  = e::ESPIPE as i64;
+pub const EPIPE: i64   = e::EPIPE as i64;
+pub const ERANGE: i64  = e::ERANGE as i64;
+pub const ENOSYS: i64  = e::ENOSYS as i64;
+pub const ENOTEMPTY: i64 = e::ENOTEMPTY as i64;
+pub const EDESTADDRREQ: i64 = e::EDESTADDRREQ as i64;
+pub const ETIMEDOUT: i64 = e::ETIMEDOUT as i64;
 
 // ---------------------------------------------------------------
-// open(2) / openat(2) flags
+// open(2) / openat(2) flags — sourced from linux-raw-sys
 // ---------------------------------------------------------------
 
-pub const O_RDONLY: u32    = 0;
-pub const O_WRONLY: u32    = 1;
-pub const O_RDWR: u32      = 2;
-pub const O_CREAT: u32     = 0o100;
-pub const O_TRUNC: u32     = 0o1000;
-pub const O_APPEND: u32    = 0o2000;
-pub const O_NONBLOCK: u32  = 0o4000;
-pub const O_DIRECTORY: u32 = 0o200000;
-pub const O_CLOEXEC: u32   = 0o2000000;
+pub const O_RDONLY: u32    = k::O_RDONLY;
+pub const O_WRONLY: u32    = k::O_WRONLY;
+pub const O_RDWR: u32      = k::O_RDWR;
+pub const O_CREAT: u32     = k::O_CREAT;
+pub const O_TRUNC: u32     = k::O_TRUNC;
+pub const O_APPEND: u32    = k::O_APPEND;
+pub const O_NONBLOCK: u32  = k::O_NONBLOCK;
+pub const O_DIRECTORY: u32 = k::O_DIRECTORY;
+pub const O_CLOEXEC: u32   = k::O_CLOEXEC;
 
-pub const AT_FDCWD: i64       = -100;
-pub const AT_EMPTY_PATH: u32  = 0x1000;
-
-// ---------------------------------------------------------------
-// mmap(2) flags
-// ---------------------------------------------------------------
-
-pub const PROT_READ: u32  = 0x1;
-pub const PROT_WRITE: u32 = 0x2;
-pub const PROT_EXEC: u32  = 0x4;
-pub const MAP_SHARED: u32  = 0x01;
-pub const MAP_PRIVATE: u32 = 0x02;
-pub const MAP_FIXED: u32   = 0x10;
-pub const MAP_ANONYMOUS: u32 = 0x20;
+pub const AT_FDCWD: i64       = k::AT_FDCWD as i64;
+pub const AT_EMPTY_PATH: u32  = k::AT_EMPTY_PATH;
 
 // ---------------------------------------------------------------
-// fcntl(2) commands
+// mmap(2) flags — sourced from linux-raw-sys
 // ---------------------------------------------------------------
 
-pub const F_DUPFD: u32   = 0;
-pub const F_GETFD: u32   = 1;
-pub const F_SETFD: u32   = 2;
-pub const F_GETFL: u32   = 3;
-pub const F_SETFL: u32   = 4;
+pub const PROT_READ: u32  = k::PROT_READ;
+pub const PROT_WRITE: u32 = k::PROT_WRITE;
+pub const PROT_EXEC: u32  = k::PROT_EXEC;
+pub const MAP_SHARED: u32  = k::MAP_SHARED;
+pub const MAP_PRIVATE: u32 = k::MAP_PRIVATE;
+pub const MAP_FIXED: u32   = k::MAP_FIXED;
+pub const MAP_ANONYMOUS: u32 = k::MAP_ANONYMOUS;
 
 // ---------------------------------------------------------------
-// Linux syscall numbers (x86_64)
+// fcntl(2) commands — sourced from linux-raw-sys
 // ---------------------------------------------------------------
 
-pub const SYS_READ: u64          = 0;
-pub const SYS_WRITE: u64         = 1;
-pub const SYS_OPEN: u64          = 2;
-pub const SYS_CLOSE: u64         = 3;
-pub const SYS_FSTAT: u64         = 5;
-pub const SYS_POLL: u64          = 7;
-pub const SYS_LSEEK: u64         = 8;
-pub const SYS_MMAP: u64          = 9;
-pub const SYS_MPROTECT: u64      = 10;
-pub const SYS_MUNMAP: u64        = 11;
-pub const SYS_BRK: u64           = 12;
-pub const SYS_RT_SIGACTION: u64   = 13;
-pub const SYS_RT_SIGPROCMASK: u64 = 14;
-pub const SYS_IOCTL: u64         = 16;
-pub const SYS_WRITEV: u64        = 20;
-pub const SYS_ACCESS: u64        = 21;
-pub const SYS_PIPE: u64          = 22;
-pub const SYS_DUP: u64           = 32;
-pub const SYS_DUP2: u64          = 33;
-pub const SYS_GETPID: u64        = 39;
-pub const SYS_CLONE: u64         = 56;
-pub const SYS_FORK: u64          = 57;
-pub const SYS_EXECVE: u64        = 59;
-pub const SYS_EXIT: u64          = 60;
-pub const SYS_WAIT4: u64         = 61;
-pub const SYS_KILL: u64          = 62;
-pub const SYS_UNAME: u64         = 63;
-pub const SYS_FCNTL: u64         = 72;
-pub const SYS_GETCWD: u64        = 79;
-pub const SYS_CHDIR: u64         = 80;
-pub const SYS_MKDIR: u64         = 83;
-pub const SYS_UNLINK: u64        = 87;
-pub const SYS_GETDENTS64: u64    = 217;
-pub const SYS_SET_TID_ADDRESS: u64 = 218;
-pub const SYS_CLOCK_GETTIME: u64 = 228;
-pub const SYS_EXIT_GROUP: u64    = 231;
-pub const SYS_OPENAT: u64        = 257;
-pub const SYS_FSTATAT: u64       = 262;
-pub const SYS_READLINKAT: u64    = 267;
-pub const SYS_FACCESSAT: u64     = 269;
-pub const SYS_PRLIMIT64: u64     = 302;
-pub const SYS_GETRANDOM: u64     = 318;
-pub const SYS_STATX: u64         = 332;
+pub const F_DUPFD: u32   = k::F_DUPFD;
+pub const F_GETFD: u32   = k::F_GETFD;
+pub const F_SETFD: u32   = k::F_SETFD;
+pub const F_GETFL: u32   = k::F_GETFL;
+pub const F_SETFL: u32   = k::F_SETFL;
 
 // ---------------------------------------------------------------
-// Auxiliary vector types (for ELF loader)
+// Linux syscall numbers (x86_64) — sourced from linux-raw-sys
 // ---------------------------------------------------------------
 
-pub const AT_NULL: u64         = 0;
-pub const AT_PHDR: u64         = 3;
-pub const AT_PHENT: u64        = 4;
-pub const AT_PHNUM: u64        = 5;
-pub const AT_PAGESZ: u64       = 6;
-pub const AT_BASE: u64         = 7;
-pub const AT_ENTRY: u64        = 9;
-pub const AT_UID: u64          = 11;
-pub const AT_EUID: u64         = 12;
-pub const AT_GID: u64          = 13;
-pub const AT_EGID: u64         = 14;
-pub const AT_RANDOM: u64       = 25;
-pub const AT_SYSINFO_EHDR: u64 = 33;
+pub const SYS_READ: u64          = k::__NR_read as u64;
+pub const SYS_WRITE: u64         = k::__NR_write as u64;
+pub const SYS_OPEN: u64          = k::__NR_open as u64;
+pub const SYS_CLOSE: u64         = k::__NR_close as u64;
+pub const SYS_STAT: u64          = k::__NR_stat as u64;
+pub const SYS_FSTAT: u64         = k::__NR_fstat as u64;
+pub const SYS_LSTAT: u64         = k::__NR_lstat as u64;
+pub const SYS_POLL: u64          = k::__NR_poll as u64;
+pub const SYS_LSEEK: u64         = k::__NR_lseek as u64;
+pub const SYS_MMAP: u64          = k::__NR_mmap as u64;
+pub const SYS_MPROTECT: u64      = k::__NR_mprotect as u64;
+pub const SYS_MUNMAP: u64        = k::__NR_munmap as u64;
+pub const SYS_BRK: u64           = k::__NR_brk as u64;
+pub const SYS_RT_SIGACTION: u64   = k::__NR_rt_sigaction as u64;
+pub const SYS_RT_SIGPROCMASK: u64 = k::__NR_rt_sigprocmask as u64;
+pub const SYS_IOCTL: u64         = k::__NR_ioctl as u64;
+pub const SYS_PREAD64: u64       = k::__NR_pread64 as u64;
+pub const SYS_READV: u64         = k::__NR_readv as u64;
+pub const SYS_WRITEV: u64        = k::__NR_writev as u64;
+pub const SYS_ACCESS: u64        = k::__NR_access as u64;
+pub const SYS_PIPE: u64          = k::__NR_pipe as u64;
+pub const SYS_SELECT: u64        = k::__NR_select as u64;
+pub const SYS_MREMAP: u64        = k::__NR_mremap as u64;
+pub const SYS_MADVISE: u64       = k::__NR_madvise as u64;
+pub const SYS_DUP: u64           = k::__NR_dup as u64;
+pub const SYS_DUP2: u64          = k::__NR_dup2 as u64;
+pub const SYS_NANOSLEEP: u64     = k::__NR_nanosleep as u64;
+pub const SYS_GETPID: u64        = k::__NR_getpid as u64;
+pub const SYS_SOCKET: u64        = k::__NR_socket as u64;
+pub const SYS_CONNECT: u64       = k::__NR_connect as u64;
+pub const SYS_SENDTO: u64        = k::__NR_sendto as u64;
+pub const SYS_RECVFROM: u64      = k::__NR_recvfrom as u64;
+pub const SYS_SENDMSG: u64       = k::__NR_sendmsg as u64;
+pub const SYS_RECVMSG: u64       = k::__NR_recvmsg as u64;
+pub const SYS_SHUTDOWN: u64      = k::__NR_shutdown as u64;
+pub const SYS_BIND: u64          = k::__NR_bind as u64;
+pub const SYS_LISTEN: u64        = k::__NR_listen as u64;
+pub const SYS_GETSOCKNAME: u64   = k::__NR_getsockname as u64;
+pub const SYS_GETPEERNAME: u64   = k::__NR_getpeername as u64;
+pub const SYS_SETSOCKOPT: u64    = k::__NR_setsockopt as u64;
+pub const SYS_GETSOCKOPT: u64    = k::__NR_getsockopt as u64;
+pub const SYS_CLONE: u64         = k::__NR_clone as u64;
+pub const SYS_FORK: u64          = k::__NR_fork as u64;
+pub const SYS_EXECVE: u64        = k::__NR_execve as u64;
+pub const SYS_EXIT: u64          = k::__NR_exit as u64;
+pub const SYS_WAIT4: u64         = k::__NR_wait4 as u64;
+pub const SYS_KILL: u64          = k::__NR_kill as u64;
+pub const SYS_UNAME: u64         = k::__NR_uname as u64;
+pub const SYS_FCNTL: u64         = k::__NR_fcntl as u64;
+pub const SYS_FSYNC: u64         = k::__NR_fsync as u64;
+pub const SYS_FDATASYNC: u64     = k::__NR_fdatasync as u64;
+pub const SYS_FTRUNCATE: u64     = k::__NR_ftruncate as u64;
+pub const SYS_GETCWD: u64        = k::__NR_getcwd as u64;
+pub const SYS_CHDIR: u64         = k::__NR_chdir as u64;
+pub const SYS_RENAME: u64        = k::__NR_rename as u64;
+pub const SYS_MKDIR: u64         = k::__NR_mkdir as u64;
+pub const SYS_RMDIR: u64         = k::__NR_rmdir as u64;
+pub const SYS_UNLINK: u64        = k::__NR_unlink as u64;
+pub const SYS_CHMOD: u64         = k::__NR_chmod as u64;
+pub const SYS_GETTIMEOFDAY: u64  = k::__NR_gettimeofday as u64;
+pub const SYS_GETRLIMIT: u64     = k::__NR_getrlimit as u64;
+pub const SYS_SYSINFO: u64       = k::__NR_sysinfo as u64;
+pub const SYS_GETUID: u64        = k::__NR_getuid as u64;
+pub const SYS_GETGID: u64        = k::__NR_getgid as u64;
+pub const SYS_GETEUID: u64       = k::__NR_geteuid as u64;
+pub const SYS_GETEGID: u64       = k::__NR_getegid as u64;
+pub const SYS_SETPGID: u64       = k::__NR_setpgid as u64;
+pub const SYS_GETPPID: u64       = k::__NR_getppid as u64;
+pub const SYS_GETPGRP: u64       = k::__NR_getpgrp as u64;
+pub const SYS_SETSID: u64        = k::__NR_setsid as u64;
+pub const SYS_SETFSUID: u64      = k::__NR_setfsuid as u64;
+pub const SYS_SETFSGID: u64      = k::__NR_setfsgid as u64;
+pub const SYS_SIGALTSTACK: u64   = k::__NR_sigaltstack as u64;
+pub const SYS_PRCTL: u64         = k::__NR_prctl as u64;
+pub const SYS_SETRLIMIT: u64     = k::__NR_setrlimit as u64;
+pub const SYS_GETTID: u64        = k::__NR_gettid as u64;
+pub const SYS_TKILL: u64         = k::__NR_tkill as u64;
+pub const SYS_TIME: u64          = k::__NR_time as u64;
+pub const SYS_FUTEX: u64         = k::__NR_futex as u64;
+pub const SYS_SCHED_SETAFFINITY: u64 = k::__NR_sched_setaffinity as u64;
+pub const SYS_SCHED_GETAFFINITY: u64 = k::__NR_sched_getaffinity as u64;
+pub const SYS_EPOLL_CREATE: u64  = k::__NR_epoll_create as u64;
+pub const SYS_GETDENTS64: u64    = k::__NR_getdents64 as u64;
+pub const SYS_SET_TID_ADDRESS: u64 = k::__NR_set_tid_address as u64;
+pub const SYS_FADVISE64: u64     = k::__NR_fadvise64 as u64;
+pub const SYS_CLOCK_GETTIME: u64 = k::__NR_clock_gettime as u64;
+pub const SYS_EXIT_GROUP: u64    = k::__NR_exit_group as u64;
+pub const SYS_EPOLL_WAIT: u64    = k::__NR_epoll_wait as u64;
+pub const SYS_EPOLL_CTL: u64     = k::__NR_epoll_ctl as u64;
+pub const SYS_OPENAT: u64        = k::__NR_openat as u64;
+pub const SYS_FSTATAT: u64       = k::__NR_newfstatat as u64;
+pub const SYS_READLINKAT: u64    = k::__NR_readlinkat as u64;
+pub const SYS_FACCESSAT: u64     = k::__NR_faccessat as u64;
+pub const SYS_PSELECT6: u64      = k::__NR_pselect6 as u64;
+pub const SYS_PPOLL: u64         = k::__NR_ppoll as u64;
+pub const SYS_SET_ROBUST_LIST: u64 = k::__NR_set_robust_list as u64;
+pub const SYS_GET_ROBUST_LIST: u64 = k::__NR_get_robust_list as u64;
+pub const SYS_EPOLL_PWAIT: u64   = k::__NR_epoll_pwait as u64;
+pub const SYS_EPOLL_CREATE1: u64 = k::__NR_epoll_create1 as u64;
+pub const SYS_DUP3: u64          = k::__NR_dup3 as u64;
+pub const SYS_PIPE2: u64         = k::__NR_pipe2 as u64;
+pub const SYS_PRLIMIT64: u64     = k::__NR_prlimit64 as u64;
+pub const SYS_GETRANDOM: u64     = k::__NR_getrandom as u64;
+pub const SYS_STATX: u64         = k::__NR_statx as u64;
+pub const SYS_RSEQ: u64          = k::__NR_rseq as u64;
+
+// ---------------------------------------------------------------
+// Auxiliary vector types (for ELF loader) — sourced from linux-raw-sys
+// ---------------------------------------------------------------
+
+pub const AT_NULL: u64         = k::AT_NULL as u64;
+pub const AT_PHDR: u64         = k::AT_PHDR as u64;
+pub const AT_PHENT: u64        = k::AT_PHENT as u64;
+pub const AT_PHNUM: u64        = k::AT_PHNUM as u64;
+pub const AT_PAGESZ: u64       = k::AT_PAGESZ as u64;
+pub const AT_BASE: u64         = k::AT_BASE as u64;
+pub const AT_ENTRY: u64        = k::AT_ENTRY as u64;
+pub const AT_UID: u64          = k::AT_UID as u64;
+pub const AT_EUID: u64         = k::AT_EUID as u64;
+pub const AT_GID: u64          = k::AT_GID as u64;
+pub const AT_EGID: u64         = k::AT_EGID as u64;
+pub const AT_CLKTCK: u64       = k::AT_CLKTCK as u64;
+pub const AT_RANDOM: u64       = k::AT_RANDOM as u64;
+pub const AT_SYSINFO_EHDR: u64 = k::AT_SYSINFO_EHDR as u64;
