@@ -1,9 +1,60 @@
 use sotos_common::sys;
+use sotos_common::elf::{ElfInfo, LoadSegment, InterpInfo, MAX_LOAD_SEGMENTS};
 use core::sync::atomic::{AtomicU64, Ordering};
 use crate::framebuffer::{print, print_hex64};
 use crate::process::NEXT_CHILD_STACK;
 use crate::vdso;
 use crate::{vfs_lock, vfs_unlock, shared_store};
+
+/// Parse an ELF binary using goblin, returning our existing types.
+/// Resets the bump allocator after extracting all needed data.
+fn parse_elf_goblin(data: &[u8]) -> Result<(ElfInfo, [LoadSegment; MAX_LOAD_SEGMENTS], usize, Option<InterpInfo>), i64> {
+    use goblin::elf::Elf;
+
+    let elf = Elf::parse(data).map_err(|_| -8i64)?;
+
+    let info = ElfInfo {
+        entry: elf.entry,
+        phoff: elf.header.e_phoff as usize,
+        phentsize: elf.header.e_phentsize as usize,
+        phnum: elf.header.e_phnum as usize,
+        elf_type: elf.header.e_type,
+    };
+
+    let mut segments = [const { LoadSegment { offset: 0, vaddr: 0, filesz: 0, memsz: 0, flags: 0 } }; MAX_LOAD_SEGMENTS];
+    let mut seg_count = 0;
+    for ph in &elf.program_headers {
+        if ph.p_type == goblin::elf::program_header::PT_LOAD && seg_count < MAX_LOAD_SEGMENTS {
+            segments[seg_count] = LoadSegment {
+                offset: ph.p_offset as usize,
+                vaddr: ph.p_vaddr,
+                filesz: ph.p_filesz as usize,
+                memsz: ph.p_memsz as usize,
+                flags: ph.p_flags,
+            };
+            seg_count += 1;
+        }
+    }
+
+    let interp = elf.program_headers.iter()
+        .find(|ph| ph.p_type == goblin::elf::program_header::PT_INTERP)
+        .map(|ph| {
+            let offset = ph.p_offset as usize;
+            let filesz = ph.p_filesz as usize;
+            let len = if filesz > 0 && offset + filesz <= data.len() && data[offset + filesz - 1] == 0 {
+                filesz - 1
+            } else {
+                filesz
+            };
+            InterpInfo { offset, len }
+        });
+
+    // Drop Elf struct (frees goblin's Vecs), then reset bump allocator
+    drop(elf);
+    crate::bump_alloc::reset();
+
+    Ok((info, segments, seg_count, interp))
+}
 
 /// Spinlock for serializing execve ELF loading (shared temp buffer).
 pub(crate) static EXEC_LOCK: AtomicU64 = AtomicU64::new(0);
@@ -242,21 +293,14 @@ pub(crate) fn exec_from_vfs_argv(path: &[u8], argv: &[[u8; MAX_EXEC_ARG_LEN]]) -
 /// Common ELF loading path after the binary data is already at EXEC_BUF_BASE.
 /// Used by both exec_from_initrd_argv and exec_from_vfs_argv.
 fn exec_loaded_elf(file_size: usize, bin_name: &[u8], argv: &[[u8; MAX_EXEC_ARG_LEN]]) -> Result<(u64, u64), i64> {
-    use sotos_common::elf;
-
     let elf_data = unsafe { core::slice::from_raw_parts(EXEC_BUF_BASE as *const u8, file_size) };
-    let elf_info = match elf::parse(elf_data) {
-        Ok(info) => info,
-        Err(_) => {
+    let (elf_info, segments, seg_count, interp_info) = match parse_elf_goblin(elf_data) {
+        Ok(parsed) => parsed,
+        Err(e) => {
             unmap_temp_buf(EXEC_BUF_BASE, EXEC_BUF_PAGES);
-            return Err(-8);
+            return Err(e);
         }
     };
-
-    let mut segments = [const { elf::LoadSegment { offset: 0, vaddr: 0, filesz: 0, memsz: 0, flags: 0 } }; elf::MAX_LOAD_SEGMENTS];
-    let seg_count = elf::load_segments(elf_data, &elf_info, &mut segments);
-
-    let interp_info = elf::parse_interp(elf_data, &elf_info);
     let is_dynamic = interp_info.is_some();
 
     let main_base: u64 = if elf_info.elf_type == 3 { 0x400000 } else { 0 };
@@ -326,17 +370,14 @@ fn exec_loaded_elf(file_size: usize, bin_name: &[u8], argv: &[[u8; MAX_EXEC_ARG_
         };
 
         let interp_data = unsafe { core::slice::from_raw_parts(INTERP_BUF_BASE as *const u8, interp_size) };
-        let interp_elf = match elf::parse(interp_data) {
-            Ok(info) => info,
+        let (interp_elf, interp_segs, interp_seg_count, _) = match parse_elf_goblin(interp_data) {
+            Ok(parsed) => parsed,
             Err(_) => {
                 unmap_temp_buf(INTERP_BUF_BASE, INTERP_BUF_PAGES);
                 unmap_temp_buf(EXEC_BUF_BASE, EXEC_BUF_PAGES);
                 return Err(-8);
             }
         };
-
-        let mut interp_segs = [const { elf::LoadSegment { offset: 0, vaddr: 0, filesz: 0, memsz: 0, flags: 0 } }; elf::MAX_LOAD_SEGMENTS];
-        let interp_seg_count = elf::load_segments(interp_data, &interp_elf, &mut interp_segs);
 
         interp_base = INTERP_LOAD_BASE;
         // Unmap previous interpreter pages (e.g., leftover from musl dynamic test)

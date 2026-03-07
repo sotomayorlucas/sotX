@@ -1,7 +1,51 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
 use sotos_common::sys;
+
+// =============================================================================
+// Bump allocator for goblin ELF parsing (128 KiB, resettable)
+// =============================================================================
+mod bump_alloc {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    const HEAP_SIZE: usize = 128 * 1024;
+    static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
+    static HEAP_POS: AtomicUsize = AtomicUsize::new(0);
+
+    pub fn reset() {
+        HEAP_POS.store(0, Ordering::Release);
+    }
+
+    struct BumpAlloc;
+
+    unsafe impl core::alloc::GlobalAlloc for BumpAlloc {
+        unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
+            let size = layout.size();
+            let align = layout.align();
+            loop {
+                let pos = HEAP_POS.load(Ordering::Relaxed);
+                let aligned = (pos + align - 1) & !(align - 1);
+                let new_pos = aligned + size;
+                if new_pos > HEAP_SIZE {
+                    return core::ptr::null_mut();
+                }
+                if HEAP_POS
+                    .compare_exchange_weak(pos, new_pos, Ordering::AcqRel, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    return unsafe { HEAP.as_mut_ptr().add(aligned) };
+                }
+            }
+        }
+        unsafe fn dealloc(&self, _ptr: *mut u8, _layout: core::alloc::Layout) {}
+    }
+
+    #[global_allocator]
+    static ALLOCATOR: BumpAlloc = BumpAlloc;
+}
 use sotos_common::spsc;
 use sotos_common::{BootInfo, BOOT_INFO_ADDR};
 use sotos_pci::PciBus;
