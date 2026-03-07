@@ -732,6 +732,37 @@ impl WindowManager {
 // Drawing primitives (operate on a raw u32 framebuffer)
 // ---------------------------------------------------------------------------
 
+/// Fill a rectangle with a vertical gradient (top color → bottom color).
+pub fn gradient_fill_fb(
+    fb: *mut u32, stride: u32, x: u32, y: u32, w: u32, h: u32,
+    r1: u8, g1: u8, b1: u8, r2: u8, g2: u8, b2: u8,
+) {
+    if w == 0 || h == 0 { return; }
+    let hi = h as i32;
+    for row in 0..h {
+        let yi = row as i32;
+        let r = (r1 as i32 + (r2 as i32 - r1 as i32) * yi / hi) as u8;
+        let g = (g1 as i32 + (g2 as i32 - g1 as i32) * yi / hi) as u8;
+        let b = (b1 as i32 + (b2 as i32 - b1 as i32) * yi / hi) as u8;
+        let pixel = bgra(r, g, b, 255);
+        let offset = ((y + row) * stride + x) as usize;
+        unsafe {
+            let row_ptr = fb.add(offset);
+            for col in 0..w as usize {
+                *row_ptr.add(col) = pixel;
+            }
+        }
+    }
+}
+
+/// Fill a contiguous pixel buffer (stride = width) with a vertical gradient.
+pub fn draw_gradient_into(
+    buf: *mut u32, width: u32, height: u32,
+    r1: u8, g1: u8, b1: u8, r2: u8, g2: u8, b2: u8,
+) {
+    gradient_fill_fb(buf, width, 0, 0, width, height, r1, g1, b1, r2, g2, b2);
+}
+
 /// Fill a rectangle with a solid color (scanline-optimized).
 pub fn fill_rect_fb(fb: *mut u32, stride: u32, x: u32, y: u32, w: u32, h: u32, color: u32) {
     if w == 0 || h == 0 { return; }

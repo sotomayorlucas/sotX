@@ -242,11 +242,43 @@ pub fn draw_modern_desktop(display: &mut FramebufferDisplay, title: &[u8]) -> De
     .draw(display)
     .ok();
 
-    // 10. Return text area layout (for VGA 8x16 terminal font)
+    // 10. Welcome splash — gradient strip with text at bottom of client area
+    let splash_h = 48u32;
+    let splash_y = win_y + win_h - splash_h - 4;
+
+    // Draw gradient strip (purple → teal)
+    for i in 0..splash_h {
+        let r = (122u32.saturating_sub(80 * i / splash_h)) as u8;
+        let g = (80 + 100 * i / splash_h) as u8;
+        let b = (200u32.saturating_sub(50 * i / splash_h)) as u8;
+        let color = Rgb888::new(r, g, b);
+        Rectangle::new(
+            Point::new(win_x as i32 + 2, splash_y as i32 + i as i32),
+            Size::new(win_w - 4, 1),
+        )
+        .into_styled(PrimitiveStyle::with_fill(color))
+        .draw(display)
+        .ok();
+    }
+
+    // Welcome text centered in the gradient strip
+    let welcome_style = MonoTextStyleBuilder::new()
+        .font(&FONT_10X20)
+        .text_color(TEXT_WHITE)
+        .build();
+    let msg = "Welcome to sotOS";
+    let msg_w = msg.len() as i32 * 10;
+    let msg_x = win_x as i32 + (win_w as i32 - msg_w) / 2;
+    let msg_y = splash_y as i32 + (splash_h as i32 - 20) / 2;
+    Text::with_baseline(msg, Point::new(msg_x, msg_y), welcome_style, Baseline::Top)
+        .draw(display)
+        .ok();
+
+    // 11. Return text area layout (for VGA 8x16 terminal font)
     let text_x = win_x + 6;
     let text_y = win_y + TITLE_HEIGHT + 4;
     let text_area_w = win_w - 12;
-    let text_area_h = win_h - TITLE_HEIGHT - 8;
+    let text_area_h = win_h - TITLE_HEIGHT - splash_h - 12;
     let text_cols = text_area_w / 8;
     let text_rows = text_area_h / 16;
 
