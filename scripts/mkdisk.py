@@ -339,6 +339,105 @@ class DiskBuilder:
         # Snap meta (zeroed)
         # Already zeroed from bytearray init.
 
+        # ── Embed FAT32 test partition at end of disk ──────────────
+        # MBR partition table (bytes 446-511) doesn't overlap ObjectStore
+        # superblock (bytes 0-48), so both coexist in sector 0.
+        fat32_sectors = 131072  # 64 MiB
+        fat32_start = self.total_sectors - fat32_sectors
+        if fat32_start > SECTOR_DATA + 10000:
+            self._embed_fat32(fat32_start, fat32_sectors)
+
+    def _embed_fat32(self, part_start, part_sectors):
+        """Write MBR partition entry + minimal FAT32 filesystem at end of disk."""
+        # MBR partition entry 1 (bytes 446-461 of sector 0)
+        e = bytearray(16)
+        e[4] = 0x0C  # FAT32 LBA
+        struct.pack_into('<I', e, 8, part_start)
+        struct.pack_into('<I', e, 12, part_sectors)
+        self.data[446:462] = e
+        self.data[510] = 0x55
+        self.data[511] = 0xAA
+
+        reserved = 32
+        num_fats = 2
+        spc = 1  # 1 sector/cluster → guaranteed FAT32 (>65525 clusters)
+        total = part_sectors
+        # FAT size: 4 bytes per cluster entry
+        fat_sectors = ((total - reserved) * 4 // (512 * spc + 4 * num_fats)) + 1
+        clusters = (total - reserved - fat_sectors * num_fats) // spc
+
+        off = part_start * SECTOR_SIZE
+
+        # BPB
+        bpb = bytearray(512)
+        bpb[0:3] = b'\xEB\x58\x90'
+        bpb[3:11] = b'sotOS   '
+        struct.pack_into('<H', bpb, 11, 512)       # bytes/sector
+        bpb[13] = spc
+        struct.pack_into('<H', bpb, 14, reserved)   # reserved sectors
+        bpb[16] = num_fats
+        bpb[21] = 0xF8                              # media
+        struct.pack_into('<H', bpb, 24, 63)          # sectors/track
+        struct.pack_into('<H', bpb, 26, 255)         # heads
+        struct.pack_into('<I', bpb, 28, part_start)  # hidden sectors
+        struct.pack_into('<I', bpb, 32, total)       # total sectors
+        struct.pack_into('<I', bpb, 36, fat_sectors) # FAT size
+        struct.pack_into('<I', bpb, 44, 2)           # root cluster
+        struct.pack_into('<H', bpb, 48, 1)           # FSInfo
+        struct.pack_into('<H', bpb, 50, 6)           # backup boot
+        bpb[66] = 0x29
+        struct.pack_into('<I', bpb, 67, 0x534F5453)  # serial
+        bpb[71:82] = b'SOTOS_FAT  '
+        bpb[82:90] = b'FAT32   '
+        bpb[510] = 0x55
+        bpb[511] = 0xAA
+        self.data[off:off+512] = bpb
+
+        # FSInfo at sector 1
+        fsi = bytearray(512)
+        struct.pack_into('<I', fsi, 0, 0x41615252)
+        struct.pack_into('<I', fsi, 484, 0x61417272)
+        struct.pack_into('<I', fsi, 488, clusters - 1)
+        struct.pack_into('<I', fsi, 492, 3)
+        fsi[508] = 0x00; fsi[509] = 0x00; fsi[510] = 0x55; fsi[511] = 0xAA
+        self.data[off+512:off+1024] = fsi
+
+        # Backup boot sector at sector 6
+        self.data[off+6*512:off+7*512] = bpb
+
+        # FAT1 and FAT2
+        fat = bytearray(fat_sectors * 512)
+        struct.pack_into('<I', fat, 0, 0x0FFFFFF8)   # media
+        struct.pack_into('<I', fat, 4, 0x0FFFFFFF)   # reserved
+        struct.pack_into('<I', fat, 8, 0x0FFFFFFF)   # root cluster 2 (end)
+        struct.pack_into('<I', fat, 12, 0x0FFFFFFF)  # cluster 3 (README.TXT, end)
+
+        fat1_off = off + reserved * 512
+        fat2_off = fat1_off + fat_sectors * 512
+        self.data[fat1_off:fat1_off + len(fat)] = fat
+        self.data[fat2_off:fat2_off + len(fat)] = fat
+
+        # Root directory at cluster 2
+        data_start_off = off + (reserved + fat_sectors * num_fats) * 512
+        # Volume label entry
+        vlabel = bytearray(32)
+        vlabel[0:11] = b'SOTOS_FAT  '
+        vlabel[11] = 0x08
+        self.data[data_start_off:data_start_off+32] = vlabel
+        # README.TXT entry → cluster 3
+        entry = bytearray(32)
+        entry[0:8] = b'README  '
+        entry[8:11] = b'TXT'
+        entry[11] = 0x20  # archive
+        content = b'Hello from FAT32 on sotOS!\n'
+        struct.pack_into('<H', entry, 26, 3)  # first cluster lo
+        struct.pack_into('<I', entry, 28, len(content))
+        self.data[data_start_off+32:data_start_off+64] = entry
+
+        # File content at cluster 3 (data_start + 1 sector)
+        file_off = data_start_off + spc * 512
+        self.data[file_off:file_off+len(content)] = content
+
     def write(self, path):
         """Write the disk image to a file."""
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)

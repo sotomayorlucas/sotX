@@ -226,7 +226,7 @@ pub extern "C" fn _start() -> ! {
     run_benchmarks(ring);
 
     // --- Phase 4: Virtio-BLK + Object Store ---
-    let blk = init_block_storage(boot_info);
+    let mut blk = init_block_storage(boot_info);
 
     // --- Phase 5: Look up net service endpoint ---
     for _ in 0..50 { sys::yield_now(); }
@@ -263,6 +263,11 @@ pub extern "C" fn _start() -> ! {
 
     // --- Phase 7.8: Busybox auto-test ---
     run_busybox_test();
+
+    // --- Phase 7.9: FAT32 boot partition test ---
+    if let Some(ref mut b) = blk {
+        run_fat_test(b);
+    }
 
     // --- Phase 8: Platform validation ---
     run_phase_validation();
@@ -628,6 +633,73 @@ fn init_objstore(blk: VirtioBlk) -> Option<VirtioBlk> {
             Some(store.into_blk())
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// FAT32 boot partition test
+// ---------------------------------------------------------------------------
+
+fn run_fat_test(blk: &mut sotos_virtio::blk::VirtioBlk) {
+    use sotos_objstore::fat::{VirtioBlkDevice, FixedTimeSource, VolumeManager, VolumeIdx, embedded_sdmmc};
+
+    print(b"FAT32-TEST: mounting boot partition...\n");
+    let device = unsafe { VirtioBlkDevice::new(blk as *mut _) };
+    let mut mgr = VolumeManager::new(device, FixedTimeSource);
+
+    let vol = match mgr.open_raw_volume(VolumeIdx(0)) {
+        Ok(v) => v,
+        Err(e) => {
+            print(b"FAT32-TEST: failed to open volume: ");
+            match e {
+                embedded_sdmmc::Error::DeviceError(_) => print(b"DeviceError"),
+                embedded_sdmmc::Error::FormatError(s) => { print(b"FormatError("); print(s.as_bytes()); print(b")"); }
+                embedded_sdmmc::Error::NoSuchVolume => print(b"NoSuchVolume"),
+                embedded_sdmmc::Error::BadBlockSize(sz) => { print(b"BadBlockSize="); print_u64(sz as u64); }
+                embedded_sdmmc::Error::Unsupported => print(b"Unsupported"),
+                _ => print(b"Other"),
+            }
+            print(b"\n");
+            return;
+        }
+    };
+    print(b"FAT32-TEST: volume opened\n");
+
+    let dir = match mgr.open_root_dir(vol) {
+        Ok(d) => d,
+        Err(_) => { print(b"FAT32-TEST: failed to open root dir\n"); return; }
+    };
+
+    print(b"FAT32-TEST: root directory:\n");
+    let mut fat_count = 0u32;
+    let dir_result = mgr.iterate_dir(dir, |entry| {
+        fat_count += 1;
+        print(b"  ");
+        for &b in entry.name.base_name() {
+            if b != b' ' { sotos_common::sys::debug_print(b); unsafe { framebuffer::fb_putchar(b); } }
+        }
+        if !entry.attributes.is_directory() {
+            let ext = entry.name.extension();
+            if ext[0] != b' ' {
+                print(b".");
+                for &b in ext {
+                    if b != b' ' { sotos_common::sys::debug_print(b); unsafe { framebuffer::fb_putchar(b); } }
+                }
+            }
+        } else {
+            print(b"/");
+        }
+        print(b"\n");
+    });
+
+    print(b"FAT32-TEST: ");
+    print_u64(fat_count as u64);
+    print(b" entries found\n");
+    if dir_result.is_err() {
+        print(b"FAT32-TEST: iterate_dir failed\n");
+    }
+    let _ = mgr.close_dir(dir);
+    let _ = mgr.close_volume(vol);
+    print(b"FAT32-TEST: SUCCESS\n");
 }
 
 // ---------------------------------------------------------------------------

@@ -7,3 +7,4 @@ edition = "2021"
 sotos-common = { path = "../sotos-common" }
 sotos-pci = { path = "../sotos-pci" }
 sotos-virtio = { path = "../sotos-virtio" }
+embedded-sdmmc = { version = "0.8", default-features = false }
