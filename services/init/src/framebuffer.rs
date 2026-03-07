@@ -824,6 +824,8 @@ static mut WM: Option<sotos_gui::WindowManager> = None;
 const GUI_WIN1_ADDR: u64 = 0x7000000;
 const GUI_WIN2_ADDR: u64 = 0x7100000;
 const GUI_TERM_ADDR: u64 = 0x7200000;
+/// Back buffer for double-buffering (avoids slow MMIO pixel writes).
+const GUI_BACKBUF_ADDR: u64 = 0x7300000;
 
 /// Demo window dimensions.
 const GUI_WIN1_W: u32 = 400;
@@ -838,6 +840,12 @@ static mut TERM_FB: *mut u32 = core::ptr::null_mut();
 static mut TERM_STRIDE: u32 = 0;
 static mut TERM_W: u32 = 0;
 static mut TERM_H: u32 = 0;
+
+/// Double-buffer: compositor draws here (WB RAM), then we blit to MMIO screen.
+static mut BACK_BUF: *mut u32 = core::ptr::null_mut();
+static mut SCREEN_FB: *mut u32 = core::ptr::null_mut();
+static mut SCREEN_STRIDE: u32 = 0;
+static mut SCREEN_PIXELS: usize = 0;
 
 /// Allocate physical frames and map them at a fixed virtual address range.
 unsafe fn map_gui_buffer(base: u64, pages: u64) {
@@ -870,6 +878,16 @@ pub(crate) unsafe fn gui_compositor_init() {
     let term_pages = (term_bytes + 0xFFF) / 0x1000;
     map_gui_buffer(GUI_TERM_ADDR, term_pages);
 
+    // Allocate back buffer for double-buffering (same size as screen).
+    let stride = FB_PITCH / 4;
+    let backbuf_bytes = (stride * FB_HEIGHT * 4) as u64;
+    let backbuf_pages = (backbuf_bytes + 0xFFF) / 0x1000;
+    map_gui_buffer(GUI_BACKBUF_ADDR, backbuf_pages);
+    BACK_BUF = GUI_BACKBUF_ADDR as *mut u32;
+    SCREEN_FB = FB_PTR as *mut u32;
+    SCREEN_STRIDE = stride;
+    SCREEN_PIXELS = (stride * FB_HEIGHT) as usize;
+
     // Fill window buffers with gradient content.
     sotos_gui::draw_gradient_into(
         GUI_WIN1_ADDR as *mut u32, GUI_WIN1_W, GUI_WIN1_H,
@@ -889,23 +907,30 @@ pub(crate) unsafe fn gui_compositor_init() {
     }
 
     // Draw text labels into window buffers using the built-in 8x8 font.
-    sotos_gui::draw_string_fb(
-        GUI_WIN1_ADDR as *mut u32, GUI_WIN1_W, GUI_WIN1_W, GUI_WIN1_H,
-        10, 10, b"Hello from sotOS!", sotos_gui::COLOR_WHITE,
-    );
-    sotos_gui::draw_string_fb(
-        GUI_WIN1_ADDR as *mut u32, GUI_WIN1_W, GUI_WIN1_W, GUI_WIN1_H,
-        10, 24, b"Drag this window!", sotos_gui::COLOR_WHITE,
-    );
-    sotos_gui::draw_string_fb(
-        GUI_WIN2_ADDR as *mut u32, GUI_WIN2_W, GUI_WIN2_W, GUI_WIN2_H,
-        10, 10, b"Window 2", sotos_gui::COLOR_WHITE,
-    );
+    let w1 = GUI_WIN1_ADDR as *mut u32;
+    sotos_gui::draw_string_fb(w1, GUI_WIN1_W, GUI_WIN1_W, GUI_WIN1_H,
+        12, 12, b"Hello from sotOS!", sotos_gui::COLOR_WHITE);
+    sotos_gui::draw_string_fb(w1, GUI_WIN1_W, GUI_WIN1_W, GUI_WIN1_H,
+        12, 28, b"Drag windows around!", sotos_gui::COLOR_WHITE);
+    sotos_gui::draw_string_fb(w1, GUI_WIN1_W, GUI_WIN1_W, GUI_WIN1_H,
+        12, 52, b"Microkernel OS written", sotos_gui::COLOR_WHITE);
+    sotos_gui::draw_string_fb(w1, GUI_WIN1_W, GUI_WIN1_W, GUI_WIN1_H,
+        12, 68, b"entirely in Rust", sotos_gui::COLOR_WHITE);
 
-    // Create the window manager with the screen framebuffer.
-    let fb = FB_PTR as *mut u32;
-    let stride = FB_PITCH / 4;
-    let mut wm = sotos_gui::WindowManager::new(fb, FB_WIDTH, FB_HEIGHT, stride);
+    let w2 = GUI_WIN2_ADDR as *mut u32;
+    sotos_gui::draw_string_fb(w2, GUI_WIN2_W, GUI_WIN2_W, GUI_WIN2_H,
+        12, 12, b"System Info", sotos_gui::COLOR_WHITE);
+    sotos_gui::draw_string_fb(w2, GUI_WIN2_W, GUI_WIN2_W, GUI_WIN2_H,
+        12, 32, b"Arch: x86_64", sotos_gui::bgra(180, 190, 210, 255));
+    sotos_gui::draw_string_fb(w2, GUI_WIN2_W, GUI_WIN2_W, GUI_WIN2_H,
+        12, 48, b"Kernel: sotOS 0.1", sotos_gui::bgra(180, 190, 210, 255));
+    sotos_gui::draw_string_fb(w2, GUI_WIN2_W, GUI_WIN2_W, GUI_WIN2_H,
+        12, 64, b"RAM: 512 MB", sotos_gui::bgra(180, 190, 210, 255));
+    sotos_gui::draw_string_fb(w2, GUI_WIN2_W, GUI_WIN2_W, GUI_WIN2_H,
+        12, 80, b"Display: BGRA32", sotos_gui::bgra(180, 190, 210, 255));
+
+    // Create the window manager targeting the back buffer (not MMIO screen).
+    let mut wm = sotos_gui::WindowManager::new(BACK_BUF, FB_WIDTH, FB_HEIGHT, stride);
 
     // Create terminal window (prominent, front and center).
     let term_x = 20i32;
@@ -924,8 +949,9 @@ pub(crate) unsafe fn gui_compositor_init() {
     wm.create_window(w2_x, w2_y, GUI_WIN2_W, GUI_WIN2_H,
         b"Demo Window", GUI_WIN2_ADDR as *mut u32);
 
-    // Initial composite render.
+    // Initial composite render + blit to screen.
     wm.composite();
+    blit_backbuf_to_screen();
 
     WM = Some(wm);
     COMPOSITOR_ACTIVE = true;
@@ -971,7 +997,16 @@ unsafe fn poll_mouse_compositor() {
 
     if wm.dirty {
         wm.composite();
+        // Blit back buffer to MMIO screen in one fast sequential copy.
+        blit_backbuf_to_screen();
     }
+}
+
+/// Fast blit: copy the RAM back buffer to the MMIO screen framebuffer.
+/// Sequential write is much faster than random pixel writes to UC memory.
+unsafe fn blit_backbuf_to_screen() {
+    if BACK_BUF.is_null() || SCREEN_FB.is_null() { return; }
+    core::ptr::copy_nonoverlapping(BACK_BUF, SCREEN_FB, SCREEN_PIXELS);
 }
 
 // ---------------------------------------------------------------------------
