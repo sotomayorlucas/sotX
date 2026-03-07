@@ -7,7 +7,16 @@ edition = "2021"
 sotos-common = { path = "../../libs/sotos-common" }
 sotos-pci = { path = "../../libs/sotos-pci" }
 sotos-virtio = { path = "../../libs/sotos-virtio" }
-sotos-net = { path = "../../libs/sotos-net" }
+smoltcp = { version = "0.11", default-features = false, features = [
+    "alloc",
+    "medium-ethernet",
+    "proto-ipv4",
+    "socket-tcp",
+    "socket-udp",
+    "socket-icmp",
+    "socket-dhcpv4",
+    "socket-dns",
+] }
 
 [profile.dev]
 panic = "abort"

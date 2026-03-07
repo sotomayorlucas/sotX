@@ -1,77 +1,137 @@
-//! sotOS Network Service Process
+//! sotOS Network Service — powered by smoltcp
 //!
-//! Runs as a separate process with its own address space.
-//! Drives a virtio-net device and implements the IP/UDP/TCP stack.
+//! Replaces the manual TCP/IP stack with smoltcp for production-grade networking.
+//! Preserves the IPC command interface and Network Mirroring feature.
 
 #![no_std]
 #![no_main]
 
-use core::sync::atomic::{AtomicU64, Ordering};
+extern crate alloc;
+
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
 use sotos_common::sys;
 use sotos_common::{BootInfo, IpcMsg, BOOT_INFO_ADDR};
 use sotos_pci::PciBus;
 use sotos_virtio::net::VirtioNet;
 
-/// Root capability indices (must match kernel write_net_boot_info() order).
-const CAP_PCI: usize = 0; // I/O port 0xCF8-0xCFF (PCI config)
+use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
+use smoltcp::phy::{Device, DeviceCapabilities, Medium};
+use smoltcp::socket::{dhcpv4, icmp, tcp, udp};
+use smoltcp::time::Instant;
+use smoltcp::wire::{
+    EthernetAddress, HardwareAddress, IpAddress, IpCidr, IpEndpoint,
+    Ipv4Address, Ipv4Cidr,
+};
 
-/// Default IP configuration — DHCP fallback (QEMU SLIRP defaults).
+// =============================================================================
+// Bump allocator (256 KiB, never frees)
+// =============================================================================
+
+const HEAP_SIZE: usize = 256 * 1024;
+static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
+static HEAP_POS: AtomicUsize = AtomicUsize::new(0);
+
+struct BumpAlloc;
+
+unsafe impl core::alloc::GlobalAlloc for BumpAlloc {
+    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
+        let size = layout.size();
+        let align = layout.align();
+        loop {
+            let pos = HEAP_POS.load(Ordering::Relaxed);
+            let aligned = (pos + align - 1) & !(align - 1);
+            let new_pos = aligned + size;
+            if new_pos > HEAP_SIZE {
+                return core::ptr::null_mut();
+            }
+            if HEAP_POS
+                .compare_exchange_weak(pos, new_pos, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                return unsafe { HEAP.as_mut_ptr().add(aligned) };
+            }
+        }
+    }
+    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: core::alloc::Layout) {}
+}
+
+#[global_allocator]
+static ALLOCATOR: BumpAlloc = BumpAlloc;
+
+// =============================================================================
+// Constants
+// =============================================================================
+
+const CAP_PCI: usize = 0;
+
 const DEFAULT_IP: u32 = 0x0A00020F; // 10.0.2.15
 const DEFAULT_GATEWAY: u32 = 0x0A000202; // 10.0.2.2
-const DEFAULT_SUBNET: u32 = 0xFFFFFF00; // 255.255.255.0
-
-/// Default DNS server — DHCP fallback (QEMU SLIRP default).
 const DEFAULT_DNS: u32 = 0x0A000203; // 10.0.2.3
+const PING_TARGET: u32 = 0x08080808; // 8.8.8.8
+const PING_ID: u16 = 0x5054;
 
-/// 8.8.8.8 — boot connectivity test target.
-const PING_TARGET: u32 = 0x08080808;
-/// ICMP echo ID for our pings.
-const PING_ID: u16 = 0x5054; // "PT" for PingTest
-
-/// UDP echo port.
-const UDP_ECHO_PORT: u16 = 5555;
-/// TCP echo port.
 const TCP_ECHO_PORT: u16 = 7;
 
-// ---- IPC command interface ----
-// IPC commands sent via sync endpoints (svc_register "net").
-const CMD_PING: u64 = 1;        // arg0 = dst_ip → result = 0 ok / -1 fail
-const CMD_DNS_QUERY: u64 = 2;   // arg0 = name_ptr, arg1 = name_len → result = resolved IP
-const CMD_TCP_CONNECT: u64 = 3; // arg0 = dst_ip, arg1 = dst_port → result = conn_id
-const CMD_TCP_SEND: u64 = 4;    // arg0 = conn_id, arg1 = data_ptr, arg2 = data_len → result = bytes sent
-const CMD_TCP_RECV: u64 = 5;    // arg0 = conn_id, arg1 = buf_ptr, arg2 = buf_len → result = bytes read
-const CMD_TCP_CLOSE: u64 = 6;   // arg0 = conn_id → result = 0
-const CMD_TRACEROUTE_HOP: u64 = 7; // arg0 = dst_ip, arg1 = ttl → result = responder_ip (0=timeout, high bit=reached)
-const CMD_UDP_BIND: u64 = 8;       // arg0 = port → result = 0
-const CMD_UDP_SENDTO: u64 = 9;     // arg0 = dst_ip, arg1 = dst_port, arg2 = src_port, arg3 = len, data in IPC_DATA_BUF
-const CMD_UDP_RECV: u64 = 10;      // arg0 = port, arg1 = max_len → result = bytes_read, data in IPC_DATA_BUF
-const CMD_TCP_STATUS: u64 = 11;    // arg0 = conn_id → result[0] = recv_avail, result[1] = connected
-const CMD_NET_MIRROR: u64 = 12;   // arg0 = 0/1 → toggle packet mirroring
+// IPC command codes (must match LUCAS / child_handler)
+const CMD_PING: u64 = 1;
+const CMD_DNS_QUERY: u64 = 2;
+const CMD_TCP_CONNECT: u64 = 3;
+const CMD_TCP_SEND: u64 = 4;
+const CMD_TCP_RECV: u64 = 5;
+const CMD_TCP_CLOSE: u64 = 6;
+const CMD_TRACEROUTE_HOP: u64 = 7;
+const CMD_UDP_BIND: u64 = 8;
+const CMD_UDP_SENDTO: u64 = 9;
+const CMD_UDP_RECV: u64 = 10;
+const CMD_TCP_STATUS: u64 = 11;
+const CMD_NET_MIRROR: u64 = 12;
 
-/// Packet mirror flag: when non-zero, log packet summaries to serial.
+// IPC atomic command queue
 static NET_MIRROR: AtomicU64 = AtomicU64::new(0);
-
-// IPC command queue (atomic, single-slot producer-consumer).
-// The IPC handler thread writes cmd + args, then spins on IPC_RESULT.
-// The main net loop picks up the command, processes it, writes IPC_RESULT.
 static IPC_CMD: AtomicU64 = AtomicU64::new(0);
 static IPC_ARG0: AtomicU64 = AtomicU64::new(0);
 static IPC_ARG1: AtomicU64 = AtomicU64::new(0);
 static IPC_ARG2: AtomicU64 = AtomicU64::new(0);
 static IPC_ARG3: AtomicU64 = AtomicU64::new(0);
 static IPC_RESULT: AtomicU64 = AtomicU64::new(0);
-// Data page for bulk transfers (DNS names, TCP data).
-/// Shared data buffer for IPC.
 static mut IPC_DATA_BUF: [u8; 4096] = [0; 4096];
-/// IPC endpoint cap (set by _start, read by ipc_handler_thread).
 static IPC_EP_CAP: AtomicU64 = AtomicU64::new(0);
-/// IPC handler stack base.
 const IPC_HANDLER_STACK: u64 = 0xD01000;
-/// Next ephemeral port for outgoing TCP connections.
 static NEXT_EPHEMERAL_PORT: AtomicU64 = AtomicU64::new(49152);
 
+// Socket handle tables
+const MAX_TCP: usize = 16;
+const MAX_UDP: usize = 8;
+static mut TCP_SLOTS: [Option<SocketHandle>; MAX_TCP] = [None; MAX_TCP];
+static mut UDP_SLOTS: [(Option<SocketHandle>, u16); MAX_UDP] = [(None, 0); MAX_UDP];
+
+// =============================================================================
+// Print helpers
+// =============================================================================
+
 fn print(s: &[u8]) {
-    for &b in s { sys::debug_print(b); }
+    for &b in s {
+        sys::debug_print(b);
+    }
+}
+
+fn print_u32(mut n: u32) {
+    if n == 0 {
+        sys::debug_print(b'0');
+        return;
+    }
+    let mut buf = [0u8; 10];
+    let mut i = 0;
+    while n > 0 {
+        buf[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+        i += 1;
+    }
+    while i > 0 {
+        i -= 1;
+        sys::debug_print(buf[i]);
+    }
 }
 
 fn print_hex_byte(b: u8) {
@@ -82,7 +142,9 @@ fn print_hex_byte(b: u8) {
 
 fn print_mac(mac: &[u8; 6]) {
     for (i, &b) in mac.iter().enumerate() {
-        if i > 0 { sys::debug_print(b':'); }
+        if i > 0 {
+            sys::debug_print(b':');
+        }
         print_hex_byte(b);
     }
 }
@@ -90,93 +152,384 @@ fn print_mac(mac: &[u8; 6]) {
 fn print_ip(ip: u32) {
     let bytes = ip.to_be_bytes();
     for (i, &b) in bytes.iter().enumerate() {
-        if i > 0 { sys::debug_print(b'.'); }
+        if i > 0 {
+            sys::debug_print(b'.');
+        }
         print_u32(b as u32);
     }
 }
 
-fn print_u32(mut n: u32) {
-    if n == 0 { sys::debug_print(b'0'); return; }
-    let mut buf = [0u8; 10];
-    let mut i = 0;
-    while n > 0 { buf[i] = b'0' + (n % 10) as u8; n /= 10; i += 1; }
-    while i > 0 { i -= 1; sys::debug_print(buf[i]); }
+// =============================================================================
+// Timestamp (RDTSC at assumed 2 GHz)
+// =============================================================================
+
+fn now() -> Instant {
+    let tsc: u64;
+    unsafe {
+        core::arch::asm!(
+            "rdtsc",
+            "shl rdx, 32",
+            "or rax, rdx",
+            out("rax") tsc,
+            out("rdx") _,
+        );
+    }
+    Instant::from_millis((tsc / 2_000_000) as i64)
 }
 
-/// Transmit buffer (shared across the main loop).
-static mut TX_FRAME: [u8; 1514] = [0; 1514];
-/// IP reply scratch buffer.
-static mut IP_BUF: [u8; 1500] = [0; 1500];
-/// TCP/UDP reply scratch buffer.
-static mut PROTO_BUF: [u8; 1460] = [0; 1460];
-/// Protocol state — static to avoid stack overflow (TcpTable is ~9 KiB).
-static mut ARP_TABLE: sotos_net::arp::ArpTable = sotos_net::arp::ArpTable::new();
-static mut UDP_TABLE: sotos_net::udp::UdpTable = sotos_net::udp::UdpTable::new();
-static mut TCP_TABLE: sotos_net::tcp::TcpTable = sotos_net::tcp::TcpTable::new();
+// =============================================================================
+// smoltcp Device implementation for VirtioNet
+// =============================================================================
+
+struct VirtioDevice {
+    net: VirtioNet,
+}
+
+struct VirtioRxToken {
+    buf: [u8; 1514],
+    len: usize,
+}
+
+struct VirtioTxToken<'a> {
+    net: &'a mut VirtioNet,
+}
+
+impl smoltcp::phy::RxToken for VirtioRxToken {
+    fn consume<R, F>(mut self, f: F) -> R
+    where
+        F: FnOnce(&mut [u8]) -> R,
+    {
+        f(&mut self.buf[..self.len])
+    }
+}
+
+impl<'a> smoltcp::phy::TxToken for VirtioTxToken<'a> {
+    fn consume<R, F>(self, len: usize, f: F) -> R
+    where
+        F: FnOnce(&mut [u8]) -> R,
+    {
+        let mut buf = [0u8; 1514];
+        let result = f(&mut buf[..len]);
+        let _ = self.net.transmit(&buf[..len]);
+        result
+    }
+}
+
+impl Device for VirtioDevice {
+    type RxToken<'a> = VirtioRxToken where Self: 'a;
+    type TxToken<'a> = VirtioTxToken<'a> where Self: 'a;
+
+    fn receive(&mut self, _timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
+        let (idx, total_len) = self.net.poll_rx()?;
+        let frame_len = total_len.saturating_sub(10);
+        if frame_len == 0 || frame_len > 1514 {
+            self.net.rx_done(idx);
+            return None;
+        }
+        let ptr = self.net.rx_buf(idx);
+        let data = unsafe { core::slice::from_raw_parts(ptr, frame_len) };
+        let mut buf = [0u8; 1514];
+        buf[..frame_len].copy_from_slice(data);
+        self.net.rx_done(idx);
+
+        // Network mirroring — log before smoltcp processes
+        if NET_MIRROR.load(Ordering::Relaxed) != 0 {
+            mirror_frame(&buf[..frame_len]);
+        }
+
+        Some((
+            VirtioRxToken { buf, len: frame_len },
+            VirtioTxToken { net: &mut self.net },
+        ))
+    }
+
+    fn transmit(&mut self, _timestamp: Instant) -> Option<Self::TxToken<'_>> {
+        Some(VirtioTxToken { net: &mut self.net })
+    }
+
+    fn capabilities(&self) -> DeviceCapabilities {
+        let mut caps = DeviceCapabilities::default();
+        caps.max_transmission_unit = 1500;
+        caps.medium = Medium::Ethernet;
+        caps
+    }
+}
+
+// =============================================================================
+// Network mirroring — raw frame inspection
+// =============================================================================
+
+fn mirror_frame(frame: &[u8]) {
+    if frame.len() < 14 {
+        return;
+    }
+    let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
+    match ethertype {
+        0x0800 => {
+            if frame.len() < 34 {
+                return;
+            }
+            let protocol = frame[23];
+            let src_ip = u32::from_be_bytes([frame[26], frame[27], frame[28], frame[29]]);
+            let dst_ip = u32::from_be_bytes([frame[30], frame[31], frame[32], frame[33]]);
+            print(b"[MIRROR] ");
+            match protocol {
+                6 => print(b"TCP"),
+                17 => print(b"UDP"),
+                1 => print(b"ICMP"),
+                _ => print(b"???"),
+            }
+            print(b" ");
+            print_ip(src_ip);
+            print(b" -> ");
+            print_ip(dst_ip);
+            if (protocol == 6 || protocol == 17) && frame.len() >= 38 {
+                let ihl = ((frame[14] & 0xF) as usize) * 4;
+                let tp = 14 + ihl;
+                if frame.len() >= tp + 4 {
+                    let sp = u16::from_be_bytes([frame[tp], frame[tp + 1]]);
+                    let dp = u16::from_be_bytes([frame[tp + 2], frame[tp + 3]]);
+                    print(b" :");
+                    print_u32(sp as u32);
+                    print(b"->:");
+                    print_u32(dp as u32);
+                }
+            }
+            print(b" len=");
+            print_u32(frame.len() as u32);
+            print(b"\n");
+        }
+        0x0806 => {
+            print(b"[MIRROR] ARP len=");
+            print_u32(frame.len() as u32);
+            print(b"\n");
+        }
+        _ => {}
+    }
+}
+
+// =============================================================================
+// Helpers
+// =============================================================================
+
+fn ip_from_u32(ip: u32) -> Ipv4Address {
+    Ipv4Address::from_bytes(&ip.to_be_bytes())
+}
+
+fn u32_from_ip(ip: &Ipv4Address) -> u32 {
+    u32::from_be_bytes(ip.0)
+}
+
+fn alloc_tcp_slot() -> Option<usize> {
+    let slots = unsafe { &*core::ptr::addr_of!(TCP_SLOTS) };
+    for (i, slot) in slots.iter().enumerate() {
+        if slot.is_none() {
+            return Some(i);
+        }
+    }
+    None
+}
+
+fn find_udp_slot(port: u16) -> Option<usize> {
+    let slots = unsafe { &*core::ptr::addr_of!(UDP_SLOTS) };
+    for (i, (handle, p)) in slots.iter().enumerate() {
+        if handle.is_some() && *p == port {
+            return Some(i);
+        }
+    }
+    None
+}
+
+fn alloc_udp_slot() -> Option<usize> {
+    let slots = unsafe { &*core::ptr::addr_of!(UDP_SLOTS) };
+    for (i, (handle, _)) in slots.iter().enumerate() {
+        if handle.is_none() {
+            return Some(i);
+        }
+    }
+    None
+}
+
+fn icmp_checksum(data: &[u8]) -> u16 {
+    let mut sum: u32 = 0;
+    let mut i = 0;
+    while i + 1 < data.len() {
+        sum += u16::from_be_bytes([data[i], data[i + 1]]) as u32;
+        i += 2;
+    }
+    if i < data.len() {
+        sum += (data[i] as u32) << 8;
+    }
+    while sum >> 16 != 0 {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+
+// Minimal DNS query builder (A record)
+fn build_dns_query(name: &[u8], buf: &mut [u8]) -> usize {
+    if buf.len() < 64 || name.is_empty() {
+        return 0;
+    }
+    buf[0] = 0x12;
+    buf[1] = 0x34; // ID
+    buf[2] = 0x01;
+    buf[3] = 0x00; // Flags: RD=1
+    buf[4] = 0x00;
+    buf[5] = 0x01; // QDCOUNT=1
+    buf[6..12].fill(0);
+
+    let mut pos = 12;
+    let mut label_start = pos;
+    pos += 1;
+    for &b in name {
+        if b == b'.' {
+            buf[label_start] = (pos - label_start - 1) as u8;
+            label_start = pos;
+            pos += 1;
+        } else {
+            if pos >= buf.len() - 5 {
+                return 0;
+            }
+            buf[pos] = b;
+            pos += 1;
+        }
+    }
+    buf[label_start] = (pos - label_start - 1) as u8;
+    buf[pos] = 0; // root
+    pos += 1;
+    buf[pos] = 0;
+    buf[pos + 1] = 1; // QTYPE=A
+    buf[pos + 2] = 0;
+    buf[pos + 3] = 1; // QCLASS=IN
+    pos + 4
+}
+
+fn parse_dns_response(data: &[u8]) -> Option<u32> {
+    if data.len() < 12 {
+        return None;
+    }
+    let ancount = u16::from_be_bytes([data[6], data[7]]);
+    if ancount == 0 {
+        return None;
+    }
+    let mut pos = 12;
+    // Skip QNAME
+    while pos < data.len() {
+        let len = data[pos] as usize;
+        if len == 0 {
+            pos += 1;
+            break;
+        }
+        if len >= 0xC0 {
+            pos += 2;
+            break;
+        }
+        pos += 1 + len;
+    }
+    pos += 4; // QTYPE + QCLASS
+
+    for _ in 0..ancount {
+        if pos >= data.len() {
+            break;
+        }
+        if data[pos] >= 0xC0 {
+            pos += 2;
+        } else {
+            while pos < data.len() {
+                let len = data[pos] as usize;
+                if len == 0 {
+                    pos += 1;
+                    break;
+                }
+                pos += 1 + len;
+            }
+        }
+        if pos + 10 > data.len() {
+            break;
+        }
+        let rtype = u16::from_be_bytes([data[pos], data[pos + 1]]);
+        let rdlength = u16::from_be_bytes([data[pos + 8], data[pos + 9]]) as usize;
+        pos += 10;
+        if rtype == 1 && rdlength == 4 && pos + 4 <= data.len() {
+            return Some(u32::from_be_bytes([
+                data[pos],
+                data[pos + 1],
+                data[pos + 2],
+                data[pos + 3],
+            ]));
+        }
+        pos += rdlength;
+    }
+    None
+}
+
+// Build raw ICMP echo request packet (8 bytes: type+code+cksum+id+seq)
+fn build_echo_request(id: u16, seq: u16) -> [u8; 8] {
+    let mut pkt = [0u8; 8];
+    pkt[0] = 8; // Echo Request
+    pkt[4] = (id >> 8) as u8;
+    pkt[5] = id as u8;
+    pkt[6] = (seq >> 8) as u8;
+    pkt[7] = seq as u8;
+    let cksum = icmp_checksum(&pkt);
+    pkt[2] = (cksum >> 8) as u8;
+    pkt[3] = cksum as u8;
+    pkt
+}
+
+// =============================================================================
+// Main entry point
+// =============================================================================
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     let boot_info = unsafe { &*(BOOT_INFO_ADDR as *const BootInfo) };
     if !boot_info.is_valid() {
         print(b"NET: invalid BootInfo!\n");
-        loop { sys::yield_now(); }
+        loop {
+            sys::yield_now();
+        }
     }
 
     let pci_cap = boot_info.caps[CAP_PCI];
     let pci = PciBus::new(pci_cap);
 
-    // Find virtio-net device (vendor 0x1AF4, device 0x1000).
     let net_dev = match pci.find_device(0x1AF4, 0x1000) {
         Some(d) => d,
         None => {
             print(b"NET: virtio-net device not found\n");
-            loop { sys::yield_now(); }
+            loop {
+                sys::yield_now();
+            }
         }
     };
 
-    let mut net = match VirtioNet::init(&net_dev, &pci) {
+    let net = match VirtioNet::init(&net_dev, &pci) {
         Ok(n) => n,
         Err(e) => {
             print(b"NET: init failed: ");
             print(e.as_bytes());
             print(b"\n");
-            loop { sys::yield_now(); }
+            loop {
+                sys::yield_now();
+            }
         }
     };
 
     let mac = net.mac();
     print(b"NET: MAC=");
     print_mac(&mac);
-    print(b" IP=");
-    print_ip(DEFAULT_IP);
     print(b"\n");
 
-    // Initialize protocol state (statics — too large for stack).
-    let arp_table = unsafe { &mut *core::ptr::addr_of_mut!(ARP_TABLE) };
-    let udp_table = unsafe { &mut *core::ptr::addr_of_mut!(UDP_TABLE) };
-    let tcp_table = unsafe { &mut *core::ptr::addr_of_mut!(TCP_TABLE) };
-
-    // Bind UDP echo socket.
-    udp_table.bind(UDP_ECHO_PORT);
-
-    // Listen on TCP echo port.
-    tcp_table.listen(TCP_ECHO_PORT);
-
-    print(b"NET: listening UDP=");
-    print_u32(UDP_ECHO_PORT as u32);
-    print(b" TCP=");
-    print_u32(TCP_ECHO_PORT as u32);
-    print(b"\n");
-
-    // Register as "net" service for IPC.
+    // Register as "net" service for IPC
     if let Ok(ep_cap) = sys::endpoint_create() {
         IPC_EP_CAP.store(ep_cap, Ordering::Release);
         let name = b"net";
         if sys::svc_register(name.as_ptr() as u64, name.len() as u64, ep_cap).is_ok() {
             print(b"NET: registered as 'net' service\n");
-            // Allocate IPC handler stack (1 page).
             if let Ok(stack_frame) = sys::frame_alloc() {
-                if sys::map(IPC_HANDLER_STACK, stack_frame, 2 /* MAP_WRITABLE */).is_ok() {
+                if sys::map(IPC_HANDLER_STACK, stack_frame, 2).is_ok() {
                     let _ = sys::thread_create(
                         ipc_handler_thread as *const () as u64,
                         IPC_HANDLER_STACK + 0x1000,
@@ -186,746 +539,621 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
-    // Bind UDP ports for DNS and DHCP responses.
-    udp_table.bind(53);
-    udp_table.bind(68); // DHCP client port
+    // Wrap VirtioNet in smoltcp Device
+    let mut device = VirtioDevice { net };
 
-    // IP identification counter.
-    let mut ip_id: u16 = 1;
+    // Create smoltcp interface
+    let hw_addr = HardwareAddress::Ethernet(EthernetAddress::from_bytes(&mac));
+    let mut config = Config::new(hw_addr);
+    config.random_seed = now().total_millis() as u64;
 
-    // Mutable IP configuration (can be updated by DHCP).
-    let mut our_ip: u32 = DEFAULT_IP;
-    let mut gateway_ip: u32 = DEFAULT_GATEWAY;
-    let mut dns_server: u32 = DEFAULT_DNS;
+    let mut iface = Interface::new(config, &mut device, now());
 
-    // --- DHCP: try to obtain IP dynamically ---
-    {
-        let mut dhcp_buf = [0u8; 576]; // DHCP messages can be up to 576 bytes
-        let discover_len = sotos_net::dhcp::build_discover(&mac, &mut dhcp_buf);
-        if discover_len > 0 {
-            // Wrap in UDP (src 68 → dst 67) then IP (0.0.0.0 → 255.255.255.255) then Ethernet broadcast.
-            let proto_buf = unsafe { &mut *core::ptr::addr_of_mut!(PROTO_BUF) };
-            // UDP is max 1460 but DHCP fits.
-            // Build UDP manually since our IP is 0.0.0.0.
-            let udp_len = sotos_net::udp::build(
-                proto_buf, 0, 0xFFFFFFFF, // src=0.0.0.0, dst=255.255.255.255
-                68, 67, &dhcp_buf[..discover_len],
-            );
-            if udp_len > 0 {
-                let ip_buf = unsafe { &mut *core::ptr::addr_of_mut!(IP_BUF) };
-                let ip_len = sotos_net::ip::build(
-                    ip_buf, 0, 0xFFFFFFFF,
-                    sotos_net::ip::PROTO_UDP, next_ip_id(&mut ip_id),
-                    &proto_buf[..udp_len],
-                );
-                if ip_len > 0 {
-                    let tx = unsafe { &mut *core::ptr::addr_of_mut!(TX_FRAME) };
-                    let tx_len = sotos_net::eth::build(
-                        tx, &sotos_net::eth::BROADCAST_MAC, &mac,
-                        sotos_net::eth::ETHERTYPE_IPV4, &ip_buf[..ip_len],
-                    );
-                    if tx_len > 0 {
-                        let _ = net.transmit(&tx[..tx_len]);
-                        print(b"NET: DHCP Discover sent\n");
-                    }
-                }
-            }
+    // Set default IP (will be updated by DHCP)
+    iface.update_ip_addrs(|addrs| {
+        let _ = addrs.push(IpCidr::Ipv4(Ipv4Cidr::new(ip_from_u32(DEFAULT_IP), 24)));
+    });
+    iface
+        .routes_mut()
+        .add_default_ipv4_route(ip_from_u32(DEFAULT_GATEWAY))
+        .ok();
 
-            // Wait for DHCP Offer (poll up to ~100 iterations).
-            let mut dhcp_offer: Option<sotos_net::dhcp::DhcpOffer> = None;
-            for _ in 0..100 {
-                sys::yield_now();
-                while let Some((buf_idx, total_len)) = net.poll_rx() {
-                    if total_len > 10 {
-                        let frame_len = total_len - 10;
-                        let frame_ptr = net.rx_buf(buf_idx);
-                        let rx_frame = unsafe { core::slice::from_raw_parts(frame_ptr, frame_len) };
-                        if let Some((_eh, ep)) = sotos_net::eth::parse(rx_frame) {
-                            if let Some((ip_hdr, ip_payload)) = sotos_net::ip::parse(ep) {
-                                if ip_hdr.protocol == sotos_net::ip::PROTO_UDP {
-                                    if let Some((udp_hdr, udp_payload)) = sotos_net::udp::parse(ip_payload) {
-                                        if udp_hdr.dst_port == 68 {
-                                            if let Some((msg_type, offer)) = sotos_net::dhcp::parse_response(udp_payload) {
-                                                if msg_type == 2 { // DHCP_OFFER
-                                                    print(b"NET: DHCP Offer: IP=");
-                                                    print_ip(offer.your_ip);
-                                                    print(b" GW=");
-                                                    print_ip(offer.gateway);
-                                                    print(b"\n");
-                                                    dhcp_offer = Some(offer);
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    net.rx_done(buf_idx);
-                    if dhcp_offer.is_some() { break; }
-                }
-                if dhcp_offer.is_some() { break; }
-            }
+    // Create socket set
+    let mut sockets = SocketSet::new(alloc::vec![]);
 
-            // If we got an offer, send DHCP Request.
-            if let Some(offer) = dhcp_offer {
-                let req_len = sotos_net::dhcp::build_request(&offer, &mac, &mut dhcp_buf);
-                if req_len > 0 {
-                    let proto_buf = unsafe { &mut *core::ptr::addr_of_mut!(PROTO_BUF) };
-                    let udp_len = sotos_net::udp::build(
-                        proto_buf, 0, 0xFFFFFFFF, 68, 67, &dhcp_buf[..req_len],
-                    );
-                    if udp_len > 0 {
-                        let ip_buf = unsafe { &mut *core::ptr::addr_of_mut!(IP_BUF) };
-                        let ip_len = sotos_net::ip::build(
-                            ip_buf, 0, 0xFFFFFFFF,
-                            sotos_net::ip::PROTO_UDP, next_ip_id(&mut ip_id),
-                            &proto_buf[..udp_len],
-                        );
-                        if ip_len > 0 {
-                            let tx = unsafe { &mut *core::ptr::addr_of_mut!(TX_FRAME) };
-                            let tx_len = sotos_net::eth::build(
-                                tx, &sotos_net::eth::BROADCAST_MAC, &mac,
-                                sotos_net::eth::ETHERTYPE_IPV4, &ip_buf[..ip_len],
-                            );
-                            if tx_len > 0 {
-                                let _ = net.transmit(&tx[..tx_len]);
-                                print(b"NET: DHCP Request sent\n");
-                            }
-                        }
-                    }
+    // DHCP client socket
+    let dhcp_socket = dhcpv4::Socket::new();
+    let dhcp_handle = sockets.add(dhcp_socket);
 
-                    // Wait for DHCP ACK.
-                    for _ in 0..100 {
-                        sys::yield_now();
-                        while let Some((buf_idx, total_len)) = net.poll_rx() {
-                            if total_len > 10 {
-                                let frame_len = total_len - 10;
-                                let frame_ptr = net.rx_buf(buf_idx);
-                                let rx_frame = unsafe { core::slice::from_raw_parts(frame_ptr, frame_len) };
-                                if let Some((_eh, ep)) = sotos_net::eth::parse(rx_frame) {
-                                    if let Some((ip_hdr, ip_payload)) = sotos_net::ip::parse(ep) {
-                                        if ip_hdr.protocol == sotos_net::ip::PROTO_UDP {
-                                            if let Some((udp_hdr, udp_payload)) = sotos_net::udp::parse(ip_payload) {
-                                                if udp_hdr.dst_port == 68 {
-                                                    if let Some((msg_type, ack)) = sotos_net::dhcp::parse_response(udp_payload) {
-                                                        if msg_type == 5 { // DHCP_ACK
-                                                            our_ip = ack.your_ip;
-                                                            if ack.gateway != 0 {
-                                                                gateway_ip = ack.gateway;
-                                                            }
-                                                            if ack.dns != 0 {
-                                                                dns_server = ack.dns;
-                                                            }
-                                                            print(b"NET: DHCP ACK: IP=");
-                                                            print_ip(our_ip);
-                                                            print(b" GW=");
-                                                            print_ip(gateway_ip);
-                                                            print(b"\n");
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            net.rx_done(buf_idx);
-                        }
-                    }
-                }
-            } else {
-                print(b"NET: DHCP timeout, using default IP config\n");
-            }
-        }
-    }
-
-    // --- Ping Google! ---
-    // Step 1: ARP for gateway so we know where to send packets.
-    let arp_req = sotos_net::arp::build_request(&mac, our_ip, gateway_ip);
-    let tx = unsafe { &mut *core::ptr::addr_of_mut!(TX_FRAME) };
-    let tx_len = sotos_net::eth::build(
-        tx, &sotos_net::eth::BROADCAST_MAC, &mac,
-        sotos_net::eth::ETHERTYPE_ARP, &arp_req,
+    // ICMP socket for ping / traceroute (bind to receive all ICMP)
+    let icmp_rx = icmp::PacketBuffer::new(
+        alloc::vec![icmp::PacketMetadata::EMPTY; 4],
+        alloc::vec![0u8; 2048],
     );
-    if tx_len > 0 {
-        let _ = net.transmit(&tx[..tx_len]);
-    }
-    print(b"NET: ARP request for gateway\n");
+    let icmp_tx = icmp::PacketBuffer::new(
+        alloc::vec![icmp::PacketMetadata::EMPTY; 4],
+        alloc::vec![0u8; 2048],
+    );
+    let mut icmp_socket = icmp::Socket::new(icmp_rx, icmp_tx);
+    let _ = icmp_socket.bind(icmp::Endpoint::Ident(PING_ID));
+    let icmp_handle = sockets.add(icmp_socket);
 
+    // TCP echo server (port 7)
+    let echo_rx = tcp::SocketBuffer::new(alloc::vec![0u8; 2048]);
+    let echo_tx = tcp::SocketBuffer::new(alloc::vec![0u8; 2048]);
+    let mut echo_socket = tcp::Socket::new(echo_rx, echo_tx);
+    let _ = echo_socket.listen(TCP_ECHO_PORT);
+    let echo_handle = sockets.add(echo_socket);
+
+    print(b"NET: smoltcp interface ready, DHCP starting...\n");
+
+    let mut dns_server = DEFAULT_DNS;
     let mut ping_sent = false;
     let mut ping_replied = false;
-    let ping_seq: u16 = 1;
 
-    // Main poll loop.
-    // We poll RX FIRST (before wait_irq) because transmit()'s wait_tx_completion
-    // may consume the IRQ notification while an RX packet is already in the ring.
+    // Main event loop
     loop {
-        // Drain all pending RX packets (may have arrived during a previous transmit).
-        while let Some((buf_idx, total_len)) = net.poll_rx() {
-            if total_len <= 10 {
-                net.rx_done(buf_idx);
-                continue;
-            }
+        let ts = now();
+        iface.poll(ts, &mut device, &mut sockets);
 
-            let frame_len = total_len - 10;
-            let frame_ptr = net.rx_buf(buf_idx);
-            let frame = unsafe { core::slice::from_raw_parts(frame_ptr, frame_len) };
+        // Handle DHCP events
+        {
+            let dhcp = sockets.get_mut::<dhcpv4::Socket>(dhcp_handle);
+            if let Some(event) = dhcp.poll() {
+                match event {
+                    dhcpv4::Event::Configured(cfg) => {
+                        let cidr = cfg.address;
+                        print(b"NET: DHCP: IP=");
+                        print_ip(u32_from_ip(&cidr.address()));
+                        print(b"/");
+                        print_u32(cidr.prefix_len() as u32);
 
-            if let Some((eth_hdr, eth_payload)) = sotos_net::eth::parse(frame) {
-                // Phase 5: Packet mirroring — log packet summaries to serial
-                if NET_MIRROR.load(Ordering::Relaxed) != 0 {
-                    if eth_hdr.ethertype == sotos_net::eth::ETHERTYPE_IPV4 {
-                        if let Some((ip_hdr, ip_payload)) = sotos_net::ip::parse(eth_payload) {
-                            print(b"[MIRROR] ");
-                            let proto = match ip_hdr.protocol {
-                                sotos_net::ip::PROTO_TCP => b"TCP" as &[u8],
-                                sotos_net::ip::PROTO_UDP => b"UDP",
-                                sotos_net::ip::PROTO_ICMP => b"ICMP",
-                                _ => b"???",
-                            };
-                            print(proto);
-                            print(b" ");
-                            print_ip(ip_hdr.src);
-                            print(b" -> ");
-                            print_ip(ip_hdr.dst);
-                            if ip_hdr.protocol == sotos_net::ip::PROTO_TCP || ip_hdr.protocol == sotos_net::ip::PROTO_UDP {
-                                if ip_payload.len() >= 4 {
-                                    let src_port = u16::from_be_bytes([ip_payload[0], ip_payload[1]]);
-                                    let dst_port = u16::from_be_bytes([ip_payload[2], ip_payload[3]]);
-                                    print(b" :");
-                                    print_u32(src_port as u32);
-                                    print(b"->:");
-                                    print_u32(dst_port as u32);
-                                }
+                        iface.update_ip_addrs(|addrs| {
+                            if !addrs.is_empty() {
+                                addrs[0] = IpCidr::Ipv4(cidr);
+                            } else {
+                                let _ = addrs.push(IpCidr::Ipv4(cidr));
                             }
-                            print(b" len=");
-                            print_u32(frame_len as u32);
-                            print(b"\n");
+                        });
+
+                        if let Some(router) = cfg.router {
+                            iface
+                                .routes_mut()
+                                .add_default_ipv4_route(router)
+                                .ok();
+                            print(b" GW=");
+                            print_ip(u32_from_ip(&router));
                         }
-                    } else if eth_hdr.ethertype == sotos_net::eth::ETHERTYPE_ARP {
-                        print(b"[MIRROR] ARP len=");
-                        print_u32(frame_len as u32);
+                        if let Some(&dns) = cfg.dns_servers.iter().next() {
+                            dns_server = u32_from_ip(&dns);
+                            print(b" DNS=");
+                            print_ip(dns_server);
+                        }
                         print(b"\n");
                     }
-                }
-
-                match eth_hdr.ethertype {
-                    sotos_net::eth::ETHERTYPE_ARP => {
-                        handle_arp(&mut net, arp_table, &mac, eth_payload, &mut ip_id);
-                    }
-                    sotos_net::eth::ETHERTYPE_IPV4 => {
-                        // Check for startup ping reply before passing to handle_ip.
-                        if ping_sent && !ping_replied {
-                            if let Some((ip_hdr, ip_payload)) = sotos_net::ip::parse(eth_payload) {
-                                if ip_hdr.protocol == sotos_net::ip::PROTO_ICMP {
-                                    if let Some((id, seq)) = sotos_net::icmp::is_echo_reply(ip_payload) {
-                                        if id == PING_ID && seq == ping_seq {
-                                            ping_replied = true;
-                                            print(b"NET: PONG from ");
-                                            print_ip(ip_hdr.src);
-                                            print(b" seq=");
-                                            print_u32(seq as u32);
-                                            print(b" -- google is alive!\n");
-                                        }
-                                    }
-                                }
+                    dhcpv4::Event::Deconfigured => {
+                        print(b"NET: DHCP deconfigured\n");
+                        dns_server = DEFAULT_DNS;
+                        iface.update_ip_addrs(|addrs| {
+                            if !addrs.is_empty() {
+                                addrs[0] =
+                                    IpCidr::Ipv4(Ipv4Cidr::new(ip_from_u32(DEFAULT_IP), 24));
                             }
-                        }
-                        handle_ip(
-                            &mut net, arp_table, udp_table, tcp_table,
-                            &mac, eth_payload, &mut ip_id,
-                        );
-                    }
-                    _ => {}
-                }
-            }
-
-            net.rx_done(buf_idx);
-        }
-
-        // Echo server: only echo data on port 7 (not outbound connections).
-        for i in 0..16 {
-            if tcp_table.conns[i].active
-                && tcp_table.conns[i].local_port == 7
-                && tcp_table.conns[i].state == sotos_net::tcp::TcpState::Established
-                && tcp_table.conns[i].recv_len > 0
-            {
-                let mut echo_data = [0u8; 2048];
-                let n = tcp_table.read(i, &mut echo_data);
-                if n > 0 {
-                    let proto_buf = unsafe { &mut *core::ptr::addr_of_mut!(PROTO_BUF) };
-                    if let Some(seg_len) = tcp_table.send(i, DEFAULT_IP, &echo_data[..n], proto_buf) {
-                        let ip_buf = unsafe { &mut *core::ptr::addr_of_mut!(IP_BUF) };
-                        let ip_len = sotos_net::ip::build(
-                            ip_buf, DEFAULT_IP, tcp_table.conns[i].remote_ip,
-                            sotos_net::ip::PROTO_TCP, next_ip_id(&mut ip_id),
-                            &proto_buf[..seg_len],
-                        );
-                        if ip_len > 0 {
-                            let dst_mac = arp_table.lookup(tcp_table.conns[i].remote_ip)
-                                .or_else(|| arp_table.lookup(DEFAULT_GATEWAY))
-                                .unwrap_or(sotos_net::eth::BROADCAST_MAC);
-                            let tx = unsafe { &mut *core::ptr::addr_of_mut!(TX_FRAME) };
-                            let tx_len = sotos_net::eth::build(
-                                tx, &dst_mac, &mac,
-                                sotos_net::eth::ETHERTYPE_IPV4, &ip_buf[..ip_len],
-                            );
-                            if tx_len > 0 {
-                                let _ = net.transmit(&tx[..tx_len]);
-                            }
-                        }
+                        });
                     }
                 }
             }
         }
 
-        // --- Ping Google: send once we have gateway MAC ---
+        // Boot ping to 8.8.8.8
         if !ping_sent {
-            if let Some(gw_mac) = arp_table.lookup(gateway_ip) {
-                print(b"NET: gateway MAC=");
-                print_mac(&gw_mac);
-                print(b"\n");
-
-                let proto_buf = unsafe { &mut *core::ptr::addr_of_mut!(PROTO_BUF) };
-                let icmp_len = sotos_net::icmp::build_echo_request(proto_buf, PING_ID, ping_seq);
-                if icmp_len > 0 {
-                    let ip_buf = unsafe { &mut *core::ptr::addr_of_mut!(IP_BUF) };
-                    let ip_len = sotos_net::ip::build(
-                        ip_buf, DEFAULT_IP, PING_TARGET,
-                        sotos_net::ip::PROTO_ICMP, next_ip_id(&mut ip_id),
-                        &proto_buf[..icmp_len],
-                    );
-                    if ip_len > 0 {
-                        let tx = unsafe { &mut *core::ptr::addr_of_mut!(TX_FRAME) };
-                        let tx_len = sotos_net::eth::build(
-                            tx, &gw_mac, &mac,
-                            sotos_net::eth::ETHERTYPE_IPV4, &ip_buf[..ip_len],
-                        );
-                        if tx_len > 0 {
-                            let _ = net.transmit(&tx[..tx_len]);
-                            print(b"NET: PING ");
-                            print_ip(PING_TARGET);
-                            print(b" seq=");
-                            print_u32(ping_seq as u32);
-                            print(b"\n");
-                            ping_sent = true;
-                            // Loop back to poll RX — the echo reply may already
-                            // be in the ring (IRQ consumed by wait_tx_completion).
-                            continue;
-                        }
-                    }
+            let icmp = sockets.get_mut::<icmp::Socket>(icmp_handle);
+            if icmp.can_send() {
+                let echo = build_echo_request(PING_ID, 1);
+                if icmp
+                    .send_slice(&echo, IpAddress::Ipv4(ip_from_u32(PING_TARGET)))
+                    .is_ok()
+                {
+                    print(b"NET: PING 8.8.8.8 seq=1\n");
+                    ping_sent = true;
                 }
             }
         }
 
-        // Process IPC commands (non-blocking check).
+        // Check for ping reply
+        if ping_sent && !ping_replied {
+            let icmp = sockets.get_mut::<icmp::Socket>(icmp_handle);
+            while icmp.can_recv() {
+                let mut buf = [0u8; 128];
+                if let Ok((n, addr)) = icmp.recv_slice(&mut buf) {
+                    if n >= 8 && buf[0] == 0 {
+                        // Echo Reply
+                        let id = u16::from_be_bytes([buf[4], buf[5]]);
+                        if id == PING_ID {
+                            let seq = u16::from_be_bytes([buf[6], buf[7]]);
+                            print(b"NET: PONG from ");
+                            if let IpAddress::Ipv4(ip4) = addr {
+                                print_ip(u32_from_ip(&ip4));
+                            }
+                            print(b" seq=");
+                            print_u32(seq as u32);
+                            print(b" -- google is alive!\n");
+                            ping_replied = true;
+                        }
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+
+        // TCP echo server
+        {
+            let echo = sockets.get_mut::<tcp::Socket>(echo_handle);
+            if echo.may_recv() {
+                let mut buf = [0u8; 2048];
+                if let Ok(n) = echo.recv_slice(&mut buf) {
+                    if n > 0 {
+                        let _ = echo.send_slice(&buf[..n]);
+                    }
+                }
+            }
+            if !echo.is_active() && !echo.is_listening() {
+                let _ = echo.listen(TCP_ECHO_PORT);
+            }
+        }
+
+        // Process IPC commands (non-blocking)
         let cmd = IPC_CMD.load(Ordering::Acquire);
         if cmd != 0 {
-            let arg0 = IPC_ARG0.load(Ordering::Acquire);
-            let arg1 = IPC_ARG1.load(Ordering::Acquire);
-            let arg2 = IPC_ARG2.load(Ordering::Acquire);
-            let result = match cmd {
-                CMD_PING => {
-                    // Send ICMP echo request to arg0 (IP address), arg1 = seq number.
-                    let dst_ip = arg0 as u32;
-                    let ping_seq = arg1 as u16;
-                    let proto_buf = unsafe { &mut *core::ptr::addr_of_mut!(PROTO_BUF) };
-                    let icmp_len = sotos_net::icmp::build_echo_request(proto_buf, PING_ID, ping_seq);
-                    if icmp_len > 0 {
-                        send_ip_reply(&mut net, arp_table, &mac, dst_ip,
-                            sotos_net::ip::PROTO_ICMP, &mut ip_id, &proto_buf[..icmp_len]);
-                        // Wait for ICMP echo reply (poll up to ~600 iterations).
-                        let mut got_reply: u64 = 0;
-                        for _ in 0..600 {
-                            sys::yield_now();
-                            while let Some((buf_idx, total_len)) = net.poll_rx() {
-                                if total_len > 10 {
-                                    let frame_len = total_len - 10;
-                                    let frame_ptr = net.rx_buf(buf_idx);
-                                    let rx_frame = unsafe { core::slice::from_raw_parts(frame_ptr, frame_len) };
-                                    if let Some((_eh, ep)) = sotos_net::eth::parse(rx_frame) {
-                                        if let Some((ip_hdr, ip_payload)) = sotos_net::ip::parse(ep) {
-                                            if ip_hdr.protocol == sotos_net::ip::PROTO_ICMP {
-                                                if let Some((reply_id, reply_seq)) = sotos_net::icmp::is_echo_reply(ip_payload) {
-                                                    if reply_id == PING_ID && reply_seq == ping_seq {
-                                                        // Return TTL in upper 32 bits, 1 in lower.
-                                                        got_reply = 1 | ((ip_hdr.ttl as u64) << 32);
-                                                    }
-                                                }
-                                            } else {
-                                                handle_ip(&mut net, arp_table, udp_table, tcp_table, &mac, ep, &mut ip_id);
-                                            }
-                                        }
-                                    }
-                                }
-                                net.rx_done(buf_idx);
-                                if got_reply != 0 { break; }
-                            }
-                            if got_reply != 0 { break; }
-                        }
-                        got_reply
-                    } else {
-                        0u64
-                    }
-                }
-                CMD_DNS_QUERY => {
-                    // DNS query: name is in IPC_DATA_BUF[..arg1]
-                    let name_len = arg1 as usize;
-                    let name = unsafe { core::slice::from_raw_parts(core::ptr::addr_of!(IPC_DATA_BUF) as *const u8, name_len) };
-                    let mut query_buf = [0u8; 512];
-                    let qlen = sotos_net::dns::build_query(name, &mut query_buf);
-                    if qlen > 0 {
-                        // Send DNS query via UDP to dns_server:53
-                        let proto_buf = unsafe { &mut *core::ptr::addr_of_mut!(PROTO_BUF) };
-                        let udp_len = sotos_net::udp::build(
-                            proto_buf, DEFAULT_IP, dns_server,
-                            53, 53, &query_buf[..qlen],
-                        );
-                        if udp_len > 0 {
-                            send_ip_reply(&mut net, arp_table, &mac, dns_server,
-                                sotos_net::ip::PROTO_UDP, &mut ip_id, &proto_buf[..udp_len]);
-                        }
-                        // Wait for DNS response (poll up to ~200 iterations).
-                        let mut resolved: u64 = 0;
-                        for _ in 0..200 {
-                            sys::yield_now();
-                            while let Some((buf_idx, total_len)) = net.poll_rx() {
-                                if total_len > 10 {
-                                    let frame_len = total_len - 10;
-                                    let frame_ptr = net.rx_buf(buf_idx);
-                                    let rx_frame = unsafe { core::slice::from_raw_parts(frame_ptr, frame_len) };
-                                    if let Some((eth_hdr, eth_payload)) = sotos_net::eth::parse(rx_frame) {
-                                        match eth_hdr.ethertype {
-                                            sotos_net::eth::ETHERTYPE_ARP => {
-                                                handle_arp(&mut net, arp_table, &mac, eth_payload, &mut ip_id);
-                                            }
-                                            sotos_net::eth::ETHERTYPE_IPV4 => {
-                                                if let Some((ip_hdr, ip_payload)) = sotos_net::ip::parse(eth_payload) {
-                                                    if ip_hdr.protocol == sotos_net::ip::PROTO_UDP {
-                                                        if let Some((udp_hdr, udp_payload)) = sotos_net::udp::parse(ip_payload) {
-                                                            if udp_hdr.src_port == 53 {
-                                                                if let Some(ip) = sotos_net::dns::parse_response(udp_payload) {
-                                                                    resolved = ip as u64;
-                                                                }
-                                                            }
-                                                        }
-                                                    } else {
-                                                        // Handle other protocols normally.
-                                                        handle_ip(&mut net, arp_table, udp_table, tcp_table, &mac, eth_payload, &mut ip_id);
-                                                    }
-                                                }
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-                                }
-                                net.rx_done(buf_idx);
-                                if resolved != 0 { break; }
-                            }
-                            if resolved != 0 { break; }
-                        }
-                        resolved
-                    } else {
-                        0 // failed to build query
-                    }
-                }
-                CMD_TCP_CONNECT => {
-                    // Active TCP open: arg0 = dst_ip, arg1 = dst_port
-                    let dst_ip = arg0 as u32;
-                    let dst_port = arg1 as u16;
-                    let local_port = NEXT_EPHEMERAL_PORT.fetch_add(1, Ordering::Relaxed) as u16;
-                    let proto_buf = unsafe { &mut *core::ptr::addr_of_mut!(PROTO_BUF) };
-                    match tcp_table.connect(local_port, dst_ip, dst_port, DEFAULT_IP, proto_buf) {
-                        Some((conn_id, seg_len)) => {
-                            send_ip_reply(&mut net, arp_table, &mac, dst_ip,
-                                sotos_net::ip::PROTO_TCP, &mut ip_id, &proto_buf[..seg_len]);
-                            // Wait for SYN+ACK (poll up to ~500 iterations).
-                            for _ in 0..500 {
-                                sys::yield_now();
-                                while let Some((buf_idx, total_len)) = net.poll_rx() {
-                                    if total_len > 10 {
-                                        let frame_len = total_len - 10;
-                                        let frame_ptr = net.rx_buf(buf_idx);
-                                        let rx_frame = unsafe { core::slice::from_raw_parts(frame_ptr, frame_len) };
-                                        if let Some((_eh, ep)) = sotos_net::eth::parse(rx_frame) {
-                                            handle_ip(&mut net, arp_table, udp_table, tcp_table, &mac, ep, &mut ip_id);
-                                        }
-                                    }
-                                    net.rx_done(buf_idx);
-                                }
-                                let st = tcp_table.conns[conn_id].state;
-                                if st == sotos_net::tcp::TcpState::Established
-                                    || st == sotos_net::tcp::TcpState::Closed {
-                                    break;
-                                }
-                            }
-                            if tcp_table.conns[conn_id].state == sotos_net::tcp::TcpState::Established {
-                                conn_id as u64
-                            } else {
-                                // Connection failed — clean up the slot so it doesn't leak.
-                                tcp_table.conns[conn_id].active = false;
-                                tcp_table.conns[conn_id].state = sotos_net::tcp::TcpState::Closed;
-                                (-1i64) as u64
-                            }
-                        }
-                        None => (-1i64) as u64,
-                    }
-                }
-                CMD_TCP_SEND => {
-                    // arg0 = conn_id, arg1 = data in IPC_DATA_BUF, arg2 = data_len
-                    let conn_id = arg0 as usize;
-                    if conn_id >= 16 { (-1i64) as u64 } else {
-                    let data_len = arg2 as usize;
-                    let data = unsafe { core::slice::from_raw_parts(core::ptr::addr_of!(IPC_DATA_BUF) as *const u8, data_len.min(4096)) };
-                    let proto_buf = unsafe { &mut *core::ptr::addr_of_mut!(PROTO_BUF) };
-                    if let Some(seg_len) = tcp_table.send(conn_id, DEFAULT_IP, data, proto_buf) {
-                        let dst_ip = tcp_table.conns[conn_id].remote_ip;
-                        send_ip_reply(&mut net, arp_table, &mac, dst_ip,
-                            sotos_net::ip::PROTO_TCP, &mut ip_id, &proto_buf[..seg_len]);
-                        data_len as u64
-                    } else {
-                        (-1i64) as u64
-                    }
-                    }
-                }
-                CMD_TCP_RECV => {
-                    // arg0 = conn_id, arg1 = max_len
-                    let conn_id = arg0 as usize;
-                    if conn_id >= 16 { 0u64 } else {
-                    let max_len = (arg1 as usize).min(4096);
-                    // Poll for incoming data (up to ~300 iterations).
-                    for _ in 0..300 {
-                        if tcp_table.conns[conn_id].recv_len > 0 { break; }
-                        if !tcp_table.conns[conn_id].active { break; }
-                        sys::yield_now();
-                        while let Some((buf_idx, total_len)) = net.poll_rx() {
-                            if total_len > 10 {
-                                let frame_len = total_len - 10;
-                                let frame_ptr = net.rx_buf(buf_idx);
-                                let rx_frame = unsafe { core::slice::from_raw_parts(frame_ptr, frame_len) };
-                                if let Some((_eh, ep)) = sotos_net::eth::parse(rx_frame) {
-                                    handle_ip(&mut net, arp_table, udp_table, tcp_table, &mac, ep, &mut ip_id);
-                                }
-                            }
-                            net.rx_done(buf_idx);
-                        }
-                    }
-                    let mut read_buf = [0u8; 2048];
-                    let n = tcp_table.read(conn_id, &mut read_buf[..max_len.min(2048)]);
-                    if n > 0 {
-                        unsafe {
-                            let ipc_dst = core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(IPC_DATA_BUF) as *mut u8, n);
-                            ipc_dst.copy_from_slice(&read_buf[..n]);
-                        }
-                    }
-                    n as u64
-                    }
-                }
-                CMD_TCP_CLOSE => {
-                    let conn_id = arg0 as usize;
-                    if conn_id >= 16 { 0u64 } else {
-                    let proto_buf = unsafe { &mut *core::ptr::addr_of_mut!(PROTO_BUF) };
-                    if let Some(seg_len) = tcp_table.close(conn_id, DEFAULT_IP, proto_buf) {
-                        let dst_ip = tcp_table.conns[conn_id].remote_ip;
-                        send_ip_reply(&mut net, arp_table, &mac, dst_ip,
-                            sotos_net::ip::PROTO_TCP, &mut ip_id, &proto_buf[..seg_len]);
-                    }
-                    0u64
-                    }
-                }
-                CMD_TRACEROUTE_HOP => {
-                    // Send ICMP echo with specific TTL, wait for Time Exceeded or Echo Reply.
-                    // arg0 = dst_ip, arg1 = ttl
-                    let dst_ip = arg0 as u32;
-                    let ttl = arg1 as u8;
-                    let proto_buf = unsafe { &mut *core::ptr::addr_of_mut!(PROTO_BUF) };
-                    let icmp_len = sotos_net::icmp::build_echo_request(proto_buf, PING_ID, ttl as u16);
-                    if icmp_len > 0 {
-                        // Build IP with custom TTL.
-                        let ip_buf = unsafe { &mut *core::ptr::addr_of_mut!(IP_BUF) };
-                        let ip_len = sotos_net::ip::build_with_ttl(
-                            ip_buf, DEFAULT_IP, dst_ip,
-                            sotos_net::ip::PROTO_ICMP, next_ip_id(&mut ip_id),
-                            ttl, &proto_buf[..icmp_len],
-                        );
-                        if ip_len > 0 {
-                            let next_hop = if (dst_ip & DEFAULT_SUBNET) == (DEFAULT_IP & DEFAULT_SUBNET) {
-                                dst_ip
-                            } else {
-                                gateway_ip
-                            };
-                            let dst_mac = arp_table.lookup(next_hop).unwrap_or(sotos_net::eth::BROADCAST_MAC);
-                            let tx = unsafe { &mut *core::ptr::addr_of_mut!(TX_FRAME) };
-                            let tx_len = sotos_net::eth::build(
-                                tx, &dst_mac, &mac,
-                                sotos_net::eth::ETHERTYPE_IPV4, &ip_buf[..ip_len],
-                            );
-                            if tx_len > 0 {
-                                let _ = net.transmit(&tx[..tx_len]);
-                            }
-                        }
-                        // Wait for ICMP response (Time Exceeded or Echo Reply).
-                        let mut result_ip: u64 = 0;
-                        for _ in 0..200 {
-                            sys::yield_now();
-                            while let Some((buf_idx, total_len)) = net.poll_rx() {
-                                if total_len > 10 {
-                                    let frame_len = total_len - 10;
-                                    let frame_ptr = net.rx_buf(buf_idx);
-                                    let rx_frame = unsafe { core::slice::from_raw_parts(frame_ptr, frame_len) };
-                                    if let Some((_eh, ep)) = sotos_net::eth::parse(rx_frame) {
-                                        if let Some((ip_hdr, ip_payload)) = sotos_net::ip::parse(ep) {
-                                            if ip_hdr.protocol == sotos_net::ip::PROTO_ICMP {
-                                                if sotos_net::icmp::is_time_exceeded(ip_payload) {
-                                                    // TTL expired — hop router responded.
-                                                    result_ip = ip_hdr.src as u64;
-                                                } else if sotos_net::icmp::is_echo_reply(ip_payload).is_some() {
-                                                    // Reached destination.
-                                                    result_ip = ip_hdr.src as u64 | (1u64 << 32);
-                                                }
-                                            } else {
-                                                handle_ip(&mut net, arp_table, udp_table, tcp_table, &mac, ep, &mut ip_id);
-                                            }
-                                        }
-                                    }
-                                }
-                                net.rx_done(buf_idx);
-                                if result_ip != 0 { break; }
-                            }
-                            if result_ip != 0 { break; }
-                        }
-                        result_ip
-                    } else {
-                        0u64
-                    }
-                }
-                CMD_UDP_BIND => {
-                    // Bind a UDP port for receiving datagrams.
-                    let port = arg0 as u16;
-                    udp_table.bind(port);
-                    0u64
-                }
-                CMD_UDP_SENDTO => {
-                    // Send UDP datagram: arg0=dst_ip, arg1=dst_port, arg2=src_port, arg3=len
-                    // Data is in IPC_DATA_BUF[..len]
-                    let dst_ip = arg0 as u32;
-                    let dst_port = arg1 as u16;
-                    let src_port = arg2 as u16;
-                    let data_len = (IPC_ARG3.load(Ordering::Acquire) as usize).min(512);
-                    let data_buf = unsafe {
-                        core::slice::from_raw_parts(core::ptr::addr_of!(IPC_DATA_BUF) as *const u8, data_len)
-                    };
-                    let proto_buf = unsafe { &mut *core::ptr::addr_of_mut!(PROTO_BUF) };
-                    let udp_len = sotos_net::udp::build(
-                        proto_buf, DEFAULT_IP, dst_ip,
-                        src_port, dst_port, &data_buf[..data_len],
-                    );
-                    if udp_len > 0 {
-                        send_ip_reply(&mut net, arp_table, &mac, dst_ip,
-                            sotos_net::ip::PROTO_UDP, &mut ip_id, &proto_buf[..udp_len]);
-                    }
-                    data_len as u64
-                }
-                CMD_UDP_RECV => {
-                    // Receive UDP datagram on a specific port.
-                    // arg0 = port, arg1 = max_len
-                    let port = arg0 as u16;
-                    let max_len = (arg1 as usize).min(512);
-                    let data_buf = unsafe {
-                        core::slice::from_raw_parts_mut(
-                            core::ptr::addr_of_mut!(IPC_DATA_BUF) as *mut u8, 512)
-                    };
-                    // Check UDP table for pending data on this port
-                    let n = udp_table.recv(port, &mut data_buf[..max_len]);
-                    if n > 0 {
-                        n as u64
-                    } else {
-                        // Poll for incoming packets briefly
-                        let mut received: u64 = 0;
-                        for _ in 0..100 {
-                            sys::yield_now();
-                            while let Some((buf_idx, total_len)) = net.poll_rx() {
-                                if total_len > 10 {
-                                    let frame_len = total_len - 10;
-                                    let frame_ptr = net.rx_buf(buf_idx);
-                                    let rx_frame = unsafe { core::slice::from_raw_parts(frame_ptr, frame_len) };
-                                    if let Some((eth_hdr, eth_payload)) = sotos_net::eth::parse(rx_frame) {
-                                        match eth_hdr.ethertype {
-                                            sotos_net::eth::ETHERTYPE_ARP => {
-                                                handle_arp(&mut net, arp_table, &mac, eth_payload, &mut ip_id);
-                                            }
-                                            sotos_net::eth::ETHERTYPE_IPV4 => {
-                                                if let Some((ip_hdr, ip_payload)) = sotos_net::ip::parse(eth_payload) {
-                                                    if ip_hdr.protocol == sotos_net::ip::PROTO_UDP {
-                                                        if let Some((udp_hdr, udp_payload)) = sotos_net::udp::parse(ip_payload) {
-                                                            if udp_hdr.dst_port == port {
-                                                                let copy_len = udp_payload.len().min(max_len);
-                                                                data_buf[..copy_len].copy_from_slice(&udp_payload[..copy_len]);
-                                                                received = copy_len as u64;
-                                                            } else {
-                                                                // Dispatch to UDP table for other ports
-                                                                udp_table.handle_rx(udp_hdr.dst_port, ip_hdr.src, udp_hdr.src_port, udp_payload);
-                                                            }
-                                                        }
-                                                    } else {
-                                                        handle_ip(&mut net, arp_table, udp_table, tcp_table, &mac, eth_payload, &mut ip_id);
-                                                    }
-                                                }
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-                                }
-                                net.rx_done(buf_idx);
-                                if received > 0 { break; }
-                            }
-                            if received > 0 { break; }
-                        }
-                        received
-                    }
-                }
-                CMD_TCP_STATUS => {
-                    // Query TCP connection status.
-                    // Returns: regs[0]=recv_avail, regs[1]=connected (1 or 0)
-                    let conn_id = arg0 as usize;
-                    if conn_id >= 16 {
-                        0u64 // invalid
-                    } else {
-                        let recv_avail = tcp_table.conns[conn_id].recv_len as u64;
-                        let connected = if tcp_table.conns[conn_id].active &&
-                            tcp_table.conns[conn_id].state == sotos_net::tcp::TcpState::Established { 1u64 } else { 0u64 };
-                        // Pack both values: low 32 bits = recv_avail, high 32 bits = connected
-                        // Actually, the IPC result is a single u64. We need two values.
-                        // Use a special encoding: result = recv_avail | (connected << 32)
-                        recv_avail | (connected << 32)
-                    }
-                }
-                CMD_NET_MIRROR => {
-                    // Toggle packet mirroring
-                    NET_MIRROR.store(arg0, Ordering::Release);
-                    if arg0 != 0 {
-                        print(b"NET: packet mirroring ENABLED\n");
-                    } else {
-                        print(b"NET: packet mirroring DISABLED\n");
-                    }
-                    0u64
-                }
-                _ => (-1i64) as u64,
-            };
+            let result = process_ipc_cmd(
+                cmd,
+                &mut iface,
+                &mut device,
+                &mut sockets,
+                dns_server,
+                icmp_handle,
+            );
             IPC_RESULT.store(result, Ordering::Release);
-            IPC_CMD.store(0, Ordering::Release); // Signal completion.
+            IPC_CMD.store(0, Ordering::Release);
         }
 
-        // Yield and poll — don't use blocking wait_irq() so we can also
-        // pick up IPC commands from the handler thread.
         sys::yield_now();
-        net.ack_irq();
+        device.net.ack_irq();
     }
 }
 
-/// IPC handler thread — blocks on recv(), writes command to atomic queue,
-/// waits for main loop to process, then replies.
+// =============================================================================
+// IPC command processing via smoltcp sockets
+// =============================================================================
+
+fn process_ipc_cmd(
+    cmd: u64,
+    iface: &mut Interface,
+    device: &mut VirtioDevice,
+    sockets: &mut SocketSet,
+    dns_server: u32,
+    icmp_handle: SocketHandle,
+) -> u64 {
+    let arg0 = IPC_ARG0.load(Ordering::Acquire);
+    let arg1 = IPC_ARG1.load(Ordering::Acquire);
+    let arg2 = IPC_ARG2.load(Ordering::Acquire);
+
+    match cmd {
+        CMD_PING => {
+            let dst_ip = arg0 as u32;
+            let ping_seq = arg1 as u16;
+
+            let echo = build_echo_request(PING_ID, ping_seq);
+            {
+                let icmp = sockets.get_mut::<icmp::Socket>(icmp_handle);
+                if icmp
+                    .send_slice(&echo, IpAddress::Ipv4(ip_from_u32(dst_ip)))
+                    .is_err()
+                {
+                    return 0;
+                }
+            }
+
+            for _ in 0..600 {
+                iface.poll(now(), device, sockets);
+                let icmp = sockets.get_mut::<icmp::Socket>(icmp_handle);
+                if icmp.can_recv() {
+                    let mut buf = [0u8; 128];
+                    if let Ok((n, _)) = icmp.recv_slice(&mut buf) {
+                        if n >= 8 && buf[0] == 0 {
+                            let id = u16::from_be_bytes([buf[4], buf[5]]);
+                            let seq = u16::from_be_bytes([buf[6], buf[7]]);
+                            if id == PING_ID && seq == ping_seq {
+                                return 1 | (64u64 << 32);
+                            }
+                        }
+                    }
+                }
+                sys::yield_now();
+            }
+            0
+        }
+
+        CMD_DNS_QUERY => {
+            let name_len = arg1 as usize;
+            let name = unsafe {
+                core::slice::from_raw_parts(
+                    core::ptr::addr_of!(IPC_DATA_BUF) as *const u8,
+                    name_len.min(48),
+                )
+            };
+
+            // Find or create UDP socket on port 53
+            let slot = find_udp_slot(53).or_else(|| {
+                let slot = alloc_udp_slot()?;
+                let rx = udp::PacketBuffer::new(
+                    alloc::vec![udp::PacketMetadata::EMPTY; 4],
+                    alloc::vec![0u8; 1024],
+                );
+                let tx = udp::PacketBuffer::new(
+                    alloc::vec![udp::PacketMetadata::EMPTY; 4],
+                    alloc::vec![0u8; 1024],
+                );
+                let mut udp_sock = udp::Socket::new(rx, tx);
+                if udp_sock.bind(53).is_err() {
+                    return None;
+                }
+                let handle = sockets.add(udp_sock);
+                unsafe {
+                    UDP_SLOTS[slot] = (Some(handle), 53);
+                }
+                Some(slot)
+            });
+
+            if let Some(slot) = slot {
+                let handle = unsafe { UDP_SLOTS[slot].0.unwrap() };
+                let mut query = [0u8; 512];
+                let qlen = build_dns_query(name, &mut query);
+                if qlen > 0 {
+                    {
+                        let sock = sockets.get_mut::<udp::Socket>(handle);
+                        let ep =
+                            IpEndpoint::new(IpAddress::Ipv4(ip_from_u32(dns_server)), 53);
+                        let _ = sock.send_slice(&query[..qlen], ep);
+                    }
+
+                    for _ in 0..200 {
+                        iface.poll(now(), device, sockets);
+                        let sock = sockets.get_mut::<udp::Socket>(handle);
+                        if sock.can_recv() {
+                            let mut buf = [0u8; 512];
+                            if let Ok((n, _)) = sock.recv_slice(&mut buf) {
+                                if let Some(ip) = parse_dns_response(&buf[..n]) {
+                                    return ip as u64;
+                                }
+                            }
+                        }
+                        sys::yield_now();
+                    }
+                }
+            }
+            0
+        }
+
+        CMD_TCP_CONNECT => {
+            let dst_ip = arg0 as u32;
+            let dst_port = arg1 as u16;
+            let local_port = NEXT_EPHEMERAL_PORT.fetch_add(1, Ordering::Relaxed) as u16;
+
+            if let Some(slot) = alloc_tcp_slot() {
+                let rx = tcp::SocketBuffer::new(alloc::vec![0u8; 4096]);
+                let tx = tcp::SocketBuffer::new(alloc::vec![0u8; 4096]);
+                let tcp_sock = tcp::Socket::new(rx, tx);
+                let handle = sockets.add(tcp_sock);
+
+                {
+                    let cx = iface.context();
+                    let sock = sockets.get_mut::<tcp::Socket>(handle);
+                    let remote =
+                        IpEndpoint::new(IpAddress::Ipv4(ip_from_u32(dst_ip)), dst_port);
+                    if sock.connect(cx, remote, local_port).is_err() {
+                        sockets.remove(handle);
+                        return (-1i64) as u64;
+                    }
+                }
+                unsafe {
+                    TCP_SLOTS[slot] = Some(handle);
+                }
+
+                // Wait for connection
+                for _ in 0..500 {
+                    iface.poll(now(), device, sockets);
+                    let sock = sockets.get_mut::<tcp::Socket>(handle);
+                    if sock.is_active() && sock.may_send() {
+                        return slot as u64;
+                    }
+                    if sock.state() == tcp::State::Closed {
+                        break;
+                    }
+                    sys::yield_now();
+                }
+
+                // Failed
+                sockets.remove(handle);
+                unsafe {
+                    TCP_SLOTS[slot] = None;
+                }
+                (-1i64) as u64
+            } else {
+                (-1i64) as u64
+            }
+        }
+
+        CMD_TCP_SEND => {
+            let conn_id = arg0 as usize;
+            let data_len = arg2 as usize;
+            if conn_id >= MAX_TCP {
+                return (-1i64) as u64;
+            }
+            let handle = match unsafe { TCP_SLOTS[conn_id] } {
+                Some(h) => h,
+                None => return (-1i64) as u64,
+            };
+            let data = unsafe {
+                core::slice::from_raw_parts(
+                    core::ptr::addr_of!(IPC_DATA_BUF) as *const u8,
+                    data_len.min(4096),
+                )
+            };
+            let sock = sockets.get_mut::<tcp::Socket>(handle);
+            match sock.send_slice(data) {
+                Ok(n) => {
+                    iface.poll(now(), device, sockets);
+                    n as u64
+                }
+                Err(_) => (-1i64) as u64,
+            }
+        }
+
+        CMD_TCP_RECV => {
+            let conn_id = arg0 as usize;
+            let max_len = (arg1 as usize).min(4096);
+            if conn_id >= MAX_TCP {
+                return 0;
+            }
+            let handle = match unsafe { TCP_SLOTS[conn_id] } {
+                Some(h) => h,
+                None => return 0,
+            };
+
+            for _ in 0..300 {
+                iface.poll(now(), device, sockets);
+                let sock = sockets.get_mut::<tcp::Socket>(handle);
+                if sock.can_recv() {
+                    let ipc_buf = unsafe {
+                        core::slice::from_raw_parts_mut(
+                            core::ptr::addr_of_mut!(IPC_DATA_BUF) as *mut u8,
+                            max_len,
+                        )
+                    };
+                    if let Ok(n) = sock.recv_slice(ipc_buf) {
+                        if n > 0 {
+                            return n as u64;
+                        }
+                    }
+                }
+                if !sock.is_active() {
+                    break;
+                }
+                sys::yield_now();
+            }
+            0
+        }
+
+        CMD_TCP_CLOSE => {
+            let conn_id = arg0 as usize;
+            if conn_id < MAX_TCP {
+                if let Some(handle) = unsafe { TCP_SLOTS[conn_id] } {
+                    let sock = sockets.get_mut::<tcp::Socket>(handle);
+                    sock.close();
+                    iface.poll(now(), device, sockets);
+                    unsafe {
+                        TCP_SLOTS[conn_id] = None;
+                    }
+                }
+            }
+            0
+        }
+
+        CMD_TRACEROUTE_HOP => {
+            let dst_ip = arg0 as u32;
+            let ttl = arg1 as u8;
+
+            {
+                let icmp = sockets.get_mut::<icmp::Socket>(icmp_handle);
+                icmp.set_hop_limit(Some(ttl));
+                let echo = build_echo_request(PING_ID, ttl as u16);
+                if icmp
+                    .send_slice(&echo, IpAddress::Ipv4(ip_from_u32(dst_ip)))
+                    .is_err()
+                {
+                    icmp.set_hop_limit(None);
+                    return 0;
+                }
+            }
+
+            let mut result: u64 = 0;
+            for _ in 0..200 {
+                iface.poll(now(), device, sockets);
+                let icmp = sockets.get_mut::<icmp::Socket>(icmp_handle);
+                if icmp.can_recv() {
+                    let mut buf = [0u8; 128];
+                    if let Ok((_n, addr)) = icmp.recv_slice(&mut buf) {
+                        let IpAddress::Ipv4(ip4) = addr;
+                        let src = u32_from_ip(&ip4);
+                        if buf[0] == 11 {
+                            // Time Exceeded
+                            result = src as u64;
+                            break;
+                        } else if buf[0] == 0 {
+                            // Echo Reply — reached destination
+                            result = src as u64 | (1u64 << 32);
+                            break;
+                        }
+                    }
+                }
+                sys::yield_now();
+            }
+
+            let icmp = sockets.get_mut::<icmp::Socket>(icmp_handle);
+            icmp.set_hop_limit(None);
+            result
+        }
+
+        CMD_UDP_BIND => {
+            let port = arg0 as u16;
+            if let Some(slot) = alloc_udp_slot() {
+                let rx = udp::PacketBuffer::new(
+                    alloc::vec![udp::PacketMetadata::EMPTY; 8],
+                    alloc::vec![0u8; 2048],
+                );
+                let tx = udp::PacketBuffer::new(
+                    alloc::vec![udp::PacketMetadata::EMPTY; 8],
+                    alloc::vec![0u8; 2048],
+                );
+                let mut udp_sock = udp::Socket::new(rx, tx);
+                if udp_sock.bind(port).is_ok() {
+                    let handle = sockets.add(udp_sock);
+                    unsafe {
+                        UDP_SLOTS[slot] = (Some(handle), port);
+                    }
+                }
+            }
+            0
+        }
+
+        CMD_UDP_SENDTO => {
+            let dst_ip = arg0 as u32;
+            let dst_port = arg1 as u16;
+            let src_port = arg2 as u16;
+            let data_len = (IPC_ARG3.load(Ordering::Acquire) as usize).min(512);
+            let data = unsafe {
+                core::slice::from_raw_parts(
+                    core::ptr::addr_of!(IPC_DATA_BUF) as *const u8,
+                    data_len,
+                )
+            };
+
+            let slot = find_udp_slot(src_port).or_else(|| {
+                let slot = alloc_udp_slot()?;
+                let rx = udp::PacketBuffer::new(
+                    alloc::vec![udp::PacketMetadata::EMPTY; 4],
+                    alloc::vec![0u8; 1024],
+                );
+                let tx = udp::PacketBuffer::new(
+                    alloc::vec![udp::PacketMetadata::EMPTY; 4],
+                    alloc::vec![0u8; 1024],
+                );
+                let mut udp_sock = udp::Socket::new(rx, tx);
+                if udp_sock.bind(src_port).is_err() {
+                    return None;
+                }
+                let handle = sockets.add(udp_sock);
+                unsafe {
+                    UDP_SLOTS[slot] = (Some(handle), src_port);
+                }
+                Some(slot)
+            });
+
+            if let Some(slot) = slot {
+                let handle = unsafe { UDP_SLOTS[slot].0.unwrap() };
+                let sock = sockets.get_mut::<udp::Socket>(handle);
+                let ep = IpEndpoint::new(IpAddress::Ipv4(ip_from_u32(dst_ip)), dst_port);
+                let _ = sock.send_slice(data, ep);
+                iface.poll(now(), device, sockets);
+                data_len as u64
+            } else {
+                0
+            }
+        }
+
+        CMD_UDP_RECV => {
+            let port = arg0 as u16;
+            let max_len = (arg1 as usize).min(512);
+
+            let slot = match find_udp_slot(port) {
+                Some(s) => s,
+                None => return 0,
+            };
+            let handle = unsafe { UDP_SLOTS[slot].0.unwrap() };
+
+            // Check buffered data first
+            {
+                let sock = sockets.get_mut::<udp::Socket>(handle);
+                if sock.can_recv() {
+                    let ipc_buf = unsafe {
+                        core::slice::from_raw_parts_mut(
+                            core::ptr::addr_of_mut!(IPC_DATA_BUF) as *mut u8,
+                            max_len,
+                        )
+                    };
+                    if let Ok((n, _)) = sock.recv_slice(ipc_buf) {
+                        return n as u64;
+                    }
+                }
+            }
+
+            // Poll for new data
+            for _ in 0..100 {
+                sys::yield_now();
+                iface.poll(now(), device, sockets);
+                let sock = sockets.get_mut::<udp::Socket>(handle);
+                if sock.can_recv() {
+                    let ipc_buf = unsafe {
+                        core::slice::from_raw_parts_mut(
+                            core::ptr::addr_of_mut!(IPC_DATA_BUF) as *mut u8,
+                            max_len,
+                        )
+                    };
+                    if let Ok((n, _)) = sock.recv_slice(ipc_buf) {
+                        return n as u64;
+                    }
+                }
+            }
+            0
+        }
+
+        CMD_TCP_STATUS => {
+            let conn_id = arg0 as usize;
+            if conn_id >= MAX_TCP {
+                return 0;
+            }
+            match unsafe { TCP_SLOTS[conn_id] } {
+                Some(handle) => {
+                    let sock = sockets.get_mut::<tcp::Socket>(handle);
+                    let recv_avail = sock.recv_queue() as u64;
+                    let connected =
+                        if sock.is_active() && sock.may_send() { 1u64 } else { 0u64 };
+                    recv_avail | (connected << 32)
+                }
+                None => 0,
+            }
+        }
+
+        CMD_NET_MIRROR => {
+            NET_MIRROR.store(arg0, Ordering::Release);
+            if arg0 != 0 {
+                print(b"NET: packet mirroring ENABLED\n");
+            } else {
+                print(b"NET: packet mirroring DISABLED\n");
+            }
+            0
+        }
+
+        _ => (-1i64) as u64,
+    }
+}
+
+// =============================================================================
+// IPC handler thread — blocks on recv, posts to atomic queue
+// =============================================================================
+
 #[unsafe(no_mangle)]
 pub extern "C" fn ipc_handler_thread() -> ! {
     let ep_cap = IPC_EP_CAP.load(Ordering::Acquire);
@@ -942,42 +1170,40 @@ pub extern "C" fn ipc_handler_thread() -> ! {
         let arg1 = msg.regs[1];
         let arg2 = msg.regs[2];
 
-        // For commands that pass data, copy from caller's regs into IPC_DATA_BUF.
-        // (The caller writes data pointer + len; we need to read from the shared
-        //  address space. Since we're in the same AS as the net main loop, we
-        //  can just copy the data if it's in our address space.)
-        // For DNS_QUERY: arg0 = name_ptr (in caller's AS!), arg1 = name_len.
-        // Problem: caller is in a different AS. We need the data in IPC_DATA_BUF.
-        // Solution: caller writes data into IPC_DATA_BUF before calling.
-        // Actually, the IPC message regs can carry small data inline.
-        // For DNS: name fits in 8 regs * 8 bytes = 64 bytes (enough for hostnames).
+        // Copy inline data from IPC regs to shared buffer
         if cmd == CMD_DNS_QUERY {
-            // Name is packed in regs[2..] (up to 48 bytes).
-            let name_len = arg1 as usize;
-            let avail = name_len.min(48);
+            let avail = (arg1 as usize).min(48);
             unsafe {
                 let src = &msg.regs[2] as *const u64 as *const u8;
-                core::ptr::copy_nonoverlapping(src, core::ptr::addr_of_mut!(IPC_DATA_BUF) as *mut u8, avail);
+                core::ptr::copy_nonoverlapping(
+                    src,
+                    core::ptr::addr_of_mut!(IPC_DATA_BUF) as *mut u8,
+                    avail,
+                );
             }
         } else if cmd == CMD_TCP_SEND {
-            // Data packed in regs[3..] (up to 40 bytes inline).
-            let data_len = arg2 as usize;
-            let avail = data_len.min(40);
+            let avail = (arg2 as usize).min(40);
             unsafe {
                 let src = &msg.regs[3] as *const u64 as *const u8;
-                core::ptr::copy_nonoverlapping(src, core::ptr::addr_of_mut!(IPC_DATA_BUF) as *mut u8, avail);
+                core::ptr::copy_nonoverlapping(
+                    src,
+                    core::ptr::addr_of_mut!(IPC_DATA_BUF) as *mut u8,
+                    avail,
+                );
             }
         } else if cmd == CMD_UDP_SENDTO {
-            // Data packed in regs[4..] (up to 32 bytes inline).
-            let data_len = msg.regs[3] as usize;
-            let avail = data_len.min(32);
+            let avail = (msg.regs[3] as usize).min(32);
             unsafe {
                 let src = &msg.regs[4] as *const u64 as *const u8;
-                core::ptr::copy_nonoverlapping(src, core::ptr::addr_of_mut!(IPC_DATA_BUF) as *mut u8, avail);
+                core::ptr::copy_nonoverlapping(
+                    src,
+                    core::ptr::addr_of_mut!(IPC_DATA_BUF) as *mut u8,
+                    avail,
+                );
             }
         }
 
-        // Post command to main loop.
+        // Post command
         IPC_ARG0.store(arg0, Ordering::Release);
         IPC_ARG1.store(arg1, Ordering::Release);
         IPC_ARG2.store(arg2, Ordering::Release);
@@ -985,7 +1211,7 @@ pub extern "C" fn ipc_handler_thread() -> ! {
         IPC_RESULT.store(0, Ordering::Release);
         IPC_CMD.store(cmd, Ordering::Release);
 
-        // Wait for main loop to process (IPC_CMD becomes 0).
+        // Wait for main loop to process
         loop {
             if IPC_CMD.load(Ordering::Acquire) == 0 {
                 break;
@@ -995,141 +1221,32 @@ pub extern "C" fn ipc_handler_thread() -> ! {
 
         let result = IPC_RESULT.load(Ordering::Acquire);
 
-        // Build reply.
+        // Build reply
         let mut reply = IpcMsg::empty();
         reply.regs[0] = result;
 
-        // For TCP_RECV / UDP_RECV, copy data back into reply regs.
-        // Put byte count in tag, use all 8 regs for data (64 bytes max).
+        // TCP_RECV / UDP_RECV: copy data into reply regs
         if (cmd == CMD_TCP_RECV || cmd == CMD_UDP_RECV) && result > 0 {
-            reply.tag = result; // byte count in tag
-            reply.regs[0] = result; // also in regs[0] for backward compat
-            let n = (result as usize).min(64); // 8 regs * 8 bytes
+            reply.tag = result;
+            reply.regs[0] = result;
+            let n = (result as usize).min(64);
             unsafe {
                 let dst = &mut reply.regs[0] as *mut u64 as *mut u8;
-                core::ptr::copy_nonoverlapping(core::ptr::addr_of!(IPC_DATA_BUF) as *const u8, dst, n);
+                core::ptr::copy_nonoverlapping(
+                    core::ptr::addr_of!(IPC_DATA_BUF) as *const u8,
+                    dst,
+                    n,
+                );
             }
         }
 
-        // For TCP_STATUS, unpack the packed result into two regs.
+        // TCP_STATUS: unpack into two regs
         if cmd == CMD_TCP_STATUS {
-            reply.regs[0] = result & 0xFFFFFFFF;        // recv_avail
-            reply.regs[1] = result >> 32;                // connected
+            reply.regs[0] = result & 0xFFFFFFFF;
+            reply.regs[1] = result >> 32;
         }
 
         let _ = sys::send(ep_cap, &reply);
-    }
-}
-
-fn next_ip_id(id: &mut u16) -> u16 {
-    let v = *id;
-    *id = id.wrapping_add(1);
-    v
-}
-
-fn handle_arp(
-    net: &mut VirtioNet,
-    arp_table: &mut sotos_net::arp::ArpTable,
-    our_mac: &[u8; 6],
-    data: &[u8],
-    _ip_id: &mut u16,
-) {
-    if let Some(pkt) = sotos_net::arp::parse(data) {
-        if let Some(reply_arp) = sotos_net::arp::handle(arp_table, &pkt, DEFAULT_IP, our_mac) {
-            let tx = unsafe { &mut *core::ptr::addr_of_mut!(TX_FRAME) };
-            let tx_len = sotos_net::eth::build(
-                tx, &pkt.sender_mac, our_mac,
-                sotos_net::eth::ETHERTYPE_ARP, &reply_arp,
-            );
-            if tx_len > 0 {
-                let _ = net.transmit(&tx[..tx_len]);
-            }
-        }
-    }
-}
-
-fn handle_ip(
-    net: &mut VirtioNet,
-    arp_table: &mut sotos_net::arp::ArpTable,
-    udp_table: &mut sotos_net::udp::UdpTable,
-    tcp_table: &mut sotos_net::tcp::TcpTable,
-    our_mac: &[u8; 6],
-    data: &[u8],
-    ip_id: &mut u16,
-) {
-    let (ip_hdr, ip_payload) = match sotos_net::ip::parse(data) {
-        Some(x) => x,
-        None => return,
-    };
-
-    // Only process packets addressed to us.
-    if ip_hdr.dst != DEFAULT_IP {
-        return;
-    }
-
-    match ip_hdr.protocol {
-        sotos_net::ip::PROTO_ICMP => {
-            // Echo replies are handled inline by CMD_PING / CMD_TRACEROUTE_HOP.
-            // Handle inbound ICMP: echo requests (ping) and echo replies.
-            if sotos_net::icmp::is_echo_reply(ip_payload).is_none() {
-                let proto_buf = unsafe { &mut *core::ptr::addr_of_mut!(PROTO_BUF) };
-                if let Some(icmp_len) = sotos_net::icmp::handle(ip_payload, proto_buf) {
-                    send_ip_reply(net, arp_table, our_mac, ip_hdr.src,
-                        sotos_net::ip::PROTO_ICMP, ip_id, &proto_buf[..icmp_len]);
-                }
-            }
-        }
-        sotos_net::ip::PROTO_UDP => {
-            if let Some((udp_hdr, udp_payload)) = sotos_net::udp::parse(ip_payload) {
-                if udp_table.is_bound(udp_hdr.dst_port) {
-                    // Queue the datagram for IPC-based recv.
-                    udp_table.handle_rx(udp_hdr.dst_port, ip_hdr.src, udp_hdr.src_port, udp_payload);
-                }
-            }
-        }
-        sotos_net::ip::PROTO_TCP => {
-            let proto_buf = unsafe { &mut *core::ptr::addr_of_mut!(PROTO_BUF) };
-            if let Some(seg_len) = tcp_table.handle_segment(
-                ip_hdr.src, DEFAULT_IP, ip_payload, proto_buf,
-            ) {
-                send_ip_reply(net, arp_table, our_mac, ip_hdr.src,
-                    sotos_net::ip::PROTO_TCP, ip_id, &proto_buf[..seg_len]);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn send_ip_reply(
-    net: &mut VirtioNet,
-    arp_table: &sotos_net::arp::ArpTable,
-    our_mac: &[u8; 6],
-    dst_ip: u32,
-    protocol: u8,
-    ip_id: &mut u16,
-    transport_data: &[u8],
-) {
-    let ip_buf = unsafe { &mut *core::ptr::addr_of_mut!(IP_BUF) };
-    let ip_len = sotos_net::ip::build(
-        ip_buf, DEFAULT_IP, dst_ip, protocol, next_ip_id(ip_id), transport_data,
-    );
-    if ip_len == 0 { return; }
-
-    // Resolve destination MAC: if on our subnet use direct, else gateway.
-    let next_hop = if (dst_ip & DEFAULT_SUBNET) == (DEFAULT_IP & DEFAULT_SUBNET) {
-        dst_ip
-    } else {
-        DEFAULT_GATEWAY
-    };
-    let dst_mac = arp_table.lookup(next_hop).unwrap_or(sotos_net::eth::BROADCAST_MAC);
-
-    let tx = unsafe { &mut *core::ptr::addr_of_mut!(TX_FRAME) };
-    let tx_len = sotos_net::eth::build(
-        tx, &dst_mac, our_mac,
-        sotos_net::eth::ETHERTYPE_IPV4, &ip_buf[..ip_len],
-    );
-    if tx_len > 0 {
-        let _ = net.transmit(&tx[..tx_len]);
     }
 }
 
@@ -1143,5 +1260,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         print_u32(loc.line());
     }
     print(b"\n");
-    loop { sys::yield_now(); }
+    loop {
+        sys::yield_now();
+    }
 }
