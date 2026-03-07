@@ -243,7 +243,10 @@ pub const ERANGE: i64  = e::ERANGE as i64;
 pub const ENOSYS: i64  = e::ENOSYS as i64;
 pub const ENOTEMPTY: i64 = e::ENOTEMPTY as i64;
 pub const EDESTADDRREQ: i64 = e::EDESTADDRREQ as i64;
+pub const EAFNOSUPPORT: i64 = e::EAFNOSUPPORT as i64;
+pub const EADDRNOTAVAIL: i64 = e::EADDRNOTAVAIL as i64;
 pub const ETIMEDOUT: i64 = e::ETIMEDOUT as i64;
+pub const ECONNREFUSED: i64 = e::ECONNREFUSED as i64;
 
 // ---------------------------------------------------------------
 // open(2) / openat(2) flags — sourced from linux-raw-sys

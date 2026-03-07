@@ -152,7 +152,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             let child_tid = kernel_tid;
             match sig_dispatch(pid as usize, sig) {
                 1 => break, // terminated
-                2 => { reply_val(ep_cap, -4); continue; } // -EINTR
+                2 => { reply_val(ep_cap, -EINTR); continue; } // -EINTR
                 3 => {
                     if signal_deliver(ep_cap, pid as usize, sig, child_tid, 0, false) {
                         continue;
@@ -173,7 +173,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                 let len = msg.regs[2] as usize;
 
                 if fd >= MAX_FDS || fds[fd].kind == FdKind::Free {
-                    reply_val(ep_cap, -9); // -EBADF
+                    reply_val(ep_cap, -EBADF); // -EBADF
                     continue;
                 }
 
@@ -187,13 +187,13 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                             // Check for pending signal while polling stdin
                             let s = sig_dequeue(pid as usize);
                             if s != 0 && sig_dispatch(pid as usize, s) >= 1 {
-                                reply_val(ep_cap, -4); // -EINTR
+                                reply_val(ep_cap, -EINTR); // -EINTR
                                 break;
                             }
                             match unsafe { kb_read_char() } {
                                 Some(0x03) => {
                                     // Ctrl+C
-                                    reply_val(ep_cap, -4);
+                                    reply_val(ep_cap, -EINTR);
                                     break;
                                 }
                                 Some(ch) => {
@@ -233,21 +233,21 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                                 let dst = unsafe { core::slice::from_raw_parts_mut(buf_ptr as *mut u8, len) };
                                 match vfs.read(vfs_fd, dst) {
                                     Ok(n) => reply_val(ep_cap, n as i64),
-                                    Err(_) => reply_val(ep_cap, -9),
+                                    Err(_) => reply_val(ep_cap, -EBADF),
                                 }
                             }
-                            None => reply_val(ep_cap, -9),
+                            None => reply_val(ep_cap, -EBADF),
                         }
                     }
                     FdKind::Stdout => {
-                        reply_val(ep_cap, -9); // can't read stdout
+                        reply_val(ep_cap, -EBADF); // can't read stdout
                     }
                     FdKind::PipeRead => {
                         // Simple pipe: return 0 (EOF) — real data flow needs shared memory
                         reply_val(ep_cap, 0);
                     }
                     FdKind::PipeWrite => {
-                        reply_val(ep_cap, -9); // can't read from write end
+                        reply_val(ep_cap, -EBADF); // can't read from write end
                     }
                     FdKind::Socket => {
                         // Read from socket → TCP recv via net service.
@@ -279,7 +279,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                         let port = fds[fd].udp_local_port;
                         let recv_len = len.min(56);
                         if net_cap == 0 || port == 0 {
-                            reply_val(ep_cap, -9);
+                            reply_val(ep_cap, -EBADF);
                         } else {
                             let req = sotos_common::IpcMsg {
                                 tag: NET_CMD_UDP_RECV,
@@ -322,7 +322,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                         }
                         reply_val(ep_cap, n as i64);
                     }
-                    _ => reply_val(ep_cap, -9),
+                    _ => reply_val(ep_cap, -EBADF),
                 }
             }
 
@@ -333,7 +333,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                 let len = msg.regs[2] as usize;
 
                 if fd >= MAX_FDS || fds[fd].kind == FdKind::Free {
-                    reply_val(ep_cap, -9);
+                    reply_val(ep_cap, -EBADF);
                     continue;
                 }
 
@@ -353,10 +353,10 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                                 let data = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, len) };
                                 match vfs.write(vfs_fd, data) {
                                     Ok(n) => reply_val(ep_cap, n as i64),
-                                    Err(_) => reply_val(ep_cap, -9),
+                                    Err(_) => reply_val(ep_cap, -EBADF),
                                 }
                             }
-                            None => reply_val(ep_cap, -9),
+                            None => reply_val(ep_cap, -EBADF),
                         }
                     }
                     FdKind::Socket => {
@@ -375,7 +375,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                         }
                         match sys::call_timeout(net_cap, &req, 500) {
                             Ok(resp) => reply_val(ep_cap, resp.regs[0] as i64),
-                            Err(_) => reply_val(ep_cap, -5),
+                            Err(_) => reply_val(ep_cap, -EIO),
                         }
                     }
                     FdKind::SocketUdp => {
@@ -385,7 +385,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                         let remote_port = fds[fd].udp_remote_port;
                         let src_port = fds[fd].udp_local_port;
                         if net_cap == 0 || remote_ip == 0 {
-                            reply_val(ep_cap, -89); // -EDESTADDRREQ
+                            reply_val(ep_cap, -EDESTADDRREQ); // -EDESTADDRREQ
                         } else {
                             let send_len = len.min(32);
                             let mut req = sotos_common::IpcMsg {
@@ -399,7 +399,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                             }
                             match sys::call_timeout(net_cap, &req, 500) {
                                 Ok(resp) => reply_val(ep_cap, resp.regs[0] as i64),
-                                Err(_) => reply_val(ep_cap, -5),
+                                Err(_) => reply_val(ep_cap, -EIO),
                             }
                         }
                     }
@@ -408,7 +408,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                         reply_val(ep_cap, len as i64);
                     }
                     _ => {
-                        reply_val(ep_cap, -9); // can't write to stdin/dirlist
+                        reply_val(ep_cap, -EBADF); // can't write to stdin/dirlist
                     }
                 }
             }
@@ -425,7 +425,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                 let new_fd = match alloc_fd(&fds, 3) {
                     Some(f) => f,
                     None => {
-                        reply_val(ep_cap, -24); // -EMFILE
+                        reply_val(ep_cap, -EMFILE); // -EMFILE
                         continue;
                     }
                 };
@@ -494,7 +494,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                         dir_buf[..content.len()].copy_from_slice(content);
                         dir_len = content.len();
                     } else {
-                        reply_val(ep_cap, -2); // -ENOENT
+                        reply_val(ep_cap, -ENOENT); // -ENOENT
                         continue;
                     }
                     fds[new_fd] = FdEntry::new(FdKind::DirList, 0, 0);
@@ -604,15 +604,15 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                             if after == b"/status" || after.is_empty() {
                                 dir_len = format_proc_status(&mut dir_buf, n as usize);
                             } else {
-                                reply_val(ep_cap, -2); // -ENOENT
+                                reply_val(ep_cap, -ENOENT); // -ENOENT
                                 continue;
                             }
                         } else {
-                            reply_val(ep_cap, -2);
+                            reply_val(ep_cap, -ENOENT);
                             continue;
                         }
                     } else {
-                        reply_val(ep_cap, -2);
+                        reply_val(ep_cap, -ENOENT);
                         continue;
                     }
 
@@ -638,10 +638,10 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                                         fds[new_fd] = FdEntry::new(FdKind::DirList, 0, 0);
                                         reply_val(ep_cap, new_fd as i64);
                                     }
-                                    Err(_) => reply_val(ep_cap, -28), // -ENOSPC
+                                    Err(_) => reply_val(ep_cap, -ENOSPC), // -ENOSPC
                                 }
                             }
-                            None => reply_val(ep_cap, -2),
+                            None => reply_val(ep_cap, -ENOENT),
                         }
                         continue;
                     } else if snap_cmd == b"list" {
@@ -690,13 +690,13 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                                                 fds[new_fd] = FdEntry::new(FdKind::DirList, 0, 0);
                                                 reply_val(ep_cap, new_fd as i64);
                                             }
-                                            Err(_) => reply_val(ep_cap, -5), // -EIO
+                                            Err(_) => reply_val(ep_cap, -EIO), // -EIO
                                         }
                                     }
-                                    None => reply_val(ep_cap, -2), // -ENOENT
+                                    None => reply_val(ep_cap, -ENOENT), // -ENOENT
                                 }
                             }
-                            None => reply_val(ep_cap, -2),
+                            None => reply_val(ep_cap, -ENOENT),
                         }
                         continue;
                     } else if starts_with(snap_cmd, b"delete/") && snap_cmd.len() > 7 {
@@ -714,17 +714,17 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                                                 fds[new_fd] = FdEntry::new(FdKind::DirList, 0, 0);
                                                 reply_val(ep_cap, new_fd as i64);
                                             }
-                                            Err(_) => reply_val(ep_cap, -5),
+                                            Err(_) => reply_val(ep_cap, -EIO),
                                         }
                                     }
-                                    None => reply_val(ep_cap, -2),
+                                    None => reply_val(ep_cap, -ENOENT),
                                 }
                             }
-                            None => reply_val(ep_cap, -2),
+                            None => reply_val(ep_cap, -ENOENT),
                         }
                         continue;
                     } else {
-                        reply_val(ep_cap, -2);
+                        reply_val(ep_cap, -ENOENT);
                         continue;
                     }
                 }
@@ -758,10 +758,10 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                                 fds[new_fd] = FdEntry::new(FdKind::VfsFile, vfs_fd, 0);
                                 reply_val(ep_cap, new_fd as i64);
                             }
-                            Err(_) => reply_val(ep_cap, -2),
+                            Err(_) => reply_val(ep_cap, -ENOENT),
                         }
                     }
-                    None => reply_val(ep_cap, -2),
+                    None => reply_val(ep_cap, -ENOENT),
                 }
             }
 
@@ -769,7 +769,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             SYS_CLOSE => {
                 let fd = msg.regs[0] as usize;
                 if fd >= MAX_FDS || fds[fd].kind == FdKind::Free {
-                    reply_val(ep_cap, -9);
+                    reply_val(ep_cap, -EBADF);
                     continue;
                 }
 
@@ -827,13 +827,13 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                                         write_linux_stat(stat_ptr, oid, entry.size, is_dir);
                                         reply_val(ep_cap, 0);
                                     }
-                                    None => reply_val(ep_cap, -2),
+                                    None => reply_val(ep_cap, -ENOENT),
                                 }
                             }
-                            Err(_) => reply_val(ep_cap, -2),
+                            Err(_) => reply_val(ep_cap, -ENOENT),
                         }
                     }
-                    None => reply_val(ep_cap, -2),
+                    None => reply_val(ep_cap, -ENOENT),
                 }
             }
 
@@ -843,7 +843,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                 let stat_ptr = msg.regs[1];
 
                 if fd >= MAX_FDS || fds[fd].kind == FdKind::Free {
-                    reply_val(ep_cap, -9);
+                    reply_val(ep_cap, -EBADF);
                     continue;
                 }
 
@@ -869,7 +869,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                                 write_linux_stat(stat_ptr, oid, size, false);
                                 reply_val(ep_cap, 0);
                             }
-                            None => reply_val(ep_cap, -9),
+                            None => reply_val(ep_cap, -EBADF),
                         }
                     }
                     FdKind::Socket => {
@@ -904,7 +904,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                         buf[24..28].copy_from_slice(&mode.to_le_bytes());
                         reply_val(ep_cap, 0);
                     }
-                    FdKind::EpollFd | FdKind::Free => reply_val(ep_cap, -9),
+                    FdKind::EpollFd | FdKind::Free => reply_val(ep_cap, -EBADF),
                 }
             }
 
@@ -915,7 +915,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                 let whence = msg.regs[2] as u32;
 
                 if fd >= MAX_FDS || fds[fd].kind != FdKind::VfsFile {
-                    reply_val(ep_cap, -9);
+                    reply_val(ep_cap, -EBADF);
                     continue;
                 }
 
@@ -938,14 +938,14 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                                 (size as i64 + offset) as u64
                             }
                             _ => {
-                                reply_val(ep_cap, -22); // -EINVAL
+                                reply_val(ep_cap, -EINVAL); // -EINVAL
                                 continue;
                             }
                         };
                         let _ = vfs.seek(vfs_fd, new_pos);
                         reply_val(ep_cap, new_pos as i64);
                     }
-                    None => reply_val(ep_cap, -9),
+                    None => reply_val(ep_cap, -EBADF),
                 }
             }
 
@@ -963,11 +963,11 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                 // Validate: file-backed mmap needs a valid VfsFile fd
                 if !is_anon {
                     if mmap_fd >= MAX_FDS || fds[mmap_fd].kind != FdKind::VfsFile {
-                        reply_val(ep_cap, -9); // -EBADF
+                        reply_val(ep_cap, -EBADF); // -EBADF
                         continue;
                     }
                     if vfs_opt.is_none() {
-                        reply_val(ep_cap, -19); // -ENODEV
+                        reply_val(ep_cap, -ENODEV); // -ENODEV
                         continue;
                     }
                 }
@@ -985,7 +985,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                     match found {
                         Some(s) => s,
                         None => {
-                            reply_val(ep_cap, -12); // -ENOMEM
+                            reply_val(ep_cap, -ENOMEM); // -ENOMEM
                             continue;
                         }
                     }
@@ -1005,7 +1005,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                     }
                 }
                 if !ok {
-                    reply_val(ep_cap, -12);
+                    reply_val(ep_cap, -ENOMEM);
                     continue;
                 }
 
@@ -1094,7 +1094,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             SYS_DUP => {
                 let oldfd = msg.regs[0] as usize;
                 if oldfd >= MAX_FDS || fds[oldfd].kind == FdKind::Free {
-                    reply_val(ep_cap, -9);
+                    reply_val(ep_cap, -EBADF);
                     continue;
                 }
                 match alloc_fd(&fds, 0) {
@@ -1102,7 +1102,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                         fds[newfd] = fds[oldfd];
                         reply_val(ep_cap, newfd as i64);
                     }
-                    None => reply_val(ep_cap, -24),
+                    None => reply_val(ep_cap, -EMFILE),
                 }
             }
 
@@ -1111,7 +1111,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                 let oldfd = msg.regs[0] as usize;
                 let newfd = msg.regs[1] as usize;
                 if oldfd >= MAX_FDS || fds[oldfd].kind == FdKind::Free || newfd >= MAX_FDS {
-                    reply_val(ep_cap, -9);
+                    reply_val(ep_cap, -EBADF);
                     continue;
                 }
                 // Close newfd if open
@@ -1141,10 +1141,10 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                 // Map guest stack (1 page)
                 let gf = match sys::frame_alloc() {
                     Ok(f) => f,
-                    Err(_) => { reply_val(ep_cap, -12); continue; }
+                    Err(_) => { reply_val(ep_cap, -ENOMEM); continue; }
                 };
                 if sys::map(guest_stack, gf, MAP_WRITABLE).is_err() {
-                    reply_val(ep_cap, -12);
+                    reply_val(ep_cap, -ENOMEM);
                     continue;
                 }
 
@@ -1160,14 +1160,14 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                     }
                 }
                 if !hok {
-                    reply_val(ep_cap, -12);
+                    reply_val(ep_cap, -ENOMEM);
                     continue;
                 }
 
                 // Create child endpoint
                 let child_ep = match sys::endpoint_create() {
                     Ok(e) => e,
-                    Err(_) => { reply_val(ep_cap, -12); continue; }
+                    Err(_) => { reply_val(ep_cap, -ENOMEM); continue; }
                 };
 
                 // Assign PID
@@ -1190,7 +1190,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                     handler_stack + 0x4000,
                 ).is_err() {
                     CHILD_SETUP_READY.store(0, Ordering::Release);
-                    reply_val(ep_cap, -12);
+                    reply_val(ep_cap, -ENOMEM);
                     continue;
                 }
 
@@ -1202,7 +1202,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                 // Spawn child guest thread with redirect pre-set (no race)
                 let child_thread = match sys::thread_create_redirected(child_fn, guest_stack + 0x1000, child_ep) {
                     Ok(t) => t,
-                    Err(_) => { reply_val(ep_cap, -12); continue; }
+                    Err(_) => { reply_val(ep_cap, -ENOMEM); continue; }
                 };
                 let _ = sys::signal_entry(child_thread, vdso::SIGNAL_TRAMPOLINE_ADDR);
 
@@ -1226,7 +1226,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             SYS_WAIT4 => {
                 let target_pid = msg.regs[0] as i64;
                 if target_pid <= 0 || target_pid as usize > MAX_PROCS {
-                    reply_val(ep_cap, -10); // -ECHILD
+                    reply_val(ep_cap, -ECHILD); // -ECHILD
                     continue;
                 }
                 let idx = target_pid as usize - 1;
@@ -1244,7 +1244,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                 let target = msg.regs[0] as usize;
                 let sig = msg.regs[1];
                 if target == 0 || target > MAX_PROCS || PROC_STATE[target - 1].load(Ordering::Acquire) == 0 {
-                    reply_val(ep_cap, -3); // -ESRCH
+                    reply_val(ep_cap, -ESRCH); // -ESRCH
                     continue;
                 }
                 sig_send(target, sig);
@@ -1303,7 +1303,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                         }
                         reply_val(ep_cap, buf_ptr as i64);
                     }
-                    None => reply_val(ep_cap, -2),
+                    None => reply_val(ep_cap, -ENOENT),
                 }
             }
 
@@ -1323,13 +1323,13 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                                         cwd_oid = oid;
                                         reply_val(ep_cap, 0);
                                     }
-                                    _ => reply_val(ep_cap, -20), // -ENOTDIR
+                                    _ => reply_val(ep_cap, -ENOTDIR), // -ENOTDIR
                                 }
                             }
-                            Err(_) => reply_val(ep_cap, -2), // -ENOENT
+                            Err(_) => reply_val(ep_cap, -ENOENT), // -ENOENT
                         }
                     }
-                    None => reply_val(ep_cap, -2),
+                    None => reply_val(ep_cap, -ENOENT),
                 }
             }
 
@@ -1345,10 +1345,10 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                         vfs.cwd = cwd_oid;
                         match vfs.mkdir(name) {
                             Ok(_) => reply_val(ep_cap, 0),
-                            Err(_) => reply_val(ep_cap, -2),
+                            Err(_) => reply_val(ep_cap, -ENOENT),
                         }
                     }
-                    None => reply_val(ep_cap, -2),
+                    None => reply_val(ep_cap, -ENOENT),
                 }
             }
 
@@ -1364,10 +1364,10 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                         vfs.cwd = cwd_oid;
                         match vfs.rmdir(name) {
                             Ok(()) => reply_val(ep_cap, 0),
-                            Err(_) => reply_val(ep_cap, -2),
+                            Err(_) => reply_val(ep_cap, -ENOENT),
                         }
                     }
-                    None => reply_val(ep_cap, -2),
+                    None => reply_val(ep_cap, -ENOENT),
                 }
             }
 
@@ -1383,10 +1383,10 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                         vfs.cwd = cwd_oid;
                         match vfs.delete(name) {
                             Ok(()) => reply_val(ep_cap, 0),
-                            Err(_) => reply_val(ep_cap, -2),
+                            Err(_) => reply_val(ep_cap, -ENOENT),
                         }
                     }
-                    None => reply_val(ep_cap, -2),
+                    None => reply_val(ep_cap, -ENOENT),
                 }
             }
 
@@ -1401,7 +1401,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                 let len = msg.regs[1] as usize;
                 let prot = msg.regs[2]; // PROT_READ=1, PROT_WRITE=2, PROT_EXEC=4
                 if addr & 0xFFF != 0 {
-                    reply_val(ep_cap, -22); // -EINVAL
+                    reply_val(ep_cap, -EINVAL); // -EINVAL
                 } else {
                     let pages = (len + 0xFFF) / 0x1000;
                     let mut flags: u64 = 0;
@@ -1430,14 +1430,14 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                             ws[4..8].copy_from_slice(&[0; 4]); // xpixel, ypixel
                             reply_val(ep_cap, 0);
                         } else {
-                            reply_val(ep_cap, -22);
+                            reply_val(ep_cap, -EINVAL);
                         }
                     }
                     // FIONREAD — bytes available for reading
                     0x541B => {
                         reply_val(ep_cap, 0);
                     }
-                    _ => reply_val(ep_cap, -25), // -ENOTTY
+                    _ => reply_val(ep_cap, -ENOTTY), // -ENOTTY
                 }
             }
 
@@ -1447,7 +1447,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                 let iov_ptr = msg.regs[1];
                 let iovcnt = msg.regs[2] as usize;
                 if fd >= MAX_FDS || fds[fd].kind == FdKind::Free {
-                    reply_val(ep_cap, -9); // -EBADF
+                    reply_val(ep_cap, -EBADF); // -EBADF
                 } else {
                     // struct iovec { iov_base: *mut u8, iov_len: usize } = 16 bytes each
                     let mut total: usize = 0;
@@ -1522,10 +1522,10 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                     Some(vfs) => {
                         match vfs.store().resolve_path(name, cwd_oid) {
                             Ok(_) => reply_val(ep_cap, 0),
-                            Err(_) => reply_val(ep_cap, -2), // -ENOENT
+                            Err(_) => reply_val(ep_cap, -ENOENT), // -ENOENT
                         }
                     }
-                    None => reply_val(ep_cap, -2),
+                    None => reply_val(ep_cap, -ENOENT),
                 }
             }
 
@@ -1533,7 +1533,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             SYS_PIPE => {
                 let pfd_ptr = msg.regs[0];
                 if pfd_ptr == 0 || pfd_ptr >= 0x0000_8000_0000_0000 {
-                    reply_val(ep_cap, -14); // -EFAULT
+                    reply_val(ep_cap, -EFAULT); // -EFAULT
                 } else {
                     // Allocate two FDs pointing to a simple pipe
                     match (alloc_fd(&fds, 3), alloc_fd(&fds, 4)) {
@@ -1545,7 +1545,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                             pfd[1] = wfd as i32;
                             reply_val(ep_cap, 0);
                         }
-                        _ => reply_val(ep_cap, -24), // -EMFILE
+                        _ => reply_val(ep_cap, -EMFILE), // -EMFILE
                     }
                 }
             }
@@ -1554,7 +1554,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             SYS_UNAME => {
                 let buf_ptr = msg.regs[0];
                 if buf_ptr == 0 || buf_ptr >= 0x0000_8000_0000_0000 {
-                    reply_val(ep_cap, -14);
+                    reply_val(ep_cap, -EFAULT);
                 } else {
                     // struct utsname: 5 fields of 65 bytes each = 325 bytes
                     let buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr as *mut u8, 325) };
@@ -1581,7 +1581,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                 let cmd = msg.regs[1] as u32;
                 let _arg = msg.regs[2];
                 if fd >= MAX_FDS || fds[fd].kind == FdKind::Free {
-                    reply_val(ep_cap, -9); // -EBADF
+                    reply_val(ep_cap, -EBADF); // -EBADF
                 } else {
                     match cmd {
                         0 => { // F_DUPFD
@@ -1590,14 +1590,14 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                                     fds[newfd] = fds[fd];
                                     reply_val(ep_cap, newfd as i64);
                                 }
-                                None => reply_val(ep_cap, -24),
+                                None => reply_val(ep_cap, -EMFILE),
                             }
                         }
                         1 => reply_val(ep_cap, 0), // F_GETFD → no FD_CLOEXEC
                         2 => reply_val(ep_cap, 0), // F_SETFD → ignore
                         3 => reply_val(ep_cap, 0), // F_GETFL → O_RDONLY
                         4 => reply_val(ep_cap, 0), // F_SETFL → ignore
-                        _ => reply_val(ep_cap, -22), // -EINVAL
+                        _ => reply_val(ep_cap, -EINVAL), // -EINVAL
                     }
                 }
             }
@@ -1618,7 +1618,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                 let _clock_id = msg.regs[0]; // CLOCK_REALTIME=0, CLOCK_MONOTONIC=1
                 let tp_ptr = msg.regs[1];
                 if tp_ptr == 0 || tp_ptr >= 0x0000_8000_0000_0000 {
-                    reply_val(ep_cap, -14);
+                    reply_val(ep_cap, -EFAULT);
                 } else {
                     let tsc = rdtsc();
                     let boot_tsc = BOOT_TSC.load(Ordering::Acquire);
@@ -1655,9 +1655,9 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                 let dirp = msg.regs[1];
                 let count = msg.regs[2] as usize;
                 if fd >= MAX_FDS || fds[fd].kind != FdKind::DirList {
-                    reply_val(ep_cap, -9); // -EBADF
+                    reply_val(ep_cap, -EBADF); // -EBADF
                 } else if dirp == 0 || dirp >= 0x0000_8000_0000_0000 {
-                    reply_val(ep_cap, -14); // -EFAULT
+                    reply_val(ep_cap, -EFAULT); // -EFAULT
                 } else {
                     // If dir_buf is empty, populate it from the VFS
                     if dir_pos >= dir_len {
@@ -1721,7 +1721,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                             fds[newfd] = FdEntry::new(dk, 0, 0);
                             reply_val(ep_cap, newfd as i64);
                         }
-                        None => reply_val(ep_cap, -24),
+                        None => reply_val(ep_cap, -EMFILE),
                     }
                     continue;
                 }
@@ -1740,7 +1740,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                                                     dir_len = 0; dir_pos = 0; // reset for getdents64
                                                     reply_val(ep_cap, newfd as i64);
                                                 }
-                                                None => reply_val(ep_cap, -24),
+                                                None => reply_val(ep_cap, -EMFILE),
                                             }
                                         } else {
                                             match alloc_fd(&fds, 3) {
@@ -1748,11 +1748,11 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                                                     fds[newfd] = FdEntry::new(FdKind::VfsFile, oid as u32, 0);
                                                     reply_val(ep_cap, newfd as i64);
                                                 }
-                                                None => reply_val(ep_cap, -24),
+                                                None => reply_val(ep_cap, -EMFILE),
                                             }
                                         }
                                     }
-                                    None => reply_val(ep_cap, -2),
+                                    None => reply_val(ep_cap, -ENOENT),
                                 }
                             }
                             Err(_) => {
@@ -1766,18 +1766,18 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                                                     fds[newfd] = FdEntry::new(FdKind::VfsFile, oid as u32, 0);
                                                     reply_val(ep_cap, newfd as i64);
                                                 }
-                                                None => reply_val(ep_cap, -24),
+                                                None => reply_val(ep_cap, -EMFILE),
                                             }
                                         }
-                                        Err(_) => reply_val(ep_cap, -2),
+                                        Err(_) => reply_val(ep_cap, -ENOENT),
                                     }
                                 } else {
-                                    reply_val(ep_cap, -2);
+                                    reply_val(ep_cap, -ENOENT);
                                 }
                             }
                         }
                     }
-                    None => reply_val(ep_cap, -2),
+                    None => reply_val(ep_cap, -ENOENT),
                 }
             }
 
@@ -1797,19 +1797,19 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                                         write_linux_stat(stat_ptr, oid, entry.size, entry.is_dir());
                                         reply_val(ep_cap, 0);
                                     }
-                                    None => reply_val(ep_cap, -2),
+                                    None => reply_val(ep_cap, -ENOENT),
                                 }
                             }
-                            Err(_) => reply_val(ep_cap, -2),
+                            Err(_) => reply_val(ep_cap, -ENOENT),
                         }
                     }
-                    None => reply_val(ep_cap, -2),
+                    None => reply_val(ep_cap, -ENOENT),
                 }
             }
 
             // SYS_readlinkat(dirfd, path, buf, bufsiz) — always -EINVAL (no symlinks)
             SYS_READLINKAT => {
-                reply_val(ep_cap, -22); // -EINVAL: no symlinks
+                reply_val(ep_cap, -EINVAL); // -EINVAL: no symlinks
             }
 
             // SYS_faccessat(dirfd, path, mode, flags) — check file accessibility
@@ -1822,10 +1822,10 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                     Some(vfs) => {
                         match vfs.store().resolve_path(name, cwd_oid) {
                             Ok(_) => reply_val(ep_cap, 0),
-                            Err(_) => reply_val(ep_cap, -2),
+                            Err(_) => reply_val(ep_cap, -ENOENT),
                         }
                     }
-                    None => reply_val(ep_cap, -2),
+                    None => reply_val(ep_cap, -ENOENT),
                 }
             }
 
@@ -1847,7 +1847,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                 let buf_ptr = msg.regs[0];
                 let buflen = msg.regs[1] as usize;
                 if buf_ptr == 0 || buf_ptr >= 0x0000_8000_0000_0000 {
-                    reply_val(ep_cap, -14);
+                    reply_val(ep_cap, -EFAULT);
                 } else {
                     let len = buflen.min(256); // cap to prevent huge writes
                     let buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr as *mut u8, len) };
@@ -1872,7 +1872,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                 if domain == 2 && (base_type == 1 || base_type == 2) {
                     let net_cap = NET_EP_CAP.load(Ordering::Acquire);
                     if net_cap == 0 {
-                        reply_val(ep_cap, -99); // -EADDRNOTAVAIL
+                        reply_val(ep_cap, -EADDRNOTAVAIL); // -EADDRNOTAVAIL
                     } else {
                         match alloc_fd(&fds, 3) {
                             Some(fd) => {
@@ -1887,7 +1887,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                                 }
                                 reply_val(ep_cap, fd as i64);
                             }
-                            None => reply_val(ep_cap, -24), // -EMFILE
+                            None => reply_val(ep_cap, -EMFILE), // -EMFILE
                         }
                     }
                 } else if domain == 2 && base_type == 3 {
@@ -1897,10 +1897,10 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                             fds[fd] = FdEntry::new(FdKind::SocketUdp, 0, 0xFFFF);
                             reply_val(ep_cap, fd as i64);
                         }
-                        None => reply_val(ep_cap, -24),
+                        None => reply_val(ep_cap, -EMFILE),
                     }
                 } else {
-                    reply_val(ep_cap, -97); // -EAFNOSUPPORT
+                    reply_val(ep_cap, -EAFNOSUPPORT); // -EAFNOSUPPORT
                 }
             }
 
@@ -1911,7 +1911,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                 let _addrlen = msg.regs[2];
 
                 if fd >= MAX_FDS || (fds[fd].kind != FdKind::Socket && fds[fd].kind != FdKind::SocketUdp) {
-                    reply_val(ep_cap, -9); // -EBADF
+                    reply_val(ep_cap, -EBADF); // -EBADF
                 } else {
                     // Parse sockaddr_in: family(2) + port(2) + ip(4)
                     let sa = unsafe { core::slice::from_raw_parts(sockaddr_ptr as *const u8, 8) };
@@ -1927,7 +1927,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                         // TCP connect
                         let net_cap = NET_EP_CAP.load(Ordering::Acquire);
                         if net_cap == 0 {
-                            reply_val(ep_cap, -99);
+                            reply_val(ep_cap, -EADDRNOTAVAIL);
                         } else {
                             let req = sotos_common::IpcMsg {
                                 tag: NET_CMD_TCP_CONNECT,
@@ -1940,10 +1940,10 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                                         fds[fd].net_conn_id = conn_id as u32;
                                         reply_val(ep_cap, 0);
                                     } else {
-                                        reply_val(ep_cap, -111); // -ECONNREFUSED
+                                        reply_val(ep_cap, -ECONNREFUSED); // -ECONNREFUSED
                                     }
                                 }
-                                Err(_) => reply_val(ep_cap, -111),
+                                Err(_) => reply_val(ep_cap, -ECONNREFUSED),
                             }
                         }
                     }
@@ -1960,11 +1960,11 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                 let dest_ptr = msg.regs[4]; // sockaddr_in* (for UDP)
 
                 if fd >= MAX_FDS || (fds[fd].kind != FdKind::Socket && fds[fd].kind != FdKind::SocketUdp) {
-                    reply_val(ep_cap, -9);
+                    reply_val(ep_cap, -EBADF);
                 } else if fds[fd].kind == FdKind::SocketUdp {
                     // UDP sendto
                     let net_cap = NET_EP_CAP.load(Ordering::Acquire);
-                    if net_cap == 0 { reply_val(ep_cap, -99); continue; }
+                    if net_cap == 0 { reply_val(ep_cap, -EADDRNOTAVAIL); continue; }
 
                     // Determine destination: from dest_addr or from connect()
                     let (dst_ip, dst_port) = if dest_ptr != 0 {
@@ -1988,7 +1988,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                     }
                     match sys::call_timeout(net_cap, &req, 500) {
                         Ok(resp) => reply_val(ep_cap, resp.regs[0] as i64),
-                        Err(_) => reply_val(ep_cap, -5),
+                        Err(_) => reply_val(ep_cap, -EIO),
                     }
                 } else {
                     // TCP sendto (same as before)
@@ -2006,7 +2006,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                     }
                     match sys::call_timeout(net_cap, &req, 500) {
                         Ok(resp) => reply_val(ep_cap, resp.regs[0] as i64),
-                        Err(_) => reply_val(ep_cap, -5),
+                        Err(_) => reply_val(ep_cap, -EIO),
                     }
                 }
             }
@@ -2019,11 +2019,11 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                 let len = msg.regs[2] as usize;
 
                 if fd >= MAX_FDS || (fds[fd].kind != FdKind::Socket && fds[fd].kind != FdKind::SocketUdp) {
-                    reply_val(ep_cap, -9);
+                    reply_val(ep_cap, -EBADF);
                 } else if fds[fd].kind == FdKind::SocketUdp {
                     // UDP recvfrom
                     let net_cap = NET_EP_CAP.load(Ordering::Acquire);
-                    if net_cap == 0 { reply_val(ep_cap, -99); continue; }
+                    if net_cap == 0 { reply_val(ep_cap, -EADDRNOTAVAIL); continue; }
                     let src_port = fds[fd].udp_local_port;
                     let recv_len = len.min(48); // Max inline in 6 regs
                     let req = sotos_common::IpcMsg {
@@ -2143,7 +2143,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                 let idx = pid as usize - 1;
                 // SIGKILL(9) and SIGSTOP(19) cannot be caught
                 if signo == 9 || signo == 19 {
-                    reply_val(ep_cap, -22); continue; // -EINVAL
+                    reply_val(ep_cap, -EINVAL); continue; // -EINVAL
                 }
                 // Write old handler to oldact
                 if oldact != 0 && oldact < 0x0000_8000_0000_0000 {
@@ -2239,7 +2239,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                 let iov_ptr = msg.regs[1];
                 let iovcnt = msg.regs[2] as usize;
                 if fd >= MAX_FDS || fds[fd].kind == FdKind::Free {
-                    reply_val(ep_cap, -9);
+                    reply_val(ep_cap, -EBADF);
                 } else if fds[fd].kind == FdKind::Stdin {
                     // Stdin readv: read into first iovec only
                     if iovcnt > 0 && iov_ptr < 0x0000_8000_0000_0000 {
@@ -2260,7 +2260,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                         reply_val(ep_cap, 0);
                     }
                 } else {
-                    reply_val(ep_cap, -9); // other FD types: not yet
+                    reply_val(ep_cap, -EBADF); // other FD types: not yet
                 }
             }
 
@@ -2285,13 +2285,13 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                                         let _ = vfs.store_mut().delete(oid);
                                         reply_val(ep_cap, 0);
                                     }
-                                    Err(_) => reply_val(ep_cap, -2),
+                                    Err(_) => reply_val(ep_cap, -ENOENT),
                                 }
                             }
-                            Err(_) => reply_val(ep_cap, -2),
+                            Err(_) => reply_val(ep_cap, -ENOENT),
                         }
                     }
-                    None => reply_val(ep_cap, -2),
+                    None => reply_val(ep_cap, -ENOENT),
                 }
             }
 
@@ -2532,7 +2532,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                 let fd = msg.regs[0] as usize;
                 let sockaddr_ptr = msg.regs[1];
                 if fd >= MAX_FDS || (fds[fd].kind != FdKind::Socket && fds[fd].kind != FdKind::SocketUdp) {
-                    reply_val(ep_cap, -9);
+                    reply_val(ep_cap, -EBADF);
                 } else {
                     // For UDP: store the local port from sockaddr_in
                     let sa = unsafe { core::slice::from_raw_parts(sockaddr_ptr as *const u8, 8) };
@@ -2575,7 +2575,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                 let sa_ptr = msg.regs[1];
                 let alen_ptr = msg.regs[2];
                 if fd >= MAX_FDS || (fds[fd].kind != FdKind::Socket && fds[fd].kind != FdKind::SocketUdp) {
-                    reply_val(ep_cap, -9);
+                    reply_val(ep_cap, -EBADF);
                 } else {
                     // Return AF_INET, local port, 0.0.0.0
                     let sa = unsafe { core::slice::from_raw_parts_mut(sa_ptr as *mut u8, 16) };
@@ -2596,7 +2596,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                 let sa_ptr = msg.regs[1];
                 let alen_ptr = msg.regs[2];
                 if fd >= MAX_FDS || (fds[fd].kind != FdKind::Socket && fds[fd].kind != FdKind::SocketUdp) {
-                    reply_val(ep_cap, -9);
+                    reply_val(ep_cap, -EBADF);
                 } else {
                     let sa = unsafe { core::slice::from_raw_parts_mut(sa_ptr as *mut u8, 16) };
                     for b in sa.iter_mut() { *b = 0; }
@@ -2636,7 +2636,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             SYS_EPOLL_CREATE1 | SYS_EPOLL_CREATE => {
                 let idx = next_epoll_idx as usize;
                 if idx >= MAX_EPOLL_INSTANCES {
-                    reply_val(ep_cap, -24); // -EMFILE
+                    reply_val(ep_cap, -EMFILE); // -EMFILE
                 } else {
                     match alloc_fd(&fds, 3) {
                         Some(fd) => {
@@ -2647,7 +2647,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                             next_epoll_idx += 1;
                             reply_val(ep_cap, fd as i64);
                         }
-                        None => reply_val(ep_cap, -24),
+                        None => reply_val(ep_cap, -EMFILE),
                     }
                 }
             }
@@ -2659,11 +2659,11 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                 let target_fd = msg.regs[2] as u32;
                 let event_ptr = msg.regs[3];
                 if epfd >= MAX_FDS || fds[epfd].kind != FdKind::EpollFd {
-                    reply_val(ep_cap, -9); // -EBADF
+                    reply_val(ep_cap, -EBADF); // -EBADF
                 } else {
                     let idx = fds[epfd].epoll_idx as usize;
                     if idx >= MAX_EPOLL_INSTANCES {
-                        reply_val(ep_cap, -22);
+                        reply_val(ep_cap, -EINVAL);
                     } else {
                         // Read epoll_event struct: { u32 events, u64 data } = 12 bytes
                         let (events, data) = if event_ptr != 0 && event_ptr < 0x0000_8000_0000_0000 {
@@ -2678,7 +2678,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                                 if epoll_instances[idx].add(target_fd, events, data) {
                                     reply_val(ep_cap, 0);
                                 } else {
-                                    reply_val(ep_cap, -28); // -ENOSPC
+                                    reply_val(ep_cap, -ENOSPC); // -ENOSPC
                                 }
                             }
                             2 => { // EPOLL_CTL_DEL
@@ -2689,10 +2689,10 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                                 if epoll_instances[idx].add(target_fd, events, data) {
                                     reply_val(ep_cap, 0);
                                 } else {
-                                    reply_val(ep_cap, -2); // -ENOENT
+                                    reply_val(ep_cap, -ENOENT); // -ENOENT
                                 }
                             }
-                            _ => reply_val(ep_cap, -22), // -EINVAL
+                            _ => reply_val(ep_cap, -EINVAL), // -EINVAL
                         }
                     }
                 }
@@ -2706,7 +2706,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                 let maxevents = msg.regs[2] as usize;
                 let timeout = msg.regs[3] as i32;
                 if epfd >= MAX_FDS || fds[epfd].kind != FdKind::EpollFd {
-                    reply_val(ep_cap, -9);
+                    reply_val(ep_cap, -EBADF);
                 } else {
                     let idx = fds[epfd].epoll_idx as usize;
                     let max_out = maxevents.min(16);
@@ -2804,7 +2804,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                 print(b"LUCAS: unhandled syscall ");
                 print_u64(syscall_nr);
                 print(b"\n");
-                reply_val(ep_cap, -38);
+                reply_val(ep_cap, -ENOSYS);
             }
         }
     }

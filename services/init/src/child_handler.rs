@@ -154,7 +154,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             let child_tid = kernel_tid;
             match sig_dispatch(pid, sig) {
                 1 => break, // terminated
-                2 => { reply_val(ep_cap, -4); continue; } // -EINTR
+                2 => { reply_val(ep_cap, -EINTR); continue; } // -EINTR
                 3 => {
                     // User handler registered — deliver signal via frame injection
                     if signal_deliver(ep_cap, pid, sig, child_tid, 0, false) {
@@ -180,7 +180,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                 let buf_ptr = msg.regs[1];
                 let len = msg.regs[2] as usize;
                 if fd >= CHILD_MAX_FDS || child_fds[fd] == 0 {
-                    reply_val(ep_cap, -9); // -EBADF
+                    reply_val(ep_cap, -EBADF); // -EBADF
                     continue;
                 }
                 match child_fds[fd] {
@@ -190,10 +190,10 @@ pub(crate) extern "C" fn child_handler() -> ! {
                         loop {
                             let s = sig_dequeue(pid);
                             if s != 0 && sig_dispatch(pid, s) >= 1 {
-                                reply_val(ep_cap, -4); break; // -EINTR
+                                reply_val(ep_cap, -EINTR); break; // -EINTR
                             }
                             match unsafe { kb_read_char() } {
-                                Some(0x03) => { reply_val(ep_cap, -4); break; }
+                                Some(0x03) => { reply_val(ep_cap, -EINTR); break; }
                                 Some(ch) => {
                                     unsafe { *(buf_ptr as *mut u8) = ch; }
                                     let reply = sotos_common::IpcMsg {
@@ -250,7 +250,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                                 break;
                             }
                         }
-                        if !found { reply_val(ep_cap, -9); }
+                        if !found { reply_val(ep_cap, -EBADF); }
                     }
                     13 => {
                         // VFS file: read via shared ObjectStore
@@ -269,13 +269,13 @@ pub(crate) extern "C" fn child_handler() -> ! {
                                         vfs_files[s][2] += n as u64;
                                         reply_val(ep_cap, n as i64);
                                     }
-                                    None => reply_val(ep_cap, -5), // -EIO
+                                    None => reply_val(ep_cap, -EIO), // -EIO
                                 }
                                 found = true;
                                 break;
                             }
                         }
-                        if !found { reply_val(ep_cap, -9); }
+                        if !found { reply_val(ep_cap, -EBADF); }
                     }
                     15 => {
                         // Procfs virtual file: read from dir_buf
@@ -326,7 +326,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                         if got > 0 {
                             reply_val(ep_cap, got as i64);
                         } else {
-                            reply_val(ep_cap, -11); // -EAGAIN after exhausting retries
+                            reply_val(ep_cap, -EAGAIN); // -EAGAIN after exhausting retries
                         }
                     }
                     17 => {
@@ -335,7 +335,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                         let port = sock_udp_local_port[fd];
                         let recv_len = len.min(56);
                         if net_cap == 0 || port == 0 {
-                            reply_val(ep_cap, -9);
+                            reply_val(ep_cap, -EBADF);
                         } else {
                             let req = sotos_common::IpcMsg {
                                 tag: NET_CMD_UDP_RECV,
@@ -356,7 +356,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                             }
                         }
                     }
-                    _ => reply_val(ep_cap, -9),
+                    _ => reply_val(ep_cap, -EBADF),
                 }
             }
 
@@ -366,7 +366,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                 let buf_ptr = msg.regs[1];
                 let len = msg.regs[2] as usize;
                 if fd >= CHILD_MAX_FDS || child_fds[fd] == 0 {
-                    reply_val(ep_cap, -9);
+                    reply_val(ep_cap, -EBADF);
                     continue;
                 }
                 match child_fds[fd] {
@@ -393,7 +393,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                         }
                         match sys::call_timeout(net_cap, &req, 500) {
                             Ok(resp) => reply_val(ep_cap, resp.regs[0] as i64),
-                            Err(_) => reply_val(ep_cap, -5),
+                            Err(_) => reply_val(ep_cap, -EIO),
                         }
                     }
                     17 => {
@@ -403,7 +403,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                         let remote_port = sock_udp_remote_port[fd];
                         let src_port = sock_udp_local_port[fd];
                         if net_cap == 0 || remote_ip == 0 {
-                            reply_val(ep_cap, -89); // -EDESTADDRREQ
+                            reply_val(ep_cap, -EDESTADDRREQ); // -EDESTADDRREQ
                         } else {
                             let send_len = len.min(32);
                             let mut req = sotos_common::IpcMsg {
@@ -417,7 +417,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                             }
                             match sys::call_timeout(net_cap, &req, 500) {
                                 Ok(resp) => reply_val(ep_cap, resp.regs[0] as i64),
-                                Err(_) => reply_val(ep_cap, -5),
+                                Err(_) => reply_val(ep_cap, -EIO),
                             }
                         }
                     }
@@ -441,15 +441,15 @@ pub(crate) extern "C" fn child_handler() -> ! {
                                         if new_end > vfs_files[s][1] { vfs_files[s][1] = new_end; }
                                         reply_val(ep_cap, len as i64);
                                     }
-                                    None => reply_val(ep_cap, -5), // -EIO
+                                    None => reply_val(ep_cap, -EIO), // -EIO
                                 }
                                 found = true;
                                 break;
                             }
                         }
-                        if !found { reply_val(ep_cap, -9); }
+                        if !found { reply_val(ep_cap, -EBADF); }
                     }
-                    _ => reply_val(ep_cap, -9),
+                    _ => reply_val(ep_cap, -EBADF),
                 }
             }
 
@@ -505,7 +505,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                         child_fds[f] = kind;
                         reply_val(ep_cap, f as i64);
                     } else {
-                        reply_val(ep_cap, -24);
+                        reply_val(ep_cap, -EMFILE);
                     }
                 } else {
                     // Try initrd — extract basename
@@ -521,7 +521,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                     }
 
                     if basename.is_empty() || slot.is_none() {
-                        reply_val(ep_cap, -2);
+                        reply_val(ep_cap, -ENOENT);
                         continue;
                     }
                     let slot = slot.unwrap();
@@ -537,7 +537,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                         } else { buf_ok = false; break; }
                     }
                     if !buf_ok {
-                        reply_val(ep_cap, -12);
+                        reply_val(ep_cap, -ENOMEM);
                         continue;
                     }
 
@@ -556,12 +556,12 @@ pub(crate) extern "C" fn child_handler() -> ! {
                                 reply_val(ep_cap, f as i64);
                             } else {
                                 for p in 0..FILE_BUF_PAGES_OPEN { let _ = sys::unmap_free(file_buf + p * 0x1000); }
-                                reply_val(ep_cap, -24);
+                                reply_val(ep_cap, -EMFILE);
                             }
                         }
                         Err(_) => {
                             for p in 0..FILE_BUF_PAGES_OPEN { let _ = sys::unmap_free(file_buf + p * 0x1000); }
-                            reply_val(ep_cap, -2);
+                            reply_val(ep_cap, -ENOENT);
                         }
                     }
                 }
@@ -572,7 +572,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                 let fd = msg.regs[0] as usize;
                 let stat_ptr = msg.regs[1];
                 if fd >= CHILD_MAX_FDS || child_fds[fd] == 0 {
-                    reply_val(ep_cap, -9);
+                    reply_val(ep_cap, -EBADF);
                 } else if child_fds[fd] == 12 {
                     let mut size = 0u64;
                     for s in 0..MAX_INITRD_FILES {
@@ -656,7 +656,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                         write_linux_stat(stat_ptr, 0, 4096, true);
                         reply_val(ep_cap, 0);
                     } else {
-                        reply_val(ep_cap, -2);
+                        reply_val(ep_cap, -ENOENT);
                     }
                 }
             }
@@ -725,7 +725,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                         if waited >= max_iters { break; }
                     }
                     if interrupted {
-                        reply_val(ep_cap, -4); // -EINTR
+                        reply_val(ep_cap, -EINTR); // -EINTR
                     } else {
                         reply_val(ep_cap, ready as i64);
                     }
@@ -738,7 +738,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                 let offset_val = msg.regs[1] as i64;
                 let whence = msg.regs[2] as u32;
                 if fd >= CHILD_MAX_FDS || child_fds[fd] == 0 {
-                    reply_val(ep_cap, -9); // -EBADF
+                    reply_val(ep_cap, -EBADF); // -EBADF
                 } else if child_fds[fd] == 12 {
                     let mut found = false;
                     for s in 0..MAX_INITRD_FILES {
@@ -749,10 +749,10 @@ pub(crate) extern "C" fn child_handler() -> ! {
                                 0 => offset_val,                    // SEEK_SET
                                 1 => cur_pos + offset_val,          // SEEK_CUR
                                 2 => file_size + offset_val,        // SEEK_END
-                                _ => { reply_val(ep_cap, -22); found = true; break; }
+                                _ => { reply_val(ep_cap, -EINVAL); found = true; break; }
                             };
                             if new_pos < 0 {
-                                reply_val(ep_cap, -22); // -EINVAL
+                                reply_val(ep_cap, -EINVAL); // -EINVAL
                             } else {
                                 initrd_files[s][2] = new_pos as u64;
                                 reply_val(ep_cap, new_pos);
@@ -761,7 +761,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                             break;
                         }
                     }
-                    if !found { reply_val(ep_cap, -9); }
+                    if !found { reply_val(ep_cap, -EBADF); }
                 } else if child_fds[fd] == 13 || child_fds[fd] == 14 {
                     // VFS file or directory: seek
                     let mut found = false;
@@ -773,10 +773,10 @@ pub(crate) extern "C" fn child_handler() -> ! {
                                 0 => offset_val,
                                 1 => cur_pos + offset_val,
                                 2 => file_size + offset_val,
-                                _ => { reply_val(ep_cap, -22); found = true; break; }
+                                _ => { reply_val(ep_cap, -EINVAL); found = true; break; }
                             };
                             if new_pos < 0 {
-                                reply_val(ep_cap, -22);
+                                reply_val(ep_cap, -EINVAL);
                             } else {
                                 vfs_files[s][2] = new_pos as u64;
                                 reply_val(ep_cap, new_pos);
@@ -785,9 +785,9 @@ pub(crate) extern "C" fn child_handler() -> ! {
                             break;
                         }
                     }
-                    if !found { reply_val(ep_cap, -9); }
+                    if !found { reply_val(ep_cap, -EBADF); }
                 } else {
-                    reply_val(ep_cap, -29); // -ESPIPE (not seekable)
+                    reply_val(ep_cap, -ESPIPE); // -ESPIPE (not seekable)
                 }
             }
 
@@ -866,7 +866,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                     }
 
                     if file_data == 0 && !is_vfs {
-                        reply_val(ep_cap, -9); // -EBADF
+                        reply_val(ep_cap, -EBADF); // -EBADF
                         continue;
                     }
 
@@ -906,7 +906,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                         mmap_fixup_prot(base, pages, prot);
                         reply_val(ep_cap, base as i64);
                     } else {
-                        reply_val(ep_cap, -12);
+                        reply_val(ep_cap, -ENOMEM);
                     }
                     continue;
                 }
@@ -926,7 +926,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                     mmap_fixup_prot(base, pages, prot);
                     reply_val(ep_cap, base as i64);
                 } else {
-                    reply_val(ep_cap, -12);
+                    reply_val(ep_cap, -ENOMEM);
                 }
             }
 
@@ -960,7 +960,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                 let count = msg.regs[2] as usize;
                 let off = msg.regs[3];
                 if fd >= CHILD_MAX_FDS || child_fds[fd] == 0 {
-                    reply_val(ep_cap, -9);
+                    reply_val(ep_cap, -EBADF);
                 } else if child_fds[fd] == 12 {
                     let mut found = false;
                     for s in 0..MAX_INITRD_FILES {
@@ -983,7 +983,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                             break;
                         }
                     }
-                    if !found { reply_val(ep_cap, -9); }
+                    if !found { reply_val(ep_cap, -EBADF); }
                 } else if child_fds[fd] == 13 {
                     // VFS file pread64
                     let mut found = false;
@@ -997,15 +997,15 @@ pub(crate) extern "C" fn child_handler() -> ! {
                             vfs_unlock();
                             match result {
                                 Some(n) => reply_val(ep_cap, n as i64),
-                                None => reply_val(ep_cap, -5), // -EIO
+                                None => reply_val(ep_cap, -EIO), // -EIO
                             }
                             found = true;
                             break;
                         }
                     }
-                    if !found { reply_val(ep_cap, -9); }
+                    if !found { reply_val(ep_cap, -EBADF); }
                 } else {
-                    reply_val(ep_cap, -9);
+                    reply_val(ep_cap, -EBADF);
                 }
             }
 
@@ -1054,7 +1054,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                 let ksa_size = (24 + sigsetsize).min(64);
                 if signo == 0 || signo >= 32 || signo == 9 || signo == 19 {
                     // SIGKILL(9) and SIGSTOP(19) cannot be caught
-                    if signo == 9 || signo == 19 { reply_val(ep_cap, -22); continue; }
+                    if signo == 9 || signo == 19 { reply_val(ep_cap, -EINVAL); continue; }
                 }
                 let idx = pid - 1;
                 // Write old handler to oldact
@@ -1163,9 +1163,9 @@ pub(crate) extern "C" fn child_handler() -> ! {
                             }
                             reply_val(ep_cap, 0);
                         }
-                        _ => reply_val(ep_cap, -25), // -ENOTTY
+                        _ => reply_val(ep_cap, -ENOTTY), // -ENOTTY
                     }
-                } else { reply_val(ep_cap, -9); }
+                } else { reply_val(ep_cap, -EBADF); }
             }
 
             // SYS_readv(fd, iov, iovcnt) — scatter read
@@ -1174,7 +1174,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                 let iov_ptr = msg.regs[1];
                 let iovcnt = msg.regs[2] as usize;
                 if fd >= CHILD_MAX_FDS || child_fds[fd] == 0 {
-                    reply_val(ep_cap, -9); // -EBADF
+                    reply_val(ep_cap, -EBADF); // -EBADF
                 } else if child_fds[fd] == 1 {
                     // stdin readv: read one char into first iovec
                     if iovcnt > 0 && iov_ptr < 0x0000_8000_0000_0000 {
@@ -1182,7 +1182,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                         loop {
                             let s = sig_dequeue(pid);
                             if s != 0 && sig_dispatch(pid, s) >= 1 {
-                                reply_val(ep_cap, -4); break;
+                                reply_val(ep_cap, -EINTR); break;
                             }
                             match unsafe { kb_read_char() } {
                                 Some(ch) => {
@@ -1234,7 +1234,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                     if found {
                         reply_val(ep_cap, total as i64);
                     } else {
-                        reply_val(ep_cap, -9);
+                        reply_val(ep_cap, -EBADF);
                     }
                 } else if child_fds[fd] == 13 {
                     // VFS file readv
@@ -1269,11 +1269,11 @@ pub(crate) extern "C" fn child_handler() -> ! {
                     if found {
                         reply_val(ep_cap, total as i64);
                     } else {
-                        reply_val(ep_cap, -9);
+                        reply_val(ep_cap, -EBADF);
                     }
                 } else if child_fds[fd] == 2 {
                     // stdout/stderr readv → -EBADF (write-only)
-                    reply_val(ep_cap, -9);
+                    reply_val(ep_cap, -EBADF);
                 } else {
                     reply_val(ep_cap, 0); // other FD types: EOF
                 }
@@ -1310,7 +1310,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                     }
                     reply_val(ep_cap, total as i64);
                 } else {
-                    reply_val(ep_cap, -9);
+                    reply_val(ep_cap, -EBADF);
                 }
             }
 
@@ -1348,7 +1348,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                             }
                         }
                     } else {
-                        reply_val(ep_cap, -2);
+                        reply_val(ep_cap, -ENOENT);
                     }
                 }
             }
@@ -1371,7 +1371,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                     unsafe { *pipefd = r as i32; *pipefd.add(1) = w as i32; }
                     reply_val(ep_cap, 0);
                 } else {
-                    reply_val(ep_cap, -24); // -EMFILE
+                    reply_val(ep_cap, -EMFILE); // -EMFILE
                 }
             }
 
@@ -1391,7 +1391,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             SYS_DUP => {
                 let oldfd = msg.regs[0] as usize;
                 if oldfd >= CHILD_MAX_FDS || child_fds[oldfd] == 0 {
-                    reply_val(ep_cap, -9);
+                    reply_val(ep_cap, -EBADF);
                 } else {
                     let mut newfd = None;
                     for i in 0..CHILD_MAX_FDS {
@@ -1401,7 +1401,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                         child_fds[nfd] = child_fds[oldfd];
                         reply_val(ep_cap, nfd as i64);
                     } else {
-                        reply_val(ep_cap, -24);
+                        reply_val(ep_cap, -EMFILE);
                     }
                 }
             }
@@ -1411,7 +1411,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                 let oldfd = msg.regs[0] as usize;
                 let newfd = msg.regs[1] as usize;
                 if oldfd >= CHILD_MAX_FDS || child_fds[oldfd] == 0 || newfd >= CHILD_MAX_FDS {
-                    reply_val(ep_cap, -9);
+                    reply_val(ep_cap, -EBADF);
                 } else {
                     child_fds[newfd] = child_fds[oldfd];
                     reply_val(ep_cap, newfd as i64);
@@ -1431,12 +1431,12 @@ pub(crate) extern "C" fn child_handler() -> ! {
                 if is_shell {
                     let boot_info = unsafe { &*(BOOT_INFO_ADDR as *const BootInfo) };
                     let entry = boot_info.guest_entry;
-                    if entry == 0 { reply_val(ep_cap, -2); continue; }
+                    if entry == 0 { reply_val(ep_cap, -ENOENT); continue; }
                     let stack_addr = NEXT_CHILD_STACK.fetch_add(0x2000, Ordering::SeqCst);
-                    let guest_frame = match sys::frame_alloc() { Ok(f) => f, Err(_) => { reply_val(ep_cap, -12); continue; } };
-                    if sys::map(stack_addr, guest_frame, MAP_WRITABLE).is_err() { reply_val(ep_cap, -12); continue; }
-                    let new_ep = match sys::endpoint_create() { Ok(e) => e, Err(_) => { reply_val(ep_cap, -12); continue; } };
-                    let new_thread = match sys::thread_create_redirected(entry, stack_addr + 0x1000, new_ep) { Ok(t) => t, Err(_) => { reply_val(ep_cap, -12); continue; } };
+                    let guest_frame = match sys::frame_alloc() { Ok(f) => f, Err(_) => { reply_val(ep_cap, -ENOMEM); continue; } };
+                    if sys::map(stack_addr, guest_frame, MAP_WRITABLE).is_err() { reply_val(ep_cap, -ENOMEM); continue; }
+                    let new_ep = match sys::endpoint_create() { Ok(e) => e, Err(_) => { reply_val(ep_cap, -ENOMEM); continue; } };
+                    let new_thread = match sys::thread_create_redirected(entry, stack_addr + 0x1000, new_ep) { Ok(t) => t, Err(_) => { reply_val(ep_cap, -ENOMEM); continue; } };
                     let _ = sys::signal_entry(new_thread, vdso::SIGNAL_TRAMPOLINE_ADDR);
                     ep_cap = new_ep;
                     continue;
@@ -1508,7 +1508,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                 let target = msg.regs[0] as usize;
                 let sig = msg.regs[1];
                 if target == 0 || target > MAX_PROCS || PROC_STATE[target - 1].load(Ordering::Acquire) == 0 {
-                    reply_val(ep_cap, -3); // -ESRCH
+                    reply_val(ep_cap, -ESRCH); // -ESRCH
                     continue;
                 }
                 sig_send(target, sig);
@@ -1527,7 +1527,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                 // Allocate child PID
                 let child_pid = NEXT_PID.fetch_add(1, Ordering::SeqCst) as usize;
                 if child_pid > MAX_PROCS {
-                    reply_val(ep_cap, -12); // -ENOMEM
+                    reply_val(ep_cap, -ENOMEM); // -ENOMEM
                     continue;
                 }
 
@@ -1576,14 +1576,14 @@ pub(crate) extern "C" fn child_handler() -> ! {
                     }
                 }
                 if !hok {
-                    reply_val(ep_cap, -12);
+                    reply_val(ep_cap, -ENOMEM);
                     continue;
                 }
 
                 // Create child endpoint
                 let child_ep = match sys::endpoint_create() {
                     Ok(e) => e,
-                    Err(_) => { reply_val(ep_cap, -12); continue; }
+                    Err(_) => { reply_val(ep_cap, -ENOMEM); continue; }
                 };
 
                 // Pass setup info to child handler
@@ -1599,7 +1599,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                     handler_stack_base + 0x4000,
                 ).is_err() {
                     CHILD_SETUP_READY.store(0, Ordering::Release);
-                    reply_val(ep_cap, -12);
+                    reply_val(ep_cap, -ENOMEM);
                     continue;
                 }
 
@@ -1615,7 +1615,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                     child_ep,
                 ) {
                     Ok(t) => t,
-                    Err(_) => { reply_val(ep_cap, -12); continue; }
+                    Err(_) => { reply_val(ep_cap, -ENOMEM); continue; }
                 };
                 let _ = sys::signal_entry(child_thread, vdso::SIGNAL_TRAMPOLINE_ADDR);
 
@@ -1649,17 +1649,17 @@ pub(crate) extern "C" fn child_handler() -> ! {
                 match cmd {
                     0 => { // F_DUPFD
                         let min = msg.regs[2] as usize;
-                        if fd >= CHILD_MAX_FDS || child_fds[fd] == 0 { reply_val(ep_cap, -9); }
+                        if fd >= CHILD_MAX_FDS || child_fds[fd] == 0 { reply_val(ep_cap, -EBADF); }
                         else {
                             let mut nfd = None;
                             for i in min..CHILD_MAX_FDS { if child_fds[i] == 0 { nfd = Some(i); break; } }
                             if let Some(n) = nfd { child_fds[n] = child_fds[fd]; reply_val(ep_cap, n as i64); }
-                            else { reply_val(ep_cap, -24); }
+                            else { reply_val(ep_cap, -EMFILE); }
                         }
                     }
                     1 | 3 => reply_val(ep_cap, 0), // F_GETFD, F_GETFL
                     2 | 4 => reply_val(ep_cap, 0), // F_SETFD, F_SETFL
-                    _ => reply_val(ep_cap, -22),
+                    _ => reply_val(ep_cap, -EINVAL),
                 }
             }
 
@@ -1671,7 +1671,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                     unsafe { *buf = b'/'; *buf.add(1) = 0; }
                     reply_val(ep_cap, buf as i64);
                 } else {
-                    reply_val(ep_cap, -34); // -ERANGE
+                    reply_val(ep_cap, -ERANGE); // -ERANGE
                 }
             }
 
@@ -1694,7 +1694,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                     }
                     reply_val(ep_cap, if done { 0 } else { -9 });
                 } else {
-                    reply_val(ep_cap, -9); // EBADF
+                    reply_val(ep_cap, -EBADF); // EBADF
                 }
             }
 
@@ -1809,7 +1809,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                         child_fds[f] = kind;
                         reply_val(ep_cap, f as i64);
                     } else {
-                        reply_val(ep_cap, -24);
+                        reply_val(ep_cap, -EMFILE);
                     }
                 } else if starts_with(name, b"/etc/") {
                     // /etc virtual files for DNS resolution
@@ -1834,7 +1834,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                     } else if name == b"/etc/ld.so.cache" {
                         // glibc ld.so looks for this — return ENOENT so it
                         // falls back to searching /lib and /usr/lib directly
-                        reply_val(ep_cap, -2);
+                        reply_val(ep_cap, -ENOENT);
                         continue;
                     } else if name == b"/etc/ld.so.preload" {
                         // Empty: no preloaded libraries
@@ -1856,7 +1856,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                            || name == b"/etc/localtime" || name == b"/etc/locale.alias" {
                         gen_len = 0; // empty
                     } else {
-                        reply_val(ep_cap, -2);
+                        reply_val(ep_cap, -ENOENT);
                         continue;
                     }
                     *dir_len = gen_len;
@@ -1867,7 +1867,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                         child_fds[f] = 15; // kind=15 = virtual procfs file (reuse)
                         reply_val(ep_cap, f as i64);
                     } else {
-                        reply_val(ep_cap, -24);
+                        reply_val(ep_cap, -EMFILE);
                     }
                 } else if starts_with(name, b"/proc/") || starts_with(name, b"/sys/") {
                     // Virtual procfs/sysfs files — generate content into dir_buf
@@ -1981,7 +1981,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                     }
 
                     if !handled {
-                        reply_val(ep_cap, -2); // -ENOENT
+                        reply_val(ep_cap, -ENOENT); // -ENOENT
                     } else {
                         *dir_len = gen_len;
                         *dir_pos = 0;
@@ -1991,7 +1991,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                             child_fds[f] = 15; // procfs virtual file
                             reply_val(ep_cap, f as i64);
                         } else {
-                            reply_val(ep_cap, -24); // -EMFILE
+                            reply_val(ep_cap, -EMFILE); // -EMFILE
                         }
                     }
                 } else {
@@ -2039,7 +2039,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                                         opened_initrd = true;
                                     } else {
                                         for p in 0..FILE_BUF_PAGES_OPEN { let _ = sys::unmap_free(file_buf + p * 0x1000); }
-                                        reply_val(ep_cap, -24);
+                                        reply_val(ep_cap, -EMFILE);
                                         opened_initrd = true; // error already replied
                                     }
                                 } else {
@@ -2122,10 +2122,10 @@ pub(crate) extern "C" fn child_handler() -> ! {
                                     vfs_files[vs] = [oid, size, 0, f as u64];
                                     reply_val(ep_cap, f as i64);
                                 } else {
-                                    reply_val(ep_cap, -24); // -EMFILE
+                                    reply_val(ep_cap, -EMFILE); // -EMFILE
                                 }
                             }
-                            None => reply_val(ep_cap, -2), // -ENOENT
+                            None => reply_val(ep_cap, -ENOENT), // -ENOENT
                         }
                     }
                 }
@@ -2200,7 +2200,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                         }
                         reply_val(ep_cap, 0);
                     } else {
-                        reply_val(ep_cap, -9); // -EBADF
+                        reply_val(ep_cap, -EBADF); // -EBADF
                     }
                     continue;
                 }
@@ -2238,7 +2238,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                         write_linux_stat(stat_ptr, 0, 4096, true);
                         reply_val(ep_cap, 0);
                     } else {
-                        reply_val(ep_cap, -2);
+                        reply_val(ep_cap, -ENOENT);
                     }
                 }
             }
@@ -2263,7 +2263,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                     }
                     reply_val(ep_cap, n as i64);
                 } else {
-                    reply_val(ep_cap, -22); // -EINVAL
+                    reply_val(ep_cap, -EINVAL); // -EINVAL
                 }
             }
 
@@ -2332,7 +2332,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                 if fd >= CHILD_MAX_FDS || child_fds[fd] != 14 {
                     // FD kind 14 = VFS directory (opened via openat with O_DIRECTORY)
                     // Also support kind 13 that turns out to be a dir
-                    reply_val(ep_cap, -9); // -EBADF
+                    reply_val(ep_cap, -EBADF); // -EBADF
                 } else {
                     // Populate dir_buf on first call (dir_pos == 0 && dir_len == 0)
                     if *dir_pos >= *dir_len {
@@ -2442,7 +2442,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                         sys::yield_now();
                     }
                     if interrupted {
-                        reply_val(ep_cap, -4);
+                        reply_val(ep_cap, -EINTR);
                     } else {
                         reply_val(ep_cap, ready as i64);
                     }
@@ -2450,10 +2450,10 @@ pub(crate) extern "C" fn child_handler() -> ! {
             }
 
             // SYS_statx — not supported, force musl to fall back to fstatat
-            SYS_STATX => reply_val(ep_cap, -38), // -ENOSYS
+            SYS_STATX => reply_val(ep_cap, -ENOSYS), // -ENOSYS
 
             // SYS_rseq — restartable sequences (musl may use)
-            SYS_RSEQ => reply_val(ep_cap, -38), // -ENOSYS is fine
+            SYS_RSEQ => reply_val(ep_cap, -ENOSYS), // -ENOSYS is fine
 
             // SYS_SIGNAL_TRAMPOLINE (0x7F00) — async signal delivery
             0x7F00 => {
@@ -2522,7 +2522,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                 if domain == 2 && (base_type == 1 || base_type == 2 || base_type == 3) {
                     let net_cap = NET_EP_CAP.load(Ordering::Acquire);
                     if net_cap == 0 {
-                        reply_val(ep_cap, -99);
+                        reply_val(ep_cap, -EADDRNOTAVAIL);
                     } else {
                         // Find free FD (start from 3)
                         let mut fd = None;
@@ -2548,11 +2548,11 @@ pub(crate) extern "C" fn child_handler() -> ! {
                                 }
                                 reply_val(ep_cap, f as i64);
                             }
-                            None => reply_val(ep_cap, -24), // -EMFILE
+                            None => reply_val(ep_cap, -EMFILE), // -EMFILE
                         }
                     }
                 } else {
-                    reply_val(ep_cap, -97); // -EAFNOSUPPORT
+                    reply_val(ep_cap, -EAFNOSUPPORT); // -EAFNOSUPPORT
                 }
             }
 
@@ -2561,7 +2561,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                 let fd = msg.regs[0] as usize;
                 let sockaddr_ptr = msg.regs[1];
                 if fd >= CHILD_MAX_FDS || (child_fds[fd] != 16 && child_fds[fd] != 17) {
-                    reply_val(ep_cap, -9);
+                    reply_val(ep_cap, -EBADF);
                 } else {
                     let sa = unsafe { core::slice::from_raw_parts(sockaddr_ptr as *const u8, 8) };
                     let port = u16::from_be_bytes([sa[2], sa[3]]);
@@ -2575,7 +2575,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                     } else {
                         // TCP connect
                         let net_cap = NET_EP_CAP.load(Ordering::Acquire);
-                        if net_cap == 0 { reply_val(ep_cap, -99); continue; }
+                        if net_cap == 0 { reply_val(ep_cap, -EADDRNOTAVAIL); continue; }
                         let req = sotos_common::IpcMsg {
                             tag: NET_CMD_TCP_CONNECT,
                             regs: [ip as u64, port as u64, 0, 0, 0, 0, 0, 0],
@@ -2587,10 +2587,10 @@ pub(crate) extern "C" fn child_handler() -> ! {
                                     sock_conn_id[fd] = conn_id as u32;
                                     reply_val(ep_cap, 0);
                                 } else {
-                                    reply_val(ep_cap, -111); // -ECONNREFUSED
+                                    reply_val(ep_cap, -ECONNREFUSED); // -ECONNREFUSED
                                 }
                             }
-                            Err(_) => reply_val(ep_cap, -111),
+                            Err(_) => reply_val(ep_cap, -ECONNREFUSED),
                         }
                     }
                 }
@@ -2604,11 +2604,11 @@ pub(crate) extern "C" fn child_handler() -> ! {
                 let dest_ptr = msg.regs[4];
 
                 if fd >= CHILD_MAX_FDS || (child_fds[fd] != 16 && child_fds[fd] != 17) {
-                    reply_val(ep_cap, -9);
+                    reply_val(ep_cap, -EBADF);
                 } else if child_fds[fd] == 17 {
                     // UDP sendto
                     let net_cap = NET_EP_CAP.load(Ordering::Acquire);
-                    if net_cap == 0 { reply_val(ep_cap, -99); continue; }
+                    if net_cap == 0 { reply_val(ep_cap, -EADDRNOTAVAIL); continue; }
                     let (dst_ip, dst_port) = if dest_ptr != 0 {
                         let sa = unsafe { core::slice::from_raw_parts(dest_ptr as *const u8, 8) };
                         (u32::from_be_bytes([sa[4], sa[5], sa[6], sa[7]]),
@@ -2629,7 +2629,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                     }
                     match sys::call_timeout(net_cap, &req, 500) {
                         Ok(resp) => reply_val(ep_cap, resp.regs[0] as i64),
-                        Err(_) => reply_val(ep_cap, -5),
+                        Err(_) => reply_val(ep_cap, -EIO),
                     }
                 } else {
                     // TCP send
@@ -2647,7 +2647,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                     }
                     match sys::call_timeout(net_cap, &req, 500) {
                         Ok(resp) => reply_val(ep_cap, resp.regs[0] as i64),
-                        Err(_) => reply_val(ep_cap, -5),
+                        Err(_) => reply_val(ep_cap, -EIO),
                     }
                 }
             }
@@ -2659,11 +2659,11 @@ pub(crate) extern "C" fn child_handler() -> ! {
                 let len = msg.regs[2] as usize;
 
                 if fd >= CHILD_MAX_FDS || (child_fds[fd] != 16 && child_fds[fd] != 17) {
-                    reply_val(ep_cap, -9);
+                    reply_val(ep_cap, -EBADF);
                 } else if child_fds[fd] == 17 {
                     // UDP recvfrom
                     let net_cap = NET_EP_CAP.load(Ordering::Acquire);
-                    if net_cap == 0 { reply_val(ep_cap, -99); continue; }
+                    if net_cap == 0 { reply_val(ep_cap, -EADDRNOTAVAIL); continue; }
                     let src_port = sock_udp_local_port[fd];
                     let recv_len = len.min(48);
                     let req = sotos_common::IpcMsg {
@@ -2899,7 +2899,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
 
             // SYS_pidfd_open(293) — stub: not supported
             SYS_PIPE2 => {
-                reply_val(ep_cap, -38); // -ENOSYS
+                reply_val(ep_cap, -ENOSYS); // -ENOSYS
             }
 
             // --- glibc compatibility stubs ---
@@ -2908,7 +2908,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             SYS_SET_ROBUST_LIST => reply_val(ep_cap, 0),
 
             // SYS_get_robust_list(274)
-            SYS_GET_ROBUST_LIST => reply_val(ep_cap, -38),
+            SYS_GET_ROBUST_LIST => reply_val(ep_cap, -ENOSYS),
 
             // SYS_madvise(28) — memory advisory (glibc malloc)
             SYS_MADVISE => reply_val(ep_cap, 0),
@@ -2950,7 +2950,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                         reply_val(ep_cap, 0);
                     }
                     38 => reply_val(ep_cap, 0), // PR_SET_NO_NEW_PRIVS
-                    _ => reply_val(ep_cap, -22), // -EINVAL
+                    _ => reply_val(ep_cap, -EINVAL), // -EINVAL
                 }
             }
 
@@ -2992,10 +2992,10 @@ pub(crate) extern "C" fn child_handler() -> ! {
                         for p in 0..old_pages { let _ = sys::unmap_free(old_addr + p * 0x1000); }
                         reply_val(ep_cap, new_base as i64);
                     } else {
-                        reply_val(ep_cap, -12);
+                        reply_val(ep_cap, -ENOMEM);
                     }
                 } else {
-                    reply_val(ep_cap, -12); // ENOMEM: can't expand in-place
+                    reply_val(ep_cap, -ENOMEM); // ENOMEM: can't expand in-place
                 }
             }
 
@@ -3010,7 +3010,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                 print(b",");
                 print_u64(msg.regs[2]);
                 print(b"]\n");
-                reply_val(ep_cap, -38);
+                reply_val(ep_cap, -ENOSYS);
             }
         }
     }

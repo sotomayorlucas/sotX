@@ -431,14 +431,14 @@ pub(crate) fn futex_wait(addr: u64, expected: u32) -> i64 {
         }
     }
     if slot == usize::MAX {
-        return -12; // -ENOMEM (no free slots)
+        return -(linux_abi::ENOMEM);
     }
 
     // Check the value AFTER registering (to avoid missing a wake between check and register)
     let current = unsafe { core::ptr::read_volatile(addr as *const u32) };
     if current != expected {
         FUTEX_ADDR[slot].store(0, Ordering::Release);
-        return -11; // -EAGAIN
+        return -(linux_abi::EAGAIN);
     }
 
     // Spin-wait until woken (with yield to avoid burning CPU)
@@ -449,7 +449,7 @@ pub(crate) fn futex_wait(addr: u64, expected: u32) -> i64 {
         // Safety timeout: ~10 seconds at 100Hz scheduler
         if spins > 10_000 {
             FUTEX_ADDR[slot].store(0, Ordering::Release);
-            return -110; // -ETIMEDOUT
+            return -(linux_abi::ETIMEDOUT);
         }
     }
 

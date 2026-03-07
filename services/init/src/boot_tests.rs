@@ -231,7 +231,7 @@ pub(crate) fn run_linux_test() {
                 let len = msg.regs[1];
                 let fd = msg.regs[4] as i64;
                 if fd >= 0 {
-                    reply_val(ep_cap, -22); // -EINVAL: no file-backed mmap
+                    reply_val(ep_cap, -EINVAL); // -EINVAL: no file-backed mmap
                 } else {
                     let pages = ((len + 0xFFF) & !0xFFF) / 0x1000;
                     let base = mmap_next;
@@ -251,7 +251,7 @@ pub(crate) fn run_linux_test() {
                         mmap_next += pages * 0x1000;
                         reply_val(ep_cap, base as i64);
                     } else {
-                        reply_val(ep_cap, -12); // -ENOMEM
+                        reply_val(ep_cap, -ENOMEM); // -ENOMEM
                     }
                 }
             }
@@ -297,7 +297,7 @@ pub(crate) fn run_linux_test() {
                 let ksa_size = (24 + sigsetsize).min(64);
                 let idx = test_pid - 1;
                 if signo == 9 || signo == 19 {
-                    reply_val(ep_cap, -22); continue;
+                    reply_val(ep_cap, -EINVAL); continue;
                 }
                 if oldact != 0 && oldact < 0x0000_8000_0000_0000 {
                     let buf = unsafe { core::slice::from_raw_parts_mut(oldact as *mut u8, ksa_size) };
@@ -377,7 +377,7 @@ pub(crate) fn run_linux_test() {
                 print(b"LINUX-TEST: unhandled syscall ");
                 print_u64(nr);
                 print(b"\n");
-                reply_val(ep_cap, -38); // -ENOSYS
+                reply_val(ep_cap, -ENOSYS); // -ENOSYS
             }
         }
     }
@@ -472,7 +472,7 @@ pub(crate) fn run_musl_test() {
                 let len = msg.regs[1];
                 let flags = msg.regs[3];
                 if !MFlags::from_bits_truncate(flags as u32).contains(MFlags::ANONYMOUS) {
-                    reply_val(ep_cap, -22); // No file-backed mmap in test handler
+                    reply_val(ep_cap, -EINVAL); // No file-backed mmap in test handler
                     continue;
                 }
                 let pages = ((len + 0xFFF) / 0x1000) as u32;
@@ -488,7 +488,7 @@ pub(crate) fn run_musl_test() {
                         Err(_) => { ok = false; break; }
                     }
                 }
-                if !ok { reply_val(ep_cap, -12); continue; }
+                if !ok { reply_val(ep_cap, -ENOMEM); continue; }
                 let region = unsafe { core::slice::from_raw_parts_mut(base as *mut u8, (pages as usize) * 0x1000) };
                 for b in region.iter_mut() { *b = 0; }
                 mmap_next += (pages as u64) * 0x1000;
@@ -527,7 +527,7 @@ pub(crate) fn run_musl_test() {
                 let sigsetsize = msg.regs[3].max(8) as usize; // r10 = sigsetsize
                 let ksa_size = 24 + sigsetsize; // handler + flags + restorer + mask
                 let idx = test_pid - 1;
-                if signo == 9 || signo == 19 { reply_val(ep_cap, -22); continue; }
+                if signo == 9 || signo == 19 { reply_val(ep_cap, -EINVAL); continue; }
                 if oldact != 0 && oldact < 0x0000_8000_0000_0000 {
                     let buf = unsafe { core::slice::from_raw_parts_mut(oldact as *mut u8, ksa_size.min(64)) };
                     for b in buf.iter_mut() { *b = 0; }
@@ -569,7 +569,7 @@ pub(crate) fn run_musl_test() {
                 reply_val(ep_cap, 0);
             }
             // ioctl — return ENOTTY for terminal queries
-            16 => reply_val(ep_cap, -25),
+            16 => reply_val(ep_cap, -ENOTTY),
             // writev(fd, iov, iovcnt)
             20 => {
                 let iov_ptr = msg.regs[1];
@@ -668,7 +668,7 @@ pub(crate) fn run_musl_test() {
             // prlimit64
             302 => reply_val(ep_cap, 0),
             // sched_getaffinity — musl sometimes calls this
-            204 => reply_val(ep_cap, -38), // -ENOSYS
+            204 => reply_val(ep_cap, -ENOSYS), // -ENOSYS
             // futex — real implementation
             202 => {
                 let uaddr = msg.regs[0];
@@ -681,13 +681,13 @@ pub(crate) fn run_musl_test() {
                 }
             }
             // readlinkat — /proc/self/exe
-            267 => reply_val(ep_cap, -22),
+            267 => reply_val(ep_cap, -EINVAL),
             // Unknown syscall — log and return -ENOSYS
             _ => {
                 print(b"MUSL-TEST: unhandled syscall ");
                 print_u64(nr);
                 print(b"\n");
-                reply_val(ep_cap, -38); // -ENOSYS
+                reply_val(ep_cap, -ENOSYS); // -ENOSYS
             }
         }
     }
@@ -808,7 +808,7 @@ pub(crate) fn run_dynamic_test() {
                 }
 
                 if basename.is_empty() || slot.is_none() {
-                    reply_val(ep_cap, -2);
+                    reply_val(ep_cap, -ENOENT);
                     continue;
                 }
                 let slot = slot.unwrap();
@@ -823,7 +823,7 @@ pub(crate) fn run_dynamic_test() {
                         }
                     } else { buf_ok = false; break; }
                 }
-                if !buf_ok { reply_val(ep_cap, -12); continue; }
+                if !buf_ok { reply_val(ep_cap, -ENOMEM); continue; }
 
                 match sys::initrd_read(
                     basename.as_ptr() as u64,
@@ -847,12 +847,12 @@ pub(crate) fn run_dynamic_test() {
                             reply_val(ep_cap, f as i64);
                         } else {
                             for p in 0..FILE_BUF_PAGES_DYN { let _ = sys::unmap_free(file_buf + p * 0x1000); }
-                            reply_val(ep_cap, -24);
+                            reply_val(ep_cap, -EMFILE);
                         }
                     }
                     Err(_) => {
                         for p in 0..FILE_BUF_PAGES_DYN { let _ = sys::unmap_free(file_buf + p * 0x1000); }
-                        reply_val(ep_cap, -2);
+                        reply_val(ep_cap, -ENOENT);
                     }
                 }
             }
@@ -917,7 +917,7 @@ pub(crate) fn run_dynamic_test() {
                         if sys::map(base + p * 0x1000, f, MAP_WRITABLE).is_err() { ok = false; break; }
                     } else { ok = false; break; }
                 }
-                if !ok { reply_val(ep_cap, -12); continue; }
+                if !ok { reply_val(ep_cap, -ENOMEM); continue; }
 
                 // Zero the region
                 unsafe { core::ptr::write_bytes(base as *mut u8, 0, (pages * 0x1000) as usize); }
@@ -1013,7 +1013,7 @@ pub(crate) fn run_dynamic_test() {
                 print(b"DYNAMIC: unhandled syscall ");
                 print_u64(nr);
                 print(b"\n");
-                reply_val(ep_cap, -38);
+                reply_val(ep_cap, -ENOSYS);
             }
         }
     }
@@ -1207,7 +1207,7 @@ pub(crate) fn run_busybox_test() {
             // rt_sigaction / rt_sigprocmask / sigaltstack
             13 | 14 | 131 => reply_val(ep_cap, 0),
             // ioctl
-            16 => reply_val(ep_cap, -25), // -ENOTTY
+            16 => reply_val(ep_cap, -ENOTTY), // -ENOTTY
             // fcntl
             72 => reply_val(ep_cap, 0),
             // dup2
@@ -1252,7 +1252,7 @@ pub(crate) fn run_busybox_test() {
                     bb_fd_kind[slot] = if sock_type & 0xFF == 1 { 1 } else { 2 }; // 1=TCP, 2=UDP
                     reply_val(ep_cap, slot as i64);
                 } else {
-                    reply_val(ep_cap, -24);
+                    reply_val(ep_cap, -EMFILE);
                 }
             }
             // connect(fd, addr, addrlen)
@@ -1270,7 +1270,7 @@ pub(crate) fn run_busybox_test() {
                 if fd < 32 && bb_fd_kind[fd] == 1 {
                     // TCP connect
                     let net_cap = NET_EP_CAP.load(Ordering::Acquire);
-                    if net_cap == 0 { reply_val(ep_cap, -111); continue; }
+                    if net_cap == 0 { reply_val(ep_cap, -ECONNREFUSED); continue; }
                     let conn_msg = sotos_common::IpcMsg { tag: NET_CMD_TCP_CONNECT, regs: [ip as u64, port as u64, 0, 0, 0, 0, 0, 0] };
                     if let Ok(resp) = sys::call(net_cap, &conn_msg) {
                         let conn_id = resp.regs[0];
@@ -1278,17 +1278,17 @@ pub(crate) fn run_busybox_test() {
                             bb_fd_conn[fd] = conn_id;
                             reply_val(ep_cap, 0);
                         } else {
-                            reply_val(ep_cap, -111); // -ECONNREFUSED
+                            reply_val(ep_cap, -ECONNREFUSED); // -ECONNREFUSED
                         }
                     } else {
-                        reply_val(ep_cap, -111);
+                        reply_val(ep_cap, -ECONNREFUSED);
                     }
                 } else if fd < 32 && bb_fd_kind[fd] == 2 {
                     // UDP "connect" — store remote addr
                     bb_fd_conn[fd] = ((ip as u64) << 16) | port as u64;
                     reply_val(ep_cap, 0);
                 } else {
-                    reply_val(ep_cap, -9);
+                    reply_val(ep_cap, -EBADF);
                 }
             }
             // sendto(fd, buf, len, flags, dest_addr, addrlen)
@@ -1312,7 +1312,7 @@ pub(crate) fn run_busybox_test() {
                     };
                     let src_port = bb_fd_port[fd];
                     let net_cap = NET_EP_CAP.load(Ordering::Acquire);
-                    if net_cap == 0 { reply_val(ep_cap, -111); continue; }
+                    if net_cap == 0 { reply_val(ep_cap, -ECONNREFUSED); continue; }
                     // Net service CMD_UDP_SENDTO layout:
                     // regs[0]=dst_ip, regs[1]=dst_port, regs[2]=src_port, regs[3]=data_len, regs[4..]=data
                     // IPC handler copies from regs[4..] into IPC_DATA_BUF, length from regs[3]
@@ -1327,7 +1327,7 @@ pub(crate) fn run_busybox_test() {
                     let _ = sys::call(net_cap, &send_msg);
                     reply_val(ep_cap, len as i64);
                 } else {
-                    reply_val(ep_cap, -9);
+                    reply_val(ep_cap, -EBADF);
                 }
             }
             // recvfrom(fd, buf, len, flags, src_addr, addrlen)
@@ -1338,7 +1338,7 @@ pub(crate) fn run_busybox_test() {
                 if fd < 32 && bb_fd_kind[fd] == 2 {
                     let port = bb_fd_port[fd];
                     let net_cap = NET_EP_CAP.load(Ordering::Acquire);
-                    if net_cap == 0 { reply_val(ep_cap, -11); continue; }
+                    if net_cap == 0 { reply_val(ep_cap, -EAGAIN); continue; }
                     let max_recv = len.min(512);
                     let src_addr_ptr = msg.regs[4];
                     let addrlen_ptr = msg.regs[5];
@@ -1469,7 +1469,7 @@ pub(crate) fn run_busybox_test() {
                     unsafe { *buf = b'/'; *buf.add(1) = 0; }
                     reply_val(ep_cap, buf as i64);
                 } else {
-                    reply_val(ep_cap, -34); // -ERANGE
+                    reply_val(ep_cap, -ERANGE); // -ERANGE
                 }
             }
             // nanosleep / sched_yield
@@ -1484,7 +1484,7 @@ pub(crate) fn run_busybox_test() {
                         0 => offset as usize,                           // SEEK_SET
                         1 => (bb_fd_pos[fd] as i64 + offset) as usize,  // SEEK_CUR
                         2 => (bb_fd_size[fd] as i64 + offset) as usize, // SEEK_END
-                        _ => { reply_val(ep_cap, -22); continue; }
+                        _ => { reply_val(ep_cap, -EINVAL); continue; }
                     };
                     bb_fd_pos[fd] = new_pos;
                     reply_val(ep_cap, new_pos as i64);
@@ -1496,7 +1496,7 @@ pub(crate) fn run_busybox_test() {
             22 => {
                 let pipefd = msg.regs[0] as *mut i32;
                 if pipe_next >= 4 {
-                    reply_val(ep_cap, -24); // -EMFILE
+                    reply_val(ep_cap, -EMFILE); // -EMFILE
                 } else {
                     let slot = pipe_next;
                     pipe_next += 1;
@@ -1519,7 +1519,7 @@ pub(crate) fn run_busybox_test() {
                         unsafe { *pipefd = rfd as i32; *pipefd.add(1) = wfd as i32; }
                         reply_val(ep_cap, 0);
                     } else {
-                        reply_val(ep_cap, -24);
+                        reply_val(ep_cap, -EMFILE);
                     }
                 }
             }
@@ -1538,10 +1538,10 @@ pub(crate) fn run_busybox_test() {
                         bb_fd_pos[slot] = 0;
                         reply_val(ep_cap, slot as i64);
                     } else {
-                        reply_val(ep_cap, -24);
+                        reply_val(ep_cap, -EMFILE);
                     }
                 } else if name.starts_with(b"/proc/") || name.starts_with(b"/sys/") || name.starts_with(b"/dev/") || name == b"/etc/passwd" || name == b"/etc/group" || name == b"/etc/shells" {
-                    reply_val(ep_cap, -2); // -ENOENT
+                    reply_val(ep_cap, -ENOENT); // -ENOENT
                 } else {
                     // Try VFS
                     let fname = if name.starts_with(b"/") { &name[1..] } else { name };
@@ -1559,7 +1559,7 @@ pub(crate) fn run_busybox_test() {
                             dir_len = 0; dir_pos = 0;
                             reply_val(ep_cap, slot as i64);
                         } else {
-                            reply_val(ep_cap, -24);
+                            reply_val(ep_cap, -EMFILE);
                         }
                     } else {
                         vfs_lock();
@@ -1630,7 +1630,7 @@ pub(crate) fn run_busybox_test() {
                 if fd < 32 && bb_fd_kind[fd] == 1 {
                     // TCP socket read — assemble multiple 64-byte IPC chunks
                     let net_cap = NET_EP_CAP.load(Ordering::Acquire);
-                    if net_cap == 0 { reply_val(ep_cap, -11); continue; }
+                    if net_cap == 0 { reply_val(ep_cap, -EAGAIN); continue; }
                     let mut total_got = 0usize;
                     let mut empty_retries = 0usize;
                     while total_got < len && empty_retries < 500 {
@@ -1720,7 +1720,7 @@ pub(crate) fn run_busybox_test() {
                 if fd < 32 && bb_fd_kind[fd] == 1 {
                     // TCP socket write
                     let net_cap = NET_EP_CAP.load(Ordering::Acquire);
-                    if net_cap == 0 { reply_val(ep_cap, -111); continue; }
+                    if net_cap == 0 { reply_val(ep_cap, -ECONNREFUSED); continue; }
                     let data = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, len) };
                     let mut sent = 0;
                     while sent < len {
@@ -1816,7 +1816,7 @@ pub(crate) fn run_busybox_test() {
                     vfs_lock();
                     let found = unsafe { shared_store().and_then(|s| s.find(fname)).is_some() };
                     vfs_unlock();
-                    if found || fname.is_empty() { reply_val(ep_cap, 0); } else { reply_val(ep_cap, -2); }
+                    if found || fname.is_empty() { reply_val(ep_cap, 0); } else { reply_val(ep_cap, -ENOENT); }
                 }
             }
             // stat(path, buf) / lstat / newfstatat / fstatat
@@ -1866,7 +1866,7 @@ pub(crate) fn run_busybox_test() {
                         } else { false }
                     };
                     vfs_unlock();
-                    if found { reply_val(ep_cap, 0); } else { reply_val(ep_cap, -2); }
+                    if found { reply_val(ep_cap, 0); } else { reply_val(ep_cap, -ENOENT); }
                 }
             }
             // getdents64(fd, dirp, count)
@@ -1876,7 +1876,7 @@ pub(crate) fn run_busybox_test() {
                 let dirp = msg.regs[1];
                 let count = msg.regs[2] as usize;
                 if fd >= 32 || bb_fd_kind[fd] != 5 {
-                    reply_val(ep_cap, -9); // -EBADF
+                    reply_val(ep_cap, -EBADF); // -EBADF
                 } else {
                     if dir_pos >= dir_len {
                         dir_len = 0;
@@ -2442,7 +2442,7 @@ pub(crate) fn run_busybox_test() {
                     if options & 1 != 0 { // WNOHANG
                         reply_val(ep_cap, 0);
                     } else {
-                        reply_val(ep_cap, -10); // -ECHILD
+                        reply_val(ep_cap, -ECHILD); // -ECHILD
                     }
                 }
             }
@@ -2494,7 +2494,7 @@ pub(crate) fn run_busybox_test() {
                 print(b"BUSYBOX: unhandled syscall ");
                 print_u64(nr);
                 print(b"\n");
-                reply_val(ep_cap, -38); // -ENOSYS
+                reply_val(ep_cap, -ENOSYS); // -ENOSYS
             }
         }
     }
