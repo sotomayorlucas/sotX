@@ -19,6 +19,7 @@ pub mod desktop;
 
 pub use display::FramebufferDisplay;
 pub use desktop::{draw_modern_desktop, DesktopLayout};
+pub use tinybmp;
 
 /// Maximum number of windows managed by the compositor.
 pub const MAX_WINDOWS: usize = 16;
@@ -638,17 +639,36 @@ impl WindowManager {
             26, 27, 38, 16, 16, 28,
         );
 
-        // Draw taskbar at bottom.
-        let tb_h = 36u32;
+        // Draw semi-transparent taskbar at bottom.
+        let tb_h = 40u32;
         let tb_y = self.screen_height.saturating_sub(tb_h);
-        fill_rect_fb(self.screen_fb, self.screen_stride, 0, tb_y, self.screen_width, tb_h,
-            bgra(30, 30, 46, 255));
-        // Taskbar top border.
+        alpha_fill_rect_fb(self.screen_fb, self.screen_stride, 0, tb_y,
+            self.screen_width, tb_h, bgra(20, 20, 36, 255), 200);
+        // Taskbar top border (accent line).
         fill_rect_fb(self.screen_fb, self.screen_stride, 0, tb_y, self.screen_width, 1,
-            bgra(65, 72, 104, 255));
+            bgra(122, 162, 247, 255));
         // "sotOS" branding in taskbar.
         draw_string_fb(self.screen_fb, self.screen_stride, self.screen_width, self.screen_height,
-            12, tb_y as i32 + 10, b"sotOS", bgra(122, 162, 247, 255));
+            16, tb_y as i32 + 14, b"sotOS", bgra(122, 162, 247, 255));
+        // Separator.
+        fill_rect_fb(self.screen_fb, self.screen_stride, 68, tb_y + 8, 1, tb_h - 16,
+            bgra(65, 72, 104, 255));
+        // Window count indicator in taskbar.
+        for wi in 0..self.window_count {
+            let w = &self.windows[wi];
+            if !w.visible || w.minimized { continue; }
+            let ind_x = 80 + wi as u32 * 80;
+            let ind_color = if w.focused {
+                bgra(115, 218, 202, 255) // teal for focused
+            } else {
+                bgra(80, 80, 100, 255) // dim for unfocused
+            };
+            fill_rect_fb(self.screen_fb, self.screen_stride,
+                ind_x, tb_y + 10, 60, 20, ind_color);
+            let name = &w.title[..w.title_len.min(6)];
+            draw_string_fb(self.screen_fb, self.screen_stride, self.screen_width, self.screen_height,
+                ind_x as i32 + 4, tb_y as i32 + 16, name, COLOR_WHITE);
+        }
 
         // Build z-order sorted index list (ascending = back to front).
         let mut sorted: [usize; MAX_WINDOWS] = [0; MAX_WINDOWS];
@@ -675,77 +695,39 @@ impl WindowManager {
                 continue;
             }
 
-            // Draw title bar.
-            let title_color = if w.focused {
-                COLOR_TITLE_ACTIVE
+            // Draw title bar with gradient.
+            let (tr1, tg1, tb1, tr2, tg2, tb2) = if w.focused {
+                (52u8, 97, 167, 40, 75, 140) // active: blue gradient
             } else {
-                COLOR_TITLE_INACTIVE
+                (70, 70, 80, 55, 55, 65)     // inactive: gray gradient
             };
-            fill_rect_fb(
-                self.screen_fb,
-                self.screen_stride,
-                w.x as u32,
-                w.y as u32,
-                w.width,
-                TITLE_BAR_HEIGHT,
-                title_color,
+            gradient_fill_fb(
+                self.screen_fb, self.screen_stride,
+                w.x as u32, w.y as u32, w.width, TITLE_BAR_HEIGHT,
+                tr1, tg1, tb1, tr2, tg2, tb2,
             );
 
-            // Draw title text.
+            // Traffic-light buttons (macOS style circles).
+            let btn_cy = w.y + TITLE_BAR_HEIGHT as i32 / 2;
+            draw_filled_circle_fb(self.screen_fb, self.screen_stride,
+                self.screen_width, self.screen_height,
+                w.x + 14, btn_cy, 5, bgra(247, 118, 142, 255)); // close (red)
+            draw_filled_circle_fb(self.screen_fb, self.screen_stride,
+                self.screen_width, self.screen_height,
+                w.x + 32, btn_cy, 5, bgra(224, 175, 104, 255)); // minimize (yellow)
+            draw_filled_circle_fb(self.screen_fb, self.screen_stride,
+                self.screen_width, self.screen_height,
+                w.x + 50, btn_cy, 5, bgra(115, 218, 202, 255)); // maximize (green)
+
+            // Draw title text (centered in title bar, right of buttons).
             let text = &w.title[..w.title_len];
+            let text_w = w.title_len as i32 * FONT_WIDTH as i32;
+            let text_x = w.x + 64 + (w.width as i32 - 64 - text_w) / 2;
             draw_string_fb(
-                self.screen_fb,
-                self.screen_stride,
-                self.screen_width,
-                self.screen_height,
-                w.x + 4,
-                w.y + 4,
-                text,
-                COLOR_WHITE,
-            );
-
-            // Draw close button [X].
-            let close_x = w.x + w.width as i32 - CLOSE_BTN_WIDTH as i32;
-            fill_rect_fb(
-                self.screen_fb,
-                self.screen_stride,
-                close_x as u32,
-                w.y as u32,
-                CLOSE_BTN_WIDTH,
-                TITLE_BAR_HEIGHT,
-                COLOR_RED,
-            );
-            draw_char_fb(
-                self.screen_fb,
-                self.screen_stride,
-                self.screen_width,
-                self.screen_height,
-                close_x + 8,
-                w.y + 8,
-                b'X',
-                COLOR_WHITE,
-            );
-
-            // Draw minimize button [-].
-            let min_x = close_x - MINIMIZE_BTN_WIDTH as i32;
-            fill_rect_fb(
-                self.screen_fb,
-                self.screen_stride,
-                min_x as u32,
-                w.y as u32,
-                MINIMIZE_BTN_WIDTH,
-                TITLE_BAR_HEIGHT,
-                COLOR_YELLOW,
-            );
-            draw_char_fb(
-                self.screen_fb,
-                self.screen_stride,
-                self.screen_width,
-                self.screen_height,
-                min_x + 8,
-                w.y + 8,
-                b'-',
-                COLOR_BLACK,
+                self.screen_fb, self.screen_stride,
+                self.screen_width, self.screen_height,
+                text_x, w.y + (TITLE_BAR_HEIGHT as i32 - FONT_HEIGHT as i32) / 2,
+                text, COLOR_WHITE,
             );
 
             // Draw client area background.
@@ -850,6 +832,33 @@ pub fn fill_rect_fb(fb: *mut u32, stride: u32, x: u32, y: u32, w: u32, h: u32, c
             let row_ptr = fb.add(offset);
             for col in 0..w as usize {
                 *row_ptr.add(col) = color;
+            }
+        }
+    }
+}
+
+/// Fill a rectangle with semi-transparent blending.
+/// `alpha` is 0-255 (0 = fully transparent, 255 = fully opaque).
+pub fn alpha_fill_rect_fb(fb: *mut u32, stride: u32, x: u32, y: u32, w: u32, h: u32, color: u32, alpha: u8) {
+    if w == 0 || h == 0 || alpha == 0 { return; }
+    let sr = ((color >> 16) & 0xFF) as u32;
+    let sg = ((color >> 8) & 0xFF) as u32;
+    let sb = (color & 0xFF) as u32;
+    let a = alpha as u32;
+    let inv_a = 255 - a;
+    for row in 0..h {
+        let offset = ((y + row) * stride + x) as usize;
+        unsafe {
+            let row_ptr = fb.add(offset);
+            for col in 0..w as usize {
+                let dst = *row_ptr.add(col);
+                let dr = ((dst >> 16) & 0xFF) as u32;
+                let dg = ((dst >> 8) & 0xFF) as u32;
+                let db = (dst & 0xFF) as u32;
+                let r = (sr * a + dr * inv_a) / 255;
+                let g = (sg * a + dg * inv_a) / 255;
+                let b = (sb * a + db * inv_a) / 255;
+                *row_ptr.add(col) = 0xFF000000 | (r << 16) | (g << 8) | b;
             }
         }
     }
@@ -971,6 +980,34 @@ pub fn draw_string_fb(
 ) {
     for (i, &ch) in text.iter().enumerate() {
         draw_char_fb(fb, stride, screen_w, screen_h, x + (i as i32 * FONT_WIDTH as i32), y, ch, color);
+    }
+}
+
+/// Draw a filled circle using the midpoint algorithm.
+pub fn draw_filled_circle_fb(
+    fb: *mut u32, stride: u32, screen_w: u32, screen_h: u32,
+    cx: i32, cy: i32, radius: i32, color: u32,
+) {
+    for dy in -radius..=radius {
+        let py = cy + dy;
+        if py < 0 || py as u32 >= screen_h { continue; }
+        // Half-width at this row: sqrt(r^2 - dy^2) using integer approximation.
+        let dx_max = {
+            let r2 = radius * radius;
+            let d2 = dy * dy;
+            if d2 > r2 { 0 } else {
+                // Integer sqrt approximation.
+                let mut x = radius;
+                while x * x > r2 - d2 { x -= 1; }
+                x
+            }
+        };
+        for dx in -dx_max..=dx_max {
+            let px = cx + dx;
+            if px >= 0 && (px as u32) < screen_w {
+                unsafe { *fb.add((py as u32 * stride + px as u32) as usize) = color; }
+            }
+        }
     }
 }
 

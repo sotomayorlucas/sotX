@@ -254,7 +254,8 @@ run-all: image create-test-disk
         -netdev user,id=net0 \
         -device virtio-net-pci,netdev=net0,disable-modern=on \
         -serial stdio \
-        -display none \
+        -display sdl \
+        -machine usb=off \
         -no-reboot \
         -m 512M > target/test-output.log 2>&1; true
     @if grep -qiE "STACK.SMASH|PANIC" target/test-output.log; then \
