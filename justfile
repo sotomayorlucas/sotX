@@ -244,6 +244,33 @@ run-full: image create-test-disk create-nvme-disk
         -no-reboot \
         -m 512M
 
+# Automated validation: build everything, boot with 90s timeout, verify no panics
+run-all: image create-test-disk
+    @echo "=== sotOS run-all: automated build + boot validation ==="
+    timeout 90 "{{QEMU}}" \
+        -drive format=raw,file={{IMAGE}} \
+        -drive if=none,format=raw,file=target/disk.img,id=disk0 \
+        -device virtio-blk-pci,drive=disk0,disable-modern=on \
+        -netdev user,id=net0 \
+        -device virtio-net-pci,netdev=net0,disable-modern=on \
+        -serial stdio \
+        -display none \
+        -no-reboot \
+        -m 512M > target/test-output.log 2>&1; true
+    @if grep -qiE "STACK.SMASH|PANIC" target/test-output.log; then \
+        echo "FAIL: found panic/crash in output:"; \
+        grep -iE "STACK.SMASH|PANIC" target/test-output.log; \
+        exit 1; \
+    fi
+    @if ! grep -q "LUCAS" target/test-output.log; then \
+        echo "FAIL: boot did not reach LUCAS shell"; \
+        cat target/test-output.log | tail -20; \
+        exit 1; \
+    fi
+    @echo "--- Key boot milestones ---"
+    @grep -E "NET:.*MAC|DHCP.*IP=|PONG|async.*completed|FAT32-TEST:.*SUCCESS|LUCAS:.*starting" target/test-output.log || true
+    @echo "=== PASS: sotOS booted successfully without panics ==="
+
 # Flash sotOS image to a disk/USB drive (usage: just flash DISK=/dev/sdX)
 flash DISK: image
     @echo "WARNING: This will OVERWRITE all data on {{DISK}}"
