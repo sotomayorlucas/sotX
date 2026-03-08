@@ -1,22 +1,29 @@
 use sotos_common::sys;
-use sotos_common::{BootInfo, KB_RING_ADDR, MOUSE_RING_ADDR};
+use sotos_common::{KB_RING_ADDR};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
-// Print helpers
+// Print helpers — serial only when no framebuffer, serial+fb when available
 // ---------------------------------------------------------------------------
+
+/// Whether the framebuffer is active (set in fb_init).
+static mut FB_ACTIVE: bool = false;
 
 pub(crate) fn print(s: &[u8]) {
     for &b in s {
         sys::debug_print(b);
-        unsafe { fb_putchar(b); }
+    }
+    if unsafe { FB_ACTIVE } {
+        for &b in s {
+            unsafe { fb_putchar(b); }
+        }
     }
 }
 
 pub(crate) fn print_u64(mut n: u64) {
     if n == 0 {
         sys::debug_print(b'0');
-        unsafe { fb_putchar(b'0'); }
+        if unsafe { FB_ACTIVE } { unsafe { fb_putchar(b'0'); } }
         return;
     }
     let mut buf = [0u8; 20];
@@ -29,14 +36,14 @@ pub(crate) fn print_u64(mut n: u64) {
     while i > 0 {
         i -= 1;
         sys::debug_print(buf[i]);
-        unsafe { fb_putchar(buf[i]); }
+        if unsafe { FB_ACTIVE } { unsafe { fb_putchar(buf[i]); } }
     }
 }
 
 pub(crate) fn print_hex64(mut n: u64) {
     if n == 0 {
         sys::debug_print(b'0');
-        unsafe { fb_putchar(b'0'); }
+        if unsafe { FB_ACTIVE } { unsafe { fb_putchar(b'0'); } }
         return;
     }
     let mut buf = [0u8; 16];
@@ -50,7 +57,7 @@ pub(crate) fn print_hex64(mut n: u64) {
     while i > 0 {
         i -= 1;
         sys::debug_print(buf[i]);
-        unsafe { fb_putchar(buf[i]); }
+        if unsafe { FB_ACTIVE } { unsafe { fb_putchar(buf[i]); } }
     }
 }
 
@@ -62,11 +69,11 @@ pub(crate) fn print_hex(val: u32) {
 }
 
 // ---------------------------------------------------------------------------
-// Framebuffer console (Phase 13)
+// Framebuffer text console
 // ---------------------------------------------------------------------------
 
 /// VGA 8x16 font (CP437, 256 chars x 16 bytes each = 4096 bytes).
-static VGA_FONT: [u8; 4176] = [
+static VGA_FONT: [u8; 4096] = [
     0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
     0x00,0x00,0x7e,0x81,0xa5,0x81,0x81,0xbd,0x99,0x81,0x81,0x7e,0x00,0x00,0x00,0x00,
     0x00,0x00,0x7e,0xff,0xdb,0xff,0xff,0xc3,0xe7,0xff,0xff,0x7e,0x00,0x00,0x00,0x00,
@@ -197,143 +204,74 @@ static VGA_FONT: [u8; 4176] = [
     0x00,0x76,0xdc,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
     // 0x7F
     0x00,0x00,0x00,0x00,0x10,0x38,0x6c,0xc6,0xc6,0xc6,0xfe,0x00,0x00,0x00,0x00,0x00,
-    // 0x80-0xFF: extended characters (zeroed for simplicity)
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    // 0x80-0xFF: extended characters (128 chars × 16 bytes = 2048 bytes, all zeroed)
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, // 0x80-0x81
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
 ];
 
-/// Console state (global statics).
+/// Console state.
 static mut FB_PTR: u64 = 0;
 static mut FB_PITCH: u32 = 0;
 static mut FB_WIDTH: u32 = 0;
@@ -343,141 +281,54 @@ static mut CON_ROWS: u32 = 0;
 static mut CON_CUR_COL: u32 = 0;
 static mut CON_CUR_ROW: u32 = 0;
 
-/// Desktop layout constants.
-const TASKBAR_HEIGHT: u32 = 32;
-const TITLEBAR_HEIGHT: u32 = 24;
-const WIN_BORDER: u32 = 2;
-const WIN_MARGIN: u32 = 8; // margin from screen edges
-
-/// Desktop layout: computed window positions (set in fb_init).
-static mut WIN_X: u32 = 0;
-static mut WIN_Y: u32 = 0;
-static mut WIN_W: u32 = 0;
-static mut WIN_H: u32 = 0;
-/// Text area origin (inside the terminal window client area).
+/// Text area origin (full-screen text console).
 static mut TEXT_X: u32 = 0;
 static mut TEXT_Y: u32 = 0;
 
-/// Mouse cursor state.
-static mut MOUSE_X: i32 = 512;
-static mut MOUSE_Y: i32 = 384;
-static mut MOUSE_PREV_X: i32 = -1;
-static mut MOUSE_PREV_Y: i32 = -1;
-
-// Ring buffer addresses imported from sotos_common::{KB_RING_ADDR, MOUSE_RING_ADDR}.
+/// Terminal text color.
+const COL_TEXT: u32 = 0xFFA9B1D6;
+/// Terminal background color.
+const COL_BG: u32 = 0xFF1A1B26;
 
 /// Keyboard state.
 static mut KB_SHIFT: bool = false;
 static mut KB_CTRL: bool = false;
 
-// ---------------------------------------------------------------------------
-// Desktop color palette
-// ---------------------------------------------------------------------------
-const COL_DESKTOP: u32    = 0xFF285078; // teal blue desktop background
-const COL_TASKBAR: u32    = 0xFF1E1E2E; // dark taskbar
-const COL_TASKBAR_TXT: u32= 0xFFCDD6F4; // light text on taskbar
-const COL_TITLEBAR: u32   = 0xFF3366AA; // blue title bar (active)
-const COL_TITLE_TXT: u32  = 0xFFFFFFFF; // white title text
-const COL_CLOSE_BG: u32   = 0xFFCC4444; // close button red
-const COL_MIN_BG: u32     = 0xFFCCAA44; // minimize button yellow
-const COL_BORDER: u32     = 0xFF404060; // window border
-const COL_WIN_BG: u32     = 0xFF1A1B26; // dark terminal background
-const COL_TEXT: u32        = 0xFFA9B1D6; // terminal text (soft white-blue)
-const COL_CURSOR_FG: u32  = 0xFFFFFFFF; // mouse cursor white
-const COL_CURSOR_BG: u32  = 0xFF000000; // mouse cursor outline
-
-// ---------------------------------------------------------------------------
-// Mouse cursor sprite (16x16)
-// ---------------------------------------------------------------------------
-const CURSOR_BITMAP: [u16; 16] = [
-    0b1000_0000_0000_0000, 0b1100_0000_0000_0000,
-    0b1110_0000_0000_0000, 0b1111_0000_0000_0000,
-    0b1111_1000_0000_0000, 0b1111_1100_0000_0000,
-    0b1111_1110_0000_0000, 0b1111_1111_0000_0000,
-    0b1111_1111_1000_0000, 0b1111_1100_0000_0000,
-    0b1111_1100_0000_0000, 0b1100_1100_0000_0000,
-    0b1000_0110_0000_0000, 0b0000_0110_0000_0000,
-    0b0000_0011_0000_0000, 0b0000_0011_0000_0000,
-];
-const CURSOR_MASK: [u16; 16] = [
-    0b1100_0000_0000_0000, 0b1110_0000_0000_0000,
-    0b1111_0000_0000_0000, 0b1111_1000_0000_0000,
-    0b1111_1100_0000_0000, 0b1111_1110_0000_0000,
-    0b1111_1111_0000_0000, 0b1111_1111_1000_0000,
-    0b1111_1111_1100_0000, 0b1111_1111_1100_0000,
-    0b1111_1110_0000_0000, 0b1110_1111_0000_0000,
-    0b1100_0111_0000_0000, 0b0000_0111_1000_0000,
-    0b0000_0011_1000_0000, 0b0000_0011_1000_0000,
-];
-
-/// Initialize framebuffer console with desktop GUI.
-pub(crate) unsafe fn fb_init(boot_info: &BootInfo) {
+/// Initialize framebuffer as a full-screen text console.
+pub(crate) unsafe fn fb_init(boot_info: &sotos_common::BootInfo) {
+    if boot_info.fb_addr == 0 { return; }
     FB_PTR = boot_info.fb_addr;
     FB_PITCH = boot_info.fb_pitch;
     FB_WIDTH = boot_info.fb_width;
     FB_HEIGHT = boot_info.fb_height;
+    CON_COLS = FB_WIDTH / 8;
+    CON_ROWS = FB_HEIGHT / 16;
+    TEXT_X = 0;
+    TEXT_Y = 0;
     CON_CUR_COL = 0;
     CON_CUR_ROW = 0;
+    FB_ACTIVE = true;
 
-    // Draw the modern desktop (sets WIN_*, TEXT_*, CON_COLS, CON_ROWS).
-    fb_draw_desktop();
-}
-
-/// Draw the full desktop using embedded-graphics (modern rounded-window design).
-pub(crate) unsafe fn fb_draw_desktop() {
-    if FB_PTR == 0 { return; }
+    // Clear screen to background color
     let fb = FB_PTR as *mut u32;
-    let stride = FB_PITCH / 4;
-    let mut display = sotos_gui::FramebufferDisplay::new(fb, FB_WIDTH, FB_HEIGHT, stride);
-    let layout = sotos_gui::draw_modern_desktop(&mut display, b"Terminal - sotOS");
-
-    WIN_X = layout.win_x;
-    WIN_Y = layout.win_y;
-    WIN_W = layout.win_w;
-    WIN_H = layout.win_h;
-    TEXT_X = layout.text_x;
-    TEXT_Y = layout.text_y;
-    CON_COLS = layout.text_cols;
-    CON_ROWS = layout.text_rows;
-}
-
-/// Fill a rectangle with a solid color.
-unsafe fn fb_fill_rect(x: u32, y: u32, w: u32, h: u32, color: u32) {
-    let fb = FB_PTR as *mut u32;
-    let stride = FB_PITCH / 4;
-    for row in 0..h {
-        let py = y + row;
-        if py >= FB_HEIGHT { break; }
-        for col in 0..w {
-            let px = x + col;
-            if px >= FB_WIDTH { break; }
-            *fb.add((py * stride + px) as usize) = color;
-        }
+    let total = (FB_PITCH / 4 * FB_HEIGHT) as usize;
+    for i in 0..total {
+        *fb.add(i) = COL_BG;
     }
 }
 
-/// Draw text at pixel position using VGA 8x16 font.
-unsafe fn fb_draw_text_at(x: u32, y: u32, text: &[u8], color: u32) {
-    for (i, &ch) in text.iter().enumerate() {
-        fb_draw_glyph_at(x + i as u32 * 8, y, ch, color, 0);
-    }
-}
-
-/// Draw an 8x16 glyph at pixel position (x, y) with foreground color, background 0 = transparent.
+/// Draw an 8x16 glyph at pixel position.
 unsafe fn fb_draw_glyph_at(px: u32, py: u32, ch: u8, fg: u32, bg: u32) {
     let glyph = &VGA_FONT[(ch as usize) * 16..(ch as usize) * 16 + 16];
-    let (fb, stride, w, h) = if COMPOSITOR_ACTIVE && !TERM_FB.is_null() {
-        (TERM_FB, TERM_STRIDE, TERM_W, TERM_H)
-    } else {
-        (FB_PTR as *mut u32, FB_PITCH / 4, FB_WIDTH, FB_HEIGHT)
-    };
+    let fb = FB_PTR as *mut u32;
+    let stride = FB_PITCH / 4;
     for gy in 0..16u32 {
         let row_byte = glyph[gy as usize];
         let y = py + gy;
-        if y >= h { break; }
+        if y >= FB_HEIGHT { break; }
         for gx in 0..8u32 {
             let x = px + gx;
-            if x >= w { break; }
+            if x >= FB_WIDTH { break; }
             let is_fg = row_byte & (0x80 >> gx) != 0;
             if is_fg {
                 *fb.add((y * stride + x) as usize) = fg;
@@ -488,20 +339,19 @@ unsafe fn fb_draw_glyph_at(px: u32, py: u32, ch: u8, fg: u32, bg: u32) {
     }
 }
 
-/// Draw an 8x16 character glyph at (col, row) position in the terminal text area.
+/// Draw a character at (col, row) in the text console.
 unsafe fn fb_draw_char(col: u32, row: u32, ch: u8) {
     let x = TEXT_X + col * 8;
     let y = TEXT_Y + row * 16;
-    fb_draw_glyph_at(x, y, ch, COL_TEXT, COL_WIN_BG);
+    fb_draw_glyph_at(x, y, ch, COL_TEXT, COL_BG);
 }
 
-/// Scroll the terminal text area up by one text row (16 pixels).
+/// Scroll the text console up by one row.
 unsafe fn fb_scroll() {
-    let (fb_u8, pitch, fb32, stride) = if COMPOSITOR_ACTIVE && !TERM_FB.is_null() {
-        (TERM_FB as *mut u8, (TERM_STRIDE * 4) as usize, TERM_FB, TERM_STRIDE)
-    } else {
-        (FB_PTR as *mut u8, FB_PITCH as usize, FB_PTR as *mut u32, FB_PITCH / 4)
-    };
+    let fb_u8 = FB_PTR as *mut u8;
+    let pitch = FB_PITCH as usize;
+    let fb32 = FB_PTR as *mut u32;
+    let stride = FB_PITCH / 4;
     let text_width_bytes = (CON_COLS * 8 * 4) as usize;
     let text_x_bytes = (TEXT_X * 4) as usize;
 
@@ -514,13 +364,12 @@ unsafe fn fb_scroll() {
             core::ptr::copy(src, dst, text_width_bytes);
         }
     }
-    // Clear the bottom row.
     let last_row = CON_ROWS - 1;
     for py in 0..16u32 {
         let y = (TEXT_Y + last_row * 16 + py) as usize;
         for col in 0..CON_COLS * 8 {
             let x = TEXT_X as usize + col as usize;
-            *fb32.add(y * stride as usize + x) = COL_WIN_BG;
+            *fb32.add(y * stride as usize + x) = COL_BG;
         }
     }
 }
@@ -532,27 +381,23 @@ static mut VTE_PARSER: Option<vte::Parser> = None;
 static mut ANSI_SAVED_COL: u32 = 0;
 static mut ANSI_SAVED_ROW: u32 = 0;
 
-/// Clear a rectangular region of the framebuffer console with background color.
+/// Clear a rectangular region of the text console.
 unsafe fn fb_clear_region(col_start: u32, col_end: u32, row_start: u32, row_end: u32) {
-    let (fb32, stride) = if COMPOSITOR_ACTIVE && !TERM_FB.is_null() {
-        (TERM_FB, TERM_STRIDE)
-    } else {
-        (FB_PTR as *mut u32, FB_PITCH / 4)
-    };
+    let fb32 = FB_PTR as *mut u32;
+    let stride = FB_PITCH / 4;
     for row in row_start..row_end {
         for py in 0..16u32 {
             let y = TEXT_Y + row * 16 + py;
             for col in col_start..col_end {
                 for px in 0..8u32 {
                     let x = TEXT_X + col * 8 + px;
-                    *fb32.add(y as usize * stride as usize + x as usize) = COL_WIN_BG;
+                    *fb32.add(y as usize * stride as usize + x as usize) = COL_BG;
                 }
             }
         }
     }
 }
 
-/// vte Perform implementation for framebuffer console.
 struct FbPerformer;
 
 impl vte::Perform for FbPerformer {
@@ -683,429 +528,19 @@ impl vte::Perform for FbPerformer {
     }
 }
 
-/// Write a single character to the framebuffer console (inside terminal window).
-/// Uses vte crate for ANSI escape sequence parsing.
-/// When compositor is active, writes to the terminal window buffer instead of screen.
+/// Write a single character to the framebuffer console.
 pub(crate) unsafe fn fb_putchar(ch: u8) {
     if FB_PTR == 0 { return; }
-    if COMPOSITOR_ACTIVE && TERM_FB.is_null() { return; }
     if VTE_PARSER.is_none() {
         VTE_PARSER = Some(vte::Parser::new());
     }
     VTE_PARSER.as_mut().unwrap().advance(&mut FbPerformer, ch);
-    if COMPOSITOR_ACTIVE {
-        WM_SCENE_DIRTY = true;
-        if let Some(wm) = WM.as_mut() {
-            wm.dirty = true;
-        }
-    }
-}
-
-/// Draw the mouse cursor at the current position.
-pub(crate) unsafe fn fb_draw_cursor() {
-    let fb = FB_PTR as *mut u32;
-    let stride = FB_PITCH / 4;
-    for row in 0..16usize {
-        for col in 0..16usize {
-            let px = MOUSE_X + col as i32;
-            let py = MOUSE_Y + row as i32;
-            if px >= 0 && py >= 0 && (px as u32) < FB_WIDTH && (py as u32) < FB_HEIGHT {
-                let bit = 1u16 << (15 - col);
-                let offset = (py as u32 * stride + px as u32) as usize;
-                if CURSOR_BITMAP[row] & bit != 0 {
-                    *fb.add(offset) = COL_CURSOR_FG;
-                } else if CURSOR_MASK[row] & bit != 0 {
-                    *fb.add(offset) = COL_CURSOR_BG;
-                }
-            }
-        }
-    }
-}
-
-/// Save pixels under cursor (for restoration when cursor moves).
-static mut CURSOR_SAVE: [u32; 256] = [0; 256]; // 16x16
-
-/// Save the pixels under the cursor before drawing it.
-pub(crate) unsafe fn fb_save_under_cursor() {
-    let fb = FB_PTR as *mut u32;
-    let stride = FB_PITCH / 4;
-    for row in 0..16usize {
-        for col in 0..16usize {
-            let px = MOUSE_X + col as i32;
-            let py = MOUSE_Y + row as i32;
-            if px >= 0 && py >= 0 && (px as u32) < FB_WIDTH && (py as u32) < FB_HEIGHT {
-                CURSOR_SAVE[row * 16 + col] = *fb.add((py as u32 * stride + px as u32) as usize);
-            }
-        }
-    }
-}
-
-/// Restore pixels from under the old cursor position.
-pub(crate) unsafe fn fb_restore_under_cursor(old_x: i32, old_y: i32) {
-    let fb = FB_PTR as *mut u32;
-    let stride = FB_PITCH / 4;
-    for row in 0..16usize {
-        for col in 0..16usize {
-            let px = old_x + col as i32;
-            let py = old_y + row as i32;
-            if px >= 0 && py >= 0 && (px as u32) < FB_WIDTH && (py as u32) < FB_HEIGHT {
-                let bit = 1u16 << (15 - col);
-                if CURSOR_MASK[row] & bit != 0 {
-                    *fb.add((py as u32 * stride + px as u32) as usize) = CURSOR_SAVE[row * 16 + col];
-                }
-            }
-        }
-    }
-}
-
-/// Mouse ring read index (init-side).
-static mut MOUSE_READ_IDX: u32 = 0;
-
-/// Poll the mouse ring buffer and update the cursor on screen.
-/// Call this frequently (e.g. between yield_now calls) for responsive tracking.
-pub(crate) unsafe fn poll_mouse() {
-    if FB_PTR == 0 { return; }
-
-    // Route through compositor if active.
-    if COMPOSITOR_ACTIVE {
-        poll_mouse_compositor();
-        return;
-    }
-
-    let mring = MOUSE_RING_ADDR as *mut u32;
-    let mut moved = false;
-
-    loop {
-        let write_idx = core::ptr::read_volatile(mring);
-        if MOUSE_READ_IDX == write_idx { break; }
-
-        let idx = (MOUSE_READ_IDX & 63) as usize;
-        let base = MOUSE_RING_ADDR + 8 + (idx * 4) as u64;
-        let dx = *(base as *const i8);
-        let dy = *((base + 1) as *const i8);
-        let _buttons = *((base + 2) as *const u8); // mouse buttons (b0=left, b1=right, b2=middle)
-
-        MOUSE_X += dx as i32;
-        MOUSE_Y -= dy as i32; // PS/2 Y is inverted
-
-        // Clamp to screen bounds.
-        if MOUSE_X < 0 { MOUSE_X = 0; }
-        if MOUSE_Y < 0 { MOUSE_Y = 0; }
-        if MOUSE_X >= FB_WIDTH as i32 { MOUSE_X = FB_WIDTH as i32 - 1; }
-        if MOUSE_Y >= FB_HEIGHT as i32 { MOUSE_Y = FB_HEIGHT as i32 - 1; }
-
-        MOUSE_READ_IDX = (MOUSE_READ_IDX.wrapping_add(1)) & 63;
-        moved = true;
-    }
-
-    if moved {
-        let old_x = MOUSE_PREV_X;
-        let old_y = MOUSE_PREV_Y;
-        if old_x >= 0 && old_y >= 0 {
-            fb_restore_under_cursor(old_x, old_y);
-        }
-        fb_save_under_cursor();
-        fb_draw_cursor();
-        MOUSE_PREV_X = MOUSE_X;
-        MOUSE_PREV_Y = MOUSE_Y;
-    }
-}
-
-// ---------------------------------------------------------------------------
-// GUI Compositor (live window compositing, drag & drop)
-// ---------------------------------------------------------------------------
-
-/// Whether the GUI compositor has taken over the display.
-static mut COMPOSITOR_ACTIVE: bool = false;
-
-/// The live window manager / compositor (None until gui_compositor_init).
-static mut WM: Option<sotos_gui::WindowManager> = None;
-
-/// Virtual addresses for GUI window pixel buffers (mapped via frame_alloc).
-const GUI_WIN1_ADDR: u64 = 0x7000000;
-const GUI_WIN2_ADDR: u64 = 0x7100000;
-const GUI_TERM_ADDR: u64 = 0x7200000;
-/// Back buffer for double-buffering (avoids slow MMIO pixel writes).
-const GUI_BACKBUF_ADDR: u64 = 0x7300000;
-
-/// Demo window dimensions.
-const GUI_WIN1_W: u32 = 400;
-const GUI_WIN1_H: u32 = 250;
-const GUI_WIN2_W: u32 = 320;
-const GUI_WIN2_H: u32 = 200;
-const GUI_TERM_W: u32 = 640;
-const GUI_TERM_H: u32 = 384;
-
-/// Terminal buffer target for console writes when compositor is active.
-static mut TERM_FB: *mut u32 = core::ptr::null_mut();
-static mut TERM_STRIDE: u32 = 0;
-static mut TERM_W: u32 = 0;
-static mut TERM_H: u32 = 0;
-
-/// Double-buffer: compositor draws here (WB RAM), then we blit to MMIO screen.
-static mut BACK_BUF: *mut u32 = core::ptr::null_mut();
-static mut SCREEN_FB: *mut u32 = core::ptr::null_mut();
-static mut SCREEN_STRIDE: u32 = 0;
-static mut SCREEN_PIXELS: usize = 0;
-
-/// Allocate physical frames and map them at a fixed virtual address range.
-unsafe fn map_gui_buffer(base: u64, pages: u64) {
-    for i in 0..pages {
-        let frame_cap = match sys::frame_alloc() {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-        let vaddr = base + i * 0x1000;
-        let _ = sys::map(vaddr, frame_cap, 0x7); // PRESENT | WRITABLE | USER
-    }
-}
-
-/// Initialize the GUI compositor: create demo windows + terminal window.
-/// Call after fb_init() and after boot messages have been printed.
-pub(crate) unsafe fn gui_compositor_init() {
-    if FB_PTR == 0 || FB_WIDTH == 0 || FB_HEIGHT == 0 { return; }
-
-    // Allocate pixel buffers for two demo windows.
-    let win1_bytes = (GUI_WIN1_W * GUI_WIN1_H * 4) as u64;
-    let win1_pages = (win1_bytes + 0xFFF) / 0x1000;
-    map_gui_buffer(GUI_WIN1_ADDR, win1_pages);
-
-    let win2_bytes = (GUI_WIN2_W * GUI_WIN2_H * 4) as u64;
-    let win2_pages = (win2_bytes + 0xFFF) / 0x1000;
-    map_gui_buffer(GUI_WIN2_ADDR, win2_pages);
-
-    // Allocate terminal window buffer.
-    let term_bytes = (GUI_TERM_W * GUI_TERM_H * 4) as u64;
-    let term_pages = (term_bytes + 0xFFF) / 0x1000;
-    map_gui_buffer(GUI_TERM_ADDR, term_pages);
-
-    // Allocate back buffer for double-buffering (same size as screen).
-    let stride = FB_PITCH / 4;
-    let backbuf_bytes = (stride * FB_HEIGHT * 4) as u64;
-    let backbuf_pages = (backbuf_bytes + 0xFFF) / 0x1000;
-    map_gui_buffer(GUI_BACKBUF_ADDR, backbuf_pages);
-    BACK_BUF = GUI_BACKBUF_ADDR as *mut u32;
-    SCREEN_FB = FB_PTR as *mut u32;
-    SCREEN_STRIDE = stride;
-    SCREEN_PIXELS = (stride * FB_HEIGHT) as usize;
-
-    // Fill window buffers with gradient content.
-    sotos_gui::draw_gradient_into(
-        GUI_WIN1_ADDR as *mut u32, GUI_WIN1_W, GUI_WIN1_H,
-        50, 20, 120,    // deep blue top
-        200, 80, 40,    // warm orange bottom
-    );
-    sotos_gui::draw_gradient_into(
-        GUI_WIN2_ADDR as *mut u32, GUI_WIN2_W, GUI_WIN2_H,
-        20, 100, 60,    // forest green top
-        60, 200, 180,   // teal bottom
-    );
-
-    // Fill terminal buffer with dark background.
-    let term_buf = GUI_TERM_ADDR as *mut u32;
-    for i in 0..(GUI_TERM_W * GUI_TERM_H) as usize {
-        *term_buf.add(i) = COL_WIN_BG;
-    }
-
-    // Draw text labels into window buffers using the built-in 8x8 font.
-    let w1 = GUI_WIN1_ADDR as *mut u32;
-    sotos_gui::draw_string_fb(w1, GUI_WIN1_W, GUI_WIN1_W, GUI_WIN1_H,
-        12, 12, b"Hello from sotOS!", sotos_gui::COLOR_WHITE);
-    sotos_gui::draw_string_fb(w1, GUI_WIN1_W, GUI_WIN1_W, GUI_WIN1_H,
-        12, 28, b"Drag windows around!", sotos_gui::COLOR_WHITE);
-    sotos_gui::draw_string_fb(w1, GUI_WIN1_W, GUI_WIN1_W, GUI_WIN1_H,
-        12, 52, b"Microkernel OS written", sotos_gui::COLOR_WHITE);
-    sotos_gui::draw_string_fb(w1, GUI_WIN1_W, GUI_WIN1_W, GUI_WIN1_H,
-        12, 68, b"entirely in Rust", sotos_gui::COLOR_WHITE);
-
-    let w2 = GUI_WIN2_ADDR as *mut u32;
-    sotos_gui::draw_string_fb(w2, GUI_WIN2_W, GUI_WIN2_W, GUI_WIN2_H,
-        12, 12, b"System Info", sotos_gui::COLOR_WHITE);
-    sotos_gui::draw_string_fb(w2, GUI_WIN2_W, GUI_WIN2_W, GUI_WIN2_H,
-        12, 32, b"Arch: x86_64", sotos_gui::bgra(180, 190, 210, 255));
-    sotos_gui::draw_string_fb(w2, GUI_WIN2_W, GUI_WIN2_W, GUI_WIN2_H,
-        12, 48, b"Kernel: sotOS 0.1", sotos_gui::bgra(180, 190, 210, 255));
-    sotos_gui::draw_string_fb(w2, GUI_WIN2_W, GUI_WIN2_W, GUI_WIN2_H,
-        12, 64, b"RAM: 512 MB", sotos_gui::bgra(180, 190, 210, 255));
-    sotos_gui::draw_string_fb(w2, GUI_WIN2_W, GUI_WIN2_W, GUI_WIN2_H,
-        12, 80, b"Display: BGRA32", sotos_gui::bgra(180, 190, 210, 255));
-
-    // Create the window manager targeting the back buffer (not MMIO screen).
-    let mut wm = sotos_gui::WindowManager::new(BACK_BUF, FB_WIDTH, FB_HEIGHT, stride);
-
-    // Create terminal window (prominent, front and center).
-    let term_x = 20i32;
-    let term_y = 30i32;
-    wm.create_window(term_x, term_y, GUI_TERM_W, GUI_TERM_H,
-        b"Terminal", GUI_TERM_ADDR as *mut u32);
-
-    // Create two demo windows at offset positions (behind terminal).
-    let w1_x = (FB_WIDTH / 3 + 40) as i32;
-    let w1_y = (FB_HEIGHT / 6) as i32;
-    wm.create_window(w1_x, w1_y, GUI_WIN1_W, GUI_WIN1_H,
-        b"Hello World", GUI_WIN1_ADDR as *mut u32);
-
-    let w2_x = (FB_WIDTH / 2 + 20) as i32;
-    let w2_y = (FB_HEIGHT / 3 + 30) as i32;
-    wm.create_window(w2_x, w2_y, GUI_WIN2_W, GUI_WIN2_H,
-        b"Demo Window", GUI_WIN2_ADDR as *mut u32);
-
-    // Disable cursor in compositor (we draw it directly on screen for speed).
-    wm.cursor_visible = false;
-
-    // Initial composite render + blit to screen.
-    wm.composite();
-    blit_backbuf_to_screen();
-    comp_cursor_save_and_draw(wm.cursor_x, wm.cursor_y);
-
-    WM = Some(wm);
-    COMPOSITOR_ACTIVE = true;
-
-    // Set up terminal buffer target so fb_putchar writes into the terminal window.
-    TERM_FB = term_buf;
-    TERM_STRIDE = GUI_TERM_W;
-    TERM_W = GUI_TERM_W;
-    TERM_H = GUI_TERM_H;
-
-    // Reset console to terminal window dimensions.
-    TEXT_X = 0;
-    TEXT_Y = 0;
-    CON_COLS = GUI_TERM_W / 8;   // 80 columns
-    CON_ROWS = GUI_TERM_H / 16;  // 24 rows
-    CON_CUR_COL = 0;
-    CON_CUR_ROW = 0;
-}
-
-/// Saved pixels under the cursor on the MMIO screen (16x16).
-static mut COMP_CURSOR_SAVE: [u32; 256] = [0; 256];
-/// Last drawn cursor position on screen (-1 = not drawn yet).
-static mut COMP_CURSOR_X: i32 = -1;
-static mut COMP_CURSOR_Y: i32 = -1;
-
-/// Poll mouse when compositor is active — routes events through the WindowManager.
-/// Scene compositing (full redraw) only when windows/text change.
-/// Mouse cursor is drawn directly to MMIO screen (16x16 pixels) for speed.
-unsafe fn poll_mouse_compositor() {
-    let mring = MOUSE_RING_ADDR as *mut u32;
-
-    let wm = match WM.as_mut() {
-        Some(w) => w,
-        None => return,
-    };
-
-    let mut cursor_moved = false;
-    let mut click_or_drag = false;
-
-    loop {
-        let write_idx = core::ptr::read_volatile(mring);
-        if MOUSE_READ_IDX == write_idx { break; }
-
-        let idx = (MOUSE_READ_IDX & 63) as usize;
-        let base = MOUSE_RING_ADDR + 8 + (idx * 4) as u64;
-        let dx = *(base as *const i8) as i32;
-        let dy = -(*((base + 1) as *const i8) as i32); // PS/2 Y inverted
-        let buttons = *((base + 2) as *const u8);
-
-        // Detect button changes before WM processes them.
-        if buttons != wm.prev_buttons || wm.drag_idx != usize::MAX {
-            click_or_drag = true;
-        }
-
-        wm.on_mouse_input(dx, dy, buttons);
-        MOUSE_READ_IDX = (MOUSE_READ_IDX.wrapping_add(1)) & 63;
-        cursor_moved = true;
-    }
-
-    // Scene changes: text output, window click/drag, button press/release.
-    let scene_dirty = WM_SCENE_DIRTY || click_or_drag;
-    WM_SCENE_DIRTY = false;
-
-    if scene_dirty && wm.dirty {
-        // Full scene recomposite + blit (text typed, window moved, focus changed).
-        wm.composite();
-        blit_backbuf_to_screen();
-        comp_cursor_save_and_draw(wm.cursor_x, wm.cursor_y);
-    } else if cursor_moved {
-        // Cursor-only move: restore old 16x16, draw new 16x16 on screen.
-        // ~768 MMIO writes instead of 786K — dramatically faster.
-        wm.dirty = false;
-        comp_cursor_restore();
-        comp_cursor_save_and_draw(wm.cursor_x, wm.cursor_y);
-    }
-}
-
-/// Track whether scene (not just cursor) has changed (text typed, etc.).
-static mut WM_SCENE_DIRTY: bool = false;
-
-/// Save 16x16 pixels under cursor from BACK BUFFER, then draw cursor on screen.
-unsafe fn comp_cursor_save_and_draw(cx: i32, cy: i32) {
-    if SCREEN_FB.is_null() || BACK_BUF.is_null() { return; }
-    let stride = SCREEN_STRIDE;
-    // Save clean pixels from back buffer (which never has cursor drawn on it).
-    for row in 0..16usize {
-        for col in 0..16usize {
-            let px = cx + col as i32;
-            let py = cy + row as i32;
-            if px >= 0 && py >= 0 && (px as u32) < FB_WIDTH && (py as u32) < FB_HEIGHT {
-                COMP_CURSOR_SAVE[row * 16 + col] =
-                    *BACK_BUF.add((py as u32 * stride + px as u32) as usize);
-            } else {
-                COMP_CURSOR_SAVE[row * 16 + col] = 0;
-            }
-        }
-    }
-    // Draw cursor on MMIO screen.
-    for row in 0..16usize {
-        for col in 0..16usize {
-            let px = cx + col as i32;
-            let py = cy + row as i32;
-            if px >= 0 && py >= 0 && (px as u32) < FB_WIDTH && (py as u32) < FB_HEIGHT {
-                let bit = 1u16 << (15 - col);
-                let offset = (py as u32 * stride + px as u32) as usize;
-                if CURSOR_BITMAP[row] & bit != 0 {
-                    *SCREEN_FB.add(offset) = COL_CURSOR_FG;
-                } else if CURSOR_MASK[row] & bit != 0 {
-                    *SCREEN_FB.add(offset) = COL_CURSOR_BG;
-                }
-            }
-        }
-    }
-    COMP_CURSOR_X = cx;
-    COMP_CURSOR_Y = cy;
-}
-
-/// Restore the pixels that were under the cursor on the MMIO screen.
-unsafe fn comp_cursor_restore() {
-    if SCREEN_FB.is_null() || COMP_CURSOR_X < 0 { return; }
-    let stride = SCREEN_STRIDE;
-    let cx = COMP_CURSOR_X;
-    let cy = COMP_CURSOR_Y;
-    for row in 0..16usize {
-        for col in 0..16usize {
-            let px = cx + col as i32;
-            let py = cy + row as i32;
-            if px >= 0 && py >= 0 && (px as u32) < FB_WIDTH && (py as u32) < FB_HEIGHT {
-                let bit = 1u16 << (15 - col);
-                if CURSOR_MASK[row] & bit != 0 {
-                    *SCREEN_FB.add((py as u32 * stride + px as u32) as usize) =
-                        COMP_CURSOR_SAVE[row * 16 + col];
-                }
-            }
-        }
-    }
-}
-
-/// Fast blit: copy the RAM back buffer to the MMIO screen framebuffer.
-unsafe fn blit_backbuf_to_screen() {
-    if BACK_BUF.is_null() || SCREEN_FB.is_null() { return; }
-    core::ptr::copy_nonoverlapping(BACK_BUF, SCREEN_FB, SCREEN_PIXELS);
 }
 
 // ---------------------------------------------------------------------------
 // PS/2 Scancode translation (Set 1)
 // ---------------------------------------------------------------------------
 
-/// Unshifted scancode -> ASCII (Set 1, make codes only, 0 = no mapping).
 static SCANCODE_TO_ASCII: [u8; 128] = [
     0,  27, b'1',b'2',b'3',b'4',b'5',b'6',b'7',b'8',b'9',b'0',b'-',b'=',0x08,b'\t',
     b'q',b'w',b'e',b'r',b't',b'y',b'u',b'i',b'o',b'p',b'[',b']',b'\n', 0, b'a',b's',
@@ -1117,7 +552,6 @@ static SCANCODE_TO_ASCII: [u8; 128] = [
     0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0,
 ];
 
-/// Shifted scancode -> ASCII.
 static SCANCODE_TO_ASCII_SHIFT: [u8; 128] = [
     0,  27, b'!',b'@',b'#',b'$',b'%',b'^',b'&',b'*',b'(',b')',b'_',b'+',0x08,b'\t',
     b'Q',b'W',b'E',b'R',b'T',b'Y',b'U',b'I',b'O',b'P',b'{',b'}',b'\n', 0, b'A',b'S',
@@ -1129,10 +563,7 @@ static SCANCODE_TO_ASCII_SHIFT: [u8; 128] = [
     0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0,
 ];
 
-/// Read one ASCII character from the keyboard ring buffer OR serial (non-blocking).
-/// Checks PS/2 keyboard ring first, then falls back to serial input.
-/// Handles Shift/Ctrl modifier tracking, returns None if no key available.
-/// Buffered byte from serial peek (0 = empty, otherwise byte value).
+/// Buffered byte from serial peek.
 static KB_PEEK_BUF: AtomicU64 = AtomicU64::new(0);
 
 /// Check if a character is available without consuming it.
@@ -1150,14 +581,11 @@ pub(crate) unsafe fn kb_has_char() -> bool {
 }
 
 pub(crate) unsafe fn kb_read_char() -> Option<u8> {
-    // Return buffered peek byte first.
     let peeked = KB_PEEK_BUF.swap(0, Ordering::Relaxed);
     if peeked != 0 {
         return Some(peeked as u8);
     }
-    // Check serial input first (works in headless mode).
     if let Some(b) = sys::debug_read() {
-        // Convert \r to \n for terminal compatibility.
         return Some(if b == b'\r' { b'\n' } else { b });
     }
 
@@ -1166,22 +594,20 @@ pub(crate) unsafe fn kb_read_char() -> Option<u8> {
         let write_idx = core::ptr::read_volatile(ring);
         let read_idx = core::ptr::read_volatile(ring.add(1));
         if read_idx == write_idx {
-            return None; // Ring empty
+            return None;
         }
         let scancode = *((KB_RING_ADDR + 8 + (read_idx & 0xFF) as u64) as *const u8);
         let new_read = (read_idx + 1) & 0xFF;
         core::ptr::write_volatile(ring.add(1), new_read);
 
-        // Track modifier keys
         match scancode {
-            0x2A | 0x36 => { KB_SHIFT = true; continue; }   // Shift press
-            0xAA | 0xB6 => { KB_SHIFT = false; continue; }  // Shift release
-            0x1D => { KB_CTRL = true; continue; }            // Ctrl press
-            0x9D => { KB_CTRL = false; continue; }           // Ctrl release
+            0x2A | 0x36 => { KB_SHIFT = true; continue; }
+            0xAA | 0xB6 => { KB_SHIFT = false; continue; }
+            0x1D => { KB_CTRL = true; continue; }
+            0x9D => { KB_CTRL = false; continue; }
             _ => {}
         }
 
-        // Ignore break codes (key release, bit 7 set)
         if scancode & 0x80 != 0 {
             continue;
         }
@@ -1194,7 +620,6 @@ pub(crate) unsafe fn kb_read_char() -> Option<u8> {
 
         if ascii == 0 { continue; }
 
-        // Ctrl+key: map to control character
         if KB_CTRL {
             if ascii >= b'a' && ascii <= b'z' {
                 return Some(ascii - b'a' + 1);

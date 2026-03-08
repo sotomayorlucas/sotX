@@ -70,8 +70,7 @@ mod child_handler;
 mod lucas_handler;
 mod boot_tests;
 
-use framebuffer::{print, print_u64, print_hex64, print_hex, fb_init,
-                  fb_draw_cursor, fb_save_under_cursor, gui_compositor_init};
+use framebuffer::{print, print_u64, print_hex64, print_hex, fb_init};
 use exec::MAP_WRITABLE;
 use boot_tests::{test_dynamic_linking, run_linux_test, run_musl_test,
                  run_dynamic_test, run_busybox_test, producer,
@@ -182,16 +181,9 @@ pub extern "C" fn _start() -> ! {
         0
     };
 
-    // --- Initialize framebuffer console with desktop GUI ---
+    // --- Initialize framebuffer text console ---
     if boot_info.fb_addr != 0 {
-        unsafe {
-            fb_init(boot_info);
-            fb_save_under_cursor();
-            fb_draw_cursor();
-            // Activate the live compositor with demo windows.
-            gui_compositor_init();
-        }
-        print(b"[DESKTOP OK]\n");
+        unsafe { fb_init(boot_info); }
     }
 
     print(b"INIT: boot complete, ");

@@ -116,9 +116,7 @@ run-smp: image
         -m 512M \
         -smp 4
 
-# Run with QEMU display window (for framebuffer/keyboard/mouse)
-# Uses -display sdl to get PS/2 mouse input. Click inside window to grab mouse;
-# Ctrl+Alt+G to release mouse grab.
+# Run with QEMU display window (for framebuffer/keyboard testing)
 run-gui: image create-test-disk
     "{{QEMU}}" \
         -drive format=raw,file={{IMAGE}} \
@@ -127,22 +125,7 @@ run-gui: image create-test-disk
         -serial stdio \
         -no-reboot \
         -m 512M \
-        -display sdl \
-        -machine usb=off
-
-# Run with QEMU display + networking (for links/browser with internet)
-run-gui-net: image create-test-disk
-    "{{QEMU}}" \
-        -drive format=raw,file={{IMAGE}} \
-        -drive if=none,format=raw,file=target/disk.img,id=disk0 \
-        -device virtio-blk-pci,drive=disk0,disable-modern=on \
-        -netdev user,id=net0,hostfwd=udp::5555-:5555,hostfwd=tcp::7777-:7 \
-        -device virtio-net-pci,netdev=net0,disable-modern=on \
-        -serial stdio \
-        -no-reboot \
-        -m 512M \
-        -display sdl \
-        -machine usb=off
+        -display sdl
 
 # Run with GDB server for debugging (connect with gdb -ex "target remote :1234")
 debug: image
@@ -254,8 +237,7 @@ run-all: image create-test-disk
         -netdev user,id=net0 \
         -device virtio-net-pci,netdev=net0,disable-modern=on \
         -serial stdio \
-        -display sdl \
-        -machine usb=off \
+        -display none \
         -no-reboot \
         -m 512M > target/test-output.log 2>&1; true
     @if grep -qiE "STACK.SMASH|PANIC" target/test-output.log; then \
@@ -279,6 +261,28 @@ flash DISK: image
     @read -r _
     dd if={{IMAGE}} of={{DISK}} bs=4M status=progress conv=fsync
     @echo "Flash complete. You can now boot from {{DISK}}."
+
+# Download Alpine + Ubuntu rootfs tarballs
+fetch-rootfs:
+    python scripts/fetch_rootfs.py
+
+# Build a 1 GiB sysroot disk with Alpine (musl) + Ubuntu (glibc) rootfs
+build-sysroot: fetch-rootfs
+    python scripts/mkdisk.py --size 1024 --output target/sysroot.img \
+        --tarball target/alpine.tar.gz \
+        --tarball target/ubuntu-base.tar.gz
+
+# Run with Linux sysroot disk (Alpine+Ubuntu rootfs)
+run-linux: image build-sysroot
+    "{{QEMU}}" \
+        -drive format=raw,file={{IMAGE}} \
+        -drive if=none,format=raw,file=target/sysroot.img,id=disk0 \
+        -device virtio-blk-pci,drive=disk0,disable-modern=on \
+        -netdev user,id=net0 \
+        -device virtio-net-pci,netdev=net0,disable-modern=on \
+        -serial stdio \
+        -no-reboot \
+        -m 512M
 
 # Clean build artifacts
 clean:

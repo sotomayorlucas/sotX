@@ -7,7 +7,7 @@ use sotos_common::sys;
 use sotos_common::{BootInfo, BOOT_INFO_ADDR};
 use sotos_common::linux_abi::*;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::framebuffer::{print, print_u64, fb_putchar, kb_has_char, kb_read_char, poll_mouse};
+use crate::framebuffer::{print, print_u64, fb_putchar, kb_has_char, kb_read_char};
 use crate::exec::{reply_val, rdtsc, exec_from_initrd, exec_from_initrd_argv,
                   EXEC_LOCK, MAX_EXEC_ARG_LEN, MAX_EXEC_ARGS,
                   format_u64_into, copy_guest_path, starts_with,
@@ -204,7 +204,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                                     let _ = sys::send(ep_cap, &reply);
                                     break;
                                 }
-                                None => { unsafe { poll_mouse(); } sys::yield_now(); }
+                                None => { sys::yield_now(); }
                             }
                         }
                     }
@@ -1190,7 +1190,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                                     if base != 0 { unsafe { *(base as *mut u8) = ch; } }
                                     reply_val(ep_cap, 1); break;
                                 }
-                                None => { unsafe { poll_mouse(); } sys::yield_now(); }
+                                None => { sys::yield_now(); }
                             }
                         }
                     } else {
@@ -2867,7 +2867,6 @@ pub(crate) extern "C" fn child_handler() -> ! {
                             reply_val(ep_cap, 1);
                             break;
                         }
-                        unsafe { poll_mouse(); }
                         sys::yield_now();
                     }
                 }

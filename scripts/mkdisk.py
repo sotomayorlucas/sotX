@@ -4,6 +4,8 @@
 Modes:
   - Default (no --rootfs): Creates a small empty formatted disk.
   - With --rootfs <dir>: Injects directory tree into the disk as ObjectStore entries.
+  - With --tarball <file.tar.gz>: Injects tarball contents directly (no host extraction).
+  - With --deb <file.deb>: Extracts data.tar from .deb and injects shared libs.
 
 Layout (v5):
   Sector 0:        Superblock
@@ -19,11 +21,15 @@ Layout (v5):
 
 Usage:
   python scripts/mkdisk.py [--output target/disk.img] [--size 256] [--rootfs ./rootfs]
+  python scripts/mkdisk.py --size 512 --tarball target/alpine.tar.gz
+  python scripts/mkdisk.py --size 512 --deb libx11.deb
 """
 
 import argparse
+import io
 import os
 import struct
+import tarfile
 import time
 
 # ── Layout constants (must match layout.rs v5) ──────────────────────────
@@ -167,6 +173,9 @@ class DiskBuilder:
         )
         self.dir_entries.append(root)
 
+        # Name-based lookup cache: (parent_oid, name_bytes) -> oid
+        self._dir_cache = {(0, b'/'): ROOT_OID}
+
     def alloc_blocks(self, count):
         """Allocate contiguous data blocks. Returns start block index."""
         if count == 0:
@@ -175,11 +184,12 @@ class DiskBuilder:
         if start + count > self.data_count:
             raise RuntimeError(f"Disk full: need {count} blocks at {start}, "
                                f"only {self.data_count} total")
-        # Mark bitmap
+        # Mark bitmap (only within bitmap bounds)
         for b in range(start, start + count):
             byte_idx = b // 8
             bit_idx = b % 8
-            self.bitmap[byte_idx] |= (1 << bit_idx)
+            if byte_idx < BITMAP_BYTES:
+                self.bitmap[byte_idx] |= (1 << bit_idx)
         self.next_block = start + count
         return start
 
@@ -193,16 +203,43 @@ class DiskBuilder:
             self.data[offset:offset + len(chunk)] = chunk
             offset += SECTOR_SIZE
 
+    def find_entry(self, name_bytes, parent_oid):
+        """Find existing dir entry by name and parent. Returns (index, oid) or None."""
+        key = (parent_oid, name_bytes)
+        if key in self._dir_cache:
+            oid = self._dir_cache[key]
+            for i, e in enumerate(self.dir_entries):
+                if struct.unpack_from('<Q', e, 0)[0] == oid:
+                    return (i, oid)
+        return None
+
     def add_file(self, name, file_data, parent_oid, permissions=DEFAULT_FILE_PERMS,
                  uid=0, gid=0):
-        """Add a file to the filesystem. Returns OID."""
-        if len(self.dir_entries) >= DIR_ENTRY_COUNT:
-            raise RuntimeError(f"Directory full ({DIR_ENTRY_COUNT} entries)")
-
+        """Add a file to the filesystem. Returns OID. Overwrites if exists."""
         name_bytes = name.encode('utf-8') if isinstance(name, str) else name
         if len(name_bytes) >= MAX_NAME_LEN:
-            # Truncate — filesystem limitation
             name_bytes = name_bytes[:MAX_NAME_LEN - 1]
+
+        # Check for existing file with same name+parent — overwrite data
+        existing = self.find_entry(name_bytes, parent_oid)
+        if existing is not None:
+            idx, oid = existing
+            size = len(file_data)
+            count = sectors_for(size)
+            start = self.alloc_blocks(count)
+            if size > 0:
+                self.write_data(start, file_data)
+            entry = make_direntry(
+                oid=oid, name_bytes=name_bytes, size=size,
+                sector_start=start, sector_count=count, flags=0,
+                parent_oid=parent_oid, permissions=permissions,
+                uid=uid, gid=gid
+            )
+            self.dir_entries[idx] = entry
+            return oid
+
+        if len(self.dir_entries) >= DIR_ENTRY_COUNT:
+            raise RuntimeError(f"Directory full ({DIR_ENTRY_COUNT} entries)")
 
         size = len(file_data)
         count = sectors_for(size)
@@ -221,16 +258,22 @@ class DiskBuilder:
             uid=uid, gid=gid
         )
         self.dir_entries.append(entry)
+        self._dir_cache[(parent_oid, name_bytes)] = oid
         return oid
 
     def add_dir(self, name, parent_oid, permissions=DEFAULT_DIR_PERMS):
-        """Add a directory entry. Returns OID."""
-        if len(self.dir_entries) >= DIR_ENTRY_COUNT:
-            raise RuntimeError(f"Directory full ({DIR_ENTRY_COUNT} entries)")
-
+        """Add a directory entry. Returns OID. Returns existing OID if duplicate."""
         name_bytes = name.encode('utf-8') if isinstance(name, str) else name
         if len(name_bytes) >= MAX_NAME_LEN:
             name_bytes = name_bytes[:MAX_NAME_LEN - 1]
+
+        # Return existing dir if already created
+        existing = self.find_entry(name_bytes, parent_oid)
+        if existing is not None:
+            return existing[1]
+
+        if len(self.dir_entries) >= DIR_ENTRY_COUNT:
+            raise RuntimeError(f"Directory full ({DIR_ENTRY_COUNT} entries)")
 
         oid = self.next_oid
         self.next_oid += 1
@@ -242,12 +285,23 @@ class DiskBuilder:
             parent_oid=parent_oid, permissions=permissions
         )
         self.dir_entries.append(entry)
+        self._dir_cache[(parent_oid, name_bytes)] = oid
         return oid
+
+    def ensure_path(self, path_parts):
+        """Ensure all directories in path exist. Returns OID of deepest dir."""
+        parent = ROOT_OID
+        for part in path_parts:
+            if not part:
+                continue
+            part_bytes = part.encode('utf-8') if isinstance(part, str) else part
+            parent = self.add_dir(part_bytes, parent)
+        return parent
 
     def inject_rootfs(self, rootfs_path):
         """Recursively inject a directory tree into the filesystem."""
         rootfs_path = os.path.normpath(rootfs_path)
-        # Map from host directory path → OID
+        # Map from host directory path -> OID
         dir_oids = {rootfs_path: ROOT_OID}
 
         total_files = 0
@@ -304,6 +358,279 @@ class DiskBuilder:
         if skipped:
             print(f"  Skipped: {skipped} (directory full or read error)")
 
+    def inject_tarball(self, tarball_path):
+        """Inject tarball contents directly into the filesystem (no host extraction).
+
+        Handles: regular files, directories, symlinks (resolved to hard copies).
+        Skips: character/block devices, FIFOs.
+        """
+        print(f"  Injecting tarball: {tarball_path}")
+        total_files = 0
+        total_dirs = 0
+        total_bytes = 0
+        symlinks = []  # defer symlink resolution
+        skipped = 0
+
+        with tarfile.open(tarball_path, 'r:*') as tf:
+            members = tf.getmembers()
+
+            # First pass: create all directories
+            for member in members:
+                if not member.isdir():
+                    continue
+                path = member.name.lstrip('./')
+                if not path:
+                    continue
+                parts = path.split('/')
+                try:
+                    self.ensure_path(parts)
+                    total_dirs += 1
+                except RuntimeError:
+                    skipped += 1
+
+            # Second pass: inject regular files
+            for member in members:
+                if member.isdir():
+                    continue
+
+                path = member.name.lstrip('./')
+                if not path:
+                    continue
+
+                # Skip special device files
+                if member.ischr() or member.isblk() or member.isfifo():
+                    skipped += 1
+                    continue
+
+                # Defer symlinks to third pass
+                if member.issym():
+                    symlinks.append(member)
+                    continue
+
+                # Hard links: treat like symlinks (defer)
+                if member.islnk():
+                    symlinks.append(member)
+                    continue
+
+                parts = path.split('/')
+                fname = parts[-1]
+                if not fname:
+                    continue
+
+                parent_oid = self.ensure_path(parts[:-1]) if len(parts) > 1 else ROOT_OID
+
+                try:
+                    f = tf.extractfile(member)
+                    if f is None:
+                        skipped += 1
+                        continue
+                    file_data = f.read()
+                    perms = member.mode if member.mode else DEFAULT_FILE_PERMS
+                    self.add_file(fname, file_data, parent_oid,
+                                  permissions=perms,
+                                  uid=member.uid, gid=member.gid)
+                    total_files += 1
+                    total_bytes += len(file_data)
+                except (RuntimeError, KeyError):
+                    skipped += 1
+
+            # Third pass: resolve symlinks — copy target file data
+            for member in symlinks:
+                path = member.name.lstrip('./')
+                if not path:
+                    continue
+
+                parts = path.split('/')
+                fname = parts[-1]
+                if not fname:
+                    continue
+
+                parent_oid = self.ensure_path(parts[:-1]) if len(parts) > 1 else ROOT_OID
+
+                if member.issym():
+                    target = member.linkname
+                elif member.islnk():
+                    target = member.linkname
+                else:
+                    continue
+
+                # Resolve the target path relative to the symlink's directory
+                if not target.startswith('/'):
+                    # Relative symlink
+                    link_dir = '/'.join(parts[:-1])
+                    resolved = os.path.normpath(os.path.join(link_dir, target))
+                else:
+                    resolved = target.lstrip('/')
+
+                resolved = resolved.replace('\\', '/')
+
+                # Try to find and copy the target file from the tarball
+                target_data = None
+                # Look up in tarball by resolved path
+                for try_path in [resolved, './' + resolved]:
+                    try:
+                        target_member = tf.getmember(try_path)
+                        if target_member.isfile():
+                            f = tf.extractfile(target_member)
+                            if f:
+                                target_data = f.read()
+                                break
+                    except KeyError:
+                        continue
+
+                if target_data is not None:
+                    try:
+                        perms = member.mode if member.mode else DEFAULT_FILE_PERMS
+                        self.add_file(fname, target_data, parent_oid,
+                                      permissions=perms)
+                        total_files += 1
+                        total_bytes += len(target_data)
+                    except RuntimeError:
+                        skipped += 1
+                else:
+                    # Can't resolve symlink — store target path as file content
+                    target_bytes = target.encode('utf-8')
+                    try:
+                        self.add_file(fname, target_bytes, parent_oid,
+                                      permissions=0o777)
+                        total_files += 1
+                        total_bytes += len(target_bytes)
+                    except RuntimeError:
+                        skipped += 1
+
+        print(f"  Injected: {total_files} files, {total_dirs} dirs, "
+              f"{total_bytes:,} bytes data")
+        if skipped:
+            print(f"  Skipped: {skipped} (devices/fifos/full)")
+
+    def inject_deb(self, deb_path):
+        """Extract data.tar from a .deb (ar archive) and inject shared libs.
+
+        .deb files are `ar` archives containing:
+          - debian-binary
+          - control.tar.{gz,xz,zst}
+          - data.tar.{gz,xz,zst}
+
+        We parse the ar format manually (stdlib only), extract data.tar,
+        and inject all files into the filesystem.
+        """
+        print(f"  Injecting .deb: {deb_path}")
+
+        with open(deb_path, 'rb') as f:
+            # ar magic: "!<arch>\n"
+            magic = f.read(8)
+            if magic != b'!<arch>\n':
+                print(f"  Error: {deb_path} is not an ar archive")
+                return
+
+            data_tar_bytes = None
+
+            while True:
+                # ar header: 60 bytes
+                header = f.read(60)
+                if len(header) < 60:
+                    break
+
+                name = header[0:16].strip()
+                size_str = header[48:58].strip()
+                end_magic = header[58:60]
+
+                if end_magic != b'\x60\x0a':
+                    break
+
+                size = int(size_str)
+
+                # Check if this is the data.tar member
+                name_str = name.decode('ascii', errors='replace')
+                if name_str.startswith('data.tar'):
+                    data_tar_bytes = f.read(size)
+                    break
+                else:
+                    f.seek(size, 1)
+
+                # ar entries are 2-byte aligned
+                if size % 2:
+                    f.seek(1, 1)
+
+        if data_tar_bytes is None:
+            print(f"  Error: no data.tar found in {deb_path}")
+            return
+
+        # Open the data.tar from memory
+        data_tar_io = io.BytesIO(data_tar_bytes)
+        try:
+            with tarfile.open(fileobj=data_tar_io, mode='r:*') as tf:
+                total_files = 0
+                total_bytes = 0
+                skipped = 0
+
+                for member in tf.getmembers():
+                    path = member.name.lstrip('./')
+                    if not path:
+                        continue
+
+                    if member.isdir():
+                        parts = path.split('/')
+                        try:
+                            self.ensure_path(parts)
+                        except RuntimeError:
+                            skipped += 1
+                        continue
+
+                    if member.ischr() or member.isblk() or member.isfifo():
+                        skipped += 1
+                        continue
+
+                    if member.issym() or member.islnk():
+                        # For symlinks in debs, store target path
+                        parts = path.split('/')
+                        fname = parts[-1]
+                        if not fname:
+                            continue
+                        parent_oid = self.ensure_path(parts[:-1]) if len(parts) > 1 else ROOT_OID
+                        target = member.linkname
+                        target_bytes = target.encode('utf-8')
+                        try:
+                            self.add_file(fname, target_bytes, parent_oid,
+                                          permissions=0o777)
+                            total_files += 1
+                            total_bytes += len(target_bytes)
+                        except RuntimeError:
+                            skipped += 1
+                        continue
+
+                    if not member.isfile():
+                        skipped += 1
+                        continue
+
+                    parts = path.split('/')
+                    fname = parts[-1]
+                    if not fname:
+                        continue
+
+                    parent_oid = self.ensure_path(parts[:-1]) if len(parts) > 1 else ROOT_OID
+
+                    try:
+                        fobj = tf.extractfile(member)
+                        if fobj is None:
+                            skipped += 1
+                            continue
+                        file_data = fobj.read()
+                        perms = member.mode if member.mode else DEFAULT_FILE_PERMS
+                        self.add_file(fname, file_data, parent_oid,
+                                      permissions=perms)
+                        total_files += 1
+                        total_bytes += len(file_data)
+                    except (RuntimeError, KeyError):
+                        skipped += 1
+
+                print(f"  Injected: {total_files} files, "
+                      f"{total_bytes:,} bytes data")
+                if skipped:
+                    print(f"  Skipped: {skipped}")
+        except Exception as e:
+            print(f"  Error reading data.tar: {e}")
+
     def finalize(self):
         """Write all metadata to the disk image."""
         # Superblock
@@ -333,7 +660,8 @@ class DiskBuilder:
 
         # Refcount (set 1 for all allocated blocks)
         rc_offset = SECTOR_REFCOUNT * SECTOR_SIZE
-        for i in range(min(self.next_block, REFCOUNT_ENTRIES)):
+        rc_limit = REFCOUNT_SECTORS * SECTOR_SIZE
+        for i in range(min(self.next_block, rc_limit)):
             self.data[rc_offset + i] = 1
 
         # Snap meta (zeroed)
@@ -360,7 +688,7 @@ class DiskBuilder:
 
         reserved = 32
         num_fats = 2
-        spc = 1  # 1 sector/cluster → guaranteed FAT32 (>65525 clusters)
+        spc = 1  # 1 sector/cluster -> guaranteed FAT32 (>65525 clusters)
         total = part_sectors
         # FAT size: 4 bytes per cluster entry
         fat_sectors = ((total - reserved) * 4 // (512 * spc + 4 * num_fats)) + 1
@@ -424,7 +752,7 @@ class DiskBuilder:
         vlabel[0:11] = b'SOTOS_FAT  '
         vlabel[11] = 0x08
         self.data[data_start_off:data_start_off+32] = vlabel
-        # README.TXT entry → cluster 3
+        # README.TXT entry -> cluster 3
         entry = bytearray(32)
         entry[0:8] = b'README  '
         entry[8:11] = b'TXT'
@@ -453,6 +781,10 @@ def main():
                         help="Disk size in MiB (default: 256)")
     parser.add_argument("--rootfs", type=str, default=None,
                         help="Directory to inject as rootfs (recursive)")
+    parser.add_argument("--tarball", type=str, action='append', default=[],
+                        help="Tarball (.tar.gz/.tar.xz) to inject (repeatable)")
+    parser.add_argument("--deb", type=str, action='append', default=[],
+                        help=".deb package to extract and inject (repeatable)")
     args = parser.parse_args()
 
     builder = DiskBuilder(args.size)
@@ -463,6 +795,18 @@ def main():
             return 1
         print(f"Injecting rootfs from: {args.rootfs}")
         builder.inject_rootfs(args.rootfs)
+
+    for tb in args.tarball:
+        if not os.path.isfile(tb):
+            print(f"Error: {tb} not found")
+            return 1
+        builder.inject_tarball(tb)
+
+    for deb in args.deb:
+        if not os.path.isfile(deb):
+            print(f"Error: {deb} not found")
+            return 1
+        builder.inject_deb(deb)
 
     builder.finalize()
     builder.write(args.output)

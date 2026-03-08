@@ -9,7 +9,7 @@ use sotos_objstore::{ObjectStore, Vfs, DirEntry, ROOT_OID};
 use sotos_virtio::blk::VirtioBlk;
 use core::sync::atomic::{AtomicU64, Ordering};
 use crate::child_handler::child_handler;
-use crate::framebuffer::{print, print_u64, fb_putchar, kb_has_char, kb_read_char, poll_mouse};
+use crate::framebuffer::{print, print_u64, fb_putchar, kb_has_char, kb_read_char};
 use crate::exec::{reply_val, rdtsc, format_u64_into, copy_guest_path, starts_with,
                   format_uptime_into, format_pid_row};
 use crate::process::*;
@@ -133,9 +133,6 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
     let mut next_epoll_idx: u16 = 0;
 
     loop {
-        // Poll mouse cursor between syscalls for responsive tracking.
-        unsafe { poll_mouse(); }
-
         let msg = match sys::recv(ep_cap) {
             Ok(m) => m,
             Err(_) => break,
@@ -209,7 +206,6 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                                     break;
                                 }
                                 None => {
-                                    unsafe { poll_mouse(); }
                                     sys::yield_now();
                                 }
                             }
