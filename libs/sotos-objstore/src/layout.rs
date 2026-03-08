@@ -7,7 +7,7 @@ pub const SUPERBLOCK_MAGIC: u64 = 0x534F544F_53465321;
 pub const WAL_MAGIC: u32 = 0x57414C48;
 
 /// Filesystem version.
-pub const FS_VERSION: u32 = 5;
+pub const FS_VERSION: u32 = 6;
 
 /// Directory entry flag: entry is a directory.
 pub const FLAG_DIR: u32 = 1;
@@ -19,46 +19,45 @@ pub const DEFAULT_FILE_PERMS: u32 = 0o644;
 /// Root directory OID (always 1).
 pub const ROOT_OID: u64 = 1;
 
-// Sector layout (v5 — scaled for rootfs support):
+// Sector layout (v6 — 8192 dir entries for full rootfs injection):
 pub const SECTOR_SUPERBLOCK: u32 = 0;
 pub const SECTOR_WAL_HEADER: u32 = 1;
-pub const SECTOR_WAL_PAYLOAD: u32 = 2; // 2-5 (4 sectors)
+pub const SECTOR_WAL_PAYLOAD: u32 = 2;      // 2-5 (4 sectors)
 pub const WAL_MAX_ENTRIES: usize = 4;
-pub const SECTOR_BITMAP: u32 = 6;       // 6-133 (128 sectors)
+pub const SECTOR_BITMAP: u32 = 6;            // 6-133 (128 sectors)
 pub const BITMAP_SECTORS: u32 = 128;
-pub const SECTOR_DIR: u32 = 134;         // 134-645 (512 sectors, 2048 entries)
-pub const DIR_SECTORS: u32 = 512;
-pub const SECTOR_REFCOUNT: u32 = 646;    // 646-661 (16 sectors, 8192 × u8)
+pub const SECTOR_DIR: u32 = 134;             // 134-2181 (2048 sectors, 8192 entries)
+pub const DIR_SECTORS: u32 = 2048;
+pub const SECTOR_REFCOUNT: u32 = 2182;       // 2182-2197 (16 sectors, 8192 × u8)
 pub const REFCOUNT_SECTORS: u32 = 16;
 pub const REFCOUNT_ENTRIES: usize = REFCOUNT_SECTORS as usize * SECTOR_SIZE; // 8192
 
-pub const SECTOR_SNAP_META: u32 = 662;   // 662-665 (4 × SnapMeta)
+pub const SECTOR_SNAP_META: u32 = 2198;      // 2198-2201 (4 × SnapMeta)
 pub const MAX_SNAPSHOTS: usize = 4;
 
-pub const SECTOR_SNAP_DIR: u32 = 666;    // 666-2713 (4 × 512 sectors)
-pub const SECTOR_SNAP_BMP: u32 = 2714;   // 2714-3225 (4 × 128 sectors)
+pub const SECTOR_SNAP_DIR: u32 = 2202;       // 2202-10393 (4 × 2048 sectors)
+pub const SECTOR_SNAP_BMP: u32 = 10394;      // 10394-10905 (4 × 128 sectors)
 
-pub const SECTOR_DATA: u32 = 3226;       // 3226+ (data region)
+pub const SECTOR_DATA: u32 = 10906;          // 10906+ (data region)
 
 /// Entries per sector (128 bytes each, 4 per 512-byte sector).
 pub const DIR_ENTRIES_PER_SECTOR: usize = 4;
 /// Total directory entries.
-pub const DIR_ENTRY_COUNT: usize = DIR_SECTORS as usize * DIR_ENTRIES_PER_SECTOR; // 2048
+pub const DIR_ENTRY_COUNT: usize = DIR_SECTORS as usize * DIR_ENTRIES_PER_SECTOR; // 8192
 
 /// Bitmap size in bytes (128 sectors × 512 = 65536 bytes = 524288 bits).
 pub const BITMAP_BYTES: usize = BITMAP_SECTORS as usize * 512; // 65536
 
-/// v4 layout constants (for migration).
-pub const V4_SECTOR_BITMAP: u32 = 6;
-pub const V4_BITMAP_SECTORS: u32 = 2;
-pub const V4_SECTOR_DIR: u32 = 8;
-pub const V4_DIR_SECTORS: u32 = 32;
-pub const V4_DIR_ENTRY_COUNT: usize = 128;
-pub const V4_BITMAP_BYTES: usize = 1024;
-pub const V4_SECTOR_REFCOUNT: u32 = 40;
-pub const V4_REFCOUNT_SECTORS: u32 = 8;
-pub const V4_SECTOR_SNAP_META: u32 = 48;
-pub const V4_SECTOR_DATA: u32 = 124;
+/// v5 layout constants (for migration from previous format).
+pub const V5_SECTOR_DIR: u32 = 134;
+pub const V5_DIR_SECTORS: u32 = 512;
+pub const V5_DIR_ENTRY_COUNT: usize = 2048;
+pub const V5_SECTOR_REFCOUNT: u32 = 646;
+pub const V5_REFCOUNT_SECTORS: u32 = 16;
+pub const V5_SECTOR_SNAP_META: u32 = 662;
+pub const V5_SECTOR_SNAP_DIR: u32 = 666;
+pub const V5_SECTOR_SNAP_BMP: u32 = 2714;
+pub const V5_SECTOR_DATA: u32 = 3226;
 
 /// Size of a sector in bytes.
 pub const SECTOR_SIZE: usize = 512;

@@ -77,8 +77,8 @@ pub(crate) static BOOT_TSC: AtomicU64 = AtomicU64::new(0);
 /// Next PID to allocate (monotonically increasing, starts at 1).
 pub(crate) static NEXT_PID: AtomicU64 = AtomicU64::new(1);
 /// Next vaddr for child stacks (guest + handler interleaved, 0x2000 apart).
-/// Range: 0xE30000..0x2000000 (safe: BRK_BASE is at 0x2000000).
-pub(crate) static NEXT_CHILD_STACK: AtomicU64 = AtomicU64::new(0xE30000);
+/// Range: 0xE80000..0x2000000 (safe: BRK_BASE is at 0x2000000).
+pub(crate) static NEXT_CHILD_STACK: AtomicU64 = AtomicU64::new(0xE80000);
 
 // Handshake statics for passing setup info to child handler thread.
 pub(crate) static CHILD_SETUP_EP: AtomicU64 = AtomicU64::new(0);

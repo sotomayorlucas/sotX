@@ -6,9 +6,9 @@ use crate::layout::*;
 use crate::bitmap;
 use crate::wal;
 
-/// Virtual address where ObjectStore is placed (96 pages ≈ 384 KiB).
+/// Virtual address where ObjectStore is placed (320 pages ≈ 1.25 MiB).
 const STORE_VADDR: u64 = 0xD00000;
-const STORE_PAGES: u64 = 96;
+const STORE_PAGES: u64 = 320;
 /// WRITABLE flag for map syscall.
 const MAP_WRITABLE: u64 = 2;
 
@@ -166,12 +166,12 @@ impl ObjectStore {
         if store.sb.magic != SUPERBLOCK_MAGIC {
             return Err("bad superblock magic");
         }
-        // v5 layout has completely different sector offsets — old versions can't be migrated
+        // v6 layout has different sector offsets — old versions can't be migrated
         // in-place without data loss. Auto-format instead (mkdisk.py regenerates disk.img).
         if store.sb.version != FS_VERSION {
             dbg(b"OBJSTORE: old version ");
             dbg_u64(store.sb.version as u64);
-            dbg(b" -> auto-format to v5\n");
+            dbg(b" -> auto-format to v6\n");
             return Err("old version");
         }
 

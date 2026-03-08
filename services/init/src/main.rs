@@ -85,11 +85,11 @@ use boot_tests::{test_dynamic_linking, run_linux_test, run_musl_test,
 //   0xA00000        SPSC ring + producer stack
 //   0xB00000        BootInfo (RO)
 //   0xC00000+       Virtio MMIO pages
-//   0xD00000+       ObjectStore + VFS
-//   0xE00000        LUCAS guest stack (4 pages)
-//   0xE10000        LUCAS handler stack (16 pages)
-//   0xE20000        VirtioBlk storage (1 page)
-//   0xE30000+       Child process stacks (0x2000 each)
+//   0xD00000+       ObjectStore + VFS (320 pages = 1.25 MiB, ends ~0xE40000)
+//   0xE50000        LUCAS guest stack (4 pages)
+//   0xE60000        LUCAS handler stack (16 pages)
+//   0xE70000        VirtioBlk storage (1 page)
+//   0xE80000+       Child process stacks (0x2000 each)
 //   0x1000000       Shell ELF
 //   0x2000000       brk heap (BRK_LIMIT = 1 MiB)
 //   0x3000000       mmap region
@@ -115,10 +115,10 @@ const MSG_COUNT: u64 = 1000;
 // ---------------------------------------------------------------------------
 
 /// LUCAS guest stack (4 pages).
-const LUCAS_GUEST_STACK: u64 = 0xE00000;
+const LUCAS_GUEST_STACK: u64 = 0xE50000;
 const LUCAS_GUEST_STACK_PAGES: u64 = 4;
 /// LUCAS handler stack (16 pages = 64KB, large due to VFS/ObjectStore locals).
-const LUCAS_HANDLER_STACK: u64 = 0xE10000;
+const LUCAS_HANDLER_STACK: u64 = 0xE60000;
 const LUCAS_HANDLER_STACK_PAGES: u64 = 16;
 
 /// LUCAS endpoint cap — shared between handler and _start via atomic.
@@ -137,7 +137,7 @@ const CAP_PCI: usize = 0;
 // ---------------------------------------------------------------------------
 
 /// Address where VirtioBlk is stored for the LUCAS handler (1 page).
-pub(crate) const LUCAS_BLK_STORE: u64 = 0xE20000;
+pub(crate) const LUCAS_BLK_STORE: u64 = 0xE70000;
 
 /// Flag: VirtioBlk stored and ready at LUCAS_BLK_STORE.
 pub(crate) static LUCAS_VFS_READY: AtomicU64 = AtomicU64::new(0);
