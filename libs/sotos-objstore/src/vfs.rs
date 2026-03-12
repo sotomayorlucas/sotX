@@ -1,6 +1,5 @@
 //! POSIX-like VFS shim on top of the ObjectStore.
 
-use sotos_common::sys;
 use crate::store::ObjectStore;
 
 const MAX_HANDLES: usize = 16;
@@ -42,29 +41,6 @@ pub struct Vfs {
     pub gid: u16,
 }
 
-fn dbg(s: &[u8]) {
-    for &b in s {
-        sys::debug_print(b);
-    }
-}
-
-fn dbg_u64(mut n: u64) {
-    if n == 0 {
-        sys::debug_print(b'0');
-        return;
-    }
-    let mut buf = [0u8; 20];
-    let mut i = 0;
-    while n > 0 {
-        buf[i] = b'0' + (n % 10) as u8;
-        n /= 10;
-        i += 1;
-    }
-    while i > 0 {
-        i -= 1;
-        sys::debug_print(buf[i]);
-    }
-}
 
 impl Vfs {
     pub fn new(store: &'static mut ObjectStore) -> Self {
@@ -138,12 +114,6 @@ impl Vfs {
         let fd = self.alloc_handle()?;
         self.handles[fd as usize] = FileHandle { oid, pos: 0, flags: O_RDWR };
 
-        dbg(b"VFS: created ");
-        dbg(name);
-        dbg(b" fd=");
-        dbg_u64(fd as u64);
-        dbg(b"\n");
-
         Ok(fd)
     }
 
@@ -190,10 +160,6 @@ impl Vfs {
 
         self.handles[fd as usize].pos += data.len() as u64;
 
-        dbg(b"VFS: write ");
-        dbg_u64(data.len() as u64);
-        dbg(b" bytes\n");
-
         Ok(data.len())
     }
 
@@ -215,10 +181,6 @@ impl Vfs {
     pub fn delete(&mut self, name: &[u8]) -> Result<(), &'static str> {
         let oid = self.resolve(name)?;
         self.store.delete(oid)?;
-
-        dbg(b"VFS: deleted ");
-        dbg(name);
-        dbg(b"\n");
 
         Ok(())
     }

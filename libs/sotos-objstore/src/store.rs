@@ -268,9 +268,6 @@ impl ObjectStore {
             dbg(b" new_slot="); dbg_u64(slot as u64);
             dbg(b" new_name=["); dbg(name); dbg(b"]\n");
         }
-        dbg(b"CREAT-OID: next="); dbg_u64(oid);
-        dbg(b" slot="); dbg_u64(slot as u64);
-        dbg(b" name=["); dbg(name); dbg(b"]\n");
         self.dir[slot] = DirEntry::zeroed();
         self.dir[slot].oid = oid;
         let copy_len = name.len().min(MAX_NAME_LEN - 1);
@@ -288,11 +285,8 @@ impl ObjectStore {
         // Update superblock.
         self.sb.next_oid += 1;
         self.sb.obj_count += 1;
-        dbg(b"CREAT-POST: next="); dbg_u64(self.sb.next_oid); dbg(b"\n");
-
         // WAL commit: bitmap sector(s) + directory sector + superblock.
         self.wal_commit_metadata(slot)?;
-        dbg(b"CREAT-WAL: next="); dbg_u64(self.sb.next_oid); dbg(b"\n");
         self.flush_refcount()?;
 
         Ok(oid)
@@ -679,9 +673,6 @@ impl ObjectStore {
             dbg(b" new_slot="); dbg_u64(slot as u64);
             dbg(b" new_name=["); dbg(name); dbg(b"]\n");
         }
-        dbg(b"MKDIR-OID: next="); dbg_u64(oid);
-        dbg(b" slot="); dbg_u64(slot as u64);
-        dbg(b" name=["); dbg(name); dbg(b"]\n");
         self.dir[slot] = DirEntry::zeroed();
         self.dir[slot].oid = oid;
         let copy_len = name.len().min(MAX_NAME_LEN - 1);
@@ -696,10 +687,7 @@ impl ObjectStore {
 
         self.sb.next_oid += 1;
         self.sb.obj_count += 1;
-        dbg(b"MKDIR-POST: next="); dbg_u64(self.sb.next_oid); dbg(b"\n");
-
         self.wal_commit_metadata(slot)?;
-        dbg(b"MKDIR-WAL: next="); dbg_u64(self.sb.next_oid); dbg(b"\n");
 
         Ok(oid)
     }

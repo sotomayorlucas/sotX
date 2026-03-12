@@ -36,8 +36,6 @@ pub(crate) static mut PIPE_STALL_ID: [u8; 16] = [0xFF; 16];
 /// Processes that received EOF from the deadlock detector.
 /// If they exit with non-zero status shortly after, treat it as clean exit.
 pub(crate) static mut DEADLOCK_EOF: [bool; 16] = [false; 16];
-/// Set to true to enable full P3 syscall logging (after refs mkdir)
-pub(crate) static mut P3_VERBOSE: bool = false;
 
 pub(crate) fn mark_pipe_retry_on(pid: usize, pipe_id: usize) {
     if pid < 16 { unsafe { RETRY_COUNT[pid] += 1; PIPE_STALL[pid] += 1; PIPE_STALL_ID[pid] = pipe_id as u8; } }
@@ -249,11 +247,6 @@ pub(crate) extern "C" fn child_handler() -> ! {
     // Signal that we consumed the setup
     CHILD_SETUP_READY.store(0, Ordering::Release);
 
-    // DIAG: log handler startup
-    print(b"HANDLER-START P"); print_u64(pid as u64);
-    print(b" ep="); print_u64(ep_cap);
-    print(b"\n");
-
     // Resolve group indices for this thread
     let fdg = PROCESSES[pid - 1].fd_group.load(Ordering::Acquire) as usize;
     let memg = PROCESSES[pid - 1].mem_group.load(Ordering::Acquire) as usize;
@@ -395,84 +388,6 @@ pub(crate) extern "C" fn child_handler() -> ! {
 
         // Phase 5: Syscall shadow logging (record every child syscall)
         syscall_log_record(pid as u16, syscall_nr as u16, msg.regs[0], 0);
-        // DIAG: P3 logging (full when P3_VERBOSE, key syscalls otherwise)
-        let retry_n = if pid < 16 { unsafe { RETRY_COUNT[pid] } } else { 0 };
-        if pid == 3 {
-            let verbose = unsafe { P3_VERBOSE };
-            if retry_n == 0 {
-                if verbose {
-                    print(b"[P3 S"); print_u64(syscall_nr);
-                    print(b" a0="); print_u64(msg.regs[0]);
-                    print(b" a1="); print_u64(msg.regs[1]);
-                    print(b"]\n");
-                } else {
-                    match syscall_nr {
-                        SYS_CLONE | SYS_FORK | SYS_VFORK | SYS_EXECVE
-                        | SYS_EXIT | SYS_EXIT_GROUP | SYS_WAIT4 => {
-                            print(b"[P3 S"); print_u64(syscall_nr);
-                            print(b" a0="); print_u64(msg.regs[0]);
-                            print(b"]\n");
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        } else if pid >= 4 {
-            let p_retry = if pid < 16 { unsafe { RETRY_COUNT[pid] } } else { 0 };
-            // Log ALL P4/P5/P6 syscalls to trace startup & behavior
-            if (pid == 4 || pid == 5 || pid == 6) && p_retry == 0 {
-                print(b"[P"); print_u64(pid as u64);
-                print(b" S"); print_u64(syscall_nr);
-                print(b" a0="); print_u64(msg.regs[0]);
-                print(b" a1="); print_u64(msg.regs[1]);
-                // Also show a2 for read/write/open (count/flags)
-                if matches!(syscall_nr, SYS_READ | SYS_WRITE | SYS_OPEN | SYS_OPENAT
-                            | SYS_WRITEV | SYS_READV) {
-                    print(b" a2="); print_u64(msg.regs[2]);
-                }
-                print(b"]\n");
-            } else if p_retry == 0 {
-                match syscall_nr {
-                    SYS_READ | SYS_WRITE | SYS_READV | SYS_WRITEV | SYS_CLOSE
-                    | SYS_DUP | SYS_DUP2 | SYS_PIPE | SYS_FCNTL
-                    | SYS_CLONE | SYS_FORK | SYS_VFORK | SYS_EXECVE
-                    | SYS_EXIT | SYS_EXIT_GROUP | SYS_WAIT4
-                    | SYS_POLL | SYS_SELECT | SYS_PSELECT6
-                    | SYS_SOCKET | SYS_CONNECT | SYS_BIND => {
-                        print(b"[P"); print_u64(pid as u64);
-                        print(b" S"); print_u64(syscall_nr);
-                        print(b" a0="); print_u64(msg.regs[0]);
-                        print(b"]\n");
-                    }
-                    _ => {}
-                }
-            }
-        } else if pid == 3 {
-            // Verbose logging for P3 (git clone) to debug protocol deadlock
-            let p_retry = if pid < 16 { unsafe { RETRY_COUNT[pid] } } else { 0 };
-            if p_retry == 0 {
-                print(b"[P3 S"); print_u64(syscall_nr);
-                print(b" a0="); print_u64(msg.regs[0]);
-                print(b" a1="); print_u64(msg.regs[1]);
-                if matches!(syscall_nr, SYS_READ | SYS_WRITE | SYS_OPEN | SYS_OPENAT
-                            | SYS_WRITEV | SYS_READV) {
-                    print(b" a2="); print_u64(msg.regs[2]);
-                }
-                print(b"]\n");
-            }
-        } else if pid > 1 {
-            match syscall_nr {
-                SYS_SOCKET | SYS_CONNECT | SYS_BIND | SYS_POLL
-                | SYS_CLONE | SYS_FORK | SYS_VFORK | SYS_EXECVE
-                | SYS_EXIT | SYS_EXIT_GROUP | SYS_WAIT4 => {
-                    print(b"[P"); print_u64(pid as u64);
-                    print(b" S"); print_u64(syscall_nr);
-                    print(b" a0="); print_u64(msg.regs[0]);
-                    print(b"]\n");
-                }
-                _ => {}
-            }
-        }
         // Clear retry state before dispatch. If the handler sends
         // PIPE_RETRY_TAG it will re-increment via mark_pipe_retry().
         clear_pipe_retry(pid);
@@ -648,13 +563,6 @@ pub(crate) extern "C" fn child_handler() -> ! {
                 let name = &path[..path_len];
                 let bin_name = if path_len > 5 && starts_with(name, b"/bin/") { &name[5..] } else { name };
 
-                // Serial-only trace to avoid fb_putchar scroll delays
-                for &b in b"EXECVE P" { sys::debug_print(b); }
-                { let d = b'0' + (pid as u8); sys::debug_print(d); }
-                for &b in b": " { sys::debug_print(b); }
-                for &b in bin_name { sys::debug_print(b); }
-                sys::debug_print(b'\n');
-
                 let is_shell = bin_name == b"shell" || bin_name == b"sh";
                 if is_shell {
                     let boot_info = unsafe { &*(BOOT_INFO_ADDR as *const BootInfo) };
@@ -670,10 +578,6 @@ pub(crate) extern "C" fn child_handler() -> ! {
                     continue;
                 }
 
-                print(b"EXECVE-PRE-ARGV P"); print_u64(pid as u64);
-                print(b" argv_ptr="); print_u64(argv_ptr);
-                print(b" as_cap="); print_u64(child_as_cap);
-                print(b"\n");
                 // Read argv from guest memory.
                 // For CoW fork children (child_as_cap != 0), use vm_read
                 // since the child's stack pages are in a separate address space.
@@ -734,20 +638,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                     }
                 }
 
-                // Log argv for all child execves
-                print(b"EXEC-ARGV P"); print_u64(pid as u64);
-                print(b": argc="); print_u64(exec_argc as u64);
-                print(b" envc="); print_u64(exec_envc as u64);
-                for i in 0..exec_argc.min(5) {
-                    print(b" [");
-                    let alen = exec_argv[i].iter().position(|&b| b == 0).unwrap_or(exec_argv[i].len());
-                    print(&exec_argv[i][..alen]);
-                    print(b"]");
-                }
-                print(b"\n");
-                for &b in b"EX:lock\n" { sys::debug_print(b); }
                 while EXEC_LOCK.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Relaxed).is_err() { sys::yield_now(); }
-                for &b in b"EX:locked\n" { sys::debug_print(b); }
                 // Try initrd first (by full path, then by basename), then VFS
                 let envp_slice = &exec_envp[..exec_envc];
                 let result = if exec_argc > 0 || exec_envc > 0 {
@@ -798,7 +689,6 @@ pub(crate) extern "C" fn child_handler() -> ! {
                 };
                 match result {
                     Ok((new_ep, _tc)) => {
-                        for &b in b"EXECVE: ok\n" { sys::debug_print(b); }
                         // Close all fds marked close-on-exec
                         {
                             let mut ctx = make_ctx!();
@@ -821,24 +711,9 @@ pub(crate) extern "C" fn child_handler() -> ! {
                         // CoW-forked AS). Reset child_as_cap so guest_read/write
                         // use direct memory access instead of vm_read/vm_write.
                         child_as_cap = 0;
-                        // DIAG: dump fd table after exec for P6
-                        if pid == 6 {
-                            print(b"P6-EXEC-FDS:");
-                            unsafe {
-                                for f in 0..10 {
-                                    print(b" "); print_u64(f as u64);
-                                    print(b"="); print_u64(THREAD_GROUPS[fdg].fds[f] as u64);
-                                    if THREAD_GROUPS[fdg].fds[f] == 10 || THREAD_GROUPS[fdg].fds[f] == 11 {
-                                        print(b"(p"); print_u64(THREAD_GROUPS[fdg].sock_conn_id[f] as u64); print(b")");
-                                    }
-                                }
-                            }
-                            print(b"\n");
-                        }
                         continue;
                     }
                     Err(errno) => {
-                        for &b in b"EXECVE: fail\n" { sys::debug_print(b); }
                         EXEC_LOCK.store(0, Ordering::Release); reply_val(ep_cap, errno); continue;
                     }
                 }
@@ -862,14 +737,6 @@ pub(crate) extern "C" fn child_handler() -> ! {
             SYS_CLONE => {
                 let flags = msg.regs[0];
                 let child_stack = msg.regs[1];
-
-                print(b"CLONE: pid=");
-                print_u64(pid as u64);
-                print(b" flags=");
-                print_u64(flags);
-                print(b" stk=");
-                print_u64(child_stack);
-                print(b"\n");
 
                 // Fork-style clone: no CLONE_VM means fork, not thread creation.
                 // musl's fork() calls clone(SIGCHLD, 0, ...).
@@ -1006,10 +873,6 @@ pub(crate) extern "C" fn child_handler() -> ! {
 
                     PROCESSES[cidx].state.store(1, Ordering::Release);
 
-                    print(b"COW-CLONE-FORK: cpid=");
-                    print_u64(fork_cpid as u64);
-                    print(b"\n");
-
                     reply_val(ep_cap, fork_cpid as i64);
                     continue;
                 }
@@ -1128,7 +991,6 @@ pub(crate) extern "C" fn child_handler() -> ! {
             // 3. Create child thread in cloned AS at COW_FORK_RESTORE trampoline
             // 4. Reply to parent with child_pid
             SYS_FORK | SYS_VFORK => {
-                print(b"FORK: step1 pid="); print_u64(pid as u64); print(b"\n");
                 let fork_cpid = NEXT_PID.fetch_add(1, Ordering::SeqCst) as usize;
                 if fork_cpid > MAX_PROCS {
                     reply_val(ep_cap, -ENOMEM);
@@ -1145,13 +1007,8 @@ pub(crate) extern "C" fn child_handler() -> ! {
                 // Get parent's register state
                 let parent_tid = msg.regs[6];
                 let fork_rsp = msg.regs[7];
-                print(b"FORK: tid="); print_u64(parent_tid);
-                print(b" rsp="); print_u64(fork_rsp); print(b"\n");
                 let mut saved_regs = [0u64; 18];
-                match sys::get_thread_regs(parent_tid, &mut saved_regs) {
-                    Ok(()) => print(b"FORK: get_regs ok\n"),
-                    Err(e) => { print(b"FORK: get_regs err="); print_u64((-e) as u64); print(b"\n"); }
-                }
+                let _ = sys::get_thread_regs(parent_tid, &mut saved_regs);
                 let fork_rip = saved_regs[2];   // RCX = user RIP after SYSCALL
                 let fork_rbx = saved_regs[1];
                 let fork_rbp = saved_regs[6];
@@ -1160,8 +1017,6 @@ pub(crate) extern "C" fn child_handler() -> ! {
                 let fork_r14 = saved_regs[13];
                 let fork_r15 = saved_regs[14];
                 let fork_fsbase = saved_regs[16];
-                print(b"FORK: rip="); print_u64(fork_rip);
-                print(b" rbp="); print_u64(fork_rbp); print(b"\n");
 
                 // Build restore frame below fork_rsp BEFORE cloning.
                 // Stack layout (grows down):
@@ -1174,7 +1029,6 @@ pub(crate) extern "C" fn child_handler() -> ! {
                 //   [fork_rsp - 8]  = fork_rip (return address)
                 // COW_FORK_RESTORE_ADDR: xor eax,eax; pop rbx..r15; ret
                 let frame_rsp = fork_rsp - 56;
-                print(b"FORK: writing restore frame at "); print_u64(frame_rsp); print(b"\n");
                 unsafe {
                     *((frame_rsp) as *mut u64) = fork_rbx;
                     *((frame_rsp + 8) as *mut u64) = fork_rbp;
@@ -1184,7 +1038,6 @@ pub(crate) extern "C" fn child_handler() -> ! {
                     *((frame_rsp + 40) as *mut u64) = fork_r15;
                     *((frame_rsp + 48) as *mut u64) = fork_rip;
                 }
-                print(b"FORK: restore frame written\n");
 
                 // Write a TLS trampoline that sets FS_BASE BEFORE the child
                 // touches any TLS-dependent code. This avoids the race where
@@ -1199,16 +1052,9 @@ pub(crate) extern "C" fn child_handler() -> ! {
                 };
 
                 // Clone the address space with CoW semantics
-                print(b"FORK: cloning AS (cap="); print_u64(self_as_cap); print(b")...\n");
                 let child_as_cap = match sys::addr_space_clone(self_as_cap) {
-                    Ok(cap) => {
-                        print(b"FORK: AS cloned, child_as_cap="); print_u64(cap); print(b"\n");
-                        cap
-                    }
-                    Err(e) => {
-                        print(b"FORK: addr_space_clone failed err=");
-                        print_u64((-e) as u64);
-                        print(b"\n");
+                    Ok(cap) => cap,
+                    Err(_) => {
                         reply_val(ep_cap, -ENOMEM);
                         continue;
                     }
@@ -1233,32 +1079,21 @@ pub(crate) extern "C" fn child_handler() -> ! {
 
                 // Create endpoint for child process
                 let child_ep = match sys::endpoint_create() {
-                    Ok(e) => {
-                        print(b"FORK: child_ep="); print_u64(e); print(b"\n");
-                        e
-                    }
+                    Ok(e) => e,
                     Err(_) => { reply_val(ep_cap, -ENOMEM); continue; }
                 };
 
                 // Create child thread in the cloned AS at the TLS trampoline.
                 // The trampoline sets FS_BASE via syscall, then jumps to COW_FORK_RESTORE
                 // which does xor eax + pop regs + ret to fork_rip.
-                print(b"FORK: thread_create_in rip="); print_u64(child_entry);
-                print(b" rsp="); print_u64(frame_rsp); print(b"\n");
                 let child_thread = match sys::thread_create_in(
                     child_as_cap,
                     child_entry,
                     frame_rsp,
                     child_ep,
                 ) {
-                    Ok(t) => {
-                        print(b"FORK: child_thread="); print_u64(t); print(b"\n");
-                        t
-                    }
-                    Err(e) => {
-                        print(b"FORK: thread_create_in failed err=");
-                        print_u64((-e) as u64);
-                        print(b"\n");
+                    Ok(t) => t,
+                    Err(_) => {
                         reply_val(ep_cap, -ENOMEM);
                         continue;
                     }
@@ -1327,9 +1162,6 @@ pub(crate) extern "C" fn child_handler() -> ! {
                 while CHILD_SETUP_READY.load(Ordering::Acquire) != 0 { sys::yield_now(); }
 
                 PROCESSES[cidx].state.store(1, Ordering::Release);
-
-                // Serial-only to avoid fb_putchar scroll delays
-                for &b in b"COW-FORK: ok\n" { sys::debug_print(b); }
 
                 // Reply to parent with child_pid (parent's RAX = child_pid)
                 reply_val(ep_cap, fork_cpid as i64);
@@ -2005,12 +1837,6 @@ pub(crate) extern "C" fn child_handler() -> ! {
                 print(b"\n");
                 reply_val(ep_cap, -ENOSYS);
             }
-        }
-        // DIAG: post-dispatch confirmation for pid >= 4
-        if pid >= 4 {
-            for &b in b"[D" { sys::debug_print(b); }
-            sys::debug_print(b'0' + pid as u8);
-            sys::debug_print(b']');
         }
     }
 

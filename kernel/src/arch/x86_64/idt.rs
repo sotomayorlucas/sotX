@@ -196,24 +196,6 @@ extern "x86-interrupt" fn general_protection_handler(frame: InterruptStackFrame,
             "#GP(user) tid={} code={} rip={:#x} rsp={:#x}",
             tid, code, rip, frame.stack_pointer.as_u64()
         );
-        // Dump instruction bytes at RIP to identify the faulting opcode
-        let cr3 = crate::mm::paging::read_cr3();
-        let aspace = crate::mm::paging::AddressSpace::from_cr3(cr3);
-        if let Some(phys) = aspace.lookup_phys(rip & !0xFFF) {
-            let hhdm = crate::mm::hhdm_offset();
-            let off = (rip & 0xFFF) as usize;
-            let base = (phys + hhdm) as *const u8;
-            let mut bytes = [0u8; 8];
-            for i in 0..8 {
-                if off + i < 4096 {
-                    bytes[i] = unsafe { *base.add(off + i) };
-                }
-            }
-            kprintln!(
-                "#GP: bytes@rip: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
-                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]
-            );
-        }
         // Set SIGSEGV pending so parent sees WIFSIGNALED, then exit thread.
         if let Some(tid) = crate::sched::current_tid() {
             crate::sched::set_pending_signal(tid, 11);
@@ -233,12 +215,7 @@ extern "x86-interrupt" fn page_fault_handler(
     if code.contains(PageFaultErrorCode::USER_MODE) {
         let tid = crate::sched::current_tid().map(|t| t.0).unwrap_or(0);
         let cr3 = crate::mm::paging::read_cr3();
-        // Log ALL user page faults to trace CoW child behavior
-        kprintln!(
-            "#PF tid={} addr={:#x} code={:#x} rip={:#x}",
-            tid, addr, code.bits(), frame.instruction_pointer.as_u64()
-        );
-        // Log null-pointer faults (addr=0 or rip=0) to reduce noise
+        // Log null-pointer faults
         if addr == 0 || frame.instruction_pointer.as_u64() == 0 {
             kprintln!(
                 "#PF-NULL tid={} addr={:#x} code={:#x} rip={:#x}",

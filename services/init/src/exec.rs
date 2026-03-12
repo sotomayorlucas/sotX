@@ -236,34 +236,21 @@ pub(crate) fn map_elf_segments(
         let seg_end = (load_vaddr + seg.memsz as u64 + 0xFFF) & !0xFFF;
         let is_writable = (seg.flags & 2) != 0;
 
-        let mut page_count = 0u64;
         let mut page_vaddr = seg_start;
         while page_vaddr < seg_end {
-            if page_count < 3 {
-                for &b in b"P:" { sys::debug_print(b); }
-                // Print page_count digit
-                sys::debug_print(b'0' + page_count as u8);
-                sys::debug_print(b' ');
-            }
-            page_count += 1;
             let frame_cap = match sys::frame_alloc() {
                 Ok(f) => f,
                 Err(_) => {
-                    for &b in b"FA!\n" { sys::debug_print(b); }
                     return Err(-12);
                 }
             };
-            if page_count <= 3 { sys::debug_print(b'a'); }
 
             // Map temporarily to copy data
             if sys::map(EXEC_TEMP_MAP, frame_cap, MAP_WRITABLE).is_err() {
-                for &b in b"MT!\n" { sys::debug_print(b); }
                 return Err(-12);
             }
-            if page_count <= 3 { sys::debug_print(b'm'); }
 
             unsafe { core::ptr::write_bytes(EXEC_TEMP_MAP as *mut u8, 0, 4096); }
-            if page_count <= 3 { sys::debug_print(b'z'); }
 
             // Copy file data for this page
             let page_start = page_vaddr;
@@ -285,22 +272,17 @@ pub(crate) fn map_elf_segments(
                     );
                 }
             }
-            if page_count <= 3 { sys::debug_print(b'c'); }
 
             let _ = sys::unmap(EXEC_TEMP_MAP);
-            if page_count <= 3 { sys::debug_print(b'u'); }
 
             let flags = if is_writable { MAP_WRITABLE } else { 0 };
             if sys::map(page_vaddr, frame_cap, flags).is_err() {
-                for &b in b"MF!\n" { sys::debug_print(b); }
                 return Err(-12);
             }
-            if page_count <= 3 { sys::debug_print(b'M'); sys::debug_print(b'\n'); }
 
             page_vaddr += 4096;
         }
     }
-    sys::debug_print(b'\n');
     Ok(())
 }
 
@@ -361,31 +343,13 @@ pub(crate) fn exec_from_vfs(path: &[u8]) -> Result<(u64, u64), i64> {
 /// Load an ELF from VFS with argv support.
 /// Caller must hold EXEC_LOCK.
 pub(crate) fn exec_from_vfs_argv(path: &[u8], argv: &[[u8; MAX_EXEC_ARG_LEN]], envp: &[[u8; MAX_EXEC_ARG_LEN]]) -> Result<(u64, u64), i64> {
-    for &b in b"VFS-EX:1\n" { sys::debug_print(b); }
-
-    // PWC checkpoint: before map_temp_buf
-    let pwc_a = crate::fd::PIPE_WRITE_CLOSED[1].load(core::sync::atomic::Ordering::Relaxed);
-
     // Step 1: Map temp buffer and read main ELF from VFS
     map_temp_buf(EXEC_BUF_BASE, EXEC_BUF_PAGES)?;
-
-    let pwc_b = crate::fd::PIPE_WRITE_CLOSED[1].load(core::sync::atomic::Ordering::Relaxed);
-    if pwc_a != pwc_b {
-        crate::framebuffer::print(b"!! EXEC-MAPBUF-CORRUPT: PWC[1] ");
-        crate::framebuffer::print_u64(pwc_a);
-        crate::framebuffer::print(b"->");
-        crate::framebuffer::print_u64(pwc_b);
-        crate::framebuffer::print(b"\n");
-    }
-
-    for &b in b"VFS-EX:2\n" { sys::debug_print(b); }
 
     let buf_cap = (EXEC_BUF_PAGES * 0x1000) as usize;
     let file_size: usize;
 
-    for &b in b"VFS-EX:vfslock\n" { sys::debug_print(b); }
     vfs_lock();
-    for &b in b"VFS-EX:locked\n" { sys::debug_print(b); }
     let vfs_result = unsafe { shared_store() }.and_then(|store| {
         use sotos_objstore::ROOT_OID;
         let oid = store.resolve_path(path, ROOT_OID).ok()?;
@@ -393,24 +357,10 @@ pub(crate) fn exec_from_vfs_argv(path: &[u8], argv: &[[u8; MAX_EXEC_ARG_LEN]], e
         let size = entry.size as usize;
         if size > buf_cap { return None; }
         let dst = unsafe { core::slice::from_raw_parts_mut(EXEC_BUF_BASE as *mut u8, size) };
-
-        // PWC checkpoint: before read_obj
-        let pwc_c = crate::fd::PIPE_WRITE_CLOSED[1].load(core::sync::atomic::Ordering::Relaxed);
-        for &b in b"VFS-EX:read\n" { sys::debug_print(b); }
         store.read_obj(oid, dst).ok()?;
-        let pwc_d = crate::fd::PIPE_WRITE_CLOSED[1].load(core::sync::atomic::Ordering::Relaxed);
-        if pwc_c != pwc_d {
-            crate::framebuffer::print(b"!! EXEC-VFSRD-CORRUPT: PWC[1] ");
-            crate::framebuffer::print_u64(pwc_c);
-            crate::framebuffer::print(b"->");
-            crate::framebuffer::print_u64(pwc_d);
-            crate::framebuffer::print(b"\n");
-        }
-        for &b in b"VFS-EX:done\n" { sys::debug_print(b); }
         Some(size)
     });
     vfs_unlock();
-    for &b in b"VFS-EX:unlocked\n" { sys::debug_print(b); }
 
     match vfs_result {
         Some(sz) => file_size = sz,
@@ -448,7 +398,6 @@ fn exec_loaded_elf(file_size: usize, bin_name: &[u8], argv: &[[u8; MAX_EXEC_ARG_
         }
     };
     let is_dynamic = interp_info.is_some();
-    for &b in b"EL:1\n" { sys::debug_print(b); }
 
     // ET_DYN (PIE): each process gets a unique 16MB slot to avoid code overlap.
     // ET_EXEC uses the fixed address from the ELF (main_base = 0).
@@ -457,9 +406,6 @@ fn exec_loaded_elf(file_size: usize, bin_name: &[u8], argv: &[[u8; MAX_EXEC_ARG_
     } else {
         0
     };
-
-    // PWC checkpoint: before unmap_free loop
-    let pwc_pre_unmap = crate::fd::PIPE_WRITE_CLOSED[1].load(Ordering::Relaxed);
 
     // Unmap previous binary's ELF pages (leftover from prior exec)
     // Scan segments to determine the full range and free it
@@ -482,33 +428,11 @@ fn exec_loaded_elf(file_size: usize, bin_name: &[u8], argv: &[[u8; MAX_EXEC_ARG_
             }
         }
     }
-    // PWC checkpoint: after unmap_free, before map_elf_segments
-    let pwc_post_unmap = crate::fd::PIPE_WRITE_CLOSED[1].load(Ordering::Relaxed);
-    if pwc_pre_unmap != pwc_post_unmap {
-        crate::framebuffer::print(b"!! EXEC-UNMAP-CORRUPT: PWC[1] ");
-        crate::framebuffer::print_u64(pwc_pre_unmap);
-        crate::framebuffer::print(b"->");
-        crate::framebuffer::print_u64(pwc_post_unmap);
-        crate::framebuffer::print(b"\n");
-    }
 
-    for &b in b"EL:2\n" { sys::debug_print(b); }
     if let Err(e) = map_elf_segments(EXEC_BUF_BASE, &elf_info, &segments, seg_count, main_base) {
         unmap_temp_buf(EXEC_BUF_BASE, EXEC_BUF_PAGES);
         return Err(e);
     }
-    // PWC checkpoint: after map_elf_segments
-    let pwc_post_map = crate::fd::PIPE_WRITE_CLOSED[1].load(Ordering::Relaxed);
-    if pwc_post_unmap != pwc_post_map {
-        crate::framebuffer::print(b"!! EXEC-MAPSEG-CORRUPT: PWC[1] ");
-        crate::framebuffer::print_u64(pwc_post_unmap);
-        crate::framebuffer::print(b"->");
-        crate::framebuffer::print_u64(pwc_post_map);
-        crate::framebuffer::print(b" base=0x");
-        crate::framebuffer::print_hex64(main_base);
-        crate::framebuffer::print(b"\n");
-    }
-    for &b in b"EL:3\n" { sys::debug_print(b); }
 
     let mut exec_entry = main_base + elf_info.entry;
     let mut interp_base: u64 = 0;
@@ -751,43 +675,6 @@ fn exec_loaded_elf(file_size: usize, bin_name: &[u8], argv: &[[u8; MAX_EXEC_ARG_
             print(b"\n");
         }
     }
-
-    print(b"EXEC: entry=0x");
-    print_hex64(exec_entry);
-    print(b" rsp=0x");
-    print_hex64(rsp);
-    print(b" align=");
-    print_hex64(rsp & 0xF); // should be 0
-    print(b"\n");
-    print(b"  AT_PHDR=0x");
-    print_hex64(phdr_vaddr);
-    print(b" AT_PHNUM=");
-    print_hex64(elf_info.phnum as u64);
-    print(b" AT_ENTRY=0x");
-    print_hex64(main_base + elf_info.entry);
-    if is_dynamic {
-        print(b" AT_BASE=0x");
-        print_hex64(interp_base);
-    }
-    print(b"\n");
-    // Verify AT_PHDR points to accessible memory with valid ELF phdr content
-    print(b"  elf_base=0x");
-    print_hex64(elf_base);
-    print(b" phoff=0x");
-    print_hex64(elf_info.phoff as u64);
-    print(b" seg0_vaddr=0x");
-    if seg_count > 0 { print_hex64(segments[0].vaddr); } else { print(b"NONE"); }
-    print(b"\n");
-    // Stack layout: entries count and auxv_pairs
-    print(b"  stk: argc=");
-    print_hex64(argc as u64);
-    print(b" envc=");
-    print_hex64(env_count as u64);
-    print(b" auxv=");
-    print_hex64(auxv_pairs);
-    print(b" entries=");
-    print_hex64(entries);
-    print(b"\n");
 
     // Pre-TLS for glibc: write the AT_RANDOM canary at PRE_TLS+0x28.
     // glibc's ld-linux has stack-protector-enabled functions that run before

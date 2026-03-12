@@ -327,9 +327,6 @@ impl AddressSpace {
         let hhdm = hhdm_offset();
         let table_flags = PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER;
 
-        let mut total_pages = 0u32;
-        let mut total_tables = 0u32;
-
         // Allocate new PML4
         let new_pml4_phys = alloc_table_frame();
         let new_pml4 = (new_pml4_phys + hhdm) as *mut u64;
@@ -375,8 +372,6 @@ impl AddressSpace {
                     // Allocate new PT for child
                     let new_pt_phys = alloc_table_frame();
                     unsafe { *new_pd.add(pd_i) = new_pt_phys | table_flags; }
-                    total_tables += 1;
-
                     let src_pt = (pt_phys + hhdm) as *mut u64;
                     let new_pt = (new_pt_phys + hhdm) as *mut u64;
 
@@ -402,13 +397,11 @@ impl AddressSpace {
                                 rc[idx] = rc[idx].saturating_add(1);
                             }
                         }
-                        total_pages += 1;
                     }
                 }
             }
         }
 
-        crate::kprintln!("clone_cow: {} pages, {} tables", total_pages, total_tables);
         Self { pml4_phys: new_pml4_phys }
     }
 

@@ -262,77 +262,15 @@ pub(crate) fn sys_read(ctx: &mut SyscallContext, msg: &IpcMsg) {
         10 => {
             // Pipe read: non-blocking check with kernel-side retry.
             let pipe_id = ctx.sock_conn_id[fd] as usize;
-            // DIAG: dump pipe state before read for P6
-            if ctx.pid == 6 && pipe_id < MAX_PIPES {
-                let wp = PIPE_WRITE_POS[pipe_id].load(Ordering::Acquire);
-                let rp = PIPE_READ_POS[pipe_id].load(Ordering::Acquire);
-                print(b"P6-PRE-RD pipe="); print_u64(pipe_id as u64);
-                print(b" wp="); print_u64(wp);
-                print(b" rp="); print_u64(rp);
-                print(b" avail="); print_u64(wp.wrapping_sub(rp));
-                print(b" pwc="); print_u64(PIPE_WRITE_CLOSED[pipe_id].load(Ordering::Acquire));
-                print(b" wrefs="); print_u64(PIPE_WRITE_REFS[pipe_id].load(Ordering::Acquire));
-                print(b" rrefs="); print_u64(PIPE_READ_REFS[pipe_id].load(Ordering::Acquire));
-                print(b" act="); print_u64(crate::fd::PIPE_ACTIVE[pipe_id].load(Ordering::Acquire));
-                print(b"\n");
-            }
             // Check writer state
             let want = len.min(4096);
             let mut tmp = [0u8; 4096];
             let n = pipe_read(pipe_id, &mut tmp[..want]);
-            // DIAG: log pipe 0 reads for P5 during final retry phase
-            if ctx.pid == 5 && pipe_id == 0 {
-                let stall = unsafe { crate::child_handler::PIPE_STALL[5] };
-                if stall > 40 || n > 0 {
-                    print(b"P5-PIPE0: n="); print_u64(n as u64);
-                    print(b" stall="); print_u64(stall as u64);
-                    print(b" pwc="); print_u64(PIPE_WRITE_CLOSED[0].load(Ordering::Acquire));
-                    print(b" wref="); print_u64(PIPE_WRITE_REFS[0].load(Ordering::Acquire));
-                    print(b"\n");
-                }
-            }
             if n > 0 {
                 crate::child_handler::clear_pipe_stall(ctx.pid);
                 ctx.guest_write(buf_ptr, &tmp[..n]);
-                if ctx.pid >= 3 {
-                    print(b"PIPE-R P"); print_u64(ctx.pid as u64);
-                    print(b" fd="); print_u64(fd as u64);
-                    print(b" want="); print_u64(want as u64);
-                    print(b" n="); print_u64(n as u64);
-                    print(b" [");
-                    let show = n.min(80);
-                    for i in 0..show {
-                        if tmp[i] == 0x0A {
-                            print(b"\\n");
-                        } else if tmp[i] >= 0x20 && tmp[i] < 0x7F {
-                            sys::debug_print(tmp[i]);
-                        } else {
-                            print(b".");
-                        }
-                    }
-                    print(b"]\n");
-                    // Add hex dump of first 8 bytes for debugging
-                    if n <= 8 {
-                        print(b"  hex:");
-                        for i in 0..n {
-                            print(b" 0x");
-                            crate::framebuffer::print_hex64(tmp[i] as u64);
-                        }
-                        print(b"\n");
-                    }
-                    // (injection removed — fixing dual-reader root cause instead)
-                }
                 reply_val(ctx.ep_cap, n as i64);
             } else if pipe_writer_closed(pipe_id) {
-                if ctx.pid >= 3 {
-                    print(b"PIPE-R P"); print_u64(ctx.pid as u64);
-                    print(b" fd="); print_u64(fd as u64);
-                    print(b" pipe="); print_u64(pipe_id as u64);
-                    print(b" wrefs="); print_u64(PIPE_WRITE_REFS[pipe_id].load(Ordering::Acquire));
-                    print(b" PWC="); print_u64(PIPE_WRITE_CLOSED[pipe_id].load(Ordering::Acquire));
-                    print(b" ACT="); print_u64(crate::fd::PIPE_ACTIVE[pipe_id].load(Ordering::Acquire));
-                    print(b" EOF(writer-closed)\n");
-                }
                 reply_val(ctx.ep_cap, 0); // EOF
             } else {
                 // No data, writer alive — ask kernel to retry after yielding.
@@ -679,13 +617,6 @@ pub(crate) fn sys_stat(ctx: &mut SyscallContext, msg: &IpcMsg) {
     };
     let name = &path[..path_len];
 
-    // Debug: print stat path for config files only
-    if ctx.pid > 1 && name.windows(6).any(|w| w == b"config") {
-        print(b"STAT: ");
-        print(name);
-        print(b"\n");
-    }
-
     // First try initrd by basename
     let mut basename_start = 0usize;
     for idx in 0..path_len { if name[idx] == b'/' { basename_start = idx + 1; } }
@@ -708,18 +639,6 @@ pub(crate) fn sys_stat(ctx: &mut SyscallContext, msg: &IpcMsg) {
     vfs_unlock();
 
     if let Some((oid, size, is_dir)) = vfs_stat {
-        // DIAG: trace stat results for config paths
-        if name.windows(6).any(|w| w == b"config") {
-            print(b"STAT-R: oid=");
-            print_u64(oid);
-            print(b" dir=");
-            sys::debug_print(if is_dir { b'1' } else { b'0' });
-            print(b" sz=");
-            print_u64(size);
-            print(b" ");
-            print(name);
-            print(b"\n");
-        }
         write_linux_stat(stat_ptr, oid, size, is_dir);
         reply_val(ctx.ep_cap, 0);
     } else {
@@ -1146,14 +1065,6 @@ pub(crate) fn sys_open(ctx: &mut SyscallContext, msg: &IpcMsg) {
             FILE_BUF_PAGES_OPEN * 0x1000,
         ) {
             Ok(sz) => {
-                // DIAG: initrd matched by basename
-                if basename == b"config" {
-                    print(b"OPEN-INITRD: basename=config sz=");
-                    print_u64(sz);
-                    print(b" path=");
-                    print(name);
-                    print(b"\n");
-                }
                 let mut fd = None;
                 for i in 3..GRP_MAX_FDS { if ctx.child_fds[i] == 0 { fd = Some(i); break; } }
                 if let Some(f) = fd {
@@ -1175,18 +1086,6 @@ pub(crate) fn sys_open(ctx: &mut SyscallContext, msg: &IpcMsg) {
                     // Try resolve existing
                     if let Ok(oid) = store.resolve_path(name, ROOT_OID) {
                         let entry = store.stat(oid)?;
-                        // DIAG: if this is a config file and entry is_dir, dump details
-                        if entry.is_dir() && name.windows(6).any(|w| w == b"config") {
-                            print(b"VFS-DIR-BUG: oid=");
-                            print_u64(oid);
-                            print(b" flags=");
-                            print_u64(entry.flags as u64);
-                            print(b" name=[");
-                            print(entry.name_as_str());
-                            print(b"] path=[");
-                            print(name);
-                            print(b"]\n");
-                        }
                         // O_TRUNC: reset file size
                         if flags & O_TRUNC != 0 && !entry.is_dir() {
                             store.write_obj(oid, &[]).ok();
@@ -1208,32 +1107,12 @@ pub(crate) fn sys_open(ctx: &mut SyscallContext, msg: &IpcMsg) {
                             None => (ROOT_OID, name),
                         };
                         let oid = store.create_in(fname, &[], parent).ok()?;
-                        // DIAG: print slot for newly created files
-                        if let Some(sl) = store.find_slot_pub(oid) {
-                            let e = &store.dir[sl];
-                            print(b"CREAT: oid="); print_u64(oid);
-                            print(b" slot="); print_u64(sl as u64);
-                            print(b" flags="); print_u64(e.flags as u64);
-                            print(b" parent="); print_u64(e.parent_oid);
-                            print(b" name=["); print(e.name_as_str());
-                            print(b"] "); print(name);
-                            print(b"\n");
-                        }
                         return Some((oid, 0, false));
                     }
                     None
                 });
                 vfs_unlock();
                 if let Some((oid, size, is_dir)) = vfs_result {
-                    // DIAG: trace VFS open for P6
-                    if ctx.pid == 6 || name.windows(6).any(|w| w == b"config") {
-                        print(b"OPEN-VFS: P"); print_u64(ctx.pid as u64);
-                        print(b" oid="); print_u64(oid);
-                        print(b" sz="); print_u64(size);
-                        print(b" dir=");
-                        sys::debug_print(if is_dir { b'1' } else { b'0' });
-                        print(b" ["); print(name); print(b"]\n");
-                    }
                     let mut vslot = None;
                     for s in 0..GRP_MAX_VFS { if ctx.vfs_files[s][0] == 0 { vslot = Some(s); break; } }
                     let mut fd = None;
@@ -1246,12 +1125,6 @@ pub(crate) fn sys_open(ctx: &mut SyscallContext, msg: &IpcMsg) {
                     }
                 }
                 if !vfs_found {
-                    // DIAG: log open failures for P5
-                    if ctx.pid == 5 {
-                        print(b"P5-ENOENT: ");
-                        print(&name[..path_len]);
-                        print(b"\n");
-                    }
                     reply_val(ctx.ep_cap, -ENOENT);
                 }
             }
@@ -1718,15 +1591,6 @@ pub(crate) fn sys_writev(ctx: &mut SyscallContext, msg: &IpcMsg) {
             total += written;
             if written < safe_ilen { break; } // pipe full, stop
         }
-        // DIAG: log pipe state after writev for P3 writing to pipe 2
-        if ctx.pid == 3 && pipe_id == 2 {
-            let wp = PIPE_WRITE_POS[pipe_id].load(Ordering::Acquire);
-            let rp = PIPE_READ_POS[pipe_id].load(Ordering::Acquire);
-            print(b"P3-POST-WV pipe=2 wp="); print_u64(wp);
-            print(b" rp="); print_u64(rp);
-            print(b" total="); print_u64(total as u64);
-            print(b"\n");
-        }
         reply_val(ctx.ep_cap, total as i64);
     } else {
         reply_val(ctx.ep_cap, -EBADF);
@@ -2070,15 +1934,6 @@ pub(crate) fn sys_rename(ctx: &mut SyscallContext, msg: &IpcMsg) {
     let old_name = &old_path[..old_len];
     let new_name = &new_path[..new_len];
 
-    // DIAG: trace rename for config paths
-    if ctx.pid > 1 && (old_name.windows(6).any(|w| w == b"config") || new_name.windows(6).any(|w| w == b"config")) {
-        print(b"REN: ");
-        print(old_name);
-        print(b" -> ");
-        print(new_name);
-        print(b"\n");
-    }
-
     vfs_lock();
     let result = unsafe { shared_store() }.and_then(|store| {
         use sotos_objstore::ROOT_OID;
@@ -2096,17 +1951,6 @@ pub(crate) fn sys_rename(ctx: &mut SyscallContext, msg: &IpcMsg) {
             }
             None => (ROOT_OID, new_name),
         };
-        // DIAG: check flags before rename
-        if let Some(entry_pre) = store.stat(old_oid) {
-            print(b"REN-PRE: oid="); print_u64(old_oid);
-            print(b" flags="); print_u64(entry_pre.flags as u64);
-            print(b" slot=");
-            if let Some(sl) = store.find_slot_pub(old_oid) {
-                print_u64(sl as u64);
-            }
-            print(b" name=["); print(entry_pre.name_as_str());
-            print(b"]\n");
-        }
         store.rename(old_oid, new_basename, new_parent).ok()?;
         // Post-rename verification: check renamed entry's flags
         if let Some(entry) = store.stat(old_oid) {
@@ -2707,11 +2551,6 @@ pub(crate) fn sys_mkdir(ctx: &mut SyscallContext, msg: &IpcMsg) {
         print(b"MKDIR: ");
         print(abs_name);
         print(if mkdir_ok { b" OK\n" } else { b" FAIL\n" });
-    }
-    // Enable verbose P3 logging after "refs" mkdir
-    if ctx.pid == 3 && abs_name.windows(4).any(|w| w == b"refs") {
-        unsafe { crate::child_handler::P3_VERBOSE = true; }
-        print(b"[P3-VERBOSE: ON]\n");
     }
     reply_val(ctx.ep_cap, if mkdir_ok { 0 } else { -ENOSPC });
 }

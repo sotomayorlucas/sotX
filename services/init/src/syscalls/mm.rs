@@ -85,26 +85,6 @@ pub(crate) fn sys_mmap(ctx: &mut SyscallContext, msg: &IpcMsg) {
         }
     };
 
-    // DIAG: trace mmap for pid >= 4
-    if ctx.pid >= 4 {
-        for &b in b"MM9:" { sys::debug_print(b); }
-        // pid digit
-        sys::debug_print(b'0' + ctx.pid as u8);
-        sys::debug_print(b' ');
-        // fd
-        if fd >= 0 { for &b in b"fd=" { sys::debug_print(b); } sys::debug_print(b'0' + fd as u8); }
-        else { for &b in b"anon" { sys::debug_print(b); } }
-        sys::debug_print(b' ');
-        // pages
-        for &b in b"pg=" { sys::debug_print(b); }
-        crate::framebuffer::print_u64(pages);
-        sys::debug_print(b' ');
-        // flags
-        if map_fixed { sys::debug_print(b'F'); }
-        if map_anon { sys::debug_print(b'A'); }
-        sys::debug_print(b'\n');
-    }
-
     if fd >= 0 && !map_anon {
         // File-backed mmap
         let fdu = fd as usize;
@@ -112,12 +92,6 @@ pub(crate) fn sys_mmap(ctx: &mut SyscallContext, msg: &IpcMsg) {
         let mut file_size: u64 = 0;
         let mut is_vfs = false;
         let mut vfs_oid: u64 = 0;
-
-        if ctx.pid >= 4 {
-            for &b in b"MM9-FK:" { sys::debug_print(b); }
-            sys::debug_print(b'0' + ctx.child_fds[fdu as usize]);
-            sys::debug_print(b'\n');
-        }
 
         if fdu < GRP_MAX_FDS {
             if ctx.child_fds[fdu] == 12 {
@@ -159,47 +133,28 @@ pub(crate) fn sys_mmap(ctx: &mut SyscallContext, msg: &IpcMsg) {
         }
 
         if file_data == 0 && !is_vfs {
-            if ctx.pid >= 4 { for &b in b"MM9-EBADF\n" { sys::debug_print(b); } }
             reply_val(ctx.ep_cap, -EBADF);
             return;
-        }
-
-        if ctx.pid >= 4 {
-            for &b in b"MM9-ALLOC:" { sys::debug_print(b); }
-            crate::framebuffer::print_u64(pages);
-            if is_vfs { for &b in b" vfs" { sys::debug_print(b); } }
-            sys::debug_print(b'\n');
         }
 
         let mut ok = true;
         for p in 0..pages {
             if let Ok(f) = sys::frame_alloc() {
                 if sys::map(base + p * 0x1000, f, MAP_WRITABLE).is_err() {
-                    if ctx.pid >= 4 { for &b in b"MM9-MAPFAIL\n" { sys::debug_print(b); } }
                     ok = false; break;
                 }
             } else {
-                if ctx.pid >= 4 { for &b in b"MM9-OOM\n" { sys::debug_print(b); } }
                 ok = false; break;
             }
         }
-        if ctx.pid >= 4 { for &b in b"MM9-ALLOCD\n" { sys::debug_print(b); } }
         if ok {
             let map_size = (pages * 0x1000) as usize;
             unsafe { core::ptr::write_bytes(base as *mut u8, 0, map_size); }
-            if ctx.pid >= 4 { for &b in b"MM9-ZERO\n" { sys::debug_print(b); } }
             let file_off = offset as usize;
             let avail = if file_off < file_size as usize { file_size as usize - file_off } else { 0 };
             let to_copy = map_size.min(avail);
 
             if is_vfs && to_copy > 0 {
-                if ctx.pid >= 4 {
-                    for &b in b"MM9-VFSRD oid=" { sys::debug_print(b); }
-                    crate::framebuffer::print_u64(vfs_oid);
-                    for &b in b" sz=" { sys::debug_print(b); }
-                    crate::framebuffer::print_u64(file_size);
-                    sys::debug_print(b'\n');
-                }
                 let dst = unsafe { core::slice::from_raw_parts_mut(base as *mut u8, to_copy) };
                 vfs_lock();
                 let read_result = unsafe { shared_store() }
@@ -207,24 +162,7 @@ pub(crate) fn sys_mmap(ctx: &mut SyscallContext, msg: &IpcMsg) {
                 vfs_unlock();
 
                 match read_result {
-                    Some(n) => {
-                        if ctx.pid >= 4 {
-                            for &b in b"MM9-RD:" { sys::debug_print(b); }
-                            crate::framebuffer::print_u64(n as u64);
-                            for &b in b"/" { sys::debug_print(b); }
-                            crate::framebuffer::print_u64(to_copy as u64);
-                            // Show first 4 bytes to verify data integrity
-                            if n >= 4 {
-                                for &b in b" [" { sys::debug_print(b); }
-                                for i in 0..4u64 {
-                                    let byte = unsafe { *((base + i) as *const u8) };
-                                    crate::framebuffer::print_hex8(byte);
-                                }
-                                for &b in b"]" { sys::debug_print(b); }
-                            }
-                            sys::debug_print(b'\n');
-                        }
-                    }
+                    Some(_n) => {}
                     None => {
                         // VFS read failed — return error instead of zeroed pages
                         print(b"MM9-VFS-FAIL oid=");
@@ -254,66 +192,30 @@ pub(crate) fn sys_mmap(ctx: &mut SyscallContext, msg: &IpcMsg) {
                 }
 
             }
-            if ctx.pid >= 4 { for &b in b"MM9-PROT\n" { sys::debug_print(b); } }
             mmap_fixup_prot(base, pages, prot);
-            if ctx.pid >= 4 { for &b in b"MM9-REPLY\n" { sys::debug_print(b); } }
             reply_val(ctx.ep_cap, base as i64);
         } else {
-            if ctx.pid >= 4 { for &b in b"MM9-ENOMEM\n" { sys::debug_print(b); } }
             reply_val(ctx.ep_cap, -ENOMEM);
         }
         return;
     }
 
     // Anonymous mmap
-    if ctx.pid >= 4 {
-        for &b in b"ANON:" { sys::debug_print(b); }
-        sys::debug_print(b'0' + ctx.pid as u8);
-        for &b in b" pg=" { sys::debug_print(b); }
-        crate::framebuffer::print_u64(pages);
-        for &b in b" base=0x" { sys::debug_print(b); }
-        crate::framebuffer::print_hex64(base);
-        sys::debug_print(b'\n');
-    }
     let mut ok = true;
     for p in 0..pages {
-        if ctx.pid >= 4 && (p == 0 || p == pages / 2 || p == pages - 1) {
-            for &b in b"AP:" { sys::debug_print(b); }
-            sys::debug_print(b'0' + ctx.pid as u8);
-            sys::debug_print(b':');
-            crate::framebuffer::print_u64(p);
-            sys::debug_print(b'/');
-            crate::framebuffer::print_u64(pages);
-            sys::debug_print(b'\n');
-        }
         let f = match sys::frame_alloc() {
             Ok(f) => f,
             Err(_) => {
-                for &b in b"MMAP-OOM p=" { sys::debug_print(b); }
-                crate::framebuffer::print_u64(p);
-                sys::debug_print(b'\n');
                 ok = false; break;
             }
         };
         if sys::map(base + p * 0x1000, f, MAP_WRITABLE).is_err() {
-            for &b in b"MMAP-MAPF p=" { sys::debug_print(b); }
-            crate::framebuffer::print_u64(p);
-            sys::debug_print(b'\n');
             ok = false; break;
         }
     }
-    if ctx.pid >= 4 {
-        for &b in b"ANON-LOOP-DONE:" { sys::debug_print(b); }
-        sys::debug_print(b'0' + ctx.pid as u8);
-        sys::debug_print(if ok { b'Y' } else { b'N' });
-        sys::debug_print(b'\n');
-    }
     if ok {
-        if ctx.pid >= 4 { for &b in b"ANON-ZERO\n" { sys::debug_print(b); } }
         unsafe { core::ptr::write_bytes(base as *mut u8, 0, (pages * 0x1000) as usize); }
-        if ctx.pid >= 4 { for &b in b"ANON-PROT\n" { sys::debug_print(b); } }
         mmap_fixup_prot(base, pages, prot);
-        if ctx.pid >= 4 { for &b in b"ANON-REPLY\n" { sys::debug_print(b); } }
         reply_val(ctx.ep_cap, base as i64);
     } else {
         reply_val(ctx.ep_cap, -ENOMEM);

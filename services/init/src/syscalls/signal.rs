@@ -28,14 +28,6 @@ pub(crate) fn check_pending_signals(
     if sig == 0 {
         return None;
     }
-    // DIAG: log signal delivery during pipe retry
-    if pid >= 3 && pid <= 5 {
-        crate::framebuffer::print(b"SIG-CHK P");
-        crate::framebuffer::print_u64(pid as u64);
-        crate::framebuffer::print(b" sig=");
-        crate::framebuffer::print_u64(sig);
-        crate::framebuffer::print(b"\n");
-    }
     match sig_dispatch(pid, sig) {
         1 => Some(SyscallAction::Break),        // terminated
         2 => {

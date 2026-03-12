@@ -1619,18 +1619,15 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
                 Ok(CapObject::AddrSpace { cr3 }) => {
                     let src = paging::AddressSpace::from_cr3(cr3);
                     let child = src.clone_cow();
-                    kdebug!("AS_CLONE: clone done, flushing TLB...");
                     // Flush TLB: parent PTEs changed from writable to read-only.
                     // If parent is current CR3, stale TLB entries could allow writes.
                     if cr3 == paging::read_cr3() {
                         paging::flush_tlb();
                     }
-                    kdebug!("AS_CLONE: TLB flushed, inserting cap...");
                     let child_cr3 = child.cr3();
                     match cap::insert(CapObject::AddrSpace { cr3: child_cr3 }, Rights::ALL, None) {
                         Some(cap_id) => {
                             fault::register_cr3_cap(child_cr3, cap_id.raw());
-                            kdebug!("AS_CLONE: ok, cap={}", cap_id.raw());
                             frame.rax = cap_id.raw() as u64;
                         }
                         None => {

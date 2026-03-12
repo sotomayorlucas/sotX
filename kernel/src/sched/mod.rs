@@ -504,9 +504,6 @@ fn spawn_user_opt(user_rip: u64, user_rsp: u64, cr3: u64, redirect_ep: Option<u3
     let slot = handle.index();
     sched.register_tid(tid, slot);
     sched.enqueue(slot);
-    if redirect_ep.is_some() && id >= 16 {
-        crate::kprintln!("SPAWN-REDIR: tid={} rip={:#x} cr3={:#x} ep={:?}", tid.0, user_rip, cr3, redirect_ep);
-    }
     tid
 }
 
