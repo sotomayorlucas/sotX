@@ -14,7 +14,7 @@ use crate::fd::fd_grp_init;
 // Process table constants
 // ---------------------------------------------------------------------------
 
-pub(crate) const MAX_PROCS: usize = 16;
+pub(crate) const MAX_PROCS: usize = 64;
 
 // ---------------------------------------------------------------------------
 // ProcessState: all per-process metadata in one struct.

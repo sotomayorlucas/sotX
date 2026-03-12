@@ -19,10 +19,12 @@ pub(crate) struct SyscallContext<'a> {
     pub mmap_next: &'a mut u64,
     pub my_brk_base: u64,
     pub my_mmap_base: u64,
+    /// Memory group index (for VMA_LISTS access).
+    pub memg: usize,
 
     // FD tables (shared via THREAD_GROUPS)
     pub child_fds: &'a mut [u8; GRP_MAX_FDS],
-    pub fd_cloexec: &'a mut u32,
+    pub fd_cloexec: &'a mut u128,
     pub initrd_files: &'a mut [[u64; 4]; GRP_MAX_INITRD],
     pub initrd_file_buf_base: u64,
     pub vfs_files: &'a mut [[u64; 4]; GRP_MAX_VFS],

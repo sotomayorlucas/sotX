@@ -113,7 +113,7 @@ run: image
         -serial stdio \
         -display none \
         -no-reboot \
-        -m 512M
+        -m 1024M
 
 # Run with SMP (4 CPUs — may hang due to scheduler race, use for testing only)
 run-smp: image
@@ -122,7 +122,7 @@ run-smp: image
         -serial stdio \
         -display none \
         -no-reboot \
-        -m 512M \
+        -m 1024M \
         -smp 4
 
 # Run with QEMU display window (for framebuffer/keyboard testing)
@@ -133,7 +133,7 @@ run-gui: image create-test-disk
         -device virtio-blk-pci,drive=disk0,disable-modern=on \
         -serial stdio \
         -no-reboot \
-        -m 512M \
+        -m 1024M \
         -display sdl
 
 # Run with GDB server for debugging (connect with gdb -ex "target remote :1234")
@@ -143,7 +143,7 @@ debug: image
         -serial stdio \
         -display none \
         -no-reboot \
-        -m 512M \
+        -m 1024M \
         -s -S
 
 # Create a 256 MiB ObjectStore v5 disk (or inject rootfs if present)
@@ -164,7 +164,7 @@ run-net: image create-test-disk
         -device virtio-net-pci,netdev=net0,disable-modern=on \
         -serial stdio \
         -no-reboot \
-        -m 512M
+        -m 1024M
 
 # Run with virtio-net + Wireshark packet capture (pcap)
 run-net-pcap: image create-test-disk
@@ -177,7 +177,7 @@ run-net-pcap: image create-test-disk
         -object filter-dump,id=dump0,netdev=net0,file=target/net.pcap \
         -serial stdio \
         -no-reboot \
-        -m 512M
+        -m 1024M
 
 # Run with virtio-blk test disk
 run-blk: image create-test-disk
@@ -187,7 +187,7 @@ run-blk: image create-test-disk
         -device virtio-blk-pci,drive=disk0,disable-modern=on \
         -serial stdio \
         -no-reboot \
-        -m 512M
+        -m 1024M
 
 # Create a 64 MiB NVMe test disk
 create-nvme-disk:
@@ -203,7 +203,7 @@ run-nvme: image create-test-disk create-nvme-disk
         -device nvme,serial=sotOS-NVMe,drive=nvme0 \
         -serial stdio \
         -no-reboot \
-        -m 512M
+        -m 1024M
 
 # Run with xHCI USB controller (and virtio-blk for ObjectStore)
 run-xhci: image create-test-disk
@@ -215,7 +215,7 @@ run-xhci: image create-test-disk
         -device usb-kbd,bus=xhci.0 \
         -serial stdio \
         -no-reboot \
-        -m 512M
+        -m 1024M
 
 # Run with ALL devices (virtio-blk, virtio-net, NVMe, xHCI USB kbd+mouse, AC97 audio, AHCI SATA, display)
 run-full: image create-test-disk create-nvme-disk
@@ -234,7 +234,7 @@ run-full: image create-test-disk create-nvme-disk
         -device ahci,id=ahci0 \
         -serial stdio \
         -no-reboot \
-        -m 512M
+        -m 1024M
 
 # Automated validation: build everything, boot with 90s timeout, verify no panics
 run-all: image create-test-disk
@@ -248,7 +248,7 @@ run-all: image create-test-disk
         -serial stdio \
         -display none \
         -no-reboot \
-        -m 512M > target/test-output.log 2>&1; true
+        -m 1024M > target/test-output.log 2>&1; true
     @if grep -qiE "STACK.SMASH|PANIC" target/test-output.log; then \
         echo "FAIL: found panic/crash in output:"; \
         grep -iE "STACK.SMASH|PANIC" target/test-output.log; \
@@ -291,7 +291,7 @@ run-linux: image build-sysroot
         -device virtio-net-pci,netdev=net0,disable-modern=on \
         -serial stdio \
         -no-reboot \
-        -m 512M
+        -m 1024M
 
 # Clean build artifacts
 clean:

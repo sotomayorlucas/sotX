@@ -66,6 +66,7 @@ mod net;
 mod exec;
 #[allow(dead_code)]
 mod syscall_log;
+mod vma;
 mod syscalls;
 mod child_handler;
 mod lucas_handler;

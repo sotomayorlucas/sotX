@@ -892,7 +892,7 @@ pub(crate) fn close_fd_internal(ctx: &mut SyscallContext, fd: usize) -> bool {
     }
     ctx.child_fds[fd] = 0;
     // Clear cloexec bit
-    if fd < 32 { *ctx.fd_cloexec &= !(1 << fd); }
+    if fd < 128 { *ctx.fd_cloexec &= !(1u128 << fd); }
     true
 }
 
@@ -911,13 +911,13 @@ pub(crate) fn close_cloexec_fds(ctx: &mut SyscallContext) {
     let mut bits = *ctx.fd_cloexec;
     while bits != 0 {
         let fd = bits.trailing_zeros() as usize;
-        if fd >= 32 { break; }
+        if fd >= 128 { break; }
         print(b"CLOEXEC-CLOSE P"); print_u64(ctx.pid as u64);
         print(b" fd="); print_u64(fd as u64);
         print(b" kind="); print_u64(ctx.child_fds[fd] as u64);
         print(b"\n");
         close_fd_internal(ctx, fd);
-        bits &= !(1 << fd);
+        bits &= !(1u128 << fd);
     }
     // Close inherited pipe fds > 2 that weren't CLOEXEC.
     // After fork+exec, the child dup2's needed pipes to 0/1/2 and
@@ -1713,7 +1713,7 @@ pub(crate) fn sys_dup(ctx: &mut SyscallContext, msg: &IpcMsg) {
             ctx.sock_udp_remote_ip[nfd] = ctx.sock_udp_remote_ip[oldfd];
             ctx.sock_udp_remote_port[nfd] = ctx.sock_udp_remote_port[oldfd];
             // dup does NOT set FD_CLOEXEC on new fd
-            if nfd < 32 { *ctx.fd_cloexec &= !(1 << nfd); }
+            if nfd < 128 { *ctx.fd_cloexec &= !(1u128 << nfd); }
             if ctx.pid >= 3 {
                 print(b"FD-DUP P"); print_u64(ctx.pid as u64);
                 print(b" "); print_u64(oldfd as u64);
@@ -1764,7 +1764,7 @@ pub(crate) fn sys_dup2(ctx: &mut SyscallContext, msg: &IpcMsg) {
         ctx.sock_udp_remote_ip[newfd] = ctx.sock_udp_remote_ip[oldfd];
         ctx.sock_udp_remote_port[newfd] = ctx.sock_udp_remote_port[oldfd];
         // dup2 does NOT set FD_CLOEXEC on new fd
-        if newfd < 32 { *ctx.fd_cloexec &= !(1 << newfd); }
+        if newfd < 128 { *ctx.fd_cloexec &= !(1u128 << newfd); }
         if ctx.pid >= 3 {
             let ok = ctx.child_fds[newfd];
             let op = ctx.sock_conn_id[newfd] as u64;
@@ -1817,8 +1817,8 @@ pub(crate) fn sys_fcntl(ctx: &mut SyscallContext, msg: &IpcMsg) {
                         }
                     }
                     // Set cloexec on new fd if F_DUPFD_CLOEXEC
-                    if cmd == 1030 && n < 32 {
-                        *ctx.fd_cloexec |= 1 << n;
+                    if cmd == 1030 && n < 128 {
+                        *ctx.fd_cloexec |= 1u128 << n;
                     }
                     if ctx.pid >= 3 {
                         print(b"FD-FCNTL P"); print_u64(ctx.pid as u64);
@@ -1835,18 +1835,18 @@ pub(crate) fn sys_fcntl(ctx: &mut SyscallContext, msg: &IpcMsg) {
             }
         }
         1 => { // F_GETFD
-            if fd < 32 {
-                let val = if *ctx.fd_cloexec & (1 << fd) != 0 { 1 } else { 0 };
+            if fd < 128 {
+                let val = if *ctx.fd_cloexec & (1u128 << fd) != 0 { 1 } else { 0 };
                 reply_val(ctx.ep_cap, val);
             } else { reply_val(ctx.ep_cap, 0); }
         }
         2 => { // F_SETFD
-            if fd < 32 {
+            if fd < 128 {
                 let flags = msg.regs[2] as u32;
                 if flags & 1 != 0 { // FD_CLOEXEC = 1
-                    *ctx.fd_cloexec |= 1 << fd;
+                    *ctx.fd_cloexec |= 1u128 << fd;
                 } else {
-                    *ctx.fd_cloexec &= !(1 << fd);
+                    *ctx.fd_cloexec &= !(1u128 << fd);
                 }
             }
             reply_val(ctx.ep_cap, 0);
@@ -2028,14 +2028,7 @@ pub(crate) fn sys_openat(ctx: &mut SyscallContext, msg: &IpcMsg) {
         let mut gen_len: usize = 0;
         let mut handled = true;
         if name == b"/proc/self/maps" || name == b"/proc/self/smaps" {
-            let map_text = b"\
-00400000-00500000 r-xp 00000000 00:00 0          [text]\n\
-00e30000-00e34000 rw-p 00000000 00:00 0          [stack]\n\
-07000000-07200000 rw-p 00000000 00:00 0          [heap]\n\
-00b80000-00b81000 r-xp 00000000 00:00 0          [vdso]\n";
-            let n = map_text.len().min(ctx.dir_buf.len());
-            ctx.dir_buf[..n].copy_from_slice(&map_text[..n]);
-            gen_len = n;
+            gen_len = super::mm::format_proc_maps(ctx.memg, ctx.dir_buf);
         } else if name == b"/proc/self/status" {
             gen_len = format_proc_status(ctx.dir_buf, ctx.pid);
         } else if name == b"/proc/self/stat" {
@@ -2575,8 +2568,8 @@ pub(crate) fn sys_pipe2(ctx: &mut SyscallContext, msg: &IpcMsg) {
             ctx.sock_conn_id[w] = pipe_id as u32;
             // Set close-on-exec if O_CLOEXEC requested
             if flags & O_CLOEXEC != 0 {
-                if r < 32 { *ctx.fd_cloexec |= 1 << r; }
-                if w < 32 { *ctx.fd_cloexec |= 1 << w; }
+                if r < 128 { *ctx.fd_cloexec |= 1u128 << r; }
+                if w < 128 { *ctx.fd_cloexec |= 1u128 << w; }
             }
             unsafe {
                 *(pipefd_ptr as *mut i32) = r as i32;
@@ -2671,11 +2664,11 @@ pub(crate) fn sys_dup3(ctx: &mut SyscallContext, msg: &IpcMsg) {
         ctx.sock_udp_remote_ip[newfd] = ctx.sock_udp_remote_ip[oldfd];
         ctx.sock_udp_remote_port[newfd] = ctx.sock_udp_remote_port[oldfd];
         // Set or clear FD_CLOEXEC based on flags
-        if newfd < 32 {
+        if newfd < 128 {
             if flags & O_CLOEXEC != 0 {
-                *ctx.fd_cloexec |= 1 << newfd;
+                *ctx.fd_cloexec |= 1u128 << newfd;
             } else {
-                *ctx.fd_cloexec &= !(1 << newfd);
+                *ctx.fd_cloexec &= !(1u128 << newfd);
             }
         }
         reply_val(ctx.ep_cap, newfd as i64);

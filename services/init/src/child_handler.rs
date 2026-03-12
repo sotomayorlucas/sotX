@@ -143,14 +143,8 @@ pub(crate) fn open_virtual_file(name: &[u8], dir_buf: &mut [u8]) -> Option<usize
     } else if starts_with(name, b"/proc/") || starts_with(name, b"/sys/") {
         let gen_len: usize;
         if name == b"/proc/self/maps" || name == b"/proc/self/smaps" {
-            let map_text = b"\
-00400000-00500000 r-xp 00000000 00:00 0          [text]\n\
-00e30000-00e34000 rw-p 00000000 00:00 0          [stack]\n\
-07000000-07200000 rw-p 00000000 00:00 0          [heap]\n\
-00b80000-00b81000 r-xp 00000000 00:00 0          [vdso]\n";
-            let n = map_text.len().min(dir_buf.len());
-            dir_buf[..n].copy_from_slice(&map_text[..n]);
-            gen_len = n;
+            // Dynamic VMA-based output (pid is not available here, use group 0)
+            gen_len = crate::syscalls::mm::format_proc_maps(0, dir_buf);
         } else if name == b"/proc/cpuinfo" {
             let info = b"processor\t: 0\nvendor_id\t: GenuineIntel\ncpu family\t: 6\nmodel name\t: QEMU Virtual CPU\ncache size\t: 4096 KB\nflags\t\t: fpu sse sse2 ssse3 sse4_1 sse4_2 rdtsc\n\n";
             let n = info.len().min(dir_buf.len());
@@ -257,23 +251,23 @@ pub(crate) extern "C" fn child_handler() -> ! {
     const CHILD_BRK_BASE: u64 = 0x7000000;
     const CHILD_MMAP_OFFSET: u64 = 0x1000000; // mmap starts 16 MiB into the region
     // Initrd file buffers: separate region well above brk/mmap
-    // 16 children × 64 MiB = 1 GiB → ends at 0x47000000.
+    // 64 children × 64 MiB = 4 GiB → ends at 0x107000000.
     // Virtual addresses: pages are demand-allocated from physical RAM.
-    const INITRD_BUF_REGION: u64 = 0x48000000;
+    const INITRD_BUF_REGION: u64 = 0x110000000;
     const INITRD_BUF_PER_GROUP: u64 = 8 * 0x300000; // 24 MiB
 
     // Initialize memory group state if this is a new group (not CLONE_VM reuse)
     unsafe {
         if clone_flags & CLONE_VM == 0 || THREAD_GROUPS[memg].brk == 0 {
-            let my_brk_base = CHILD_BRK_BASE + ((memg as u64) % 16) * CHILD_REGION_SIZE;
+            let my_brk_base = CHILD_BRK_BASE + ((memg as u64) % MAX_PROCS as u64) * CHILD_REGION_SIZE;
             THREAD_GROUPS[memg].brk = my_brk_base;
             THREAD_GROUPS[memg].mmap_next = my_brk_base + CHILD_MMAP_OFFSET;
-            THREAD_GROUPS[memg].initrd_buf_base = INITRD_BUF_REGION + ((memg as u64) % 16) * INITRD_BUF_PER_GROUP;
+            THREAD_GROUPS[memg].initrd_buf_base = INITRD_BUF_REGION + ((memg as u64) % MAX_PROCS as u64) * INITRD_BUF_PER_GROUP;
         }
     }
 
     // Compute the brk base for this memory group (needed for limit checks).
-    let my_brk_base = CHILD_BRK_BASE + ((memg as u64) % 16) * CHILD_REGION_SIZE;
+    let my_brk_base = CHILD_BRK_BASE + ((memg as u64) % MAX_PROCS as u64) * CHILD_REGION_SIZE;
     let my_mmap_base = my_brk_base + CHILD_MMAP_OFFSET;
 
     // Record brk/mmap base for this process (for cleanup on exit)
@@ -307,7 +301,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                     pid, ep_cap, child_as_cap,
                     current_brk: &mut THREAD_GROUPS[memg].brk,
                     mmap_next: &mut THREAD_GROUPS[memg].mmap_next,
-                    my_brk_base, my_mmap_base,
+                    my_brk_base, my_mmap_base, memg,
                     child_fds: &mut tg.fds,
                     fd_cloexec: &mut tg.fd_cloexec,
                     initrd_files: &mut tg.initrd,
@@ -704,6 +698,27 @@ pub(crate) extern "C" fn child_handler() -> ! {
                             PROCESSES[pid - 1].elf_lo.store(LAST_EXEC_ELF_LO.load(Ordering::Acquire), Ordering::Release);
                             PROCESSES[pid - 1].elf_hi.store(LAST_EXEC_ELF_HI.load(Ordering::Acquire), Ordering::Release);
                             PROCESSES[pid - 1].has_interp.store(LAST_EXEC_HAS_INTERP.load(Ordering::Acquire), Ordering::Release);
+                            // Seed VMAs for /proc/self/maps
+                            {
+                                use crate::vma::{VMA_LISTS, VmaLabel};
+                                let elo = LAST_EXEC_ELF_LO.load(Ordering::Acquire);
+                                let ehi = LAST_EXEC_ELF_HI.load(Ordering::Acquire);
+                                let sb = LAST_EXEC_STACK_BASE.load(Ordering::Acquire);
+                                let sp = LAST_EXEC_STACK_PAGES.load(Ordering::Acquire);
+                                let vl = unsafe { &mut VMA_LISTS[memg] };
+                                vl.count = 0; // clear previous VMAs
+                                if ehi > elo {
+                                    vl.insert(elo, ehi, 5, 0x02, VmaLabel::Text); // r-xp
+                                }
+                                if sp > 0 && sb >= sp * 0x1000 {
+                                    let stack_lo = sb - sp * 0x1000;
+                                    vl.insert(stack_lo, sb, 3, 0x02, VmaLabel::Stack); // rw-p
+                                }
+                                // vDSO
+                                vl.insert(0xB80000, 0xB81000, 5, 0x02, VmaLabel::Vdso);
+                                // Heap (starts empty, grows via brk)
+                                vl.insert(my_brk_base, my_brk_base, 3, 0x22, VmaLabel::Heap);
+                            }
                         }
                         EXEC_LOCK.store(0, Ordering::Release);
                         ep_cap = new_ep;

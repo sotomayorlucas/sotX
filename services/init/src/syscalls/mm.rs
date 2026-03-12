@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------------------
 // Memory management syscalls: brk, mmap, munmap, mprotect, mremap
-// Extracted from child_handler.rs
+// VMA tracking for /proc/self/maps and MAP_FIXED_NOREPLACE.
 // ---------------------------------------------------------------------------
 
 use sotos_common::sys;
@@ -12,9 +12,26 @@ use crate::process::*;
 use crate::fd::*;
 use crate::{vfs_lock, vfs_unlock, shared_store};
 use crate::framebuffer::print;
+use crate::vma::{VMA_LISTS, VmaLabel};
 use super::context::SyscallContext;
 
+/// MAP_FIXED_NOREPLACE flag (Linux 4.17+). If the range overlaps an
+/// existing mapping, return -EEXIST instead of replacing it.
+const MAP_FIXED_NOREPLACE_FLAG: u32 = 0x100000;
+/// MAP_NORESERVE: don't reserve swap (we treat as hint for lazy alloc).
+const MAP_NORESERVE_FLAG: u32 = 0x4000;
+
 const MAP_WRITABLE: u64 = 2;
+
+/// Helper: record a VMA for the given memory group.
+fn vma_insert(memg: usize, start: u64, end: u64, prot: u8, flags: u8, label: VmaLabel) {
+    unsafe { VMA_LISTS[memg].insert(start, end, prot, flags, label); }
+}
+
+/// Helper: remove VMAs in [start, end) for the given memory group.
+fn vma_remove(memg: usize, start: u64, end: u64) {
+    unsafe { VMA_LISTS[memg].remove(start, end); }
+}
 
 /// SYS_BRK (12): expand/query the program break.
 pub(crate) fn sys_brk(ctx: &mut SyscallContext, msg: &IpcMsg) {
@@ -29,8 +46,9 @@ pub(crate) fn sys_brk(ctx: &mut SyscallContext, msg: &IpcMsg) {
             reply_val(ctx.ep_cap, *ctx.current_brk as i64);
             return;
         }
+        let old_brk = *ctx.current_brk;
         let mut ok = true;
-        let mut pg = (*ctx.current_brk + 0xFFF) & !0xFFF;
+        let mut pg = (old_brk + 0xFFF) & !0xFFF;
         while pg < new_brk {
             if let Ok(f) = sys::frame_alloc() {
                 if sys::map(pg, f, MAP_WRITABLE).is_err() { ok = false; break; }
@@ -42,6 +60,10 @@ pub(crate) fn sys_brk(ctx: &mut SyscallContext, msg: &IpcMsg) {
             if ctx.pid > 0 && ctx.pid <= MAX_PROCS {
                 PROCESSES[ctx.pid - 1].brk_current.store(new_brk, Ordering::Release);
             }
+            // Update heap VMA
+            let heap_start = ctx.my_brk_base & !0xFFF;
+            vma_remove(ctx.memg, heap_start, new_brk);
+            vma_insert(ctx.memg, heap_start, new_brk, 3, 0x22, VmaLabel::Heap); // rw-p, PRIVATE|ANON
         }
         reply_val(ctx.ep_cap, *ctx.current_brk as i64);
     }
@@ -57,24 +79,67 @@ pub(crate) fn sys_mmap(ctx: &mut SyscallContext, msg: &IpcMsg) {
     let offset = msg.regs[5];
 
     let mflags = MFlags::from_bits_truncate(flags);
-    let map_fixed = mflags.contains(MFlags::FIXED);
+    let map_fixed = mflags.contains(MFlags::FIXED) || (flags & MAP_FIXED_NOREPLACE_FLAG) != 0;
     let map_anon = mflags.contains(MFlags::ANONYMOUS);
-    let pages = ((len + 0xFFF) & !0xFFF) / 0x1000;
+    let map_noreplace = (flags & MAP_FIXED_NOREPLACE_FLAG) != 0;
+    let map_noreserve = (flags & MAP_NORESERVE_FLAG) != 0;
+    let aligned_len = (len + 0xFFF) & !0xFFF;
+    let pages = aligned_len / 0x1000;
+
+    // PROT_NONE + MAP_NORESERVE: reservation only (no physical frames).
+    // Wine uses this to reserve large address ranges (e.g. 32GB for 32-bit PE space).
+    let lazy = prot == 0 && map_anon && map_noreserve;
+
+    // MAP_FIXED_NOREPLACE: check for overlaps before anything else
+    if map_noreplace && req_addr != 0 {
+        let overlaps = unsafe { VMA_LISTS[ctx.memg].overlaps(req_addr, req_addr + aligned_len) };
+        if overlaps {
+            reply_val(ctx.ep_cap, -EEXIST);
+            return;
+        }
+    }
 
     // Determine base address
     let base = if map_fixed && req_addr != 0 {
-        for p in 0..pages {
-            let _ = sys::unmap_free(req_addr + p * 0x1000);
+        if !map_noreplace {
+            // Regular MAP_FIXED: unmap existing pages first
+            vma_remove(ctx.memg, req_addr, req_addr + aligned_len);
+            for p in 0..pages {
+                let _ = sys::unmap_free(req_addr + p * 0x1000);
+            }
         }
         req_addr
+    } else if req_addr != 0 {
+        // Hint address: try it first, fall back to bump allocator
+        let overlaps = unsafe { VMA_LISTS[ctx.memg].overlaps(req_addr, req_addr + aligned_len) };
+        if !overlaps {
+            req_addr
+        } else {
+            let b = *ctx.mmap_next;
+            *ctx.mmap_next += aligned_len;
+            if ctx.pid > 0 && ctx.pid <= MAX_PROCS {
+                PROCESSES[ctx.pid - 1].mmap_next.store(*ctx.mmap_next, Ordering::Release);
+            }
+            b
+        }
     } else {
         let b = *ctx.mmap_next;
-        *ctx.mmap_next += pages * 0x1000;
+        *ctx.mmap_next += aligned_len;
         if ctx.pid > 0 && ctx.pid <= MAX_PROCS {
             PROCESSES[ctx.pid - 1].mmap_next.store(*ctx.mmap_next, Ordering::Release);
         }
         b
     };
+
+    let prot_u8 = (prot & 7) as u8;
+    let flags_u8 = (flags & 0xFF) as u8;
+
+    // Lazy reservation: record VMA but don't allocate frames
+    if lazy {
+        vma_insert(ctx.memg, base, base + aligned_len, 0, flags_u8, VmaLabel::Reservation);
+        reply_val(ctx.ep_cap, base as i64);
+        return;
+    }
 
     let mmap_fixup_prot = |base: u64, pages: u64, prot: u64| {
         if prot & 2 == 0 {
@@ -84,6 +149,8 @@ pub(crate) fn sys_mmap(ctx: &mut SyscallContext, msg: &IpcMsg) {
             }
         }
     };
+
+    let label = if fd >= 0 && !map_anon { VmaLabel::Library } else { VmaLabel::Anonymous };
 
     if fd >= 0 && !map_anon {
         // File-backed mmap
@@ -95,7 +162,6 @@ pub(crate) fn sys_mmap(ctx: &mut SyscallContext, msg: &IpcMsg) {
 
         if fdu < GRP_MAX_FDS {
             if ctx.child_fds[fdu] == 12 {
-                // First: exact fd match (current open file)
                 for s in 0..GRP_MAX_INITRD {
                     if ctx.initrd_files[s][0] != 0
                         && ctx.initrd_files[s][3] == fdu as u64
@@ -105,9 +171,6 @@ pub(crate) fn sys_mmap(ctx: &mut SyscallContext, msg: &IpcMsg) {
                         break;
                     }
                 }
-                // Fallback: closed-but-alive entry (u64::MAX) — only if no exact match.
-                // NOTE: stale entries from forked parents can shadow new opens,
-                // so this fallback should rarely be needed.
                 if file_data == 0 {
                     for s in 0..GRP_MAX_INITRD {
                         if ctx.initrd_files[s][0] != 0
@@ -161,26 +224,12 @@ pub(crate) fn sys_mmap(ctx: &mut SyscallContext, msg: &IpcMsg) {
                     .and_then(|store| store.read_obj_range(vfs_oid, file_off, dst).ok());
                 vfs_unlock();
 
-                match read_result {
-                    Some(_n) => {}
-                    None => {
-                        // VFS read failed — return error instead of zeroed pages
-                        print(b"MM9-VFS-FAIL oid=");
-                        crate::framebuffer::print_u64(vfs_oid);
-                        print(b" off=");
-                        crate::framebuffer::print_u64(file_off as u64);
-                        print(b" sz=");
-                        crate::framebuffer::print_u64(to_copy as u64);
-                        print(b" P");
-                        crate::framebuffer::print_u64(ctx.pid as u64);
-                        print(b"\n");
-                        // Free the frames we already allocated
-                        for p in 0..pages {
-                            let _ = sys::unmap_free(base + p * 0x1000);
-                        }
-                        reply_val(ctx.ep_cap, -EIO);
-                        return;
+                if read_result.is_none() {
+                    for p in 0..pages {
+                        let _ = sys::unmap_free(base + p * 0x1000);
                     }
+                    reply_val(ctx.ep_cap, -EIO);
+                    return;
                 }
             } else if to_copy > 0 {
                 unsafe {
@@ -190,9 +239,9 @@ pub(crate) fn sys_mmap(ctx: &mut SyscallContext, msg: &IpcMsg) {
                         to_copy,
                     );
                 }
-
             }
             mmap_fixup_prot(base, pages, prot);
+            vma_insert(ctx.memg, base, base + aligned_len, prot_u8, flags_u8, label);
             reply_val(ctx.ep_cap, base as i64);
         } else {
             reply_val(ctx.ep_cap, -ENOMEM);
@@ -205,9 +254,7 @@ pub(crate) fn sys_mmap(ctx: &mut SyscallContext, msg: &IpcMsg) {
     for p in 0..pages {
         let f = match sys::frame_alloc() {
             Ok(f) => f,
-            Err(_) => {
-                ok = false; break;
-            }
+            Err(_) => { ok = false; break; }
         };
         if sys::map(base + p * 0x1000, f, MAP_WRITABLE).is_err() {
             ok = false; break;
@@ -216,6 +263,7 @@ pub(crate) fn sys_mmap(ctx: &mut SyscallContext, msg: &IpcMsg) {
     if ok {
         unsafe { core::ptr::write_bytes(base as *mut u8, 0, (pages * 0x1000) as usize); }
         mmap_fixup_prot(base, pages, prot);
+        vma_insert(ctx.memg, base, base + aligned_len, prot_u8, flags_u8, VmaLabel::Anonymous);
         reply_val(ctx.ep_cap, base as i64);
     } else {
         reply_val(ctx.ep_cap, -ENOMEM);
@@ -228,6 +276,40 @@ pub(crate) fn sys_mprotect(ctx: &mut SyscallContext, msg: &IpcMsg) {
     let len = msg.regs[1];
     let prot = msg.regs[2];
     let pages = ((len + 0xFFF) & !0xFFF) / 0x1000;
+    let aligned_end = addr + pages * 0x1000;
+
+    // If changing from PROT_NONE to something with frames, we may need to
+    // allocate frames for lazy reservations.  Check if the VMA is a Reservation.
+    let is_reservation = unsafe {
+        let vl = &VMA_LISTS[ctx.memg];
+        let mut found = false;
+        for i in 0..vl.count {
+            let v = &vl.entries[i];
+            if v.start >= aligned_end { break; }
+            if v.end > addr && v.label == VmaLabel::Reservation {
+                found = true;
+                break;
+            }
+        }
+        found
+    };
+
+    if is_reservation && prot != 0 {
+        // Materialize the lazy reservation: allocate frames
+        let mut ok = true;
+        for p in 0..pages {
+            if let Ok(f) = sys::frame_alloc() {
+                if sys::map(addr + p * 0x1000, f, MAP_WRITABLE).is_err() { ok = false; break; }
+            } else { ok = false; break; }
+        }
+        if ok {
+            unsafe { core::ptr::write_bytes(addr as *mut u8, 0, (pages * 0x1000) as usize); }
+        } else {
+            reply_val(ctx.ep_cap, -ENOMEM);
+            return;
+        }
+    }
+
     let flags = if prot & 2 != 0 {
         MAP_WRITABLE
     } else if prot & 4 != 0 {
@@ -238,6 +320,22 @@ pub(crate) fn sys_mprotect(ctx: &mut SyscallContext, msg: &IpcMsg) {
     for p in 0..pages {
         let _ = sys::protect(addr + p * 0x1000, flags);
     }
+
+    // Update VMA prot bits
+    unsafe { VMA_LISTS[ctx.memg].update_prot(addr, aligned_end, (prot & 7) as u8); }
+    // If was a reservation, change label to Anonymous
+    if is_reservation {
+        unsafe {
+            for i in 0..VMA_LISTS[ctx.memg].count {
+                let v = &mut VMA_LISTS[ctx.memg].entries[i];
+                if v.start >= aligned_end { break; }
+                if v.end > addr && v.label == VmaLabel::Reservation {
+                    v.label = VmaLabel::Anonymous;
+                }
+            }
+        }
+    }
+
     reply_val(ctx.ep_cap, 0);
 }
 
@@ -246,9 +344,31 @@ pub(crate) fn sys_munmap(ctx: &mut SyscallContext, msg: &IpcMsg) {
     let addr = msg.regs[0];
     let len = msg.regs[1];
     let pages = ((len + 0xFFF) & !0xFFF) / 0x1000;
-    for p in 0..pages {
-        let _ = sys::unmap_free(addr + p * 0x1000);
+    let aligned_end = addr + pages * 0x1000;
+
+    // Check if any part is a reservation (no frames to free)
+    let is_reservation = unsafe {
+        let vl = &VMA_LISTS[ctx.memg];
+        let mut found = false;
+        for i in 0..vl.count {
+            let v = &vl.entries[i];
+            if v.start >= aligned_end { break; }
+            if v.end > addr && v.label == VmaLabel::Reservation {
+                found = true;
+                break;
+            }
+        }
+        found
+    };
+
+    if !is_reservation {
+        for p in 0..pages {
+            let _ = sys::unmap_free(addr + p * 0x1000);
+        }
     }
+
+    vma_remove(ctx.memg, addr, aligned_end);
+
     let freed_end = addr + pages * 0x1000;
     if freed_end == *ctx.mmap_next {
         *ctx.mmap_next = addr;
@@ -271,15 +391,19 @@ pub(crate) fn sys_mremap(ctx: &mut SyscallContext, msg: &IpcMsg) {
         for p in new_pages..old_pages {
             let _ = sys::unmap_free(old_addr + p * 0x1000);
         }
-        let freed_end = old_addr + old_pages * 0x1000;
-        if freed_end == *ctx.mmap_next {
-            *ctx.mmap_next = old_addr + new_pages * 0x1000;
+        let new_end = old_addr + new_pages * 0x1000;
+        let old_end = old_addr + old_pages * 0x1000;
+        // Shrink VMA
+        vma_remove(ctx.memg, new_end, old_end);
+        if old_end == *ctx.mmap_next {
+            *ctx.mmap_next = new_end;
         }
         reply_val(ctx.ep_cap, old_addr as i64);
     } else if mremap_maymove {
         let old_pages = ((old_size + 0xFFF) & !0xFFF) / 0x1000;
         let new_pages = ((new_size + 0xFFF) & !0xFFF) / 0x1000;
         let old_end = old_addr + old_pages * 0x1000;
+        let new_aligned = new_pages * 0x1000;
 
         if old_end == *ctx.mmap_next {
             // In-place growth
@@ -296,6 +420,9 @@ pub(crate) fn sys_mremap(ctx: &mut SyscallContext, msg: &IpcMsg) {
                 if ctx.pid > 0 && ctx.pid <= MAX_PROCS {
                     PROCESSES[ctx.pid - 1].mmap_next.store(*ctx.mmap_next, Ordering::Release);
                 }
+                // Extend VMA
+                vma_remove(ctx.memg, old_addr, *ctx.mmap_next);
+                vma_insert(ctx.memg, old_addr, old_addr + new_aligned, 3, 0x22, VmaLabel::Anonymous);
                 reply_val(ctx.ep_cap, old_addr as i64);
             } else {
                 reply_val(ctx.ep_cap, -ENOMEM);
@@ -303,7 +430,7 @@ pub(crate) fn sys_mremap(ctx: &mut SyscallContext, msg: &IpcMsg) {
         } else {
             // Allocate new region, copy, unmap old
             let new_base = *ctx.mmap_next;
-            *ctx.mmap_next += new_pages * 0x1000;
+            *ctx.mmap_next += new_aligned;
             let mut ok = true;
             for p in 0..new_pages {
                 if let Ok(f) = sys::frame_alloc() {
@@ -313,13 +440,16 @@ pub(crate) fn sys_mremap(ctx: &mut SyscallContext, msg: &IpcMsg) {
             if ok {
                 let copy_size = old_size.min(new_size) as usize;
                 unsafe {
-                    core::ptr::write_bytes(new_base as *mut u8, 0, (new_pages * 0x1000) as usize);
+                    core::ptr::write_bytes(new_base as *mut u8, 0, (new_aligned) as usize);
                     core::ptr::copy_nonoverlapping(old_addr as *const u8, new_base as *mut u8, copy_size);
                 }
                 for p in 0..old_pages { let _ = sys::unmap_free(old_addr + p * 0x1000); }
                 if ctx.pid > 0 && ctx.pid <= MAX_PROCS {
                     PROCESSES[ctx.pid - 1].mmap_next.store(*ctx.mmap_next, Ordering::Release);
                 }
+                // Update VMAs
+                vma_remove(ctx.memg, old_addr, old_end);
+                vma_insert(ctx.memg, new_base, new_base + new_aligned, 3, 0x22, VmaLabel::Anonymous);
                 reply_val(ctx.ep_cap, new_base as i64);
             } else {
                 reply_val(ctx.ep_cap, -ENOMEM);
@@ -328,6 +458,12 @@ pub(crate) fn sys_mremap(ctx: &mut SyscallContext, msg: &IpcMsg) {
     } else {
         reply_val(ctx.ep_cap, -ENOMEM);
     }
+}
+
+/// Format dynamic /proc/self/maps content for a memory group.
+/// Called from open_virtual_file when /proc/self/maps is opened.
+pub(crate) fn format_proc_maps(memg: usize, buf: &mut [u8]) -> usize {
+    unsafe { VMA_LISTS[memg].format_maps(buf) }
 }
 
 // Constant re-exported for brk limit calculation

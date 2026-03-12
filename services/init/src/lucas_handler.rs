@@ -122,6 +122,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                     mmap_next: &mut tg.mmap_next,
                     my_brk_base: BRK_BASE,
                     my_mmap_base: MMAP_BASE,
+                    memg: fdg,
                     child_fds: &mut tg.fds,
                     fd_cloexec: &mut tg.fd_cloexec,
                     initrd_files: &mut tg.initrd,

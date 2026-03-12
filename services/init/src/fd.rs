@@ -79,7 +79,7 @@ pub(crate) const EPOLLHUP: u32 = 0x010;
 // FD constants
 // ---------------------------------------------------------------------------
 
-pub(crate) const MAX_FDS: usize = 64;
+pub(crate) const MAX_FDS: usize = 256;
 pub(crate) const BRK_BASE: u64 = 0x2000000;
 pub(crate) const BRK_LIMIT: u64 = 0x100000; // 1 MiB max heap (BRK_BASE..BRK_BASE+BRK_LIMIT)
 pub(crate) const MMAP_BASE: u64 = 0x3000000;
@@ -126,13 +126,13 @@ pub(crate) fn write_linux_stat(stat_ptr: u64, oid: u64, size: u64, is_dir: bool)
 // Thread group constants (shared across child_handler + SyscallContext)
 // ---------------------------------------------------------------------------
 
-pub(crate) const GRP_MAX_FDS: usize = 32;
-pub(crate) const GRP_MAX_INITRD: usize = 8;
-pub(crate) const GRP_MAX_VFS: usize = 16;
+pub(crate) const GRP_MAX_FDS: usize = 128;
+pub(crate) const GRP_MAX_INITRD: usize = 32;
+pub(crate) const GRP_MAX_VFS: usize = 64;
 pub(crate) const GRP_CWD_MAX: usize = 128;
-pub(crate) const MAX_EVENTFDS: usize = 16;
-pub(crate) const MAX_TIMERFDS: usize = 8;
-pub(crate) const MAX_MEMFDS: usize = 8;
+pub(crate) const MAX_EVENTFDS: usize = 32;
+pub(crate) const MAX_TIMERFDS: usize = 16;
+pub(crate) const MAX_MEMFDS: usize = 16;
 pub(crate) const MAX_EPOLL_ENTRIES: usize = 64;
 
 // ---------------------------------------------------------------------------
@@ -145,7 +145,7 @@ pub(crate) struct ThreadGroupState {
     // FD table (kind per slot)
     pub fds: [u8; GRP_MAX_FDS],
     /// Close-on-exec bitset (bit i = fd i has FD_CLOEXEC)
-    pub fd_cloexec: u32,
+    pub fd_cloexec: u128,
     // Initrd file tracking: [data_vaddr, file_size, read_position, fd_index]
     pub initrd: [[u64; 4]; GRP_MAX_INITRD],
     // VFS file tracking: [oid, size, position, fd_index]
@@ -251,7 +251,7 @@ pub(crate) static FORK_SOCK_READY: AtomicU64 = AtomicU64::new(0);
 // ---------------------------------------------------------------------------
 // Shared pipe buffers (inter-handler communication)
 // ---------------------------------------------------------------------------
-pub(crate) const MAX_PIPES: usize = 4;
+pub(crate) const MAX_PIPES: usize = 16;
 pub(crate) const PIPE_BUF_SIZE: usize = 131072; // 128KB per pipe
 
 /// Pipe data buffer (ring buffer).
@@ -298,18 +298,12 @@ pub(crate) static NEXT_PIPE_ID: AtomicU64 = AtomicU64::new(0);
 pub(crate) fn pipe_alloc() -> Option<usize> {
     for i in 0..MAX_PIPES {
         if PIPE_ACTIVE[i].compare_exchange(0, 1, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
-            let old_pwc = PIPE_WRITE_CLOSED[i].load(Ordering::Acquire);
             PIPE_WRITE_POS[i].store(0, Ordering::Release);
             PIPE_READ_POS[i].store(0, Ordering::Release);
             PIPE_WRITE_CLOSED[i].store(0, Ordering::Release);
             PIPE_READ_CLOSED[i].store(0, Ordering::Release);
             PIPE_WRITE_REFS[i].store(1, Ordering::Release);
             PIPE_READ_REFS[i].store(1, Ordering::Release);
-            crate::framebuffer::print(b"PIPE-ALLOC id=");
-            crate::framebuffer::print_u64(i as u64);
-            crate::framebuffer::print(b" old_pwc=");
-            crate::framebuffer::print_u64(old_pwc);
-            crate::framebuffer::print(b"\n");
             return Some(i);
         }
     }
@@ -374,14 +368,7 @@ pub(crate) fn pipe_writer_closed(pipe_id: usize) -> bool {
                 if THREAD_GROUPS[fdg].fds[f] == 11
                     && (THREAD_GROUPS[fdg].sock_conn_id[f] as usize) == pipe_id
                 {
-                    // Living process still has write end open — corruption!
-                    crate::framebuffer::print(b"PWC-LIVENESS: pipe=");
-                    crate::framebuffer::print_u64(pipe_id as u64);
-                    crate::framebuffer::print(b" pid=");
-                    crate::framebuffer::print_u64((p + 1) as u64);
-                    crate::framebuffer::print(b" fd=");
-                    crate::framebuffer::print_u64(f as u64);
-                    crate::framebuffer::print(b" -> NOT closed\n");
+                    // Living process still has write end open
                     return false;
                 }
             }
@@ -409,15 +396,6 @@ pub(crate) fn pipe_close_all_writers(pipe_id: usize) {
                     THREAD_GROUPS[fdg].fds[f] = 0;
                     THREAD_GROUPS[fdg].sock_conn_id[f] = 0xFFFF;
                     let prev = PIPE_WRITE_REFS[pipe_id].fetch_sub(1, Ordering::AcqRel);
-                    crate::framebuffer::print(b"DL-CLOSE: pipe=");
-                    crate::framebuffer::print_u64(pipe_id as u64);
-                    crate::framebuffer::print(b" pid=");
-                    crate::framebuffer::print_u64((p + 1) as u64);
-                    crate::framebuffer::print(b" fd=");
-                    crate::framebuffer::print_u64(f as u64);
-                    crate::framebuffer::print(b" wrefs=");
-                    crate::framebuffer::print_u64(prev);
-                    crate::framebuffer::print(b"\n");
                     if prev <= 1 {
                         PIPE_WRITE_CLOSED[pipe_id].store(1, Ordering::Release);
                     }
