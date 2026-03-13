@@ -262,11 +262,30 @@ pub(crate) fn sig_dispatch(pid: usize, sig: u64) -> u8 {
     }
 }
 
+/// Write data into the child's address space. If child_as_cap==0, direct write;
+/// otherwise uses kernel vm_write to target the child's page tables.
+fn child_write(child_as_cap: u64, addr: u64, data: &[u8]) {
+    if child_as_cap == 0 {
+        unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), addr as *mut u8, data.len()); }
+    } else {
+        let mut done = 0;
+        while done < data.len() {
+            let chunk = (data.len() - done).min(4096);
+            let _ = sys::vm_write(child_as_cap, addr + done as u64,
+                                  data[done..].as_ptr() as u64, chunk as u64);
+            done += chunk;
+        }
+    }
+}
+
 /// Deliver a signal to a child process by building a SignalFrame on the
 /// child's user stack and replying with SIG_REDIRECT_TAG.
 /// Supports SA_ONSTACK (alternate signal stack) and SA_SIGINFO (3-arg handler
 /// with siginfo_t + ucontext_t).
-pub(crate) fn signal_deliver(ep_cap: u64, pid: usize, sig: u64, child_tid: u64, syscall_ret: i64, is_async: bool) -> bool {
+/// fault_addr/fault_code: from kernel #PF (CR2 and error code). Used for siginfo.si_addr
+/// and ucontext gregs[19] (ERR) / gregs[22] (CR2).
+/// child_as_cap: the child's address-space capability (0 = shared with init).
+pub(crate) fn signal_deliver(ep_cap: u64, pid: usize, sig: u64, child_tid: u64, syscall_ret: i64, is_async: bool, fault_addr: u64, fault_code: u64, child_as_cap: u64) -> bool {
     if sig == 0 || sig >= 32 || pid == 0 || pid > MAX_PROCS { return false; }
     let p = &PROCESSES[pid - 1];
 
@@ -282,7 +301,7 @@ pub(crate) fn signal_deliver(ep_cap: u64, pid: usize, sig: u64, child_tid: u64, 
         return false;
     };
 
-    let mut saved_regs = [0u64; 18];
+    let mut saved_regs = [0u64; 20];
     if sys::get_thread_regs(child_tid, &mut saved_regs).is_err() {
         return false;
     }
@@ -305,8 +324,11 @@ pub(crate) fn signal_deliver(ep_cap: u64, pid: usize, sig: u64, child_tid: u64, 
     let saved_rsp = saved_regs[15];
     let saved_fsbase = saved_regs[16];
 
-    let saved_rip = saved_rcx;
-    let saved_rflags = saved_r11;
+    // [18]/[19] are non-zero when the context comes from an interrupt (#PF/timer),
+    // where RCX/R11 contain the ORIGINAL user values (not clobbered by SYSCALL).
+    // When zero, fall back to SYSCALL convention: rcx=rip, r11=rflags.
+    let saved_rip = if saved_regs[18] != 0 { saved_regs[18] } else { saved_rcx };
+    let saved_rflags = if saved_regs[19] != 0 { saved_regs[19] } else { saved_r11 };
     let frame_rax = if is_async { saved_rax } else { syscall_ret as u64 };
 
     // ── Determine base RSP: use alt stack if SA_ONSTACK + alt stack enabled ──
@@ -349,57 +371,41 @@ pub(crate) fn signal_deliver(ep_cap: u64, pid: usize, sig: u64, child_tid: u64, 
         let uc_rsp = (base_rsp - UCONTEXT_SIZE) & !0xF;
         let si_rsp = (uc_rsp - SIGINFO_SIZE) & !0xF;
 
-        // Zero and fill siginfo_t
-        unsafe {
-            let si = si_rsp as *mut u8;
-            core::ptr::write_bytes(si, 0, SIGINFO_SIZE as usize);
-            // si_signo at offset 0 (i32)
-            core::ptr::write_volatile(si as *mut i32, sig as i32);
-            // si_errno at offset 4 (i32) = 0
-            // si_code at offset 8 (i32) = SI_USER (0)
+        // Build siginfo_t in local buffer, then write to child AS
+        let mut si_buf = [0u8; SIGINFO_SIZE as usize];
+        // si_signo at offset 0 (i32)
+        si_buf[0..4].copy_from_slice(&(sig as i32).to_le_bytes());
+        if sig == 11 && fault_addr != 0 {
+            let si_code: i32 = if fault_code & 0x01 != 0 { 2 } else { 1 };
+            si_buf[8..12].copy_from_slice(&si_code.to_le_bytes());
+            si_buf[16..24].copy_from_slice(&fault_addr.to_le_bytes());
         }
+        child_write(child_as_cap, si_rsp, &si_buf);
 
-        // Zero and fill ucontext_t
-        unsafe {
-            let uc = uc_rsp as *mut u8;
-            core::ptr::write_bytes(uc, 0, UCONTEXT_SIZE as usize);
-
-            // uc_stack (offset 16, sizeof stack_t = 24): fill with current alt stack info
-            if use_altstack {
-                let alt_sp = p.sig_alt_sp.load(Ordering::Acquire);
-                let alt_size = p.sig_alt_size.load(Ordering::Acquire);
-                core::ptr::write_volatile((uc_rsp + 16) as *mut u64, alt_sp);        // ss_sp
-                core::ptr::write_volatile((uc_rsp + 24) as *mut u64, linux_abi::SS_ONSTACK); // ss_flags
-                core::ptr::write_volatile((uc_rsp + 32) as *mut u64, alt_size);       // ss_size
-            }
-
-            // uc_mcontext.gregs (23 entries of 8 bytes each, at offset 40)
-            // Linux gregset layout: R8,R9,R10,R11,R12,R13,R14,R15,
-            //   RDI,RSI,RBP,RBX,RDX,RCX,RAX, trapno,err,RIP,CS,EFLAGS,RSP,SS
-            let gregs = (uc_rsp + UC_MCONTEXT_GREGS_OFF) as *mut u64;
-            core::ptr::write_volatile(gregs.add(0),  saved_r8);
-            core::ptr::write_volatile(gregs.add(1),  saved_r9);
-            core::ptr::write_volatile(gregs.add(2),  saved_r10);
-            core::ptr::write_volatile(gregs.add(3),  saved_r11);
-            core::ptr::write_volatile(gregs.add(4),  saved_r12);
-            core::ptr::write_volatile(gregs.add(5),  saved_r13);
-            core::ptr::write_volatile(gregs.add(6),  saved_r14);
-            core::ptr::write_volatile(gregs.add(7),  saved_r15);
-            core::ptr::write_volatile(gregs.add(8),  saved_rdi);
-            core::ptr::write_volatile(gregs.add(9),  saved_rsi);
-            core::ptr::write_volatile(gregs.add(10), saved_rbp);
-            core::ptr::write_volatile(gregs.add(11), saved_rbx);
-            core::ptr::write_volatile(gregs.add(12), saved_rdx);
-            core::ptr::write_volatile(gregs.add(13), saved_rcx);
-            core::ptr::write_volatile(gregs.add(14), frame_rax);
-            core::ptr::write_volatile(gregs.add(15), 0);          // trapno
-            core::ptr::write_volatile(gregs.add(16), 0);          // err
-            core::ptr::write_volatile(gregs.add(17), saved_rip);
-            core::ptr::write_volatile(gregs.add(18), 0x33);       // CS (user code segment)
-            core::ptr::write_volatile(gregs.add(19), saved_rflags);
-            core::ptr::write_volatile(gregs.add(20), saved_rsp);
-            core::ptr::write_volatile(gregs.add(21), 0x2B);       // SS (user data segment)
+        // Build ucontext_t in local buffer, then write to child AS
+        let mut uc_buf = [0u8; UCONTEXT_SIZE as usize];
+        if use_altstack {
+            let alt_sp = p.sig_alt_sp.load(Ordering::Acquire);
+            let alt_size = p.sig_alt_size.load(Ordering::Acquire);
+            uc_buf[16..24].copy_from_slice(&alt_sp.to_le_bytes());        // ss_sp
+            uc_buf[24..32].copy_from_slice(&(linux_abi::SS_ONSTACK).to_le_bytes()); // ss_flags
+            uc_buf[32..40].copy_from_slice(&alt_size.to_le_bytes());       // ss_size
         }
+        // uc_mcontext.gregs at offset 40 (23 entries × 8 bytes)
+        let go = UC_MCONTEXT_GREGS_OFF as usize;
+        let gregs: [u64; 23] = [
+            saved_r8, saved_r9, saved_r10, saved_r11,
+            saved_r12, saved_r13, saved_r14, saved_r15,
+            saved_rdi, saved_rsi, saved_rbp, saved_rbx,
+            saved_rdx, frame_rax, saved_rcx, saved_rsp,
+            saved_rip, saved_rflags, 0x33, fault_code,
+            if sig == 11 { 14 } else { 0 }, 0, fault_addr,
+        ];
+        for (i, &val) in gregs.iter().enumerate() {
+            let off = go + i * 8;
+            uc_buf[off..off + 8].copy_from_slice(&val.to_le_bytes());
+        }
+        child_write(child_as_cap, uc_rsp, &uc_buf);
 
         (si_rsp, uc_rsp, si_rsp)
     } else {
@@ -411,40 +417,29 @@ pub(crate) fn signal_deliver(ep_cap: u64, pid: usize, sig: u64, child_tid: u64, 
     let frame_rsp = (stack_after_extras - frame_size) & !0xF;
     let entry_rsp = frame_rsp - 8;
 
-    unsafe {
-        core::ptr::write_volatile(entry_rsp as *mut u64, restorer_addr);
-    }
+    // Write restorer return address at entry_rsp
+    child_write(child_as_cap, entry_rsp, &restorer_addr.to_le_bytes());
 
-    let frame_ptr = frame_rsp as *mut u64;
-    unsafe {
-        core::ptr::write_volatile(frame_ptr.add(0),  restorer_addr);
-        core::ptr::write_volatile(frame_ptr.add(1),  sig);
-        core::ptr::write_volatile(frame_ptr.add(2),  frame_rax);
-        core::ptr::write_volatile(frame_ptr.add(3),  saved_rbx);
-        core::ptr::write_volatile(frame_ptr.add(4),  saved_rcx);
-        core::ptr::write_volatile(frame_ptr.add(5),  saved_rdx);
-        core::ptr::write_volatile(frame_ptr.add(6),  saved_rsi);
-        core::ptr::write_volatile(frame_ptr.add(7),  saved_rdi);
-        core::ptr::write_volatile(frame_ptr.add(8),  saved_rbp);
-        core::ptr::write_volatile(frame_ptr.add(9),  saved_r8);
-        core::ptr::write_volatile(frame_ptr.add(10), saved_r9);
-        core::ptr::write_volatile(frame_ptr.add(11), saved_r10);
-        core::ptr::write_volatile(frame_ptr.add(12), saved_r11);
-        core::ptr::write_volatile(frame_ptr.add(13), saved_r12);
-        core::ptr::write_volatile(frame_ptr.add(14), saved_r13);
-        core::ptr::write_volatile(frame_ptr.add(15), saved_r14);
-        core::ptr::write_volatile(frame_ptr.add(16), saved_r15);
-        core::ptr::write_volatile(frame_ptr.add(17), saved_rip);
-        core::ptr::write_volatile(frame_ptr.add(18), saved_rsp);
-        core::ptr::write_volatile(frame_ptr.add(19), saved_rflags);
-        core::ptr::write_volatile(frame_ptr.add(20), saved_fsbase);
-        let old_mask = p.sig_blocked.load(Ordering::Acquire);
-        core::ptr::write_volatile(frame_ptr.add(21), old_mask);
-    }
+    // Build SignalFrame in local buffer, then write to child AS
+    let old_mask = p.sig_blocked.load(Ordering::Acquire);
+    let frame_data: [u64; 23] = [
+        restorer_addr, sig, frame_rax, saved_rbx,
+        saved_rcx, saved_rdx, saved_rsi, saved_rdi,
+        saved_rbp, saved_r8, saved_r9, saved_r10,
+        saved_r11, saved_r12, saved_r13, saved_r14,
+        saved_r15, saved_rip, saved_rsp, saved_rflags,
+        saved_fsbase, old_mask, ucontext_ptr,
+    ];
+    let frame_bytes: &[u8] = unsafe {
+        core::slice::from_raw_parts(frame_data.as_ptr() as *const u8, frame_data.len() * 8)
+    };
+    child_write(child_as_cap, frame_rsp, frame_bytes);
 
-    // Block the signal during handler execution
-    let cur_mask = p.sig_blocked.load(Ordering::Acquire);
-    p.sig_blocked.store(cur_mask | (1 << sig), Ordering::Release);
+    // NOTE: We do NOT block the signal during handler execution because
+    // sotOS rt_sigreturn (kernel-only) cannot restore sig_blocked from
+    // the saved old_mask. Blocking without unblocking would permanently
+    // block the signal. Wine specifically needs SIGSEGV re-entrant delivery.
+    // The old_mask is still saved in the SignalFrame for future use.
 
     // ── SIG_REDIRECT_TAG reply ──
     // regs[0] = handler (→ RCX/RIP)

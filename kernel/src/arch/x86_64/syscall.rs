@@ -45,7 +45,10 @@ core::arch::global_asm!(
     ".global syscall_entry",
     "syscall_entry:",
     // CPU did: RCX = user RIP, R11 = user RFLAGS, CS/SS = kernel
-    // IF=0 (FMASK cleared it). GS base points to PerCpu.
+    // IF=0 (FMASK cleared it). GS base = user's GS.
+
+    // Swap user GS ↔ kernel GS (percpu) so we can access percpu via gs:xx
+    "    swapgs",
 
     // Save user RSP to percpu.user_rsp_save (offset 16), load kernel stack
     "    mov gs:[16], rsp",       // percpu.user_rsp_save
@@ -91,6 +94,8 @@ core::arch::global_asm!(
 
     // Restore user RSP and return to Ring 3
     "    mov rsp, gs:[16]",       // percpu.user_rsp_save
+    // Swap kernel GS ↔ user GS before returning to user mode
+    "    swapgs",
     "    sysretq",
 );
 

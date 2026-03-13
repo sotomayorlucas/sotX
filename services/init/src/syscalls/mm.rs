@@ -18,6 +18,85 @@ use super::context::SyscallContext;
 /// MAP_FIXED_NOREPLACE flag (Linux 4.17+). If the range overlaps an
 /// existing mapping, return -EEXIST instead of replacing it.
 const MAP_FIXED_NOREPLACE_FLAG: u32 = 0x100000;
+
+/// Per-process ntdll.so base address tracker (for Wine syscall dispatcher).
+/// Set when we detect the initial ntdll.so reservation mmap.
+pub(crate) static mut NTDLL_SO_BASE: [u64; 16] = [0; 16];
+/// Per-process fd that holds ntdll.so (Unix side). Set by openat handler.
+pub(crate) static mut NTDLL_SO_FD: [u8; 16] = [0xFF; 16];
+
+/// Wine SharedUserData fixup: ensure PE ntdll.dll uses the indirect call
+/// path (`call [0x7ffe1000]`) instead of the direct `syscall` instruction.
+/// This is critical because Wine's PE syscall numbers are NOT Linux syscall
+/// numbers — they're Wine-internal NT syscall numbers that get misinterpreted
+/// by our kernel.
+/// Per-process flag: set once we've confirmed the dispatcher pointer is valid.
+static mut WINE_KUSD_DONE: [bool; 16] = [false; 16];
+
+fn wine_patch_shared_user_data(ctx: &mut SyscallContext, addr: u64) {
+    // Only fire for addresses overlapping the KUSD pages (0x7ffe0000..0x7ffe2000)
+    if addr > 0x7ffe1000 || addr + 0x1000 < 0x7ffe0000 { return; }
+    if ctx.pid >= 16 { return; }
+    if unsafe { WINE_KUSD_DONE[ctx.pid] } { return; }
+
+    // Read current SystemCall byte at offset 0x308
+    let mut flag = [0u8; 1];
+    ctx.guest_read(0x7ffe0308, &mut flag);
+    print(b"WINE-KUSD P"); crate::framebuffer::print_u64(ctx.pid as u64);
+    print(b" [0x308]="); crate::framebuffer::print_u64(flag[0] as u64);
+
+    if flag[0] & 1 == 0 {
+        ctx.guest_write(0x7ffe0308, &[1u8]);
+        print(b" ->1");
+    }
+
+    // Set up dispatcher pointer at 0x7ffe1000
+    let pid = ctx.pid;
+    let ntdll_base = unsafe { NTDLL_SO_BASE[pid] };
+    if ntdll_base == 0 {
+        print(b" NO-BASE\n");
+        return;
+    }
+    // __wine_syscall_dispatcher at file offset 0x3caf4 in ntdll.so
+    let disp_addr = ntdll_base + 0x3caf4;
+
+    let mut disp_ptr = [0u8; 8];
+    ctx.guest_read(0x7ffe1000, &mut disp_ptr);
+    let ptr_val = u64::from_le_bytes(disp_ptr);
+    print(b" disp="); crate::framebuffer::print_hex64(ptr_val);
+
+    if ptr_val == 0 {
+        // Try writing directly first (page may already be mapped by Wine)
+        let ptr_bytes = disp_addr.to_le_bytes();
+        ctx.guest_write(0x7ffe1000, &ptr_bytes);
+        // Verify the write took
+        ctx.guest_read(0x7ffe1000, &mut disp_ptr);
+        let check = u64::from_le_bytes(disp_ptr);
+        if check == disp_addr {
+            print(b" wrote-disp="); crate::framebuffer::print_hex64(disp_addr);
+            unsafe { WINE_KUSD_DONE[ctx.pid] = true; }
+        } else {
+            // Page not mapped — allocate and map it
+            if let Ok(f) = sys::frame_alloc() {
+                if ctx.guest_map(0x7ffe1000, f, 2).is_ok() {
+                    ctx.guest_zero_page(0x7ffe1000);
+                    ctx.guest_write(0x7ffe1000, &ptr_bytes);
+                    print(b" mapped-disp="); crate::framebuffer::print_hex64(disp_addr);
+                    unsafe { WINE_KUSD_DONE[ctx.pid] = true; }
+                }
+            }
+        }
+    } else if ptr_val != disp_addr {
+        // Wine wrote something else — overwrite with correct dispatcher
+        let ptr_bytes = disp_addr.to_le_bytes();
+        ctx.guest_write(0x7ffe1000, &ptr_bytes);
+        print(b" fix-disp="); crate::framebuffer::print_hex64(disp_addr);
+        unsafe { WINE_KUSD_DONE[ctx.pid] = true; }
+    } else {
+        unsafe { WINE_KUSD_DONE[ctx.pid] = true; }
+    }
+    print(b"\n");
+}
 /// MAP_NORESERVE: don't reserve swap (we treat as hint for lazy alloc).
 const MAP_NORESERVE_FLAG: u32 = 0x4000;
 
@@ -51,7 +130,7 @@ pub(crate) fn sys_brk(ctx: &mut SyscallContext, msg: &IpcMsg) {
         let mut pg = (old_brk + 0xFFF) & !0xFFF;
         while pg < new_brk {
             if let Ok(f) = sys::frame_alloc() {
-                if sys::map(pg, f, MAP_WRITABLE).is_err() { ok = false; break; }
+                if ctx.guest_map(pg, f, MAP_WRITABLE).is_err() { ok = false; break; }
             } else { ok = false; break; }
             pg += 0x1000;
         }
@@ -78,6 +157,19 @@ pub(crate) fn sys_mmap(ctx: &mut SyscallContext, msg: &IpcMsg) {
     let fd = msg.regs[4] as i64;
     let offset = msg.regs[5];
 
+    // Suppress MMAP logging for NOREPLACE+PROT_NONE probes (Wine VA reservation
+    // binary search generates thousands of these, flooding serial).
+    let is_noreplace_probe = prot == 0 && (flags & MAP_FIXED_NOREPLACE_FLAG) != 0;
+    if !is_noreplace_probe && (ctx.child_as_cap != 0 || req_addr == 0x7ffe0000 || ctx.pid == 3) {
+        print(b"MMAP P"); crate::framebuffer::print_u64(ctx.pid as u64);
+        print(b" addr="); crate::framebuffer::print_hex64(req_addr);
+        print(b" fd="); crate::framebuffer::print_u64(fd as u64);
+        print(b" len="); crate::framebuffer::print_hex64(len);
+        print(b" prot="); crate::framebuffer::print_u64(prot);
+        print(b" fl="); crate::framebuffer::print_hex64(flags as u64);
+        print(b"\n");
+    }
+
     let mflags = MFlags::from_bits_truncate(flags);
     let map_fixed = mflags.contains(MFlags::FIXED) || (flags & MAP_FIXED_NOREPLACE_FLAG) != 0;
     let map_anon = mflags.contains(MFlags::ANONYMOUS);
@@ -102,34 +194,56 @@ pub(crate) fn sys_mmap(ctx: &mut SyscallContext, msg: &IpcMsg) {
     // Determine base address
     let base = if map_fixed && req_addr != 0 {
         if !map_noreplace {
+            // MFIX-CLOB diagnostic removed (fires on every libc MAP_FIXED segment)
             // Regular MAP_FIXED: unmap existing pages first
             vma_remove(ctx.memg, req_addr, req_addr + aligned_len);
             for p in 0..pages {
-                let _ = sys::unmap_free(req_addr + p * 0x1000);
+                ctx.guest_unmap(req_addr + p * 0x1000);
             }
         }
         req_addr
     } else if req_addr != 0 {
-        // Hint address: try it first, fall back to bump allocator
+        // Hint address: try it first, fall back to gap search
         let overlaps = unsafe { VMA_LISTS[ctx.memg].overlaps(req_addr, req_addr + aligned_len) };
         if !overlaps {
             req_addr
         } else {
-            let b = *ctx.mmap_next;
-            *ctx.mmap_next += aligned_len;
+            let b = unsafe { VMA_LISTS[ctx.memg].find_free(aligned_len, *ctx.mmap_next) }
+                .unwrap_or(*ctx.mmap_next);
+            let new_next = b + aligned_len;
+            if new_next > *ctx.mmap_next {
+                *ctx.mmap_next = new_next;
+            }
             if ctx.pid > 0 && ctx.pid <= MAX_PROCS {
                 PROCESSES[ctx.pid - 1].mmap_next.store(*ctx.mmap_next, Ordering::Release);
             }
             b
         }
     } else {
-        let b = *ctx.mmap_next;
-        *ctx.mmap_next += aligned_len;
+        // Dynamic allocation: find gap that doesn't overlap existing VMAs
+        let b = unsafe { VMA_LISTS[ctx.memg].find_free(aligned_len, *ctx.mmap_next) }
+            .unwrap_or(*ctx.mmap_next);
+        let new_next = b + aligned_len;
+        if new_next > *ctx.mmap_next {
+            *ctx.mmap_next = new_next;
+        }
         if ctx.pid > 0 && ctx.pid <= MAX_PROCS {
             PROCESSES[ctx.pid - 1].mmap_next.store(*ctx.mmap_next, Ordering::Release);
         }
         b
     };
+
+    // Track ntdll.so load base: when we see a non-fixed file mmap matching
+    // the ntdll.so fd, the returned base is the ELF load base.
+    if !map_fixed && fd >= 0 && ctx.pid < 16 {
+        let ntdll_fd = unsafe { NTDLL_SO_FD[ctx.pid] };
+        if ntdll_fd != 0xFF && fd as u8 == ntdll_fd {
+            unsafe { NTDLL_SO_BASE[ctx.pid] = base; }
+            print(b"NTDLL-BASE P"); crate::framebuffer::print_u64(ctx.pid as u64);
+            print(b" base="); crate::framebuffer::print_hex64(base);
+            print(b"\n");
+        }
+    }
 
     let prot_u8 = (prot & 7) as u8;
     let flags_u8 = (flags & 0xFF) as u8;
@@ -141,11 +255,15 @@ pub(crate) fn sys_mmap(ctx: &mut SyscallContext, msg: &IpcMsg) {
         return;
     }
 
-    let mmap_fixup_prot = |base: u64, pages: u64, prot: u64| {
+    let mmap_fixup_prot = |base: u64, pages: u64, prot: u64, as_cap: u64| {
         if prot & 2 == 0 {
             let pflags = if prot & 4 != 0 { 0u64 } else { 1u64 << 63 };
             for p in 0..pages {
-                let _ = sys::protect(base + p * 0x1000, pflags);
+                if as_cap != 0 {
+                    let _ = sys::protect_in(as_cap, base + p * 0x1000, pflags);
+                } else {
+                    let _ = sys::protect(base + p * 0x1000, pflags);
+                }
             }
         }
     };
@@ -203,7 +321,7 @@ pub(crate) fn sys_mmap(ctx: &mut SyscallContext, msg: &IpcMsg) {
         let mut ok = true;
         for p in 0..pages {
             if let Ok(f) = sys::frame_alloc() {
-                if sys::map(base + p * 0x1000, f, MAP_WRITABLE).is_err() {
+                if ctx.guest_map(base + p * 0x1000, f, MAP_WRITABLE).is_err() {
                     ok = false; break;
                 }
             } else {
@@ -212,36 +330,37 @@ pub(crate) fn sys_mmap(ctx: &mut SyscallContext, msg: &IpcMsg) {
         }
         if ok {
             let map_size = (pages * 0x1000) as usize;
-            unsafe { core::ptr::write_bytes(base as *mut u8, 0, map_size); }
+            // Zero-fill all pages
+            for p in 0..pages {
+                ctx.guest_zero_page(base + p * 0x1000);
+            }
             let file_off = offset as usize;
             let avail = if file_off < file_size as usize { file_size as usize - file_off } else { 0 };
             let to_copy = map_size.min(avail);
 
             if is_vfs && to_copy > 0 {
-                let dst = unsafe { core::slice::from_raw_parts_mut(base as *mut u8, to_copy) };
+                // Read VFS data into local buffer, then write to child
+                let mut vfs_done = 0usize;
                 vfs_lock();
-                let read_result = unsafe { shared_store() }
-                    .and_then(|store| store.read_obj_range(vfs_oid, file_off, dst).ok());
+                while vfs_done < to_copy {
+                    let chunk = (to_copy - vfs_done).min(4096);
+                    let mut local_buf = [0u8; 4096];
+                    let read_n = unsafe { shared_store() }
+                        .and_then(|store| store.read_obj_range(vfs_oid, file_off + vfs_done, &mut local_buf[..chunk]).ok())
+                        .unwrap_or(0);
+                    if read_n == 0 { break; }
+                    ctx.guest_write(base + vfs_done as u64, &local_buf[..read_n]);
+                    vfs_done += read_n;
+                }
                 vfs_unlock();
-
-                if read_result.is_none() {
-                    for p in 0..pages {
-                        let _ = sys::unmap_free(base + p * 0x1000);
-                    }
-                    reply_val(ctx.ep_cap, -EIO);
-                    return;
-                }
             } else if to_copy > 0 {
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        (file_data + file_off as u64) as *const u8,
-                        base as *mut u8,
-                        to_copy,
-                    );
-                }
+                // Initrd file: data is in init's AS at file_data
+                let src = unsafe { core::slice::from_raw_parts((file_data + file_off as u64) as *const u8, to_copy) };
+                ctx.guest_write(base, src);
             }
-            mmap_fixup_prot(base, pages, prot);
+            mmap_fixup_prot(base, pages, prot, ctx.child_as_cap);
             vma_insert(ctx.memg, base, base + aligned_len, prot_u8, flags_u8, label);
+            wine_patch_shared_user_data(ctx, base);
             reply_val(ctx.ep_cap, base as i64);
         } else {
             reply_val(ctx.ep_cap, -ENOMEM);
@@ -256,14 +375,17 @@ pub(crate) fn sys_mmap(ctx: &mut SyscallContext, msg: &IpcMsg) {
             Ok(f) => f,
             Err(_) => { ok = false; break; }
         };
-        if sys::map(base + p * 0x1000, f, MAP_WRITABLE).is_err() {
+        if ctx.guest_map(base + p * 0x1000, f, MAP_WRITABLE).is_err() {
             ok = false; break;
         }
     }
     if ok {
-        unsafe { core::ptr::write_bytes(base as *mut u8, 0, (pages * 0x1000) as usize); }
-        mmap_fixup_prot(base, pages, prot);
+        for p in 0..pages {
+            ctx.guest_zero_page(base + p * 0x1000);
+        }
+        mmap_fixup_prot(base, pages, prot, ctx.child_as_cap);
         vma_insert(ctx.memg, base, base + aligned_len, prot_u8, flags_u8, VmaLabel::Anonymous);
+        wine_patch_shared_user_data(ctx, base);
         reply_val(ctx.ep_cap, base as i64);
     } else {
         reply_val(ctx.ep_cap, -ENOMEM);
@@ -299,26 +421,39 @@ pub(crate) fn sys_mprotect(ctx: &mut SyscallContext, msg: &IpcMsg) {
         let mut ok = true;
         for p in 0..pages {
             if let Ok(f) = sys::frame_alloc() {
-                if sys::map(addr + p * 0x1000, f, MAP_WRITABLE).is_err() { ok = false; break; }
+                if ctx.guest_map(addr + p * 0x1000, f, MAP_WRITABLE).is_err() { ok = false; break; }
             } else { ok = false; break; }
         }
         if ok {
-            unsafe { core::ptr::write_bytes(addr as *mut u8, 0, (pages * 0x1000) as usize); }
+            for p in 0..pages {
+                ctx.guest_zero_page(addr + p * 0x1000);
+            }
         } else {
             reply_val(ctx.ep_cap, -ENOMEM);
             return;
         }
     }
 
-    let flags = if prot & 2 != 0 {
-        MAP_WRITABLE
-    } else if prot & 4 != 0 {
-        0u64
-    } else {
-        1u64 << 63
-    };
-    for p in 0..pages {
-        let _ = sys::protect(addr + p * 0x1000, flags);
+    // Wine SharedUserData: re-patch before making the page read-only
+    if addr <= 0x7ffe0000 && aligned_end > 0x7ffe0000 {
+        wine_patch_shared_user_data(ctx, 0x7ffe0000);
+    }
+
+    {
+        let flags = if prot & 2 != 0 {
+            MAP_WRITABLE
+        } else if prot & 4 != 0 {
+            0u64
+        } else {
+            1u64 << 63
+        };
+        for p in 0..pages {
+            if ctx.child_as_cap != 0 {
+                let _ = sys::protect_in(ctx.child_as_cap, addr + p * 0x1000, flags);
+            } else {
+                let _ = sys::protect(addr + p * 0x1000, flags);
+            }
+        }
     }
 
     // Update VMA prot bits
@@ -362,8 +497,9 @@ pub(crate) fn sys_munmap(ctx: &mut SyscallContext, msg: &IpcMsg) {
     };
 
     if !is_reservation {
+        // MUNM-CLOB diagnostic removed
         for p in 0..pages {
-            let _ = sys::unmap_free(addr + p * 0x1000);
+            ctx.guest_unmap(addr + p * 0x1000);
         }
     }
 

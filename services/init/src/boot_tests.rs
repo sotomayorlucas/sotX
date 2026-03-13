@@ -2038,7 +2038,7 @@ pub(crate) fn run_busybox_test() {
                 fork_child_phase = false;
                 // Save fork context for potential future use
                 let tid = msg.regs[6];
-                let mut saved_regs = [0u64; 18];
+                let mut saved_regs = [0u64; 20];
                 let _ = sys::get_thread_regs(tid, &mut saved_regs);
                 fork_saved_rip = saved_regs[2];
                 fork_saved_rsp = msg.regs[7];

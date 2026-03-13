@@ -113,7 +113,7 @@ pub(crate) fn write_linux_stat_dev(stat_ptr: u64, dev: u64, oid: u64, size: u64,
     st.st_dev = dev;
     st.st_ino = oid;
     st.st_nlink = 1;
-    st.st_mode = if is_dir { S_IFDIR | 0o755 } else { S_IFREG | 0o755 };
+    st.st_mode = if is_dir { S_IFDIR | 0o700 } else { S_IFREG | 0o755 };
     st.st_size = size as i64;
     st.st_blksize = 512;
     st.st_blocks = ((size + 511) / 512) as i64;
@@ -123,6 +123,24 @@ pub(crate) fn write_linux_stat_dev(stat_ptr: u64, dev: u64, oid: u64, size: u64,
 /// Convenience wrapper with st_dev=0 (backward compat for stubs/misc).
 pub(crate) fn write_linux_stat(stat_ptr: u64, oid: u64, size: u64, is_dir: bool) {
     write_linux_stat_dev(stat_ptr, 0, oid, size, is_dir);
+}
+
+/// Build a Stat struct (for guest_write by caller). Returns raw bytes.
+pub(crate) fn build_linux_stat_dev(dev: u64, oid: u64, size: u64, is_dir: bool) -> [u8; 144] {
+    use sotos_common::linux_abi::{Stat, S_IFREG, S_IFDIR};
+    let mut st = Stat::zeroed();
+    st.st_dev = dev;
+    st.st_ino = oid;
+    st.st_nlink = 1;
+    st.st_mode = if is_dir { S_IFDIR | 0o700 } else { S_IFREG | 0o755 };
+    st.st_size = size as i64;
+    st.st_blksize = 512;
+    st.st_blocks = ((size + 511) / 512) as i64;
+    unsafe { core::mem::transmute(st) }
+}
+
+pub(crate) fn build_linux_stat(oid: u64, size: u64, is_dir: bool) -> [u8; 144] {
+    build_linux_stat_dev(0, oid, size, is_dir)
 }
 
 // ---------------------------------------------------------------------------
@@ -232,6 +250,11 @@ impl ThreadGroupState {
 /// Consolidated per-group state. Indexed by group ID (PROC_FD_GROUP / PROC_MEM_GROUP).
 pub(crate) static mut THREAD_GROUPS: [ThreadGroupState; MAX_PROCS] =
     [const { ThreadGroupState::new() }; MAX_PROCS];
+
+/// Per-FD directory path tracking for fchdir(). Index = group * 8 + slot.
+/// sock_conn_id[fd] stores slot index (0..7) when kind=14.
+pub(crate) const MAX_DIR_SLOTS: usize = MAX_PROCS * 8;
+pub(crate) static mut DIR_FD_PATHS: [[u8; 128]; MAX_DIR_SLOTS] = [[0u8; 128]; MAX_DIR_SLOTS];
 
 /// Spinlock per FD group (protects THREAD_GROUPS[g]).
 pub(crate) static GRP_FD_LOCK: [AtomicU64; MAX_PROCS] = {
@@ -420,6 +443,209 @@ pub(crate) fn pipe_has_data(pipe_id: usize) -> bool {
 pub(crate) fn pipe_free(pipe_id: usize) {
     if pipe_id < MAX_PIPES {
         PIPE_ACTIVE[pipe_id].store(0, Ordering::Release);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AF_UNIX named socket infrastructure
+// ---------------------------------------------------------------------------
+
+/// Max simultaneous AF_UNIX listeners (bound + listening sockets).
+pub(crate) const MAX_UNIX_LISTENERS: usize = 8;
+/// Bound paths: 0-filled = unused slot.
+pub(crate) static mut UNIX_LISTEN_PATH: [[u8; 128]; MAX_UNIX_LISTENERS] = [[0; 128]; MAX_UNIX_LISTENERS];
+/// Slot active flag.
+pub(crate) static UNIX_LISTEN_ACTIVE: [AtomicU64; MAX_UNIX_LISTENERS] = {
+    const INIT: AtomicU64 = AtomicU64::new(0);
+    [INIT; MAX_UNIX_LISTENERS]
+};
+
+/// Max AF_UNIX connections (each uses 2 pipes: A=client→server, B=server→client).
+pub(crate) const MAX_UNIX_CONNS: usize = 8;
+/// Pipe ID for client→server direction (0xFFFF = unused).
+pub(crate) static mut UNIX_CONN_PIPE_A: [u16; MAX_UNIX_CONNS] = [0xFFFF; MAX_UNIX_CONNS];
+/// Pipe ID for server→client direction (0xFFFF = unused).
+pub(crate) static mut UNIX_CONN_PIPE_B: [u16; MAX_UNIX_CONNS] = [0xFFFF; MAX_UNIX_CONNS];
+pub(crate) static UNIX_CONN_ACTIVE: [AtomicU64; MAX_UNIX_CONNS] = {
+    const INIT: AtomicU64 = AtomicU64::new(0);
+    [INIT; MAX_UNIX_CONNS]
+};
+
+/// Pending connection queue: connect() pushes, accept() pops.
+/// Each entry is a connection slot index (0xFF = empty).
+pub(crate) const MAX_UNIX_PENDING: usize = 16;
+/// [listener_slot][queue_pos] = connection slot index (0xFF = empty).
+pub(crate) static mut UNIX_PENDING: [[u8; MAX_UNIX_PENDING]; MAX_UNIX_LISTENERS] =
+    [[0xFF; MAX_UNIX_PENDING]; MAX_UNIX_LISTENERS];
+
+/// Allocate an AF_UNIX connection (2 pipes). Returns (conn_slot, pipe_a, pipe_b) or None.
+pub(crate) fn unix_conn_alloc() -> Option<(usize, usize, usize)> {
+    let pipe_a = pipe_alloc()?;
+    let pipe_b = match pipe_alloc() {
+        Some(b) => b,
+        None => { pipe_free(pipe_a); return None; }
+    };
+    for i in 0..MAX_UNIX_CONNS {
+        if UNIX_CONN_ACTIVE[i].compare_exchange(0, 1, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+            unsafe {
+                UNIX_CONN_PIPE_A[i] = pipe_a as u16;
+                UNIX_CONN_PIPE_B[i] = pipe_b as u16;
+            }
+            return Some((i, pipe_a, pipe_b));
+        }
+    }
+    pipe_free(pipe_a);
+    pipe_free(pipe_b);
+    None
+}
+
+/// Check if a listener has pending connections.
+pub(crate) fn unix_listener_has_pending(listener: usize) -> bool {
+    if listener >= MAX_UNIX_LISTENERS { return false; }
+    unsafe { UNIX_PENDING[listener][0] != 0xFF }
+}
+
+/// Push a pending connection onto a listener's queue.
+pub(crate) fn unix_pending_push(listener: usize, conn_slot: usize) -> bool {
+    if listener >= MAX_UNIX_LISTENERS { return false; }
+    unsafe {
+        for i in 0..MAX_UNIX_PENDING {
+            if UNIX_PENDING[listener][i] == 0xFF {
+                UNIX_PENDING[listener][i] = conn_slot as u8;
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Pop a pending connection from a listener's queue. Returns conn_slot or None.
+pub(crate) fn unix_pending_pop(listener: usize) -> Option<usize> {
+    if listener >= MAX_UNIX_LISTENERS { return None; }
+    unsafe {
+        if UNIX_PENDING[listener][0] == 0xFF { return None; }
+        let slot = UNIX_PENDING[listener][0] as usize;
+        // Shift queue left
+        for i in 0..MAX_UNIX_PENDING - 1 {
+            UNIX_PENDING[listener][i] = UNIX_PENDING[listener][i + 1];
+        }
+        UNIX_PENDING[listener][MAX_UNIX_PENDING - 1] = 0xFF;
+        Some(slot)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SCM_RIGHTS: per-connection fd-passing queue (sender stores, receiver picks up)
+// ---------------------------------------------------------------------------
+/// Max fds that can be queued for SCM_RIGHTS delivery per connection direction.
+pub(crate) const MAX_SCM_FDS: usize = 8;
+/// Pending SCM_RIGHTS fds: [conn][direction][slot], direction 0=A→B (client→server), 1=B→A (server→client).
+/// Value = (sender_fd_kind, sender_sock_conn_id, sender_vfs_oid, sender_vfs_size) encoded as u64, or 0 = empty.
+/// For simplicity: store the raw fd kind + conn_id. Receiver allocates a new fd with same kind+conn_id.
+pub(crate) static mut SCM_FDS_KIND: [[[u8; MAX_SCM_FDS]; 2]; MAX_UNIX_CONNS] = [[[0; MAX_SCM_FDS]; 2]; MAX_UNIX_CONNS];
+pub(crate) static mut SCM_FDS_CONN: [[[u32; MAX_SCM_FDS]; 2]; MAX_UNIX_CONNS] = [[[0; MAX_SCM_FDS]; 2]; MAX_UNIX_CONNS];
+/// VFS OID for kind=13 fds passed via SCM_RIGHTS (0 = not a VFS file).
+pub(crate) static mut SCM_FDS_OID: [[[u64; MAX_SCM_FDS]; 2]; MAX_UNIX_CONNS] = [[[0; MAX_SCM_FDS]; 2]; MAX_UNIX_CONNS];
+/// VFS file size for kind=13 fds.
+pub(crate) static mut SCM_FDS_SIZE: [[[u64; MAX_SCM_FDS]; 2]; MAX_UNIX_CONNS] = [[[0; MAX_SCM_FDS]; 2]; MAX_UNIX_CONNS];
+pub(crate) static mut SCM_FDS_COUNT: [[u8; 2]; MAX_UNIX_CONNS] = [[0; 2]; MAX_UNIX_CONNS];
+
+/// Push fds into SCM_RIGHTS queue for a given connection+direction.
+/// direction: 0 = client→server (kind=27 sender), 1 = server→client (kind=28 sender).
+/// For kind=13 VFS files, oid and size carry the VFS metadata.
+pub(crate) fn scm_push_fd(conn: usize, direction: usize, kind: u8, conn_id: u32, oid: u64, size: u64) -> bool {
+    if conn >= MAX_UNIX_CONNS || direction > 1 { return false; }
+    unsafe {
+        let cnt = SCM_FDS_COUNT[conn][direction] as usize;
+        if cnt >= MAX_SCM_FDS { return false; }
+        SCM_FDS_KIND[conn][direction][cnt] = kind;
+        SCM_FDS_CONN[conn][direction][cnt] = conn_id;
+        SCM_FDS_OID[conn][direction][cnt] = oid;
+        SCM_FDS_SIZE[conn][direction][cnt] = size;
+        SCM_FDS_COUNT[conn][direction] = (cnt + 1) as u8;
+        true
+    }
+}
+
+/// Pop up to `max_pop` SCM_RIGHTS fds for a given connection+direction (receiver side).
+/// Returns count of fds popped, fills kinds[], conn_ids[], oids[], sizes[].
+pub(crate) fn scm_pop_fds(
+    conn: usize, direction: usize,
+    kinds: &mut [u8; MAX_SCM_FDS], conn_ids: &mut [u32; MAX_SCM_FDS],
+    oids: &mut [u64; MAX_SCM_FDS], sizes: &mut [u64; MAX_SCM_FDS],
+    max_pop: usize,
+) -> usize {
+    if conn >= MAX_UNIX_CONNS || direction > 1 { return 0; }
+    unsafe {
+        let cnt = SCM_FDS_COUNT[conn][direction] as usize;
+        let to_pop = cnt.min(max_pop);
+        for i in 0..to_pop {
+            kinds[i] = SCM_FDS_KIND[conn][direction][i];
+            conn_ids[i] = SCM_FDS_CONN[conn][direction][i];
+            oids[i] = SCM_FDS_OID[conn][direction][i];
+            sizes[i] = SCM_FDS_SIZE[conn][direction][i];
+        }
+        // Shift remaining entries left
+        let remaining = cnt - to_pop;
+        for i in 0..remaining {
+            SCM_FDS_KIND[conn][direction][i] = SCM_FDS_KIND[conn][direction][to_pop + i];
+            SCM_FDS_CONN[conn][direction][i] = SCM_FDS_CONN[conn][direction][to_pop + i];
+            SCM_FDS_OID[conn][direction][i] = SCM_FDS_OID[conn][direction][to_pop + i];
+            SCM_FDS_SIZE[conn][direction][i] = SCM_FDS_SIZE[conn][direction][to_pop + i];
+        }
+        SCM_FDS_COUNT[conn][direction] = remaining as u8;
+        to_pop
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AF_UNIX message length queue (preserves sendmsg boundaries for recvmsg)
+// ---------------------------------------------------------------------------
+/// Max queued message lengths per connection direction.
+const MSG_QUEUE_CAP: usize = 16;
+/// Ring buffer of message lengths: [conn][direction][slot].
+static mut MSG_QUEUE: [[[u16; MSG_QUEUE_CAP]; 2]; MAX_UNIX_CONNS] = [[[0; MSG_QUEUE_CAP]; 2]; MAX_UNIX_CONNS];
+/// Per-message SCM fd count: how many SCM fds belong to each message.
+static mut MSG_SCM_COUNT: [[[u8; MSG_QUEUE_CAP]; 2]; MAX_UNIX_CONNS] = [[[0; MSG_QUEUE_CAP]; 2]; MAX_UNIX_CONNS];
+/// Head (read) index.
+static mut MSG_QUEUE_HEAD: [[u8; 2]; MAX_UNIX_CONNS] = [[0; 2]; MAX_UNIX_CONNS];
+/// Count of entries.
+static mut MSG_QUEUE_COUNT: [[u8; 2]; MAX_UNIX_CONNS] = [[0; 2]; MAX_UNIX_CONNS];
+
+/// Push a message length + SCM count (from sendmsg). Returns false if queue full.
+pub(crate) fn msg_queue_push(conn: usize, direction: usize, len: u16, scm_count: u8) -> bool {
+    if conn >= MAX_UNIX_CONNS || direction > 1 { return false; }
+    unsafe {
+        let cnt = MSG_QUEUE_COUNT[conn][direction] as usize;
+        if cnt >= MSG_QUEUE_CAP { return false; }
+        let idx = ((MSG_QUEUE_HEAD[conn][direction] as usize) + cnt) % MSG_QUEUE_CAP;
+        MSG_QUEUE[conn][direction][idx] = len;
+        MSG_SCM_COUNT[conn][direction][idx] = scm_count;
+        MSG_QUEUE_COUNT[conn][direction] = (cnt + 1) as u8;
+        true
+    }
+}
+
+/// Peek the next message length (for recvmsg). Returns 0 if empty.
+pub(crate) fn msg_queue_peek(conn: usize, direction: usize) -> u16 {
+    if conn >= MAX_UNIX_CONNS || direction > 1 { return 0; }
+    unsafe {
+        if MSG_QUEUE_COUNT[conn][direction] == 0 { return 0; }
+        MSG_QUEUE[conn][direction][MSG_QUEUE_HEAD[conn][direction] as usize]
+    }
+}
+
+/// Pop a message length + SCM count (after recvmsg consumed it). Returns (len, scm_count), or (0,0) if empty.
+pub(crate) fn msg_queue_pop(conn: usize, direction: usize) -> (u16, u8) {
+    if conn >= MAX_UNIX_CONNS || direction > 1 { return (0, 0); }
+    unsafe {
+        if MSG_QUEUE_COUNT[conn][direction] == 0 { return (0, 0); }
+        let head = MSG_QUEUE_HEAD[conn][direction] as usize;
+        let val = MSG_QUEUE[conn][direction][head];
+        let scm = MSG_SCM_COUNT[conn][direction][head];
+        MSG_QUEUE_HEAD[conn][direction] = ((head + 1) % MSG_QUEUE_CAP) as u8;
+        MSG_QUEUE_COUNT[conn][direction] -= 1;
+        (val, scm)
     }
 }
 

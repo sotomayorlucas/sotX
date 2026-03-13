@@ -22,6 +22,20 @@ fn print(s: &[u8]) {
     for &b in s { sys::debug_print(b); }
 }
 
+fn print_hex16(val: u64) {
+    for i in (0..4).rev() {
+        let nib = ((val >> (i * 4)) & 0xF) as u8;
+        sys::debug_print(if nib < 10 { b'0' + nib } else { b'a' + nib - 10 });
+    }
+}
+
+fn print_hex64(val: u64) {
+    for i in (0..16).rev() {
+        let nib = ((val >> (i * 4)) & 0xF) as u8;
+        sys::debug_print(if nib < 10 { b'0' + nib } else { b'a' + nib - 10 });
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     let boot_info = unsafe { &*(BOOT_INFO_ADDR as *const BootInfo) };
@@ -51,6 +65,7 @@ pub extern "C" fn _start() -> ! {
     // Track last fault per thread to detect infinite loops.
     // [tid % 16] -> (last_addr, repeat_count)
     let mut fault_track: [(u64, u32); 16] = [(0, 0); 16];
+    let mut fault_count: u32 = 0;
 
     // Fault handling loop.
     loop {
@@ -71,16 +86,55 @@ pub extern "C" fn _start() -> ! {
                         init_as_cap
                     };
 
+                    fault_count += 1;
+                    // Log first 50 faults, then every 1000th
+                    if fault_count <= 50 || fault_count % 1000 == 0 {
+                        print(b"VF t=");
+                        print_hex16(fault.tid as u64);
+                        print(b" a=");
+                        print_hex64(fault.addr);
+                        print(b" c=");
+                        print_hex16(code);
+                        print(b" cap=");
+                        print_hex16(fault.as_cap_id);
+                        print(b" #");
+                        print_hex16(fault_count as u64);
+                        print(b"\n");
+                    }
+
+                    // Guard: kernel-space address — user tried to access HHDM/kernel memory.
+                    // Leave thread suspended (can't deliver SIGSEGV without infinite fault loop).
+                    if fault.addr >= 0xFFFF_8000_0000_0000 {
+                        print(b"VMM: KERN-ADDR t=");
+                        print_hex16(fault.tid as u64);
+                        print(b"\n");
+                        continue;
+                    }
+
                     // Guard: NX violation (instruction fetch on NX page).
-                    // Mapping a new writable frame would get NX again (W^X) -> infinite loop.
+                    // Fix by making the page R+X (read-only executable).
+                    // MUST strip WRITABLE — otherwise kernel W^X re-adds NX
+                    // for address spaces without wx_relaxed.
                     if code & 0x11 == 0x11 {
-                        continue; // leave thread suspended
+                        // Pass flags=0 → kernel sets PRESENT|USER (R+X, no NX)
+                        if sys::protect_in(target_as_cap, vaddr_raw, 0).is_ok() {
+                            let _ = sys::thread_resume(fault.tid as u64);
+                        } else {
+                            let _ = sys::signal_inject(fault.tid as u64, 11);
+                            let _ = sys::thread_resume(fault.tid as u64);
+                        }
+                        continue;
                     }
 
                     // Guard: Infinite loop detection (same address > 4 times).
                     if fault_track[slot].0 == vaddr_raw {
                         fault_track[slot].1 += 1;
                         if fault_track[slot].1 > 4 {
+                            print(b"VMM: LOOP-KILL t=");
+                            print_hex16(fault.tid as u64);
+                            print(b" a=");
+                            print_hex64(fault.addr);
+                            print(b"\n");
                             continue; // leave thread suspended
                         }
                     } else {
@@ -91,43 +145,67 @@ pub extern "C" fn _start() -> ! {
                     if code & 0x03 == 0x03 {
                         // CoW fault: page is present but read-only due to clone_cow.
                         // 1. Allocate a new frame
-                        let new_frame = sys::frame_alloc().unwrap_or_else(|_| {
-                            print(b"VMM: OOM(CoW)\n");
-                            loop { sys::yield_now(); }
-                        });
+                        let new_frame = match sys::frame_alloc() {
+                            Ok(f) => f,
+                            Err(_) => {
+                                print(b"VMM: OOM(CoW)\n");
+                                continue; // leave thread suspended
+                            }
+                        };
                         // 2. Copy 4KiB from the old frame to the new frame
                         //    (kernel copies via HHDM using SYS_FRAME_COPY)
                         if let Err(_) = sys::frame_copy(new_frame, target_as_cap, vaddr_raw) {
-                            print(b"VMM: frame_copy failed\n");
-                            // Fall through to demand-page as fallback
+                            print(b"VMM: FC-FAIL t=");
+                            print_hex16(fault.tid as u64);
+                            print(b"\n");
                         }
                         // 3. Unmap old PTE
-                        let _ = sys::unmap_from(target_as_cap, vaddr_raw);
+                        if sys::unmap_from(target_as_cap, vaddr_raw).is_err() {
+                            print(b"VMM: UM-FAIL t=");
+                            print_hex16(fault.tid as u64);
+                            print(b"\n");
+                        }
                         // 4. Map new frame as WRITABLE
-                        sys::map_into(target_as_cap, vaddr_raw, new_frame, MAP_WRITABLE).unwrap_or_else(|_| {
-                            print(b"VMM: map_into(CoW) failed!\n");
-                            loop { sys::yield_now(); }
-                        });
+                        if sys::map_into(target_as_cap, vaddr_raw, new_frame, MAP_WRITABLE).is_err() {
+                            print(b"VMM: MI-FAIL t=");
+                            print_hex16(fault.tid as u64);
+                            print(b" a=");
+                            print_hex64(vaddr_raw);
+                            print(b"\n");
+                            continue; // leave thread suspended
+                        }
                         // 5. Resume thread
-                        sys::thread_resume(fault.tid as u64).unwrap_or_else(|_| {
-                            print(b"VMM: resume(CoW) failed!\n");
-                            loop { sys::yield_now(); }
-                        });
+                        if sys::thread_resume(fault.tid as u64).is_err() {
+                            print(b"VMM: RS-FAIL t=");
+                            print_hex16(fault.tid as u64);
+                            print(b"\n");
+                        }
                         continue;
                     }
 
                     // Demand paging: page not present — allocate new frame.
-                    let frame = sys::frame_alloc().unwrap_or_else(|_| {
-                        print(b"VMM: OOM\n");
-                        loop { sys::yield_now(); }
-                    });
-                    sys::map_into(target_as_cap, vaddr_raw, frame, MAP_WRITABLE).unwrap_or_else(|_| {
-                        print(b"VMM: map_into failed!\n");
-                        loop { sys::yield_now(); }
-                    });
+                    let frame = match sys::frame_alloc() {
+                        Ok(f) => f,
+                        Err(_) => {
+                            print(b"VMM: OOM t=");
+                            print_hex16(fault.tid as u64);
+                            print(b"\n");
+                            continue;
+                        }
+                    };
+                    if sys::map_into(target_as_cap, vaddr_raw, frame, MAP_WRITABLE).is_err() {
+                        print(b"VMM: SEGV t=");
+                        print_hex16(fault.tid as u64);
+                        print(b" a=");
+                        print_hex64(fault.addr);
+                        print(b"\n");
+                        let _ = sys::signal_inject(fault.tid as u64, 11);
+                        let _ = sys::thread_resume(fault.tid as u64);
+                        continue;
+                    }
                     sys::thread_resume(fault.tid as u64).unwrap_or_else(|_| {
                         print(b"VMM: thread_resume failed!\n");
-                        loop { sys::yield_now(); }
+                        // Don't hang — just skip
                     });
                 }
                 Err(_) => break,

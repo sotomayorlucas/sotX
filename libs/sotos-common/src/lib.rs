@@ -149,6 +149,8 @@ pub enum Syscall {
     BootInfoWrite = 133,
     /// Change page permissions (mprotect-like, W^X enforced).
     Protect = 134,
+    /// Change page permissions in a target address space.
+    ProtectIn = 175,
     /// Set FS_BASE MSR for current thread (TLS support).
     SetFsBase = 160,
     /// Get FS_BASE MSR of current thread.
@@ -348,6 +350,9 @@ pub struct SignalFrame {
     pub fs_base: u64,
     /// Signal mask to restore on rt_sigreturn.
     pub old_sigmask: u64,
+    /// Pointer to ucontext_t on the user stack (0 if not SA_SIGINFO).
+    /// rt_sigreturn reads modified RIP/RSP from here if non-zero.
+    pub ucontext_ptr: u64,
 }
 
 /// Size of SignalFrame in bytes.
@@ -364,6 +369,14 @@ pub const SYS_SIGNAL_ENTRY: u64 = 173;
 /// Syscall number for injecting an async signal into a thread.
 /// Called by LUCAS: rdi = thread_id, rsi = signal_number.
 pub const SYS_SIGNAL_INJECT: u64 = 174;
+
+/// Get fault info (CR2, error code) for a thread's last kernel-generated signal.
+/// rdi = thread_id, returns: rax = fault_addr (CR2), rdx = fault_code (error code).
+pub const SYS_GET_FAULT_INFO: u64 = 176;
+
+/// Enable/disable W^X relaxation for an address space.
+/// rdi = as_cap (WRITE), rsi = 1 (relax) / 0 (enforce).
+pub const SYS_WX_RELAX: u64 = 177;
 
 /// Special syscall number used by the async signal trampoline.
 /// When the kernel redirects a user thread to the signal trampoline (from
@@ -1142,6 +1155,19 @@ pub mod sys {
         check_unit(syscall2(super::Syscall::Protect as u64, vaddr, flags))
     }
 
+    /// Change page permissions in a target address space.
+    #[inline(always)]
+    pub fn protect_in(as_cap: u64, vaddr: u64, flags: u64) -> Result<(), i64> {
+        check_unit(syscall3(super::Syscall::ProtectIn as u64, as_cap, vaddr, flags))
+    }
+
+    /// Enable/disable W^X relaxation for an address space.
+    /// `as_cap`: address space capability (WRITE). `enable`: 1=relax, 0=enforce.
+    #[inline(always)]
+    pub fn wx_relax(as_cap: u64, enable: u64) -> Result<(), i64> {
+        check_unit(syscall2(super::SYS_WX_RELAX, as_cap, enable))
+    }
+
     /// Change file permissions (chmod).
     /// `path_ptr`/`path_len`: path string in userspace memory.
     /// `mode`: Unix permission bits (e.g. 0o755).
@@ -1194,10 +1220,34 @@ pub mod sys {
     // ---------------------------------------------------------------
 
     /// Read saved user-mode registers of a blocked thread (for signal frame construction).
-    /// Writes 18 u64s to `out_buf`: [rax,rbx,rcx,rdx,rsi,rdi,rbp,r8..r15,rsp,fs_base,rflags].
+    /// Writes 20 u64s to `out_buf`:
+    ///   [0..14]=GPRs (rax,rbx,rcx,rdx,rsi,rdi,rbp,r8..r15),
+    ///   [15]=RSP, [16]=fs_base, [17]=kernel_signal,
+    ///   [18]=real_rip, [19]=real_rflags (non-zero when from interrupt/fault context).
+    /// When [18]/[19] are 0, use rcx/r11 as rip/rflags (SYSCALL convention).
     #[inline(always)]
-    pub fn get_thread_regs(tid: u64, out_buf: &mut [u64; 18]) -> Result<(), i64> {
+    pub fn get_thread_regs(tid: u64, out_buf: &mut [u64; 20]) -> Result<(), i64> {
         check_unit(syscall2(super::SYS_GET_THREAD_REGS, tid, out_buf.as_mut_ptr() as u64))
+    }
+
+    /// Get fault info (CR2 and error code) for a thread's last kernel signal.
+    /// Returns (fault_addr, fault_code).
+    #[inline(always)]
+    pub fn get_fault_info(tid: u64) -> (u64, u64) {
+        let addr: u64;
+        let code: u64;
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                inlateout("rax") super::SYS_GET_FAULT_INFO => addr,
+                in("rdi") tid,
+                lateout("rdx") code,
+                lateout("rcx") _,
+                lateout("r11") _,
+                options(nostack),
+            );
+        }
+        (addr, code)
     }
 
     /// Set the async signal trampoline address for a thread.

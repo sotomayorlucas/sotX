@@ -10,6 +10,7 @@ use core::sync::atomic::Ordering;
 use crate::exec::reply_val;
 use crate::process::*;
 use crate::fd::*;
+use crate::framebuffer::{print, print_u64};
 use super::context::SyscallContext;
 
 /// Return value for syscalls that may break the main handler loop.
@@ -118,10 +119,10 @@ pub(crate) fn sys_get_robust_list(ctx: &mut SyscallContext, msg: &IpcMsg) {
     let head = PROCESSES[target_pid - 1].robust_list_head.load(Ordering::Acquire);
     let len = PROCESSES[target_pid - 1].robust_list_len.load(Ordering::Acquire);
     if head_ptr != 0 {
-        unsafe { *(head_ptr as *mut u64) = head; }
+        ctx.guest_write(head_ptr, &head.to_le_bytes());
     }
     if len_ptr != 0 {
-        unsafe { *(len_ptr as *mut u64) = len; }
+        ctx.guest_write(len_ptr, &len.to_le_bytes());
     }
     reply_val(ctx.ep_cap, 0);
 }
@@ -176,17 +177,20 @@ pub(crate) fn sys_wait4(ctx: &mut SyscallContext, msg: &IpcMsg) {
         if wnohang && PROCESSES[idx].state.load(Ordering::Acquire) != 2 {
             reply_val(ep_cap, 0);
         } else {
-            let mut spins = 0u64;
-            while PROCESSES[idx].state.load(Ordering::Acquire) != 2 {
+            // Block until child exits (state == 2).
+            // Keep waiting as long as the child is alive (state == 1).
+            // Only give up if the child's state goes to 0 (reaped/gone).
+            loop {
+                let st = PROCESSES[idx].state.load(Ordering::Acquire);
+                if st == 2 { break; }
+                if st == 0 { break; } // child gone (already reaped)
                 sys::yield_now();
-                spins += 1;
-                if spins > 50_000_000 { break; }
             }
             if PROCESSES[idx].state.load(Ordering::Acquire) == 2 {
                 let exit_status = PROCESSES[idx].exit_code.load(Ordering::Acquire) as u32;
                 if status_ptr != 0 && status_ptr < 0x0000_8000_0000_0000 {
                     let ws = (exit_status << 8) & 0xFF00;
-                    unsafe { *(status_ptr as *mut u32) = ws; }
+                    ctx.guest_write(status_ptr, &ws.to_le_bytes());
                 }
                 PROCESSES[idx].state.store(0, Ordering::Release);
                 reply_val(ep_cap, cpid as i64);
@@ -226,7 +230,7 @@ fn exit_cleanup(ctx: &mut SyscallContext, status: u64) {
     // CLONE_CHILD_CLEARTID: write 0 to *clear_child_tid + futex_wake
     let ctid_ptr = PROCESSES[pid - 1].clear_tid.load(Ordering::Acquire);
     if ctid_ptr != 0 && ctid_ptr < 0x0000_8000_0000_0000 {
-        unsafe { core::ptr::write_volatile(ctid_ptr as *mut u32, 0); }
+        ctx.guest_write(ctid_ptr, &0u32.to_le_bytes());
         futex_wake(ctid_ptr, 1);
     }
 
@@ -260,10 +264,13 @@ fn exit_cleanup(ctx: &mut SyscallContext, status: u64) {
         PROCESSES[pid - 1].elf_hi.store(0, Ordering::Release);
     }
 
-    // Free interpreter pages if dynamic binary
-    if PROCESSES[pid - 1].has_interp.load(Ordering::Acquire) != 0 {
+    // Free interpreter pages if dynamic binary.
+    // has_interp stores the actual interp_base address (not just 0/1)
+    // so each process frees its own unique interpreter slot.
+    let interp_base = PROCESSES[pid - 1].has_interp.load(Ordering::Acquire);
+    if interp_base != 0 {
         for pg in 0..0x110u64 {
-            let _ = sys::unmap_free(crate::exec::INTERP_LOAD_BASE + pg * 0x1000);
+            let _ = sys::unmap_free(interp_base + pg * 0x1000);
         }
         PROCESSES[pid - 1].has_interp.store(0, Ordering::Release);
     }

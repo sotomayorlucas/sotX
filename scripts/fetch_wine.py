@@ -137,14 +137,14 @@ def extract_files_from_deb(deb_path, file_patterns, output_dir):
             continue
 
         for pattern, out_name in file_patterns:
-            if path == pattern or path.endswith('/' + pattern.split('/')[-1]):
+            if path == pattern or (path.endswith('/' + pattern.split('/')[-1]) and out_name not in extracted):
                 if member.isfile() or member.issym():
                     # For symlinks, try to get the target
                     if member.issym():
                         target = member.linkname
                         if not target.startswith('/'):
                             resolved = os.path.normpath(
-                                os.path.join(os.path.dirname(path), target))
+                                os.path.join(os.path.dirname(path), target)).replace('\\', '/')
                         else:
                             resolved = target.lstrip('/')
                         # Try to extract the target
@@ -175,6 +175,373 @@ def extract_files_from_deb(deb_path, file_patterns, output_dir):
 
     tf.close()
     return extracted
+
+
+def extract_nls_from_deb(deb_path, output_dir):
+    """Extract all NLS files from a .deb package to share/wine/nls/."""
+    result = extract_deb_data(deb_path)
+    if result is None:
+        return {}
+
+    data, tar_name = result
+    if tar_name.endswith('.xz'):
+        import lzma
+        data = lzma.decompress(data)
+    elif tar_name.endswith('.gz'):
+        import gzip
+        data = gzip.decompress(data)
+
+    extracted = {}
+    tf = tarfile.open(fileobj=__import__('io').BytesIO(data), mode='r:')
+    nls_dir = os.path.join(output_dir, "usr", "share", "wine", "nls")
+    os.makedirs(nls_dir, exist_ok=True)
+
+    for member in tf.getmembers():
+        path = member.name.lstrip('./')
+        if path.endswith('.nls') and member.isfile():
+            fobj = tf.extractfile(member)
+            if fobj:
+                fname = os.path.basename(path)
+                out_path = os.path.join(nls_dir, fname)
+                file_data = fobj.read()
+                with open(out_path, 'wb') as out:
+                    out.write(file_data)
+                rel = f"usr/share/wine/nls/{fname}"
+                extracted[rel] = len(file_data)
+                print(f"    NLS: {fname} ({len(file_data):,} bytes)")
+
+    tf.close()
+    return extracted
+
+
+def extract_wine_tree_from_deb(deb_path, output_dir):
+    """Extract essential Wine DLLs preserving directory structure.
+
+    Extracts from usr/lib/x86_64-linux-gnu/wine/ to x86_64-linux-gnu/wine/
+    so Wine finds them at /bin/../x86_64-linux-gnu/wine/x86_64-unix/ntdll.so etc.
+    Only extracts core DLLs needed for basic PE execution to fit in 512MB disk.
+    """
+    # Core files needed for PE loading (basename only)
+    ESSENTIAL = {
+        # Unix-side drivers
+        'ntdll.so', 'win32u.so', 'winebus.so',
+        'libwine.so.1', 'libwine.so.1.0',
+        # PE-side core
+        'ntdll.dll', 'start.exe', 'conhost.exe',
+        'kernel32.dll', 'kernelbase.dll',
+        'ucrtbase.dll', 'msvcrt.dll',
+        'advapi32.dll', 'sechost.dll',
+        'bcrypt.dll', 'bcryptprimitives.dll',
+        'user32.dll', 'gdi32.dll', 'win32u.dll',
+        'ws2_32.dll', 'nsi.dll', 'iphlpapi.dll',
+        'ole32.dll', 'oleaut32.dll', 'rpcrt4.dll',
+        'combase.dll', 'shell32.dll', 'shlwapi.dll',
+        'setupapi.dll', 'version.dll', 'cfgmgr32.dll',
+        'imm32.dll', 'winex11.drv',
+        'apisetschema.dll',
+    }
+
+    result = extract_deb_data(deb_path)
+    if result is None:
+        return {}
+
+    data, tar_name = result
+    if tar_name.endswith('.xz'):
+        import lzma
+        data = lzma.decompress(data)
+    elif tar_name.endswith('.gz'):
+        import gzip
+        data = gzip.decompress(data)
+
+    extracted = {}
+    tf = tarfile.open(fileobj=__import__('io').BytesIO(data), mode='r:')
+
+    WINE_PREFIX = "usr/lib/x86_64-linux-gnu/wine/"
+    STRIP = "usr/lib/"
+
+    def try_extract(member_or_path, rel_out):
+        """Extract a file (or resolve symlink) to output."""
+        m = member_or_path if not isinstance(member_or_path, str) else None
+        if m and m.issym():
+            target = m.linkname
+            if not target.startswith('/'):
+                resolved = os.path.normpath(
+                    os.path.join(os.path.dirname(m.name.lstrip('./')), target)).replace('\\', '/')
+            else:
+                resolved = target.lstrip('/')
+            for try_path in [resolved, './' + resolved]:
+                try:
+                    tm = tf.getmember(try_path)
+                    if tm.isfile():
+                        fobj = tf.extractfile(tm)
+                        if fobj:
+                            out_path = os.path.join(output_dir, rel_out)
+                            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+                            file_data = fobj.read()
+                            with open(out_path, 'wb') as out:
+                                out.write(file_data)
+                            extracted[rel_out] = len(file_data)
+                            return True
+                except KeyError:
+                    continue
+            return False
+
+        if m and m.isfile():
+            fobj = tf.extractfile(m)
+            if fobj:
+                out_path = os.path.join(output_dir, rel_out)
+                os.makedirs(os.path.dirname(out_path), exist_ok=True)
+                file_data = fobj.read()
+                with open(out_path, 'wb') as out:
+                    out.write(file_data)
+                extracted[rel_out] = len(file_data)
+                return True
+        return False
+
+    for member in tf.getmembers():
+        path = member.name.lstrip('./')
+        if not path.startswith(WINE_PREFIX):
+            continue
+        if not (member.isfile() or member.issym()):
+            continue
+
+        basename = os.path.basename(path)
+        if basename not in ESSENTIAL:
+            continue
+
+        rel = path[len(STRIP):]
+        try_extract(member, rel)
+
+    tf.close()
+    count = len(extracted)
+    total_mb = sum(extracted.values()) / (1024 * 1024)
+    print(f"    Extracted {count} essential Wine DLLs ({total_mb:.1f} MiB)")
+    return extracted
+
+
+def build_hello_exe(output_path):
+    """Build a minimal PE32+ executable that prints 'Hello from Wine!' and exits."""
+    # Minimal PE32+ with kernel32.dll import (WriteFile + ExitProcess)
+    # Layout: DOS header + PE header + .text section + .idata section
+    import struct
+
+    # x86_64 machine code for:
+    #   sub rsp, 40          ; shadow space
+    #   mov ecx, -11         ; STD_OUTPUT_HANDLE
+    #   call [GetStdHandle]
+    #   mov rcx, rax         ; hFile
+    #   lea rdx, [rip+msg]   ; lpBuffer
+    #   mov r8d, msglen      ; nBytesToWrite
+    #   lea r9, [rsp+32]     ; lpNumberOfBytesWritten
+    #   push 0               ; lpOverlapped
+    #   call [WriteFile]
+    #   xor ecx, ecx         ; exit code 0
+    #   call [ExitProcess]
+    # msg: "Hello from Wine!\n"
+    #
+    # We'll use a simpler approach: just call ExitProcess(42) as proof of concept
+    # The output will be the exit code, verifiable by Wine
+
+    IMAGE_BASE = 0x140000000
+
+    # --- DOS Header (64 bytes) ---
+    dos = bytearray(64)
+    dos[0:2] = b'MZ'
+    struct.pack_into('<I', dos, 0x3c, 64)  # e_lfanew = 64
+
+    # --- PE Signature (4 bytes) ---
+    pe_sig = b'PE\x00\x00'
+
+    # --- COFF Header (20 bytes) ---
+    coff = bytearray(20)
+    struct.pack_into('<H', coff, 0, 0x8664)   # Machine: AMD64
+    struct.pack_into('<H', coff, 2, 2)         # NumberOfSections: 2 (.text, .idata)
+    struct.pack_into('<H', coff, 16, 0xF0)     # SizeOfOptionalHeader: 240
+    struct.pack_into('<H', coff, 18, 0x22)     # Characteristics: EXECUTABLE_IMAGE | LARGE_ADDRESS_AWARE
+
+    # --- Optional Header PE32+ (240 bytes) ---
+    opt = bytearray(0xF0)
+    struct.pack_into('<H', opt, 0, 0x20B)      # Magic: PE32+
+    opt[2] = 14; opt[3] = 0                    # Linker version
+    struct.pack_into('<I', opt, 4, 0x200)      # SizeOfCode
+    struct.pack_into('<I', opt, 16, 0x1000)    # AddressOfEntryPoint (.text RVA)
+    struct.pack_into('<Q', opt, 24, IMAGE_BASE) # ImageBase
+    struct.pack_into('<I', opt, 32, 0x1000)    # SectionAlignment
+    struct.pack_into('<I', opt, 36, 0x200)     # FileAlignment
+    struct.pack_into('<H', opt, 40, 6)         # MajorOSVersion
+    struct.pack_into('<H', opt, 44, 6)         # MajorSubsystemVersion
+    struct.pack_into('<I', opt, 56, 0x4000)    # SizeOfImage
+    struct.pack_into('<I', opt, 60, 0x200)     # SizeOfHeaders
+    struct.pack_into('<H', opt, 68, 3)         # Subsystem: CONSOLE
+    struct.pack_into('<H', opt, 70, 0x8160)    # DllCharacteristics: NX|DYNAMIC_BASE|HIGH_ENTROPY_VA|TERMINAL_SERVER_AWARE
+    struct.pack_into('<Q', opt, 72, 0x100000)  # SizeOfStackReserve
+    struct.pack_into('<Q', opt, 80, 0x1000)    # SizeOfStackCommit
+    struct.pack_into('<Q', opt, 88, 0x100000)  # SizeOfHeapReserve
+    struct.pack_into('<Q', opt, 96, 0x1000)    # SizeOfHeapCommit
+    struct.pack_into('<I', opt, 108, 16)       # NumberOfRvaAndSizes
+
+    # Data directories (16 entries, 8 bytes each = 128 bytes, starting at offset 112)
+    # Entry 1 (Import Table): RVA=0x2000, Size=...
+    struct.pack_into('<I', opt, 112 + 1*8, 0x2000)     # Import Table RVA
+    struct.pack_into('<I', opt, 112 + 1*8 + 4, 40)     # Import Table Size
+
+    # --- Section Headers (2 * 40 bytes) ---
+    # .text section
+    text_hdr = bytearray(40)
+    text_hdr[0:6] = b'.text\x00'
+    struct.pack_into('<I', text_hdr, 8, 0x200)    # VirtualSize
+    struct.pack_into('<I', text_hdr, 12, 0x1000)   # VirtualAddress
+    struct.pack_into('<I', text_hdr, 16, 0x200)    # SizeOfRawData
+    struct.pack_into('<I', text_hdr, 20, 0x200)    # PointerToRawData
+    struct.pack_into('<I', text_hdr, 36, 0x60000020) # Characteristics: CODE|EXECUTE|READ
+
+    # .idata section
+    idata_hdr = bytearray(40)
+    idata_hdr[0:7] = b'.idata\x00'
+    struct.pack_into('<I', idata_hdr, 8, 0x200)    # VirtualSize
+    struct.pack_into('<I', idata_hdr, 12, 0x2000)   # VirtualAddress
+    struct.pack_into('<I', idata_hdr, 16, 0x200)    # SizeOfRawData
+    struct.pack_into('<I', idata_hdr, 20, 0x400)    # PointerToRawData
+    struct.pack_into('<I', idata_hdr, 36, 0xC0000040) # Characteristics: INITIALIZED_DATA|READ|WRITE
+
+    # --- Assemble headers ---
+    headers = dos + pe_sig + coff + opt + text_hdr + idata_hdr
+    # Pad headers to FileAlignment (0x200)
+    headers += b'\x00' * (0x200 - len(headers))
+
+    # --- .text section (at file offset 0x200) ---
+    # Machine code for:
+    #   sub rsp, 0x28           ; 48 83 EC 28
+    #   mov ecx, 0xFFFFFFF5     ; B9 F5 FF FF FF    (-11 = STD_OUTPUT_HANDLE)
+    #   call [rip + GetStdHandle_IAT]  ; FF 15 xx xx xx xx
+    #   mov rcx, rax            ; 48 89 C1
+    #   lea rdx, [rip + msg]    ; 48 8D 15 xx xx xx xx
+    #   mov r8d, MSGLEN         ; 41 B8 xx 00 00 00
+    #   lea r9, [rsp+0x20]      ; 4C 8D 4C 24 20
+    #   xor eax, eax            ; 31 C0
+    #   push rax                ; 50  (lpOverlapped = NULL)
+    #   sub rsp, 0x20           ; 48 83 EC 20  (shadow space for WriteFile)
+    #   call [rip + WriteFile_IAT]  ; FF 15 xx xx xx xx
+    #   add rsp, 0x28           ; 48 83 C4 28
+    #   xor ecx, ecx            ; 31 C9
+    #   call [rip + ExitProcess_IAT]; FF 15 xx xx xx xx
+
+    msg = b"Hello from Wine!\n"
+    msglen = len(msg)  # 17
+
+    text = bytearray(0x200)
+
+    # We need to know offsets. Let's build instruction by instruction.
+    # .text starts at RVA 0x1000, .idata at RVA 0x2000
+    # IAT entries in .idata at known offsets (we'll set up):
+    #   GetStdHandle  at RVA 0x2080
+    #   WriteFile     at RVA 0x2088
+    #   ExitProcess   at RVA 0x2090
+
+    code = bytearray()
+    # sub rsp, 0x28
+    code += b'\x48\x83\xEC\x28'
+    # mov ecx, -11 (STD_OUTPUT_HANDLE)
+    code += b'\xB9\xF5\xFF\xFF\xFF'
+    # call [rip + offset_to_GetStdHandle_IAT]
+    # RIP after this instruction = 0x1000 + len(code) + 6
+    # Target = 0x2080
+    rip_after = 0x1000 + len(code) + 6
+    rel = 0x2080 - rip_after
+    code += b'\xFF\x15' + struct.pack('<i', rel)
+    # mov rcx, rax
+    code += b'\x48\x89\xC1'
+    # lea rdx, [rip + msg_offset]
+    # msg will be at end of code in .text
+    # We'll place msg at offset 0x100 within .text (RVA 0x1100)
+    rip_after_lea = 0x1000 + len(code) + 7
+    msg_rva = 0x1100
+    rel_msg = msg_rva - rip_after_lea
+    code += b'\x48\x8D\x15' + struct.pack('<i', rel_msg)
+    # mov r8d, msglen
+    code += b'\x41\xB8' + struct.pack('<I', msglen)
+    # lea r9, [rsp+0x20]
+    code += b'\x4C\x8D\x4C\x24\x20'
+    # xor eax, eax
+    code += b'\x31\xC0'
+    # push rax (lpOverlapped = NULL)
+    code += b'\x50'
+    # sub rsp, 0x20
+    code += b'\x48\x83\xEC\x20'
+    # call [rip + WriteFile_IAT]
+    rip_after2 = 0x1000 + len(code) + 6
+    rel2 = 0x2088 - rip_after2
+    code += b'\xFF\x15' + struct.pack('<i', rel2)
+    # add rsp, 0x28
+    code += b'\x48\x83\xC4\x28'
+    # xor ecx, ecx
+    code += b'\x31\xC9'
+    # call [rip + ExitProcess_IAT]
+    rip_after3 = 0x1000 + len(code) + 6
+    rel3 = 0x2090 - rip_after3
+    code += b'\xFF\x15' + struct.pack('<i', rel3)
+
+    text[0:len(code)] = code
+    # Place message at offset 0x100
+    text[0x100:0x100+msglen] = msg
+
+    # --- .idata section (at file offset 0x400) ---
+    idata = bytearray(0x200)
+
+    # Import Directory Table (at RVA 0x2000, file offset 0x400)
+    # One entry for kernel32.dll + null terminator
+    # Each entry: 20 bytes (OriginalFirstThunk, TimeDateStamp, ForwarderChain, Name, FirstThunk)
+    # kernel32.dll entry:
+    ilt_rva = 0x2060   # Import Lookup Table
+    name_rva = 0x20A0  # DLL name
+    iat_rva = 0x2080   # Import Address Table
+
+    struct.pack_into('<I', idata, 0, ilt_rva)     # OriginalFirstThunk
+    struct.pack_into('<I', idata, 12, name_rva)    # Name
+    struct.pack_into('<I', idata, 16, iat_rva)     # FirstThunk (IAT)
+    # Null terminator entry (20 bytes of zeros) is already there
+
+    # Import Lookup Table at offset 0x60 (RVA 0x2060)
+    # 3 entries: GetStdHandle, WriteFile, ExitProcess + null terminator
+    # Each is 8 bytes (PE32+), pointing to Hint/Name entries
+    hint_GetStdHandle = 0x20C0
+    hint_WriteFile = 0x20E0
+    hint_ExitProcess = 0x2100
+    struct.pack_into('<Q', idata, 0x60, hint_GetStdHandle)
+    struct.pack_into('<Q', idata, 0x68, hint_WriteFile)
+    struct.pack_into('<Q', idata, 0x70, hint_ExitProcess)
+    # null terminator at 0x78 (already zeros)
+
+    # Import Address Table at offset 0x80 (RVA 0x2080) — same as ILT initially
+    struct.pack_into('<Q', idata, 0x80, hint_GetStdHandle)
+    struct.pack_into('<Q', idata, 0x88, hint_WriteFile)
+    struct.pack_into('<Q', idata, 0x90, hint_ExitProcess)
+
+    # DLL name at offset 0xA0 (RVA 0x20A0)
+    dll_name = b'kernel32.dll\x00'
+    idata[0xA0:0xA0+len(dll_name)] = dll_name
+
+    # Hint/Name entries
+    # GetStdHandle at offset 0xC0 (RVA 0x20C0): Hint(2) + Name
+    struct.pack_into('<H', idata, 0xC0, 0)
+    idata[0xC2:0xC2+15] = b'GetStdHandle\x00\x00\x00'
+
+    # WriteFile at offset 0xE0 (RVA 0x20E0)
+    struct.pack_into('<H', idata, 0xE0, 0)
+    idata[0xE2:0xE2+10] = b'WriteFile\x00'
+
+    # ExitProcess at offset 0x100 (RVA 0x2100)
+    struct.pack_into('<H', idata, 0x100, 0)
+    idata[0x102:0x102+13] = b'ExitProcess\x00\x00'
+
+    # --- Assemble final PE ---
+    pe = headers + text + idata
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, 'wb') as f:
+        f.write(pe)
+    print(f"  Built hello.exe: {len(pe)} bytes")
+    return len(pe)
 
 
 def find_deb_url(packages_data, pkg_name):
@@ -221,6 +588,7 @@ def main():
         'wine64': 'wine64',
         'libwine': 'libwine',
         'libunwind8': 'libunwind8',
+        'liblzma5': 'liblzma5',
     }
 
     deb_paths = {}
@@ -246,23 +614,47 @@ def main():
 
     all_extracted = {}
 
-    # From wine64 package: the wine64 loader binary
+    # From wine64 package: wine64 loader + wineserver
     if 'wine64' in deb_paths:
-        print("  Extracting wine64 loader...")
+        print("  Extracting wine64 loader + wineserver...")
         files = extract_files_from_deb(deb_paths['wine64'][1], [
             ("usr/lib/wine/wine64", "bin/wine64"),
+            ("usr/lib/wine/wineserver64", "bin/wineserver64"),
+            ("usr/lib/wine/wineserver64", "bin/wineserver"),
         ], SYSROOT)
         all_extracted.update(files)
 
-    # From libwine package: ntdll.so
+    # From libwine package: Wine DLLs (Unix + PE) + NLS files
     if 'libwine' in deb_paths:
-        print("  Extracting ntdll.so...")
+        print("  Extracting Wine DLL tree + NLS files...")
+        # Keep bin/ntdll.so for backward compat, and also place at real Wine path
         files = extract_files_from_deb(deb_paths['libwine'][1], [
             ("usr/lib/x86_64-linux-gnu/wine/x86_64-unix/ntdll.so", "bin/ntdll.so"),
-            # Also try alternative paths
             ("x86_64-unix/ntdll.so", "bin/ntdll.so"),
         ], SYSROOT)
         all_extracted.update(files)
+
+        # Extract full Wine DLL tree at correct paths (wine64 looks here)
+        wine_files = extract_wine_tree_from_deb(deb_paths['libwine'][1], SYSROOT)
+        all_extracted.update(wine_files)
+
+        # Extract ALL NLS files from the package
+        nls_files = extract_nls_from_deb(deb_paths['libwine'][1], SYSROOT)
+        for name, size in nls_files.items():
+            all_extracted[name] = size
+
+        # Wine also looks at /share/wine/nls/ (from /bin/../../share/wine/nls/)
+        # Copy NLS files there too
+        import shutil as _sh
+        share_nls = os.path.join(SYSROOT, "share", "wine", "nls")
+        usr_nls = os.path.join(SYSROOT, "usr", "share", "wine", "nls")
+        if os.path.isdir(usr_nls):
+            os.makedirs(share_nls, exist_ok=True)
+            for f in os.listdir(usr_nls):
+                src = os.path.join(usr_nls, f)
+                dst = os.path.join(share_nls, f)
+                if not os.path.isfile(dst):
+                    _sh.copy2(src, dst)
 
     # From libunwind8 package: libunwind.so.8
     if 'libunwind8' in deb_paths:
@@ -270,6 +662,15 @@ def main():
         files = extract_files_from_deb(deb_paths['libunwind8'][1], [
             ("usr/lib/x86_64-linux-gnu/libunwind.so.8", "lib/libunwind.so.8"),
             ("usr/lib/x86_64-linux-gnu/libunwind-x86_64.so.8", "lib/libunwind-x86_64.so.8"),
+        ], SYSROOT)
+        all_extracted.update(files)
+
+    # From liblzma5 package: liblzma.so.5 (dependency of libunwind)
+    if 'liblzma5' in deb_paths:
+        print("  Extracting liblzma.so.5...")
+        files = extract_files_from_deb(deb_paths['liblzma5'][1], [
+            ("usr/lib/x86_64-linux-gnu/liblzma.so.5", "lib/liblzma.so.5"),
+            ("lib/x86_64-linux-gnu/liblzma.so.5", "lib/liblzma.so.5"),
         ], SYSROOT)
         all_extracted.update(files)
 
@@ -296,6 +697,16 @@ def main():
     if os.path.isfile(ld_src) and not os.path.isfile(ld_dst):
         shutil.copy2(ld_src, ld_dst)
 
+    # Wine looks for wineserver at /usr/lib/wine/wineserver64
+    # Copy from /bin/wineserver64 so Wine finds it at both locations
+    wine_lib_dir = os.path.join(SYSROOT, "usr", "lib", "wine")
+    os.makedirs(wine_lib_dir, exist_ok=True)
+    ws_src = os.path.join(SYSROOT, "bin", "wineserver64")
+    ws_dst = os.path.join(wine_lib_dir, "wineserver64")
+    if os.path.isfile(ws_src) and not os.path.isfile(ws_dst):
+        shutil.copy2(ws_src, ws_dst)
+        print(f"  Copied wineserver64 -> usr/lib/wine/wineserver64")
+
     # Summary
     print(f"\n  Sysroot contents ({SYSROOT}):")
     for root, dirs, files in os.walk(SYSROOT):
@@ -305,8 +716,13 @@ def main():
             sz = os.path.getsize(full)
             print(f"    /{rel}: {sz:,} bytes")
 
+    # Build minimal PE32+ hello.exe
+    print("  Building hello.exe (minimal PE32+)...")
+    hello_size = build_hello_exe(os.path.join(SYSROOT, "bin", "hello.exe"))
+    all_extracted["bin/hello.exe"] = hello_size
+
     # Verify we have the critical files
-    critical = ["bin/wine64", "bin/ntdll.so", "lib/ld-linux-x86-64.so.2", "lib/libc.so.6"]
+    critical = ["bin/wine64", "bin/ntdll.so", "bin/hello.exe", "lib/ld-linux-x86-64.so.2", "lib/libc.so.6"]
     missing = [f for f in critical if not os.path.isfile(os.path.join(SYSROOT, f))]
     if missing:
         print(f"\n  WARNING: Missing critical files: {missing}")

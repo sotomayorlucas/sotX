@@ -17,6 +17,38 @@ pub const PAGE_NO_EXECUTE: u64 = 1 << 63;
 /// Boot-time CR3 value (Limine's page tables). Stored once at init.
 static BOOT_CR3: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
+// ---------------------------------------------------------------------------
+// W^X relaxation bitmap — per-address-space opt-out of W^X enforcement.
+// Used by Wine/glibc processes that need RWX pages (IAT fixups, JIT, etc.).
+// Lock-free: uses atomic fetch_or/fetch_and for set, atomic load for check.
+// ---------------------------------------------------------------------------
+
+use core::sync::atomic::{AtomicU64, Ordering};
+
+static WX_RELAXED: [AtomicU64; 4] = [
+    AtomicU64::new(0), AtomicU64::new(0),
+    AtomicU64::new(0), AtomicU64::new(0),
+];
+
+pub fn set_wx_relaxed(cr3: u64, relaxed: bool) {
+    let idx = (cr3 >> 12) as usize % 256;
+    let word = idx / 64;
+    let bit = idx % 64;
+    if relaxed {
+        WX_RELAXED[word].fetch_or(1u64 << bit, Ordering::Release);
+    } else {
+        WX_RELAXED[word].fetch_and(!(1u64 << bit), Ordering::Release);
+    }
+}
+
+#[inline]
+pub fn is_wx_relaxed(cr3: u64) -> bool {
+    let idx = (cr3 >> 12) as usize % 256;
+    let word = idx / 64;
+    let bit = idx % 64;
+    WX_RELAXED[word].load(Ordering::Acquire) & (1u64 << bit) != 0
+}
+
 /// Read the current CR3 register (physical address of PML4).
 pub fn read_cr3() -> u64 {
     let cr3: u64;
@@ -306,21 +338,33 @@ impl AddressSpace {
         Some(pte_ptr)
     }
 
-    /// Clone this address space for fork (parent-writable CoW).
+    /// Check if a virtual address falls in init's service regions that must
+    /// stay writable in the parent during CoW fork (DMA, ring buffers, handler
+    /// stacks, VFS storage, etc.).
+    #[inline]
+    fn is_init_service_region(virt: u64) -> bool {
+        matches!(virt,
+            0x510000..=0x52FFFF       // KB + Mouse ring buffers
+            | 0xA00000..=0xAFFFFF     // SPSC ring + aux stacks
+            | 0xC00000..=0xE7FFFF     // Virtio MMIO + ObjStore + VFS + LUCAS + handler stacks
+        )
+    }
+
+    /// Clone this address space for fork (symmetric CoW).
     ///
     /// Creates a new PML4, walks all user-half page tables (entries 0..256),
     /// and for each present leaf PTE:
     ///   1. Copy PTE to child with WRITABLE removed (child triggers CoW on write)
-    ///   2. Parent PTE is LEFT UNCHANGED (parent keeps writing freely)
+    ///   2. Parent PTE is ALSO marked read-only (symmetric CoW)
     ///   3. Increment refcount for the physical frame
     /// Kernel-half entries (256..512) are shared as usual.
     ///
-    /// Parent stays writable because init runs handler threads in its AS;
-    /// marking parent read-only breaks virtio DMA (device DMA uses original
-    /// physical addresses; CoW resolution remaps to new frames).
+    /// Exclusions: init service regions (KB/mouse rings, SPSC, virtio MMIO,
+    /// ObjectStore, VFS, handler stacks) and UC/MMIO pages are left writable
+    /// in the parent to avoid breaking DMA and handler thread writes.
     ///
-    /// The caller must eagerly copy pages the child needs before the parent
-    /// can overwrite them (restore frame page + surrounding stack pages).
+    /// The caller MUST flush the TLB after this call if the parent is the
+    /// current CR3, since parent PTEs have been changed to read-only.
     pub fn clone_cow(&self) -> Self {
         use super::frame_refcount_inc;
 
@@ -382,9 +426,20 @@ impl AddressSpace {
                         let phys = pte & 0x000F_FFFF_FFFF_F000;
 
                         // Child gets read-only PTE (CoW on write).
-                        // Parent PTE is NOT modified — stays writable.
                         let child_pte = pte & !PAGE_WRITABLE;
                         unsafe { *new_pt.add(pt_i) = child_pte; }
+
+                        // Symmetric CoW: also mark parent read-only, unless
+                        // the page is UC/MMIO or in init's service regions.
+                        if pte & PAGE_WRITABLE != 0 && pte & PAGE_CACHE_DISABLE == 0 {
+                            let virt = ((pml4_i as u64) << 39)
+                                     | ((pdp_i as u64) << 30)
+                                     | ((pd_i as u64) << 21)
+                                     | ((pt_i as u64) << 12);
+                            if !Self::is_init_service_region(virt) {
+                                unsafe { *src_pt.add(pt_i) = pte & !PAGE_WRITABLE; }
+                            }
+                        }
 
                         // Increment refcount: if frame was previously untracked (rc=0),
                         // set to 2 (parent + child). If already tracked, just +1.

@@ -5,7 +5,7 @@
 
 use crate::process::MAX_PROCS;
 
-pub(crate) const MAX_VMAS: usize = 256;
+pub(crate) const MAX_VMAS: usize = 1024;
 
 #[derive(Clone, Copy, PartialEq)]
 #[repr(u8)]
@@ -79,7 +79,18 @@ impl VmaList {
     /// Insert a VMA. Maintains sorted order by start address.
     /// Returns true on success, false if full.
     pub fn insert(&mut self, start: u64, end: u64, prot: u8, flags: u8, label: VmaLabel) -> bool {
-        if self.count >= MAX_VMAS || end <= start { return false; }
+        if self.count >= MAX_VMAS || end <= start {
+            if self.count >= MAX_VMAS {
+                crate::framebuffer::print(b"VMA-FULL ");
+                crate::framebuffer::print_u64(self.count as u64);
+                crate::framebuffer::print(b" drop=");
+                crate::framebuffer::print_hex64(start);
+                crate::framebuffer::print(b"-");
+                crate::framebuffer::print_hex64(end);
+                crate::framebuffer::print(b"\n");
+            }
+            return false;
+        }
 
         // Find insertion point (keep sorted by start)
         let mut pos = self.count;

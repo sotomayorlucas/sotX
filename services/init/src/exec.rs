@@ -80,7 +80,11 @@ pub(crate) const EXEC_TEMP_MAP: u64 = 0x5900000; // past EXEC_BUF_BASE + 1280*4K
 pub(crate) const INTERP_BUF_BASE: u64 = 0xA000000; // Far from other regions
 pub(crate) const INTERP_BUF_PAGES: u64 = 220; // ~900 KiB, enough for ld-musl (~845 KiB)
 /// Load base for the dynamic interpreter (ET_DYN, position-independent).
+/// Each ET_EXEC exec allocates a unique 2MB slot from NEXT_INTERP_BASE so
+/// concurrent glibc processes don't share ld-linux pages (GOT, link_map).
 pub(crate) const INTERP_LOAD_BASE: u64 = 0x6000000;
+pub(crate) static NEXT_INTERP_BASE: AtomicU64 = AtomicU64::new(INTERP_LOAD_BASE);
+const INTERP_SLOT_SIZE: u64 = 0x200000; // 2 MiB per interpreter instance
 /// Per-process ELF code base for ET_DYN (PIE) binaries.
 /// Each exec gets a unique 16MB slot starting at 0x70000000.
 /// 16 slots × 16MB = 256MB, ending at 0x80000000.
@@ -217,16 +221,18 @@ pub(crate) fn starts_with(hay: &[u8], needle: &[u8]) -> bool {
     hay.len() >= needle.len() && &hay[..needle.len()] == needle
 }
 
-/// Map ELF PT_LOAD segments from a buffer into the current address space.
+/// Map ELF PT_LOAD segments from a buffer into an address space.
 /// For ET_DYN (position-independent), vaddrs are offset by `base`.
 /// For ET_EXEC, `base` should be 0.
 /// `buf_base` is the virtual address where the ELF file data is mapped.
+/// `target_as`: 0 = map into init's (current) AS, nonzero = map into that AS cap.
 pub(crate) fn map_elf_segments(
     buf_base: u64,
     _elf_info: &sotos_common::elf::ElfInfo,
     segments: &[sotos_common::elf::LoadSegment; sotos_common::elf::MAX_LOAD_SEGMENTS],
     seg_count: usize,
     base: u64,
+    target_as: u64,
 ) -> Result<(), i64> {
     for si in 0..seg_count {
         let seg = &segments[si];
@@ -276,8 +282,15 @@ pub(crate) fn map_elf_segments(
             let _ = sys::unmap(EXEC_TEMP_MAP);
 
             let flags = if is_writable { MAP_WRITABLE } else { 0 };
-            if sys::map(page_vaddr, frame_cap, flags).is_err() {
-                return Err(-12);
+            if target_as != 0 {
+                let _ = sys::unmap_from(target_as, page_vaddr);
+                if sys::map_into(target_as, page_vaddr, frame_cap, flags).is_err() {
+                    return Err(-12);
+                }
+            } else {
+                if sys::map(page_vaddr, frame_cap, flags).is_err() {
+                    return Err(-12);
+                }
             }
 
             page_vaddr += 4096;
@@ -312,7 +325,16 @@ pub(crate) fn exec_from_initrd(bin_name: &[u8]) -> Result<(u64, u64), i64> {
     exec_from_initrd_argv(bin_name, &empty, &empty)
 }
 
+pub(crate) fn exec_from_initrd_into(bin_name: &[u8], target_as: u64) -> Result<(u64, u64), i64> {
+    let empty: [[u8; MAX_EXEC_ARG_LEN]; 0] = [];
+    exec_from_initrd_argv_into(bin_name, &empty, &empty, target_as)
+}
+
 pub(crate) fn exec_from_initrd_argv(bin_name: &[u8], argv: &[[u8; MAX_EXEC_ARG_LEN]], envp: &[[u8; MAX_EXEC_ARG_LEN]]) -> Result<(u64, u64), i64> {
+    exec_from_initrd_argv_into(bin_name, argv, envp, 0)
+}
+
+pub(crate) fn exec_from_initrd_argv_into(bin_name: &[u8], argv: &[[u8; MAX_EXEC_ARG_LEN]], envp: &[[u8; MAX_EXEC_ARG_LEN]], target_as: u64) -> Result<(u64, u64), i64> {
     // Step 1: Map temp buffer and read main ELF from initrd
     map_temp_buf(EXEC_BUF_BASE, EXEC_BUF_PAGES)?;
 
@@ -330,7 +352,7 @@ pub(crate) fn exec_from_initrd_argv(bin_name: &[u8], argv: &[[u8; MAX_EXEC_ARG_L
     };
 
     // Delegate to shared ELF loading path
-    exec_loaded_elf(file_size, bin_name, argv, envp)
+    exec_loaded_elf(file_size, bin_name, argv, envp, target_as)
 }
 
 /// Load an ELF from VFS into the current address space, create a redirected thread.
@@ -340,9 +362,18 @@ pub(crate) fn exec_from_vfs(path: &[u8]) -> Result<(u64, u64), i64> {
     exec_from_vfs_argv(path, &empty, &empty)
 }
 
+pub(crate) fn exec_from_vfs_into(path: &[u8], target_as: u64) -> Result<(u64, u64), i64> {
+    let empty: [[u8; MAX_EXEC_ARG_LEN]; 0] = [];
+    exec_from_vfs_argv_into(path, &empty, &empty, target_as)
+}
+
 /// Load an ELF from VFS with argv support.
 /// Caller must hold EXEC_LOCK.
 pub(crate) fn exec_from_vfs_argv(path: &[u8], argv: &[[u8; MAX_EXEC_ARG_LEN]], envp: &[[u8; MAX_EXEC_ARG_LEN]]) -> Result<(u64, u64), i64> {
+    exec_from_vfs_argv_into(path, argv, envp, 0)
+}
+
+pub(crate) fn exec_from_vfs_argv_into(path: &[u8], argv: &[[u8; MAX_EXEC_ARG_LEN]], envp: &[[u8; MAX_EXEC_ARG_LEN]], target_as: u64) -> Result<(u64, u64), i64> {
     // Step 1: Map temp buffer and read main ELF from VFS
     map_temp_buf(EXEC_BUF_BASE, EXEC_BUF_PAGES)?;
 
@@ -371,7 +402,7 @@ pub(crate) fn exec_from_vfs_argv(path: &[u8], argv: &[[u8; MAX_EXEC_ARG_LEN]], e
     }
 
     // Step 2-8 are identical to exec_from_initrd_argv — factor into shared helper
-    exec_loaded_elf(file_size, path, argv, envp)
+    exec_loaded_elf(file_size, path, argv, envp, target_as)
 }
 
 /// Common ELF loading path after the binary data is already at EXEC_BUF_BASE.
@@ -388,7 +419,7 @@ fn env_key_eq(entry: &[u8; MAX_EXEC_ARG_LEN], key: &[u8]) -> bool {
     true
 }
 
-fn exec_loaded_elf(file_size: usize, bin_name: &[u8], argv: &[[u8; MAX_EXEC_ARG_LEN]], envp: &[[u8; MAX_EXEC_ARG_LEN]]) -> Result<(u64, u64), i64> {
+fn exec_loaded_elf(file_size: usize, bin_name: &[u8], argv: &[[u8; MAX_EXEC_ARG_LEN]], envp: &[[u8; MAX_EXEC_ARG_LEN]], target_as: u64) -> Result<(u64, u64), i64> {
     let elf_data = unsafe { core::slice::from_raw_parts(EXEC_BUF_BASE as *const u8, file_size) };
     let (elf_info, segments, seg_count, interp_info) = match parse_elf_goblin(elf_data) {
         Ok(parsed) => parsed,
@@ -407,9 +438,11 @@ fn exec_loaded_elf(file_size: usize, bin_name: &[u8], argv: &[[u8; MAX_EXEC_ARG_
         0
     };
 
-    // Unmap previous binary's ELF pages (leftover from prior exec)
-    // Scan segments to determine the full range and free it
-    {
+    // Unmap previous binary's ELF pages (leftover from prior exec).
+    // For target_as != 0, we use unmap_from on the target AS (CoW pages);
+    // map_elf_segments will also unmap_from before map_into, so this is
+    // just an optimization to release CoW page table entries early.
+    if target_as == 0 {
         let mut range_lo = u64::MAX;
         let mut range_hi = 0u64;
         for si in 0..seg_count {
@@ -429,7 +462,7 @@ fn exec_loaded_elf(file_size: usize, bin_name: &[u8], argv: &[[u8; MAX_EXEC_ARG_
         }
     }
 
-    if let Err(e) = map_elf_segments(EXEC_BUF_BASE, &elf_info, &segments, seg_count, main_base) {
+    if let Err(e) = map_elf_segments(EXEC_BUF_BASE, &elf_info, &segments, seg_count, main_base, target_as) {
         unmap_temp_buf(EXEC_BUF_BASE, EXEC_BUF_PAGES);
         return Err(e);
     }
@@ -504,13 +537,30 @@ fn exec_loaded_elf(file_size: usize, bin_name: &[u8], argv: &[[u8; MAX_EXEC_ARG_
             }
         };
 
-        // Place interpreter 8MB past main_base (within the 16MB slot)
-        interp_base = if elf_info.elf_type == 3 { main_base + 0x800000 } else { INTERP_LOAD_BASE };
-        // Unmap previous interpreter pages at this location
-        for pg in 0..0x110u64 {
-            let _ = sys::unmap_free(interp_base + pg * 0x1000);
+        // Each exec gets a unique interpreter base to avoid concurrent
+        // processes sharing ld-linux pages (GOT, link_map, etc.).
+        // ET_DYN (PIE): place 8MB past main_base (within the 16MB slot).
+        // ET_EXEC: allocate fresh 2MB slot from NEXT_INTERP_BASE.
+        interp_base = if elf_info.elf_type == 3 {
+            main_base + 0x800000
+        } else {
+            NEXT_INTERP_BASE.fetch_add(INTERP_SLOT_SIZE, Ordering::SeqCst)
+        };
+        // Unmap previous interpreter pages at this location (only for init's AS)
+        if target_as == 0 {
+            for pg in 0..0x110u64 {
+                let _ = sys::unmap_free(interp_base + pg * 0x1000);
+            }
         }
-        if let Err(e) = map_elf_segments(INTERP_BUF_BASE, &interp_elf, &interp_segs, interp_seg_count, interp_base) {
+
+        // Pre-apply relocations to the buffer so map_elf_segments copies
+        // already-relocated data into whichever AS we're targeting.
+        {
+            let interp_data_mut = unsafe { core::slice::from_raw_parts_mut(INTERP_BUF_BASE as *mut u8, interp_size) };
+            apply_interp_relocs_to_buf(interp_data_mut, &interp_elf, &interp_segs, interp_seg_count, interp_base);
+        }
+
+        if let Err(e) = map_elf_segments(INTERP_BUF_BASE, &interp_elf, &interp_segs, interp_seg_count, interp_base, target_as) {
             unmap_temp_buf(INTERP_BUF_BASE, INTERP_BUF_PAGES);
             unmap_temp_buf(EXEC_BUF_BASE, EXEC_BUF_PAGES);
             return Err(e);
@@ -518,11 +568,11 @@ fn exec_loaded_elf(file_size: usize, bin_name: &[u8], argv: &[[u8; MAX_EXEC_ARG_
 
         exec_entry = interp_base + interp_elf.entry;
 
-        // Pre-apply interpreter relocations (RELR + RELA RELATIVE).
-        // glibc's ld-linux uses SSE (movaps/punpcklqdq) in its bootstrap code,
-        // and our kernel doesn't save/restore XMM state on timer interrupts.
-        // By pre-applying relocations, ld-linux's self-relocation becomes a no-op.
-        apply_interp_relocs(interp_data, &interp_elf, interp_base);
+        // For init's AS, also apply relocs to mapped pages (legacy path).
+        // The buffer-based relocs handle the target_as path.
+        if target_as == 0 {
+            apply_interp_relocs(interp_data, &interp_elf, interp_base);
+        }
 
         unmap_temp_buf(INTERP_BUF_BASE, INTERP_BUF_PAGES);
     }
@@ -531,8 +581,10 @@ fn exec_loaded_elf(file_size: usize, bin_name: &[u8], argv: &[[u8; MAX_EXEC_ARG_
     const CHILD_STACK_PAGES: u64 = 32;
     const CHILD_STACK_SIZE: u64 = CHILD_STACK_PAGES * 0x1000;
     let stack_addr = NEXT_CHILD_STACK.fetch_add(CHILD_STACK_SIZE, Ordering::SeqCst);
+    let mut stack_frames = [0u64; CHILD_STACK_PAGES as usize];
     for pg in 0..CHILD_STACK_PAGES {
         let f = sys::frame_alloc().map_err(|_| -12i64)?;
+        stack_frames[pg as usize] = f;
         if sys::map(stack_addr + pg * 0x1000, f, MAP_WRITABLE).is_err() {
             unmap_temp_buf(EXEC_BUF_BASE, EXEC_BUF_PAGES);
             return Err(-12);
@@ -585,12 +637,13 @@ fn exec_loaded_elf(file_size: usize, bin_name: &[u8], argv: &[[u8; MAX_EXEC_ARG_
     let phdr_vaddr = elf_base + elf_info.phoff as u64;
 
     // Environment: user envp first (overrides defaults), then defaults for non-overridden keys
-    let defaults: [&[u8]; 4] = [
-        b"TERM=xterm\0", b"HOME=/\0",
+    let defaults: [&[u8]; 5] = [
+        b"TERM=xterm\0", b"HOME=/root\0",
         b"TERMINFO=/usr/share/terminfo\0", b"PATH=/usr/bin:/bin:/usr/sbin:/sbin\0",
+        b"XDG_RUNTIME_DIR=/run/user/0\0",
     ];
-    let default_keys: [&[u8]; 4] = [b"TERM", b"HOME", b"TERMINFO", b"PATH"];
-    let mut env_addrs = [0u64; MAX_EXEC_ENVS + 4];
+    let default_keys: [&[u8]; 5] = [b"TERM", b"HOME", b"TERMINFO", b"PATH", b"XDG_RUNTIME_DIR"];
+    let mut env_addrs = [0u64; MAX_EXEC_ENVS + 5];
     let mut env_count: usize = 0;
 
     // User env vars first (they take priority — libc uses first occurrence)
@@ -609,7 +662,7 @@ fn exec_loaded_elf(file_size: usize, bin_name: &[u8], argv: &[[u8; MAX_EXEC_ARG_
     }
 
     // Defaults only if key not already provided by user
-    for d in 0..4 {
+    for d in 0..5 {
         let mut overridden = false;
         for e in 0..envp.len() {
             if env_key_eq(&envp[e], default_keys[d]) { overridden = true; break; }
@@ -676,64 +729,92 @@ fn exec_loaded_elf(file_size: usize, bin_name: &[u8], argv: &[[u8; MAX_EXEC_ARG_
         }
     }
 
+    // Save canary before stack pages are moved (random_addr is on the stack)
+    let saved_canary = unsafe { core::ptr::read(random_addr as *const u64) & !0xFF_u64 };
+
+    // If target_as: move stack pages from init to target AS
+    if target_as != 0 {
+        for pg in 0..CHILD_STACK_PAGES {
+            let _ = sys::unmap(stack_addr + pg * 0x1000); // unmap from init (keep frame)
+            let _ = sys::unmap_from(target_as, stack_addr + pg * 0x1000); // clear CoW entry
+            let _ = sys::map_into(target_as, stack_addr + pg * 0x1000, stack_frames[pg as usize], MAP_WRITABLE);
+        }
+    }
+
     // Pre-TLS for glibc: write the AT_RANDOM canary at PRE_TLS+0x28.
-    // glibc's ld-linux has stack-protector-enabled functions that run before
-    // arch_prctl(ARCH_SET_FS) — they read fs:0x28 as the canary. By setting
-    // FS_BASE to this pre-TLS page (via a trampoline), the canary is consistent
-    // before and after glibc's own TLS setup.
-    //
-    // CRITICAL: On nested exec, this page is already mapped from a previous exec.
-    // We must unmap+remap to get a fresh page (avoids frame leak and stale canary).
     const PRE_TLS_ADDR: u64 = 0xB70000; // below vDSO (0xB80000)
-    let _ = sys::unmap_free(PRE_TLS_ADDR); // free old page if any (no-op on first exec)
-    if let Ok(f) = sys::frame_alloc() {
-        if sys::map(PRE_TLS_ADDR, f, MAP_WRITABLE).is_ok() {
-            unsafe {
-                core::ptr::write_bytes(PRE_TLS_ADDR as *mut u8, 0, 4096);
-                // Copy the canary from AT_RANDOM to TLS+0x28.
-                // glibc masks off the LSB (& ~0xFF) for string-termination safety
-                // in _dl_setup_stack_chk_guard(). We must match this so the canary
-                // saved by stack-protector-enabled functions in ld-linux before
-                // arch_prctl matches the canary glibc writes to the final TLS.
-                // musl doesn't read fs:0x28 before its own TLS setup, so the mask
-                // is harmless for musl dynamic binaries.
-                let canary = core::ptr::read(random_addr as *const u64) & !0xFF_u64;
-                core::ptr::write((PRE_TLS_ADDR + 0x28) as *mut u64, canary);
+    if target_as != 0 {
+        // For separate AS: alloc frame, write via temp map, map into target
+        if let Ok(f) = sys::frame_alloc() {
+            if sys::map(EXEC_TEMP_MAP, f, MAP_WRITABLE).is_ok() {
+                unsafe {
+                    core::ptr::write_bytes(EXEC_TEMP_MAP as *mut u8, 0, 4096);
+                    core::ptr::write((EXEC_TEMP_MAP + 0x28) as *mut u64, saved_canary);
+                }
+                let _ = sys::unmap(EXEC_TEMP_MAP);
+                let _ = sys::unmap_from(target_as, PRE_TLS_ADDR);
+                let _ = sys::map_into(target_as, PRE_TLS_ADDR, f, MAP_WRITABLE);
+            }
+        }
+    } else {
+        let _ = sys::unmap_free(PRE_TLS_ADDR);
+        if let Ok(f) = sys::frame_alloc() {
+            if sys::map(PRE_TLS_ADDR, f, MAP_WRITABLE).is_ok() {
+                unsafe {
+                    core::ptr::write_bytes(PRE_TLS_ADDR as *mut u8, 0, 4096);
+                    core::ptr::write((PRE_TLS_ADDR + 0x28) as *mut u64, saved_canary);
+                }
             }
         }
     }
 
     // Write a trampoline at the vDSO pre-TLS setup stub.
-    // MUST NOT overlap COW_FORK_RESTORE (0xB80740) or FORK_TLS_TRAMPOLINE (0xB80760).
-    //   mov edi, 0x1002        ; ARCH_SET_FS
-    //   mov rsi, PRE_TLS_ADDR  ; pre-TLS address
-    //   mov eax, 158           ; SYS_arch_prctl
-    //   syscall
-    //   mov rax, <exec_entry>
-    //   jmp rax
     let trampoline_addr = crate::vdso::PRE_TLS_TRAMPOLINE_ADDR;
-    // Make vDSO page writable before updating trampoline (may be RX from previous exec)
-    let _ = sys::protect(trampoline_addr & !0xFFF, MAP_WRITABLE); // 2 = writable
-    unsafe {
-        let p = trampoline_addr as *mut u8;
-        // mov edi, 0x1002 (5 bytes: BF 02 10 00 00)
-        *p = 0xBF; *p.add(1) = 0x02; *p.add(2) = 0x10; *p.add(3) = 0x00; *p.add(4) = 0x00;
-        // movabs rsi, PRE_TLS_ADDR (10 bytes: 48 BE xx xx xx xx xx xx xx xx)
-        *p.add(5) = 0x48; *p.add(6) = 0xBE;
-        core::ptr::copy_nonoverlapping(&PRE_TLS_ADDR as *const u64 as *const u8, p.add(7), 8);
-        // mov eax, 158 (5 bytes: B8 9E 00 00 00)
-        *p.add(15) = 0xB8; *p.add(16) = 0x9E; *p.add(17) = 0x00; *p.add(18) = 0x00; *p.add(19) = 0x00;
-        // syscall (2 bytes: 0F 05)
-        *p.add(20) = 0x0F; *p.add(21) = 0x05;
-        // movabs rax, exec_entry (10 bytes: 48 B8 xx xx xx xx xx xx xx xx)
-        *p.add(22) = 0x48; *p.add(23) = 0xB8;
-        core::ptr::copy_nonoverlapping(&exec_entry as *const u64 as *const u8, p.add(24), 8);
-        // jmp rax (2 bytes: FF E0)
-        *p.add(32) = 0xFF; *p.add(33) = 0xE0;
-    }
+    let trampoline_page = trampoline_addr & !0xFFF;
+    let trampoline_off = (trampoline_addr - trampoline_page) as usize;
 
-    // Make trampoline page executable (VMM demand-pages as RW+NX; we need RX)
-    let _ = sys::protect(trampoline_addr & !0xFFF, 0); // 0 = read+execute (no write)
+    if target_as != 0 {
+        // For separate AS: create a private copy of the vDSO page with the trampoline
+        if let Ok(vf) = sys::frame_alloc() {
+            if sys::map(EXEC_TEMP_MAP, vf, MAP_WRITABLE).is_ok() {
+                // Copy existing vDSO page content from init's AS
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        trampoline_page as *const u8,
+                        EXEC_TEMP_MAP as *mut u8,
+                        4096,
+                    );
+                    // Write trampoline at the correct offset within the page
+                    let p = (EXEC_TEMP_MAP as *mut u8).add(trampoline_off);
+                    *p = 0xBF; *p.add(1) = 0x02; *p.add(2) = 0x10; *p.add(3) = 0x00; *p.add(4) = 0x00;
+                    *p.add(5) = 0x48; *p.add(6) = 0xBE;
+                    core::ptr::copy_nonoverlapping(&PRE_TLS_ADDR as *const u64 as *const u8, p.add(7), 8);
+                    *p.add(15) = 0xB8; *p.add(16) = 0x9E; *p.add(17) = 0x00; *p.add(18) = 0x00; *p.add(19) = 0x00;
+                    *p.add(20) = 0x0F; *p.add(21) = 0x05;
+                    *p.add(22) = 0x48; *p.add(23) = 0xB8;
+                    core::ptr::copy_nonoverlapping(&exec_entry as *const u64 as *const u8, p.add(24), 8);
+                    *p.add(32) = 0xFF; *p.add(33) = 0xE0;
+                }
+                let _ = sys::unmap(EXEC_TEMP_MAP);
+                let _ = sys::unmap_from(target_as, trampoline_page);
+                let _ = sys::map_into(target_as, trampoline_page, vf, 0); // 0 = R+X
+            }
+        }
+    } else {
+        let _ = sys::protect(trampoline_page, MAP_WRITABLE);
+        unsafe {
+            let p = trampoline_addr as *mut u8;
+            *p = 0xBF; *p.add(1) = 0x02; *p.add(2) = 0x10; *p.add(3) = 0x00; *p.add(4) = 0x00;
+            *p.add(5) = 0x48; *p.add(6) = 0xBE;
+            core::ptr::copy_nonoverlapping(&PRE_TLS_ADDR as *const u64 as *const u8, p.add(7), 8);
+            *p.add(15) = 0xB8; *p.add(16) = 0x9E; *p.add(17) = 0x00; *p.add(18) = 0x00; *p.add(19) = 0x00;
+            *p.add(20) = 0x0F; *p.add(21) = 0x05;
+            *p.add(22) = 0x48; *p.add(23) = 0xB8;
+            core::ptr::copy_nonoverlapping(&exec_entry as *const u64 as *const u8, p.add(24), 8);
+            *p.add(32) = 0xFF; *p.add(33) = 0xE0;
+        }
+        let _ = sys::protect(trampoline_page, 0); // R+X
+    }
 
     let child_entry = trampoline_addr;
 
@@ -744,11 +825,21 @@ fn exec_loaded_elf(file_size: usize, bin_name: &[u8], argv: &[[u8; MAX_EXEC_ARG_
             return Err(-12);
         }
     };
-    let new_thread = match sys::thread_create_redirected(child_entry, rsp, new_ep) {
-        Ok(t) => t,
-        Err(_) => {
-            unmap_temp_buf(EXEC_BUF_BASE, EXEC_BUF_PAGES);
-            return Err(-12);
+    let new_thread = if target_as != 0 {
+        match sys::thread_create_in(target_as, child_entry, rsp, new_ep) {
+            Ok(t) => t,
+            Err(_) => {
+                unmap_temp_buf(EXEC_BUF_BASE, EXEC_BUF_PAGES);
+                return Err(-12);
+            }
+        }
+    } else {
+        match sys::thread_create_redirected(child_entry, rsp, new_ep) {
+            Ok(t) => t,
+            Err(_) => {
+                unmap_temp_buf(EXEC_BUF_BASE, EXEC_BUF_PAGES);
+                return Err(-12);
+            }
         }
     };
     let _ = sys::signal_entry(new_thread, vdso::SIGNAL_TRAMPOLINE_ADDR);
@@ -771,10 +862,126 @@ fn exec_loaded_elf(file_size: usize, bin_name: &[u8], argv: &[[u8; MAX_EXEC_ARG_
         LAST_EXEC_ELF_LO.store(elf_lo, Ordering::Release);
         LAST_EXEC_ELF_HI.store(elf_hi, Ordering::Release);
     }
-    LAST_EXEC_HAS_INTERP.store(if is_dynamic { 1 } else { 0 }, Ordering::Release);
+    LAST_EXEC_HAS_INTERP.store(if is_dynamic { interp_base } else { 0 }, Ordering::Release);
 
     unmap_temp_buf(EXEC_BUF_BASE, EXEC_BUF_PAGES);
     Ok((new_ep, new_thread))
+}
+
+/// Convert a virtual address (relative to binary base 0) to a file offset
+/// using PT_LOAD segment mappings.
+fn vaddr_to_file_offset(
+    vaddr: u64,
+    segments: &[sotos_common::elf::LoadSegment; sotos_common::elf::MAX_LOAD_SEGMENTS],
+    seg_count: usize,
+) -> Option<usize> {
+    for i in 0..seg_count {
+        let seg = &segments[i];
+        if vaddr >= seg.vaddr && vaddr < seg.vaddr + seg.filesz as u64 {
+            return Some(seg.offset + (vaddr - seg.vaddr) as usize);
+        }
+    }
+    None
+}
+
+/// Apply interpreter relocations directly to the ELF data buffer (before mapping).
+/// This allows the relocated data to be mapped into any address space via
+/// map_elf_segments without needing write access to the target AS pages.
+fn apply_interp_relocs_to_buf(
+    elf_data: &mut [u8],
+    elf_info: &sotos_common::elf::ElfInfo,
+    segments: &[sotos_common::elf::LoadSegment; sotos_common::elf::MAX_LOAD_SEGMENTS],
+    seg_count: usize,
+    base: u64,
+) {
+    // Find PT_DYNAMIC segment
+    let mut dyn_offset = 0usize;
+    let mut dyn_size = 0usize;
+    let mut found = false;
+    for i in 0..elf_info.phnum {
+        let ph = elf_info.phoff + i * elf_info.phentsize;
+        if ph + elf_info.phentsize > elf_data.len() { break; }
+        let p_type = u32::from_le_bytes([
+            elf_data[ph], elf_data[ph+1], elf_data[ph+2], elf_data[ph+3],
+        ]);
+        if p_type == 2 { // PT_DYNAMIC
+            dyn_offset = u64::from_le_bytes([
+                elf_data[ph+8], elf_data[ph+9], elf_data[ph+10], elf_data[ph+11],
+                elf_data[ph+12], elf_data[ph+13], elf_data[ph+14], elf_data[ph+15],
+            ]) as usize;
+            dyn_size = u64::from_le_bytes([
+                elf_data[ph+32], elf_data[ph+33], elf_data[ph+34], elf_data[ph+35],
+                elf_data[ph+36], elf_data[ph+37], elf_data[ph+38], elf_data[ph+39],
+            ]) as usize;
+            found = true;
+            break;
+        }
+    }
+    if !found { return; }
+
+    let mut rela_off: u64 = 0;
+    let mut rela_sz: u64 = 0;
+    let mut pos = dyn_offset;
+    let end = (dyn_offset + dyn_size).min(elf_data.len());
+    while pos + 16 <= end {
+        let tag = u64::from_le_bytes([
+            elf_data[pos], elf_data[pos+1], elf_data[pos+2], elf_data[pos+3],
+            elf_data[pos+4], elf_data[pos+5], elf_data[pos+6], elf_data[pos+7],
+        ]);
+        let val = u64::from_le_bytes([
+            elf_data[pos+8], elf_data[pos+9], elf_data[pos+10], elf_data[pos+11],
+            elf_data[pos+12], elf_data[pos+13], elf_data[pos+14], elf_data[pos+15],
+        ]);
+        match tag {
+            0 => break,
+            7 => rela_off = val,
+            8 => rela_sz = val,
+            _ => {}
+        }
+        pos += 16;
+    }
+
+    if rela_off == 0 || rela_sz == 0 { return; }
+
+    let rela_file_off = rela_off as usize;
+    let mut rp = rela_file_off;
+    let rela_end = (rela_file_off + rela_sz as usize).min(elf_data.len());
+    while rp + 24 <= rela_end {
+        let r_offset = u64::from_le_bytes([
+            elf_data[rp], elf_data[rp+1], elf_data[rp+2], elf_data[rp+3],
+            elf_data[rp+4], elf_data[rp+5], elf_data[rp+6], elf_data[rp+7],
+        ]);
+        let r_info = u64::from_le_bytes([
+            elf_data[rp+8], elf_data[rp+9], elf_data[rp+10], elf_data[rp+11],
+            elf_data[rp+12], elf_data[rp+13], elf_data[rp+14], elf_data[rp+15],
+        ]);
+        let r_addend = u64::from_le_bytes([
+            elf_data[rp+16], elf_data[rp+17], elf_data[rp+18], elf_data[rp+19],
+            elf_data[rp+20], elf_data[rp+21], elf_data[rp+22], elf_data[rp+23],
+        ]);
+        let r_type = (r_info & 0xFFFFFFFF) as u32;
+
+        if let Some(file_off) = vaddr_to_file_offset(r_offset, segments, seg_count) {
+            if file_off + 8 <= elf_data.len() {
+                match r_type {
+                    8 => { // R_X86_64_RELATIVE
+                        let val = (base + r_addend).to_le_bytes();
+                        elf_data[file_off..file_off+8].copy_from_slice(&val);
+                    }
+                    6 => { // R_X86_64_GLOB_DAT
+                        let val = if r_addend != 0 {
+                            (base + r_addend).to_le_bytes()
+                        } else {
+                            0u64.to_le_bytes()
+                        };
+                        elf_data[file_off..file_off+8].copy_from_slice(&val);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        rp += 24;
+    }
 }
 
 /// Pre-apply interpreter relocations (RELR + RELA) so the dynamic linker's

@@ -32,6 +32,9 @@ use x86_64::VirtAddr;
 /// MSR number for IA32_FS_BASE — used for TLS (Thread-Local Storage).
 const IA32_FS_BASE: u32 = 0xC000_0100;
 
+/// MSR number for IA32_KERNEL_GS_BASE — holds user GS while in kernel mode.
+const IA32_KERNEL_GS_BASE: u32 = 0xC000_0102;
+
 /// Write the IA32_FS_BASE MSR.
 #[inline]
 fn write_fs_base_msr(value: u64) {
@@ -39,6 +42,20 @@ fn write_fs_base_msr(value: u64) {
         core::arch::asm!(
             "wrmsr",
             in("ecx") IA32_FS_BASE,
+            in("eax") value as u32,
+            in("edx") (value >> 32) as u32,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+}
+
+/// Write the IA32_KERNEL_GS_BASE MSR (user's GS value while in kernel mode).
+#[inline]
+fn write_kernel_gs_base_msr(value: u64) {
+    unsafe {
+        core::arch::asm!(
+            "wrmsr",
+            in("ecx") IA32_KERNEL_GS_BASE,
             in("eax") value as u32,
             in("edx") (value >> 32) as u32,
             options(nomem, nostack, preserves_flags),
@@ -142,6 +159,9 @@ extern "C" fn finish_switch_and_enter_user(user_rip: u64, user_rsp: u64, cr3: u6
             "mov rcx, {rip}",
             "mov r11, 0x202",       // RFLAGS with IF=1
             "mov rsp, {rsp}",
+            // Swap kernel GS → user GS before entering Ring 3.
+            // After this: GS_BASE = user value, KERNEL_GS_BASE = percpu.
+            "swapgs",
             "sysretq",
             cr3 = in(reg) cr3,
             rip = in(reg) user_rip,
@@ -396,11 +416,17 @@ pub fn init() {
         ipc_timeout: 0,
         ipc_timed_out: false,
         fs_base: 0,
+        gs_base: 0,
         redirect_saved_regs: [0; 18],
         signal_saved_regs: [0; 18],
         signal_ctx_valid: false,
         signal_trampoline: 0,
         pending_signals: 0,
+        kernel_signal: 0,
+        fault_addr: 0,
+        fault_code: 0,
+        signal_saved_rip: 0,
+        signal_saved_rflags: 0,
     };
     let tid = ThreadId(sched.next_id);
     let handle = sched.threads.alloc(idle);
@@ -447,11 +473,17 @@ pub fn create_idle_thread() -> usize {
         ipc_timeout: 0,
         ipc_timed_out: false,
         fs_base: 0,
+        gs_base: 0,
         redirect_saved_regs: [0; 18],
         signal_saved_regs: [0; 18],
         signal_ctx_valid: false,
         signal_trampoline: 0,
         pending_signals: 0,
+        kernel_signal: 0,
+        fault_addr: 0,
+        fault_code: 0,
+        signal_saved_rip: 0,
+        signal_saved_rflags: 0,
     };
     let handle = sched.threads.alloc(idle);
     let slot = handle.index();
@@ -897,6 +929,48 @@ pub fn get_current_fs_base() -> u64 {
 }
 
 // ---------------------------------------------------------------------------
+// GS_BASE (user GS) API
+// ---------------------------------------------------------------------------
+
+/// Set the current thread's user GS_BASE and write KERNEL_GS_BASE MSR.
+/// Called from arch_prctl(ARCH_SET_GS). In kernel mode after swapgs,
+/// the user's GS value lives in KERNEL_GS_BASE.
+pub fn set_current_gs_base(value: u64) {
+    let percpu = percpu::current_percpu();
+    let idx = percpu.current_thread;
+    if idx != usize::MAX {
+        let mut sched = SCHEDULER.lock();
+        if let Some(t) = sched.threads.get_mut_by_index(idx as u32) {
+            t.gs_base = value;
+        }
+    }
+    write_kernel_gs_base_msr(value);
+}
+
+/// Set a thread's GS_BASE by TID (for CoW fork — child inherits parent's GS).
+pub fn set_thread_gs_base(tid: ThreadId, value: u64) {
+    let mut sched = SCHEDULER.lock();
+    if let Some(slot) = sched.slot_of(tid) {
+        if let Some(t) = sched.threads.get_mut_by_index(slot) {
+            t.gs_base = value;
+        }
+    }
+}
+
+/// Get the current thread's user GS_BASE value.
+pub fn get_current_gs_base() -> u64 {
+    let percpu = percpu::current_percpu();
+    let idx = percpu.current_thread;
+    if idx != usize::MAX {
+        let sched = SCHEDULER.lock();
+        if let Some(t) = sched.threads.get_by_index(idx as u32) {
+            return t.gs_base;
+        }
+    }
+    0
+}
+
+// ---------------------------------------------------------------------------
 // Signal delivery support
 // ---------------------------------------------------------------------------
 
@@ -916,13 +990,13 @@ pub fn save_current_redirect_regs(frame: &TrapFrame, user_rsp: u64) {
             frame.rsi, frame.rdi, frame.rbp, frame.r8,
             frame.r9,  frame.r10, frame.r11, frame.r12,
             frame.r13, frame.r14, frame.r15, user_rsp,
-            t.fs_base, 0,
+            t.fs_base, t.gs_base,
         ];
     }
 }
 
 /// Read the saved redirect registers for a given thread (by tid).
-/// Returns [rax,rbx,rcx,rdx,rsi,rdi,rbp,r8..r15,rsp,fs_base,0] or None.
+/// Returns [rax,rbx,rcx,rdx,rsi,rdi,rbp,r8..r15,rsp,fs_base,gs_base] or None.
 pub fn get_thread_redirect_regs(tid: ThreadId) -> Option<[u64; 18]> {
     let sched = SCHEDULER.lock();
     if let Some(slot) = sched.slot_of(tid) {
@@ -935,14 +1009,30 @@ pub fn get_thread_redirect_regs(tid: ThreadId) -> Option<[u64; 18]> {
 
 /// Read the saved async signal context for a given thread (by tid).
 /// Falls back to redirect_saved_regs if no async context is available.
-pub fn get_thread_signal_regs(tid: ThreadId) -> Option<[u64; 18]> {
-    let sched = SCHEDULER.lock();
+/// Returns 20 u64s: [0..14]=GPRs, [15]=RSP, [16]=fs_base, [17]=kernel_signal,
+/// [18]=real_rip, [19]=real_rflags.
+/// When signal_ctx_valid, regs[17] is overridden with kernel_signal (consumed on read),
+/// and [18]/[19] contain the real user RIP/RFLAGS from the interrupt frame.
+/// When not signal_ctx_valid: [18]/[19] = 0 (use rcx/r11 as rip/rflags per SYSCALL ABI).
+pub fn get_thread_signal_regs(tid: ThreadId) -> Option<[u64; 20]> {
+    let mut sched = SCHEDULER.lock();
     if let Some(slot) = sched.slot_of(tid) {
-        if let Some(t) = sched.threads.get_by_index(slot) {
+        if let Some(t) = sched.threads.get_mut_by_index(slot) {
             if t.signal_ctx_valid {
-                return Some(t.signal_saved_regs);
+                let mut regs = [0u64; 20];
+                regs[..18].copy_from_slice(&t.signal_saved_regs);
+                // Override regs[17] with kernel_signal.
+                regs[17] = t.kernel_signal;
+                t.kernel_signal = 0; // Consume: only deliver once
+                // Real RIP/RFLAGS from interrupt frame (not clobbered by SYSCALL)
+                regs[18] = t.signal_saved_rip;
+                regs[19] = t.signal_saved_rflags;
+                return Some(regs);
             }
-            return Some(t.redirect_saved_regs);
+            let mut regs = [0u64; 20];
+            regs[..18].copy_from_slice(&t.redirect_saved_regs);
+            // [18]/[19] stay 0 → init should use rcx/r11 as rip/rflags
+            return Some(regs);
         }
     }
     None
@@ -1008,24 +1098,55 @@ pub fn clear_pending_signal_by_idx(idx: u32, sig: u64) {
 
 /// Save the async signal context (from timer interrupt) for the current thread.
 /// Called from the custom timer handler when redirecting a user thread.
-pub fn save_signal_context_current(gprs: &[u64; 15], rip: u64, rsp: u64, rflags: u64) {
+/// Returns true if context was saved, false if already saved (by #PF handler).
+pub fn save_signal_context_current(gprs: &[u64; 15], rip: u64, rsp: u64, rflags: u64) -> bool {
     let percpu = percpu::current_percpu();
     let idx = percpu.current_thread;
-    if idx == usize::MAX { return; }
+    if idx == usize::MAX { return false; }
     let mut sched = SCHEDULER.lock();
     if let Some(t) = sched.threads.get_mut_by_index(idx as u32) {
+        // If #PF handler already saved context, don't overwrite
+        if t.signal_ctx_valid {
+            return false;
+        }
         t.signal_saved_regs = [
             gprs[0],  gprs[1],  gprs[2],  gprs[3],   // rax, rbx, rcx, rdx
             gprs[4],  gprs[5],  gprs[6],  gprs[7],   // rsi, rdi, rbp, r8
             gprs[8],  gprs[9],  gprs[10], gprs[11],  // r9, r10, r11, r12
             gprs[12], gprs[13], gprs[14], rsp,        // r13, r14, r15, rsp
-            t.fs_base, rflags,
+            t.fs_base, t.gs_base,
         ];
-        // Overwrite rcx/r11 with the actual user RIP/RFLAGS from interrupt frame
-        // (for interrupts, RCX and R11 are NOT set by the CPU like they are for SYSCALL)
-        t.signal_saved_regs[2] = rip;    // store real user RIP in rcx slot
-        t.signal_saved_regs[10] = rflags; // store real RFLAGS in r11 slot
+        // Store the real user RIP/RFLAGS separately — do NOT clobber the
+        // original RCX/R11 slots, which Wine needs in the ucontext.
+        t.signal_saved_rip = rip;
+        t.signal_saved_rflags = rflags;
         t.signal_ctx_valid = true;
+        return true;
+    }
+    false
+}
+
+/// Set kernel-generated signal for the current thread (e.g., SIGSEGV from #PF).
+pub fn set_kernel_signal_current(sig: u64) {
+    let percpu = percpu::current_percpu();
+    let idx = percpu.current_thread;
+    if idx == usize::MAX { return; }
+    let mut sched = SCHEDULER.lock();
+    if let Some(t) = sched.threads.get_mut_by_index(idx as u32) {
+        t.kernel_signal = sig;
+    }
+}
+
+/// Set fault address and error code for the current thread (from #PF handler).
+/// Init reads these via get_thread_signal_regs to populate siginfo/ucontext.
+pub fn set_fault_info_current(addr: u64, code: u64) {
+    let percpu = percpu::current_percpu();
+    let idx = percpu.current_thread;
+    if idx == usize::MAX { return; }
+    let mut sched = SCHEDULER.lock();
+    if let Some(t) = sched.threads.get_mut_by_index(idx as u32) {
+        t.fault_addr = addr;
+        t.fault_code = code;
     }
 }
 
@@ -1368,6 +1489,11 @@ pub fn schedule() {
         if new_fs_base != 0 {
             write_fs_base_msr(new_fs_base);
         }
+
+        // Restore user GS_BASE (held in KERNEL_GS_BASE while in kernel mode).
+        // Wine uses GS for the Thread Environment Block (TEB).
+        let new_gs_base = new_t.gs_base;
+        write_kernel_gs_base_msr(new_gs_base);
 
         Some((old_rsp_ptr, new_rsp))
     };

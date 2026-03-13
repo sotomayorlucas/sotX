@@ -24,8 +24,8 @@ const SIGRETURN_RESTORER_OFF: usize = 0x110; // rt_sigreturn restorer (within .t
 const FORK_RESTORE_OFF: usize = 0x120; // fork callee-saved register restore trampoline
 const EXIT_STUB_OFF: usize = 0x130; // exit_group(rdi) stub
 const COW_FORK_RESTORE_OFF: usize = 0x140; // CoW fork child restore: xor eax + pop regs + ret
-const FORK_TLS_TRAMPOLINE_OFF: usize = 0x160; // dynamic: arch_prctl(SET_FS,X) then jmp COW_FORK_RESTORE
-const PRE_TLS_TRAMPOLINE_OFF: usize = 0x180; // exec-time: arch_prctl(SET_FS,PRE_TLS) then jmp exec_entry
+const FORK_TLS_TRAMPOLINE_OFF: usize = 0x160; // dynamic: arch_prctl(SET_FS+SET_GS,X) then jmp COW_FORK_RESTORE
+const PRE_TLS_TRAMPOLINE_OFF: usize = 0x1C0; // exec-time: arch_prctl(SET_FS,PRE_TLS) then jmp exec_entry
 const DATA_OFF: usize = 0xE00; // boot_tsc storage
 
 /// Virtual address of the signal trampoline (for SYS_SIGNAL_ENTRY).
@@ -495,38 +495,109 @@ pub fn forge(page: &mut [u8], boot_tsc: u64) {
 }
 
 /// Write a dynamic fork TLS trampoline at FORK_TLS_TRAMPOLINE_ADDR.
-/// This is called before each CoW fork to embed the parent's FS_BASE
-/// into a code stub that the child executes BEFORE touching TLS.
+/// This is called before each CoW fork to embed the parent's FS_BASE and GS_BASE
+/// into a code stub that the child executes BEFORE touching TLS/GS.
 ///
-/// Generated code (34 bytes):
-///   mov edi, 0x1002          ; ARCH_SET_FS
-///   movabs rsi, <fs_base>    ; 8-byte immediate
-///   mov eax, 158             ; SYS_arch_prctl
+/// Generated code (up to 49 bytes if gs_base != 0, else 27 bytes):
+///   [if gs_base != 0:]
+///     mov edi, 0x1001          ; ARCH_SET_GS
+///     movabs rsi, <gs_base>    ; 8-byte immediate
+///     mov eax, 158             ; SYS_arch_prctl
+///     syscall
+///   mov edi, 0x1002            ; ARCH_SET_FS
+///   movabs rsi, <fs_base>      ; 8-byte immediate
+///   mov eax, 158               ; SYS_arch_prctl
 ///   syscall
 ///   jmp COW_FORK_RESTORE_ADDR
-pub fn write_fork_tls_trampoline(fs_base: u64) {
+pub fn write_fork_tls_trampoline(fs_base: u64, gs_base: u64) {
     let addr = FORK_TLS_TRAMPOLINE_ADDR;
     // Make vDSO page writable
     let _ = sotos_common::sys::protect(addr & !0xFFF, 2); // 2 = writable
     unsafe {
         let p = addr as *mut u8;
-        // mov edi, 0x1002 (5 bytes: BF 02 10 00 00)
-        *p       = 0xBF;
-        *p.add(1) = 0x02; *p.add(2) = 0x10; *p.add(3) = 0x00; *p.add(4) = 0x00;
-        // movabs rsi, fs_base (10 bytes: 48 BE <8 bytes>)
-        *p.add(5) = 0x48; *p.add(6) = 0xBE;
-        core::ptr::copy_nonoverlapping(&fs_base as *const u64 as *const u8, p.add(7), 8);
-        // mov eax, 158 (5 bytes: B8 9E 00 00 00)
-        *p.add(15) = 0xB8; *p.add(16) = 0x9E; *p.add(17) = 0x00; *p.add(18) = 0x00; *p.add(19) = 0x00;
-        // syscall (2 bytes: 0F 05)
-        *p.add(20) = 0x0F; *p.add(21) = 0x05;
-        // jmp rel32 to COW_FORK_RESTORE_ADDR (5 bytes: E9 <rel32>)
+        let mut off = 0usize;
+
+        // Optional: SET_GS if gs_base != 0
+        if gs_base != 0 {
+            // mov edi, 0x1001 (5 bytes)
+            *p.add(off) = 0xBF; off += 1;
+            *p.add(off) = 0x01; off += 1; *p.add(off) = 0x10; off += 1;
+            *p.add(off) = 0x00; off += 1; *p.add(off) = 0x00; off += 1;
+            // movabs rsi, gs_base (10 bytes)
+            *p.add(off) = 0x48; off += 1; *p.add(off) = 0xBE; off += 1;
+            core::ptr::copy_nonoverlapping(&gs_base as *const u64 as *const u8, p.add(off), 8); off += 8;
+            // mov eax, 158 (5 bytes)
+            *p.add(off) = 0xB8; off += 1; *p.add(off) = 0x9E; off += 1;
+            *p.add(off) = 0x00; off += 1; *p.add(off) = 0x00; off += 1; *p.add(off) = 0x00; off += 1;
+            // syscall (2 bytes)
+            *p.add(off) = 0x0F; off += 1; *p.add(off) = 0x05; off += 1;
+        }
+
+        // SET_FS
+        // mov edi, 0x1002 (5 bytes)
+        *p.add(off) = 0xBF; off += 1;
+        *p.add(off) = 0x02; off += 1; *p.add(off) = 0x10; off += 1;
+        *p.add(off) = 0x00; off += 1; *p.add(off) = 0x00; off += 1;
+        // movabs rsi, fs_base (10 bytes)
+        *p.add(off) = 0x48; off += 1; *p.add(off) = 0xBE; off += 1;
+        core::ptr::copy_nonoverlapping(&fs_base as *const u64 as *const u8, p.add(off), 8); off += 8;
+        // mov eax, 158 (5 bytes)
+        *p.add(off) = 0xB8; off += 1; *p.add(off) = 0x9E; off += 1;
+        *p.add(off) = 0x00; off += 1; *p.add(off) = 0x00; off += 1; *p.add(off) = 0x00; off += 1;
+        // syscall (2 bytes)
+        *p.add(off) = 0x0F; off += 1; *p.add(off) = 0x05; off += 1;
+
+        // jmp rel32 to COW_FORK_RESTORE_ADDR (5 bytes)
         let target = COW_FORK_RESTORE_ADDR as i64;
-        let here = (addr + 22 + 5) as i64; // address after this jmp instruction
+        let here = (addr as usize + off + 5) as i64;
         let rel = (target - here) as i32;
-        *p.add(22) = 0xE9;
-        core::ptr::copy_nonoverlapping(&rel as *const i32 as *const u8, p.add(23), 4);
+        *p.add(off) = 0xE9; off += 1;
+        core::ptr::copy_nonoverlapping(&rel as *const i32 as *const u8, p.add(off), 4);
     }
     // Make vDSO page executable again (read+execute, no write)
     let _ = sotos_common::sys::protect(addr & !0xFFF, 0);
+}
+
+/// Same as `write_fork_tls_trampoline` but writes to a separate address space.
+pub fn write_fork_tls_trampoline_in(as_cap: u64, fs_base: u64, gs_base: u64) {
+    let addr = FORK_TLS_TRAMPOLINE_ADDR;
+    // Make vDSO page writable in target AS
+    let _ = sotos_common::sys::protect_in(as_cap, addr & !0xFFF, 2);
+    // Build trampoline code in a local buffer (max 49 bytes with GS, 27 without)
+    let mut buf = [0u8; 64];
+    let mut off = 0usize;
+
+    // Optional: SET_GS if gs_base != 0
+    if gs_base != 0 {
+        buf[off] = 0xBF; off += 1; // mov edi, 0x1001
+        buf[off] = 0x01; off += 1; buf[off] = 0x10; off += 1;
+        buf[off] = 0x00; off += 1; buf[off] = 0x00; off += 1;
+        buf[off] = 0x48; off += 1; buf[off] = 0xBE; off += 1; // movabs rsi, gs_base
+        buf[off..off+8].copy_from_slice(&gs_base.to_le_bytes()); off += 8;
+        buf[off] = 0xB8; off += 1; buf[off] = 0x9E; off += 1; // mov eax, 158
+        buf[off] = 0x00; off += 1; buf[off] = 0x00; off += 1; buf[off] = 0x00; off += 1;
+        buf[off] = 0x0F; off += 1; buf[off] = 0x05; off += 1; // syscall
+    }
+
+    // SET_FS
+    buf[off] = 0xBF; off += 1; // mov edi, 0x1002
+    buf[off] = 0x02; off += 1; buf[off] = 0x10; off += 1;
+    buf[off] = 0x00; off += 1; buf[off] = 0x00; off += 1;
+    buf[off] = 0x48; off += 1; buf[off] = 0xBE; off += 1; // movabs rsi, fs_base
+    buf[off..off+8].copy_from_slice(&fs_base.to_le_bytes()); off += 8;
+    buf[off] = 0xB8; off += 1; buf[off] = 0x9E; off += 1; // mov eax, 158
+    buf[off] = 0x00; off += 1; buf[off] = 0x00; off += 1; buf[off] = 0x00; off += 1;
+    buf[off] = 0x0F; off += 1; buf[off] = 0x05; off += 1; // syscall
+
+    // jmp rel32 to COW_FORK_RESTORE_ADDR
+    let target = COW_FORK_RESTORE_ADDR as i64;
+    let here = (addr as usize + off + 5) as i64;
+    let rel = (target - here) as i32;
+    buf[off] = 0xE9; off += 1;
+    buf[off..off+4].copy_from_slice(&rel.to_le_bytes()); off += 4;
+
+    // Write to target AS
+    let _ = sotos_common::sys::vm_write(as_cap, addr, buf.as_ptr() as u64, off as u64);
+    // Make vDSO page executable again (read+execute, no write)
+    let _ = sotos_common::sys::protect_in(as_cap, addr & !0xFFF, 0);
 }

@@ -32,7 +32,7 @@ const MAP_WRITABLE: u64 = 2;
 
 /// Ensure sysroot directories exist for dynamic binary support.
 fn sysroot_init(store: &mut ObjectStore) {
-    let dirs: &[&[u8]] = &[b"lib", b"lib64", b"bin", b"sbin", b"usr", b"tmp"];
+    let dirs: &[&[u8]] = &[b"lib", b"lib64", b"bin", b"sbin", b"usr", b"tmp", b"root"];
     for name in dirs {
         if store.resolve_path(name, ROOT_OID).is_err() {
             let _ = store.mkdir(name, ROOT_OID);
@@ -43,6 +43,20 @@ fn sysroot_init(store: &mut ObjectStore) {
         for name in sub {
             if store.find_in(name, usr_oid).is_none() {
                 let _ = store.mkdir(name, usr_oid);
+            }
+        }
+    }
+    // Create /run/user/0 for XDG_RUNTIME_DIR (needed by Wine server directory)
+    if store.resolve_path(b"run", ROOT_OID).is_err() {
+        let _ = store.mkdir(b"run", ROOT_OID);
+    }
+    if let Ok(run_oid) = store.resolve_path(b"run", ROOT_OID) {
+        if store.find_in(b"user", run_oid).is_none() {
+            let _ = store.mkdir(b"user", run_oid);
+        }
+        if let Some(user_oid) = store.find_in(b"user", run_oid) {
+            if store.find_in(b"0", user_oid).is_none() {
+                let _ = store.mkdir(b"0", user_oid);
             }
         }
     }
@@ -168,7 +182,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
         }
 
         // Check pending signals (same mechanism as child_handler)
-        if let Some(action) = syscalls_signal::check_pending_signals(ep_cap, pid as usize, kernel_tid) {
+        if let Some(action) = syscalls_signal::check_pending_signals(ep_cap, pid as usize, kernel_tid, 0) {
             if action.is_break() { break; }
             continue;
         }
@@ -370,8 +384,10 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             SYS_SENDMSG  => { let mut ctx = make_ctx!(); syscalls_net::sys_sendmsg(&mut ctx, &msg); }
             SYS_RECVFROM => { let mut ctx = make_ctx!(); syscalls_net::sys_recvfrom(&mut ctx, &msg); }
             SYS_RECVMSG  => { let mut ctx = make_ctx!(); syscalls_net::sys_recvmsg(&mut ctx, &msg); }
-            SYS_BIND | SYS_LISTEN | SYS_SETSOCKOPT
-                         => { let mut ctx = make_ctx!(); syscalls_net::sys_bind_listen_setsockopt(&mut ctx, &msg); }
+            SYS_BIND     => { let mut ctx = make_ctx!(); syscalls_net::sys_bind(&mut ctx, &msg); }
+            SYS_LISTEN   => { let mut ctx = make_ctx!(); syscalls_net::sys_listen(&mut ctx, &msg); }
+            SYS_SETSOCKOPT
+                         => { let mut ctx = make_ctx!(); syscalls_net::sys_setsockopt(&mut ctx, &msg); }
             SYS_GETSOCKNAME | SYS_GETPEERNAME
                          => { let mut ctx = make_ctx!(); syscalls_net::sys_getsockname(&mut ctx, &msg, syscall_nr); }
             SYS_GETSOCKOPT=>{ let mut ctx = make_ctx!(); syscalls_net::sys_getsockopt(&mut ctx, &msg); }

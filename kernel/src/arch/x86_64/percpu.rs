@@ -5,8 +5,9 @@
 //! assembly code can access per-CPU fields at fixed offsets (e.g. `gs:[8]`
 //! for `kernel_stack_top`).
 //!
-//! No SWAPGS is used — GS always points to PerCpu in both kernel and
-//! user mode (user code in this OS doesn't use GS).
+//! SWAPGS is used at every user/kernel boundary: SYSCALL entry/exit,
+//! interrupt handlers, and exception handlers. In kernel mode GS points
+//! to PerCpu; in user mode GS holds the application's value (e.g. Wine TEB).
 
 use alloc::boxed::Box;
 use x86_64::structures::tss::TaskStateSegment;
@@ -19,6 +20,10 @@ pub const PERCPU_URSP: usize = 16;
 
 /// MSR number for IA32_GS_BASE.
 const IA32_GS_BASE: u32 = 0xC000_0101;
+
+/// MSR number for IA32_KERNEL_GS_BASE (swapped by SWAPGS instruction).
+/// In kernel mode (after swapgs at entry): GS_BASE = percpu, KERNEL_GS_BASE = user value.
+const IA32_KERNEL_GS_BASE: u32 = 0xC000_0102;
 
 #[repr(C)]
 pub struct PerCpu {
@@ -124,6 +129,21 @@ pub fn write_gs_base(addr: u64) {
         core::arch::asm!(
             "wrmsr",
             in("ecx") IA32_GS_BASE,
+            in("eax") addr as u32,
+            in("edx") (addr >> 32) as u32,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+}
+
+/// Write the IA32_KERNEL_GS_BASE MSR.
+/// In kernel mode (after swapgs), this holds the user's GS value.
+/// Used to restore a thread's user GS_BASE on context switch.
+pub fn write_kernel_gs_base(addr: u64) {
+    unsafe {
+        core::arch::asm!(
+            "wrmsr",
+            in("ecx") IA32_KERNEL_GS_BASE,
             in("eax") addr as u32,
             in("edx") (addr >> 32) as u32,
             options(nomem, nostack, preserves_flags),

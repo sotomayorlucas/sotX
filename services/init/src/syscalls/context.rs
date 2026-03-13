@@ -120,6 +120,40 @@ impl SyscallContext<'_> {
         u64::from_le_bytes(buf)
     }
 
+    /// Map a frame into the child's address space.
+    /// For same-AS children (child_as_cap==0), maps into init's AS.
+    /// For separate-AS children, uses map_into.
+    pub fn guest_map(&self, vaddr: u64, frame_cap: u64, flags: u64) -> Result<(), i64> {
+        if self.child_as_cap == 0 {
+            sotos_common::sys::map(vaddr, frame_cap, flags)
+        } else {
+            sotos_common::sys::map_into(self.child_as_cap, vaddr, frame_cap, flags)
+        }
+    }
+
+    /// Unmap a page from the child's address space (frees the frame).
+    /// For same-AS children, uses unmap_free on init's AS.
+    /// For separate-AS children, uses unmap_from (frame leaked for now).
+    pub fn guest_unmap(&self, vaddr: u64) {
+        if self.child_as_cap == 0 {
+            let _ = sotos_common::sys::unmap_free(vaddr);
+        } else {
+            let _ = sotos_common::sys::unmap_from(self.child_as_cap, vaddr);
+        }
+    }
+
+    /// Zero-fill a page in the child's address space.
+    pub fn guest_zero_page(&self, vaddr: u64) {
+        if self.child_as_cap == 0 {
+            unsafe { core::ptr::write_bytes(vaddr as *mut u8, 0, 4096); }
+        } else {
+            let zeros = [0u8; 4096];
+            let _ = sotos_common::sys::vm_write(
+                self.child_as_cap, vaddr, zeros.as_ptr() as u64, 4096,
+            );
+        }
+    }
+
     /// Read a NUL-terminated path from the child's memory.
     /// Returns the length of the path (up to out.len() - 1).
     pub fn guest_copy_path(&self, guest_ptr: u64, out: &mut [u8]) -> usize {

@@ -103,6 +103,8 @@ const SYS_BOOTINFO_WRITE: u64 = 133;
 
 /// Syscall number — page permission change (mprotect-like).
 const SYS_PROTECT: u64 = 134;
+const SYS_PROTECT_IN: u64 = 175;
+const SYS_WX_RELAX: u64 = 177;
 
 /// Syscall number — unmap + free physical frame in one step.
 const SYS_UNMAP_FREE: u64 = 24;
@@ -175,6 +177,60 @@ fn msg_to_frame(frame: &mut TrapFrame, msg: &Message) {
     frame.r15 = msg.regs[7];
 }
 
+/// Restore GPRs + RIP/RSP/RFLAGS from a ucontext (glibc gregset_t) on
+/// the user stack. Factored out of syscall_dispatch to keep its stack frame
+/// small enough not to overflow the kernel stack canary in debug builds.
+#[inline(never)]
+unsafe fn restore_ucontext(frame: &mut TrapFrame, ucontext_ptr: u64,
+                           rip: &mut u64, rsp: &mut u64, rflags: &mut u64) {
+    let gregs = (ucontext_ptr + 40) as *const u64;
+    let uc_rip    = core::ptr::read_volatile(gregs.add(16));
+    let uc_rsp    = core::ptr::read_volatile(gregs.add(15));
+    let uc_rflags = core::ptr::read_volatile(gregs.add(17));
+    let uc_trapno = core::ptr::read_volatile(gregs.add(20));
+    let uc_rax = core::ptr::read_volatile(gregs.add(13));
+    let uc_rcx = core::ptr::read_volatile(gregs.add(14));
+    let uc_rdx = core::ptr::read_volatile(gregs.add(12));
+    let uc_rbx = core::ptr::read_volatile(gregs.add(11));
+    let uc_rbp = core::ptr::read_volatile(gregs.add(10));
+    let uc_r11_val = core::ptr::read_volatile(gregs.add(3));
+    kdebug!("rt_sigreturn: uc_ptr={:#x} frame_rip={:#x} uc_rip={:#x} uc_rsp={:#x} uc_trapno={}", ucontext_ptr, *rip, uc_rip, uc_rsp, uc_trapno);
+    kdebug!("  uc_gregs: rax={:#x} rbx={:#x} rcx={:#x} rdx={:#x} rbp={:#x} r11={:#x}", uc_rax, uc_rbx, uc_rcx, uc_rdx, uc_rbp, uc_r11_val);
+    if uc_trapno == 14 {
+        let uc_rdi = core::ptr::read_volatile(gregs.add(8));
+        let uc_rsi = core::ptr::read_volatile(gregs.add(9));
+        let uc_r8  = core::ptr::read_volatile(gregs.add(0));
+        let uc_r9  = core::ptr::read_volatile(gregs.add(1));
+        let uc_r10 = core::ptr::read_volatile(gregs.add(2));
+        let uc_r12 = core::ptr::read_volatile(gregs.add(4));
+        let uc_r13 = core::ptr::read_volatile(gregs.add(5));
+        let uc_r14 = core::ptr::read_volatile(gregs.add(6));
+        let uc_r15 = core::ptr::read_volatile(gregs.add(7));
+        kdebug!("  uc_extra: rdi={:#x} rsi={:#x} r8={:#x} r9={:#x} r10={:#x}",
+            uc_rdi, uc_rsi, uc_r8, uc_r9, uc_r10);
+        kdebug!("  uc_extra: r12={:#x} r13={:#x} r14={:#x} r15={:#x}",
+            uc_r12, uc_r13, uc_r14, uc_r15);
+    }
+    if uc_rip != 0 { *rip = uc_rip; }
+    if uc_rsp != 0 { *rsp = uc_rsp; }
+    if uc_rflags != 0 { *rflags = uc_rflags; }
+    // Restore GPRs from ucontext
+    frame.r8  = core::ptr::read_volatile(gregs.add(0));
+    frame.r9  = core::ptr::read_volatile(gregs.add(1));
+    frame.r10 = core::ptr::read_volatile(gregs.add(2));
+    frame.r12 = core::ptr::read_volatile(gregs.add(4));
+    frame.r13 = core::ptr::read_volatile(gregs.add(5));
+    frame.r14 = core::ptr::read_volatile(gregs.add(6));
+    frame.r15 = core::ptr::read_volatile(gregs.add(7));
+    frame.rdi = core::ptr::read_volatile(gregs.add(8));
+    frame.rsi = core::ptr::read_volatile(gregs.add(9));
+    frame.rbp = core::ptr::read_volatile(gregs.add(10));
+    frame.rbx = core::ptr::read_volatile(gregs.add(11));
+    frame.rdx = core::ptr::read_volatile(gregs.add(12));
+    frame.rax = core::ptr::read_volatile(gregs.add(13));
+    frame.r11 = core::ptr::read_volatile(gregs.add(17));
+}
+
 /// Main syscall dispatcher — called from assembly with IF=0.
 #[no_mangle]
 pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
@@ -194,12 +250,19 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
         // Linux syscall 158 = arch_prctl: rdi = subcommand, rsi = addr.
         if frame.rax == 158 {
             match frame.rdi {
+                0x1001 => { // ARCH_SET_GS
+                    sched::set_current_gs_base(frame.rsi);
+                    frame.rax = 0;
+                }
                 0x1002 => { // ARCH_SET_FS
                     sched::set_current_fs_base(frame.rsi);
                     frame.rax = 0;
                 }
                 0x1003 => { // ARCH_GET_FS
                     frame.rax = sched::get_current_fs_base();
+                }
+                0x1004 => { // ARCH_GET_GS
+                    frame.rax = sched::get_current_gs_base();
                 }
                 _ => {
                     frame.rax = (-22i64) as u64; // -EINVAL
@@ -239,11 +302,19 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
                     frame.r13     = core::ptr::read_volatile(frame_ptr.add(14));
                     frame.r14     = core::ptr::read_volatile(frame_ptr.add(15));
                     frame.r15     = core::ptr::read_volatile(frame_ptr.add(16));
-                    let rip       = core::ptr::read_volatile(frame_ptr.add(17));
-                    let rsp       = core::ptr::read_volatile(frame_ptr.add(18));
-                    let rflags    = core::ptr::read_volatile(frame_ptr.add(19));
+                    let mut rip       = core::ptr::read_volatile(frame_ptr.add(17));
+                    let mut rsp       = core::ptr::read_volatile(frame_ptr.add(18));
+                    let mut rflags    = core::ptr::read_volatile(frame_ptr.add(19));
                     let fs_base   = core::ptr::read_volatile(frame_ptr.add(20));
                     // let old_mask = core::ptr::read_volatile(frame_ptr.add(21));
+                    let ucontext_ptr = core::ptr::read_volatile(frame_ptr.add(22));
+
+                    // If signal handler had SA_SIGINFO and a ucontext was provided,
+                    // restore GPRs/RIP/RSP/RFLAGS from the (possibly modified) ucontext.
+                    // Factored into a separate #[inline(never)] fn to reduce stack pressure.
+                    if ucontext_ptr != 0 && ucontext_ptr < USER_ADDR_LIMIT {
+                        restore_ucontext(frame, ucontext_ptr, &mut rip, &mut rsp, &mut rflags);
+                    }
 
                     // Restore user RIP and RSP
                     frame.rcx = rip;      // sysretq uses rcx as return RIP
@@ -565,11 +636,13 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
                         frame.rax = SysError::InvalidArg as i64 as u64;
                     } else {
                         let mut flags = PAGE_PRESENT | PAGE_USER | (user_flags & USER_FLAG_MASK);
-                        // W^X: writable pages are never executable
-                        if flags & PAGE_WRITABLE != 0 && flags & PAGE_NO_EXECUTE == 0 {
+                        let cr3 = paging::read_cr3();
+                        // W^X: writable pages are never executable (unless relaxed)
+                        if flags & PAGE_WRITABLE != 0 && flags & PAGE_NO_EXECUTE == 0
+                            && !paging::is_wx_relaxed(cr3)
+                        {
                             flags |= PAGE_NO_EXECUTE;
                         }
-                        let cr3 = paging::read_cr3();
                         let aspace = AddressSpace::from_cr3(cr3);
                         aspace.map_page(vaddr, paddr, flags);
                         paging::invlpg(vaddr);
@@ -1078,11 +1151,13 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
                     } else {
                         let paddr = base + offset;
                         let mut flags = PAGE_PRESENT | PAGE_USER | (user_flags & USER_FLAG_MASK);
-                        // W^X: writable pages are never executable
-                        if flags & PAGE_WRITABLE != 0 && flags & PAGE_NO_EXECUTE == 0 {
+                        let cr3 = paging::read_cr3();
+                        // W^X: writable pages are never executable (unless relaxed)
+                        if flags & PAGE_WRITABLE != 0 && flags & PAGE_NO_EXECUTE == 0
+                            && !paging::is_wx_relaxed(cr3)
+                        {
                             flags |= PAGE_NO_EXECUTE;
                         }
-                        let cr3 = paging::read_cr3();
                         let aspace = AddressSpace::from_cr3(cr3);
                         aspace.map_page(vaddr, paddr, flags);
                         paging::invlpg(vaddr);
@@ -1105,11 +1180,13 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
                 frame.rax = SysError::InvalidArg as i64 as u64;
             } else {
                 let mut flags = PAGE_PRESENT | PAGE_USER | (user_flags & USER_FLAG_MASK);
-                // W^X: writable pages are never executable
-                if flags & PAGE_WRITABLE != 0 && flags & PAGE_NO_EXECUTE == 0 {
+                let cr3 = paging::read_cr3();
+                // W^X: writable pages are never executable (unless relaxed)
+                if flags & PAGE_WRITABLE != 0 && flags & PAGE_NO_EXECUTE == 0
+                    && !paging::is_wx_relaxed(cr3)
+                {
                     flags |= PAGE_NO_EXECUTE;
                 }
-                let cr3 = paging::read_cr3();
                 let aspace = AddressSpace::from_cr3(cr3);
                 if aspace.protect_page(vaddr, flags) {
                     paging::invlpg(vaddr);
@@ -1117,6 +1194,40 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
                 } else {
                     frame.rax = SysError::InvalidArg as i64 as u64;
                 }
+            }
+        }
+
+        // SYS_PROTECT_IN — change page permissions in a target address space
+        // rdi = as_cap (WRITE), rsi = vaddr (page-aligned), rdx = new flags
+        // W^X enforced: writable pages get NX.
+        SYS_PROTECT_IN => {
+            match cap::validate(frame.rdi as u32, Rights::WRITE) {
+                Ok(CapObject::AddrSpace { cr3 }) => {
+                    let vaddr = frame.rsi;
+                    let user_flags = frame.rdx;
+                    if vaddr & 0xFFF != 0 || vaddr >= USER_ADDR_LIMIT {
+                        frame.rax = SysError::InvalidArg as i64 as u64;
+                    } else {
+                        let mut flags = PAGE_PRESENT | PAGE_USER | (user_flags & USER_FLAG_MASK);
+                        // W^X: writable pages are never executable (unless relaxed)
+                        if flags & PAGE_WRITABLE != 0 && flags & PAGE_NO_EXECUTE == 0
+                            && !paging::is_wx_relaxed(cr3)
+                        {
+                            flags |= PAGE_NO_EXECUTE;
+                        }
+                        let aspace = AddressSpace::from_cr3(cr3);
+                        if aspace.protect_page(vaddr, flags) {
+                            if cr3 == paging::read_cr3() {
+                                paging::invlpg(vaddr);
+                            }
+                            frame.rax = 0;
+                        } else {
+                            frame.rax = SysError::InvalidArg as i64 as u64;
+                        }
+                    }
+                }
+                Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
+                Err(e) => frame.rax = e as i64 as u64,
             }
         }
 
@@ -1145,7 +1256,10 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
             let addr_space = paging::AddressSpace::new_user();
             let cr3 = addr_space.cr3();
             match cap::insert(CapObject::AddrSpace { cr3 }, Rights::ALL, None) {
-                Some(cap_id) => frame.rax = cap_id.raw() as u64,
+                Some(cap_id) => {
+                    fault::register_cr3_cap(cr3, cap_id.raw());
+                    frame.rax = cap_id.raw() as u64;
+                }
                 None => frame.rax = SysError::OutOfResources as i64 as u64,
             }
         }
@@ -1164,15 +1278,17 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
                                 frame.rax = SysError::InvalidArg as i64 as u64;
                             } else {
                                 let mut flags = PAGE_PRESENT | PAGE_USER | (user_flags & USER_FLAG_MASK);
-                                // W^X: writable pages are never executable
-                                if flags & PAGE_WRITABLE != 0 && flags & PAGE_NO_EXECUTE == 0 {
+                                // W^X: writable pages are never executable (unless relaxed)
+                                if flags & PAGE_WRITABLE != 0 && flags & PAGE_NO_EXECUTE == 0
+                                    && !paging::is_wx_relaxed(cr3)
+                                {
                                     flags |= PAGE_NO_EXECUTE;
                                 }
                                 let aspace = paging::AddressSpace::from_cr3(cr3);
                                 aspace.map_page(vaddr, paddr, flags);
-                                // No invlpg needed — target AS may not be current CR3.
-                                // If it is, the caller can issue invlpg themselves or
-                                // it will be flushed on next CR3 load.
+                                if cr3 == paging::read_cr3() {
+                                    paging::invlpg(vaddr);
+                                }
                                 frame.rax = 0;
                             }
                         }
@@ -1559,7 +1675,9 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
 
         // SYS_GET_THREAD_REGS (172) — read saved user registers of a blocked thread.
         // Used by LUCAS for signal frame construction.
-        // rdi = thread_id, rsi = output buffer pointer (18 u64s in caller's space).
+        // rdi = thread_id, rsi = output buffer pointer (20 u64s in caller's space).
+        // Returns: [0..14]=GPRs, [15]=RSP, [16]=fs_base, [17]=kernel_signal,
+        //          [18]=real_rip, [19]=real_rflags (non-zero when from interrupt context).
         sotos_common::SYS_GET_THREAD_REGS => {
             let target_tid = frame.rdi as u32;
             let buf_ptr = frame.rsi;
@@ -1570,7 +1688,7 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
                     Some(regs) => {
                         let out = buf_ptr as *mut u64;
                         unsafe {
-                            for i in 0..18 {
+                            for i in 0..20 {
                                 core::ptr::write_volatile(out.add(i), regs[i]);
                             }
                         }
@@ -1611,6 +1729,42 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
             }
         }
 
+        // SYS_GET_FAULT_INFO (175) — get fault addr/code for a thread's last kernel signal.
+        // rdi = thread_id (raw), returns: rax = fault_addr, rdx = fault_code.
+        sotos_common::SYS_GET_FAULT_INFO => {
+            let target_tid = frame.rdi as u32;
+            let mut sched_lock = sched::SCHEDULER.lock();
+            if let Some(slot) = sched_lock.slot_of(ThreadId(target_tid)) {
+                if let Some(t) = sched_lock.threads.get_mut_by_index(slot) {
+                    frame.rax = t.fault_addr;
+                    frame.rdx = t.fault_code;
+                    // Consume: clear after read
+                    t.fault_addr = 0;
+                    t.fault_code = 0;
+                } else {
+                    frame.rax = 0;
+                    frame.rdx = 0;
+                }
+            } else {
+                frame.rax = 0;
+                frame.rdx = 0;
+            }
+            drop(sched_lock);
+        }
+
+        // SYS_WX_RELAX — enable/disable W^X relaxation for an address space
+        // rdi = as_cap (WRITE), rsi = 1 (relax) / 0 (enforce)
+        SYS_WX_RELAX => {
+            match cap::validate(frame.rdi as u32, Rights::WRITE) {
+                Ok(CapObject::AddrSpace { cr3 }) => {
+                    paging::set_wx_relaxed(cr3, frame.rsi != 0);
+                    frame.rax = 0;
+                }
+                Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
+                Err(e) => frame.rax = e as i64 as u64,
+            }
+        }
+
         // SYS_AS_CLONE — clone an address space with CoW semantics
         // rdi = src_as_cap (READ)
         // Returns: rax = new AS cap_id (or error)
@@ -1619,12 +1773,16 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
                 Ok(CapObject::AddrSpace { cr3 }) => {
                     let src = paging::AddressSpace::from_cr3(cr3);
                     let child = src.clone_cow();
-                    // Flush TLB: parent PTEs changed from writable to read-only.
-                    // If parent is current CR3, stale TLB entries could allow writes.
+                    // Flush TLB: symmetric CoW marks parent PTEs read-only.
+                    // Stale writable TLB entries would bypass CoW protection.
                     if cr3 == paging::read_cr3() {
                         paging::flush_tlb();
                     }
                     let child_cr3 = child.cr3();
+                    // Propagate W^X relaxation from parent to child AS
+                    if paging::is_wx_relaxed(cr3) {
+                        paging::set_wx_relaxed(child_cr3, true);
+                    }
                     match cap::insert(CapObject::AddrSpace { cr3: child_cr3 }, Rights::ALL, None) {
                         Some(cap_id) => {
                             fault::register_cr3_cap(child_cr3, cap_id.raw());

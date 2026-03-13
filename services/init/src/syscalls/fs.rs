@@ -21,6 +21,51 @@ use super::context::SyscallContext;
 
 const MAP_WRITABLE: u64 = 2;
 
+/// Store the resolved directory path for fchdir() support.
+/// Allocates a slot in DIR_FD_PATHS and stores the slot index in sock_conn_id[fd].
+fn dir_store_path(ctx: &mut SyscallContext, fd: usize, name: &[u8]) {
+    let grp_base = ctx.pid.saturating_sub(1) * 8;
+    // Find a free slot (0..7)
+    for slot in 0..8usize {
+        let gslot = grp_base + slot;
+        if gslot >= crate::fd::MAX_DIR_SLOTS { break; }
+        if unsafe { crate::fd::DIR_FD_PATHS[gslot][0] } == 0 || ctx.sock_conn_id[fd] as usize == slot {
+            let resolved = if name == b"." {
+                // Resolve "." to absolute CWD
+                let mut clen = 0;
+                while clen < GRP_CWD_MAX && ctx.cwd[clen] != 0 { clen += 1; }
+                unsafe {
+                    crate::fd::DIR_FD_PATHS[gslot] = [0u8; 128];
+                    let copy = clen.min(127);
+                    crate::fd::DIR_FD_PATHS[gslot][..copy].copy_from_slice(&ctx.cwd[..copy]);
+                }
+                true
+            } else if !name.is_empty() && name[0] == b'/' {
+                unsafe {
+                    crate::fd::DIR_FD_PATHS[gslot] = [0u8; 128];
+                    let copy = name.len().min(127);
+                    crate::fd::DIR_FD_PATHS[gslot][..copy].copy_from_slice(&name[..copy]);
+                }
+                true
+            } else {
+                // Relative path: resolve with CWD
+                let mut abs = [0u8; 256];
+                let alen = resolve_with_cwd(ctx.cwd, name, &mut abs);
+                unsafe {
+                    crate::fd::DIR_FD_PATHS[gslot] = [0u8; 128];
+                    let copy = alen.min(127);
+                    crate::fd::DIR_FD_PATHS[gslot][..copy].copy_from_slice(&abs[..copy]);
+                }
+                true
+            };
+            if resolved {
+                ctx.sock_conn_id[fd] = slot as u32;
+            }
+            return;
+        }
+    }
+}
+
 pub(crate) fn sys_read(ctx: &mut SyscallContext, msg: &IpcMsg) {
     let fd = msg.regs[0] as usize;
     let buf_ptr = msg.regs[1];
@@ -54,55 +99,56 @@ pub(crate) fn sys_read(ctx: &mut SyscallContext, msg: &IpcMsg) {
             }
         }
         9 => {
-            // /dev/zero: fill buffer with zeros
+            // /dev/zero: fill buffer with zeros — use guest_write for CoW fork
             let n = len.min(4096);
             if n > 0 {
-                unsafe { core::ptr::write_bytes(buf_ptr as *mut u8, 0, n); }
+                let zeros = [0u8; 4096];
+                ctx.guest_write(buf_ptr, &zeros[..n]);
             }
             reply_val(ctx.ep_cap, n as i64);
         }
         20 => {
-            // /dev/urandom: fill buffer with ChaCha20 CSPRNG
+            // /dev/urandom: fill buffer with ChaCha20 CSPRNG — use guest_write for CoW fork
             let n = len.min(4096);
             if n > 0 {
-                let dst = unsafe { core::slice::from_raw_parts_mut(buf_ptr as *mut u8, n) };
-                fill_random(dst);
+                let mut local_buf = [0u8; 4096];
+                fill_random(&mut local_buf[..n]);
+                ctx.guest_write(buf_ptr, &local_buf[..n]);
             }
             reply_val(ctx.ep_cap, n as i64);
         }
         8 => reply_val(ctx.ep_cap, 0), // /dev/null: EOF
         22 => {
-            // eventfd read: return counter, reset to 0
+            // eventfd read: return counter, reset to 0 — use guest_write for CoW fork
             if len < 8 { reply_val(ctx.ep_cap, -EINVAL); return; }
             if let Some(slot) = ctx.eventfd_slot_fd.iter().position(|&x| x == fd) {
                 let val = ctx.eventfd_counter[slot];
                 if val == 0 {
-                    // Non-blocking: EAGAIN. Wine uses EFD_NONBLOCK.
                     reply_val(ctx.ep_cap, -EAGAIN);
                 } else {
-                    unsafe { *(buf_ptr as *mut u64) = val; }
+                    ctx.guest_write(buf_ptr, &val.to_le_bytes());
                     ctx.eventfd_counter[slot] = 0;
                     reply_val(ctx.ep_cap, 8);
                 }
             } else { reply_val(ctx.ep_cap, -EBADF); }
         }
         23 => {
-            // timerfd read: return expiration count
+            // timerfd read: return expiration count — use guest_write for CoW fork
             if len < 8 { reply_val(ctx.ep_cap, -EINVAL); return; }
             if let Some(slot) = ctx.timerfd_slot_fd.iter().position(|&x| x == fd) {
                 let now = rdtsc();
                 let exp = ctx.timerfd_expiry_tsc[slot];
                 if exp != 0 && now >= exp {
-                    unsafe { *(buf_ptr as *mut u64) = 1; }
-                    // Re-arm if interval set
+                    let one: u64 = 1;
+                    ctx.guest_write(buf_ptr, &one.to_le_bytes());
                     if ctx.timerfd_interval_ns[slot] != 0 {
-                        ctx.timerfd_expiry_tsc[slot] = now + ctx.timerfd_interval_ns[slot] * 2; // ~2GHz
+                        ctx.timerfd_expiry_tsc[slot] = now + ctx.timerfd_interval_ns[slot] * 2;
                     } else {
-                        ctx.timerfd_expiry_tsc[slot] = 0; // one-shot, disarmed
+                        ctx.timerfd_expiry_tsc[slot] = 0;
                     }
                     reply_val(ctx.ep_cap, 8);
                 } else {
-                    reply_val(ctx.ep_cap, -EAGAIN); // not expired
+                    reply_val(ctx.ep_cap, -EAGAIN);
                 }
             } else { reply_val(ctx.ep_cap, -EBADF); }
         }
@@ -119,7 +165,8 @@ pub(crate) fn sys_read(ctx: &mut SyscallContext, msg: &IpcMsg) {
                         let avail = if offset < sz { sz - offset } else { 0 };
                         let n = (len as u64).min(avail) as usize;
                         if n > 0 {
-                            unsafe { core::ptr::copy_nonoverlapping((base + offset) as *const u8, buf_ptr as *mut u8, n); }
+                            let src = unsafe { core::slice::from_raw_parts((base + offset) as *const u8, n) };
+                            ctx.guest_write(buf_ptr, src);
                             ctx.vfs_files[s][2] += n as u64;
                         }
                         reply_val(ctx.ep_cap, n as i64);
@@ -129,7 +176,7 @@ pub(crate) fn sys_read(ctx: &mut SyscallContext, msg: &IpcMsg) {
             } else { reply_val(ctx.ep_cap, -EBADF); }
         }
         12 => {
-            // Initrd file: find the slot for this FD
+            // Initrd file: find the slot for this FD — use guest_write for separate-AS
             let mut found = false;
             for s in 0..GRP_MAX_INITRD {
                 if ctx.initrd_files[s][3] == fd as u64 && ctx.initrd_files[s][0] != 0 {
@@ -139,13 +186,8 @@ pub(crate) fn sys_read(ctx: &mut SyscallContext, msg: &IpcMsg) {
                     let avail = if pos < file_size { file_size - pos } else { 0 };
                     let to_read = (len as u64).min(avail) as usize;
                     if to_read > 0 {
-                        unsafe {
-                            core::ptr::copy_nonoverlapping(
-                                (data_base + pos) as *const u8,
-                                buf_ptr as *mut u8,
-                                to_read,
-                            );
-                        }
+                        let src = unsafe { core::slice::from_raw_parts((data_base + pos) as *const u8, to_read) };
+                        ctx.guest_write(buf_ptr, src);
                         ctx.initrd_files[s][2] = pos + to_read as u64;
                     }
                     reply_val(ctx.ep_cap, to_read as i64);
@@ -157,18 +199,22 @@ pub(crate) fn sys_read(ctx: &mut SyscallContext, msg: &IpcMsg) {
         }
         13 => {
             // VFS file: read via shared ObjectStore
+            // Use guest_write for CoW fork children (child_as_cap != 0)
             let mut found = false;
             for s in 0..GRP_MAX_VFS {
                 if ctx.vfs_files[s][3] == fd as u64 && ctx.vfs_files[s][0] != 0 {
                     let oid = ctx.vfs_files[s][0];
                     let pos = ctx.vfs_files[s][2] as usize;
-                    let dst = unsafe { core::slice::from_raw_parts_mut(buf_ptr as *mut u8, len) };
+                    let safe_len = len.min(4096);
+                    let mut local_buf = [0u8; 4096];
+                    let dst = &mut local_buf[..safe_len];
                     vfs_lock();
                     let result = unsafe { shared_store() }
                         .and_then(|store| store.read_obj_range(oid, pos, dst).ok());
                     vfs_unlock();
                     match result {
                         Some(n) => {
+                            ctx.guest_write(buf_ptr, &local_buf[..n]);
                             ctx.vfs_files[s][2] += n as u64;
                             reply_val(ctx.ep_cap, n as i64);
                         }
@@ -181,17 +227,11 @@ pub(crate) fn sys_read(ctx: &mut SyscallContext, msg: &IpcMsg) {
             if !found { reply_val(ctx.ep_cap, -EBADF); }
         }
         15 => {
-            // Procfs virtual file: read from dir_buf
+            // Procfs virtual file: read from dir_buf — use guest_write for separate-AS
             let avail = if *ctx.dir_pos < *ctx.dir_len { *ctx.dir_len - *ctx.dir_pos } else { 0 };
             let to_read = len.min(avail);
             if to_read > 0 {
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        ctx.dir_buf[*ctx.dir_pos..].as_ptr(),
-                        buf_ptr as *mut u8,
-                        to_read,
-                    );
-                }
+                ctx.guest_write(buf_ptr, &ctx.dir_buf[*ctx.dir_pos..*ctx.dir_pos + to_read]);
                 *ctx.dir_pos += to_read;
             }
             reply_val(ctx.ep_cap, to_read as i64);
@@ -324,6 +364,37 @@ pub(crate) fn sys_read(ctx: &mut SyscallContext, msg: &IpcMsg) {
                 let _ = sys::send(ctx.ep_cap, &reply);
             }
         }
+        27 | 28 => {
+            // AF_UNIX connected socket read.
+            // kind=27 (client): read from pipe_b (server→client)
+            // kind=28 (server): read from pipe_a (client→server)
+            let conn = ctx.sock_conn_id[fd] as usize;
+            if conn < crate::fd::MAX_UNIX_CONNS {
+                let pipe_id = if ctx.child_fds[fd] == 27 {
+                    unsafe { crate::fd::UNIX_CONN_PIPE_B[conn] as usize }
+                } else {
+                    unsafe { crate::fd::UNIX_CONN_PIPE_A[conn] as usize }
+                };
+                let want = len.min(4096);
+                let mut tmp = [0u8; 4096];
+                let n = pipe_read(pipe_id, &mut tmp[..want]);
+                if n > 0 {
+                    ctx.guest_write(buf_ptr, &tmp[..n]);
+                    reply_val(ctx.ep_cap, n as i64);
+                } else if pipe_writer_closed(pipe_id) {
+                    reply_val(ctx.ep_cap, 0); // EOF
+                } else {
+                    mark_pipe_retry_on(ctx.pid, pipe_id);
+                    let reply = sotos_common::IpcMsg {
+                        tag: sotos_common::PIPE_RETRY_TAG,
+                        regs: [0; 8],
+                    };
+                    let _ = sys::send(ctx.ep_cap, &reply);
+                }
+            } else {
+                reply_val(ctx.ep_cap, -EBADF);
+            }
+        }
         _ => reply_val(ctx.ep_cap, -EBADF),
     }
 }
@@ -352,7 +423,7 @@ pub(crate) fn sys_write(ctx: &mut SyscallContext, msg: &IpcMsg) {
             // eventfd write: add value to counter
             if len < 8 { reply_val(ctx.ep_cap, -EINVAL); return; }
             if let Some(slot) = ctx.eventfd_slot_fd.iter().position(|&x| x == fd) {
-                let val = unsafe { *(buf_ptr as *const u64) };
+                let val = ctx.guest_read_u64(buf_ptr);
                 ctx.eventfd_counter[slot] = ctx.eventfd_counter[slot].saturating_add(val);
                 reply_val(ctx.ep_cap, 8);
             } else { reply_val(ctx.ep_cap, -EBADF); }
@@ -367,8 +438,11 @@ pub(crate) fn sys_write(ctx: &mut SyscallContext, msg: &IpcMsg) {
                         let n = len.min(cap.saturating_sub(offset));
                         if n > 0 {
                             let base = ctx.memfd_base[slot];
-                            unsafe { core::ptr::copy_nonoverlapping(buf_ptr as *const u8, (base + offset as u64) as *mut u8, n); }
-                            ctx.vfs_files[s][2] += n as u64;
+                            let mut local_buf = [0u8; 4096];
+                            let chunk = n.min(4096);
+                            ctx.guest_read(buf_ptr, &mut local_buf[..chunk]);
+                            unsafe { core::ptr::copy_nonoverlapping(local_buf.as_ptr(), (base + offset as u64) as *mut u8, chunk); }
+                            ctx.vfs_files[s][2] += chunk as u64;
                             let new_end = ctx.vfs_files[s][2];
                             if new_end > ctx.memfd_size[slot] { ctx.memfd_size[slot] = new_end; }
                         }
@@ -390,7 +464,8 @@ pub(crate) fn sys_write(ctx: &mut SyscallContext, msg: &IpcMsg) {
                     tag: NET_CMD_TCP_SEND,
                     regs: [conn_id, 0, chunk as u64, 0, 0, 0, 0, 0],
                 };
-                let data = unsafe { core::slice::from_raw_parts((buf_ptr + off as u64) as *const u8, chunk) };
+                let mut data = [0u8; 40];
+                ctx.guest_read(buf_ptr + off as u64, &mut data[..chunk]);
                 unsafe {
                     let dst = &mut req.regs[3] as *mut u64 as *mut u8;
                     core::ptr::copy_nonoverlapping(data.as_ptr(), dst, chunk);
@@ -504,35 +579,42 @@ pub(crate) fn sys_write(ctx: &mut SyscallContext, msg: &IpcMsg) {
         }
         13 => {
             // VFS file: write via shared ObjectStore
+            // Use guest_read for CoW fork children (child_as_cap != 0)
             let mut found = false;
             for s in 0..GRP_MAX_VFS {
                 if ctx.vfs_files[s][3] == fd as u64 && ctx.vfs_files[s][0] != 0 {
                     let oid = ctx.vfs_files[s][0];
                     let pos = ctx.vfs_files[s][2] as usize;
-                    let data = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, len) };
+                    let safe_len = len.min(4096);
+                    let mut local_buf = [0u8; 4096];
+                    ctx.guest_read(buf_ptr, &mut local_buf[..safe_len]);
+                    let data = &local_buf[..safe_len];
                     vfs_lock();
                     let result = unsafe { shared_store() }
-                        .and_then(|store| {
-                            let f_pre = store.find_slot_pub(oid).map(|sl| store.dir[sl].flags);
-                            let r = store.write_obj_range(oid, pos, data).ok();
-                            let f_post = store.find_slot_pub(oid).map(|sl| store.dir[sl].flags);
-                            if f_pre != f_post {
-                                print(b"WRITE-FLAG-CORRUPT: oid="); print_u64(oid);
-                                print(b" flags "); print_u64(f_pre.unwrap_or(99) as u64);
-                                print(b"->"); print_u64(f_post.unwrap_or(99) as u64);
-                                print(b"\n");
-                            }
-                            r
-                        });
+                        .and_then(|store| store.write_obj_range(oid, pos, data).ok());
                     vfs_unlock();
                     match result {
                         Some(_) => {
-                            ctx.vfs_files[s][2] += len as u64;
+                            ctx.vfs_files[s][2] += safe_len as u64;
                             let new_end = ctx.vfs_files[s][2];
                             if new_end > ctx.vfs_files[s][1] { ctx.vfs_files[s][1] = new_end; }
-                            reply_val(ctx.ep_cap, len as i64);
+                            if ctx.pid >= 5 {
+                                print(b"VFS-W P"); print_u64(ctx.pid as u64);
+                                print(b" fd="); print_u64(fd as u64);
+                                print(b" oid=0x"); crate::framebuffer::print_hex64(oid);
+                                print(b" pos="); print_u64(pos as u64);
+                                print(b" len="); print_u64(safe_len as u64);
+                                print(b"\n");
+                            }
+                            reply_val(ctx.ep_cap, safe_len as i64);
                         }
                         None => {
+                            if ctx.pid >= 5 {
+                                print(b"VFS-W-FAIL P"); print_u64(ctx.pid as u64);
+                                print(b" fd="); print_u64(fd as u64);
+                                print(b" oid=0x"); crate::framebuffer::print_hex64(oid);
+                                print(b"\n");
+                            }
                             reply_val(ctx.ep_cap, -EIO);
                         }
                     }
@@ -540,7 +622,44 @@ pub(crate) fn sys_write(ctx: &mut SyscallContext, msg: &IpcMsg) {
                     break;
                 }
             }
-            if !found { reply_val(ctx.ep_cap, -EBADF); }
+            if !found {
+                if ctx.pid >= 5 {
+                    print(b"VFS-W-NOFD P"); print_u64(ctx.pid as u64);
+                    print(b" fd="); print_u64(fd as u64);
+                    print(b"\n");
+                }
+                reply_val(ctx.ep_cap, -EBADF);
+            }
+        }
+        27 | 28 => {
+            // AF_UNIX connected socket write.
+            // kind=27 (client): write to pipe_a (client→server)
+            // kind=28 (server): write to pipe_b (server→client)
+            let conn = ctx.sock_conn_id[fd] as usize;
+            if conn < crate::fd::MAX_UNIX_CONNS {
+                let pipe_id = if ctx.child_fds[fd] == 27 {
+                    unsafe { crate::fd::UNIX_CONN_PIPE_A[conn] as usize }
+                } else {
+                    unsafe { crate::fd::UNIX_CONN_PIPE_B[conn] as usize }
+                };
+                let safe_len = len.min(4096);
+                let mut local_buf = [0u8; 4096];
+                ctx.guest_read(buf_ptr, &mut local_buf[..safe_len]);
+                let mut written = 0usize;
+                let mut retries = 0u32;
+                while written < safe_len {
+                    let n = pipe_write(pipe_id, &local_buf[written..safe_len]);
+                    written += n;
+                    if n == 0 {
+                        retries += 1;
+                        if retries > 10000 { break; }
+                        sys::yield_now();
+                    } else { retries = 0; }
+                }
+                reply_val(ctx.ep_cap, written as i64);
+            } else {
+                reply_val(ctx.ep_cap, -EBADF);
+            }
         }
         _ => {
             reply_val(ctx.ep_cap, -EBADF);
@@ -565,7 +684,8 @@ pub(crate) fn sys_fstat(ctx: &mut SyscallContext, msg: &IpcMsg) {
             }
         }
         // dev=1 for initrd files (distinct from VFS dev=2)
-        write_linux_stat_dev(stat_ptr, 1, ino, size, false);
+        let buf = build_linux_stat_dev(1, ino, size, false);
+        ctx.guest_write(stat_ptr, &buf);
         reply_val(ctx.ep_cap, 0);
     } else if ctx.child_fds[fd] == 13 || ctx.child_fds[fd] == 14 {
         // VFS file (13) or VFS directory (14): get real size from store
@@ -586,14 +706,17 @@ pub(crate) fn sys_fstat(ctx: &mut SyscallContext, msg: &IpcMsg) {
             }
         }
         // dev=2 for VFS files (distinct from initrd dev=1)
-        write_linux_stat_dev(stat_ptr, 2, oid, size, is_vfs_dir);
+        let buf = build_linux_stat_dev(2, oid, size, is_vfs_dir);
+        ctx.guest_write(stat_ptr, &buf);
         reply_val(ctx.ep_cap, 0);
     } else if ctx.child_fds[fd] == 15 {
         // Procfs virtual file: report content length
-        write_linux_stat(stat_ptr, fd as u64, *ctx.dir_len as u64, false);
+        let buf = build_linux_stat(fd as u64, *ctx.dir_len as u64, false);
+        ctx.guest_write(stat_ptr, &buf);
         reply_val(ctx.ep_cap, 0);
     } else {
-        write_linux_stat(stat_ptr, fd as u64, 0, false);
+        let buf = build_linux_stat(fd as u64, 0, false);
+        ctx.guest_write(stat_ptr, &buf);
         reply_val(ctx.ep_cap, 0);
     }
 }
@@ -603,7 +726,11 @@ pub(crate) fn sys_stat(ctx: &mut SyscallContext, msg: &IpcMsg) {
     let path_ptr = msg.regs[0];
     let stat_ptr = msg.regs[1];
     let mut path = [0u8; 128];
-    let path_len = copy_guest_path(path_ptr, &mut path);
+    let path_len = ctx.guest_copy_path(path_ptr, &mut path);
+    if ctx.pid >= 4 {
+        print(b"STAT P"); print_u64(ctx.pid as u64);
+        print(b" ["); for &b in &path[..path_len] { sys::debug_print(b); } print(b"]\n");
+    }
     // Resolve relative paths against CWD
     let (path, path_len) = if path_len > 0 && path[0] != b'/' {
         let mut abs = [0u8; 256];
@@ -623,7 +750,8 @@ pub(crate) fn sys_stat(ctx: &mut SyscallContext, msg: &IpcMsg) {
     let basename = &name[basename_start..];
     if !basename.is_empty() {
         if let Ok(sz) = sys::initrd_read(basename.as_ptr() as u64, basename.len() as u64, 0, 0) {
-            write_linux_stat(stat_ptr, 0, sz, false);
+            let buf = build_linux_stat(0, sz, false);
+            ctx.guest_write(stat_ptr, &buf);
             reply_val(ctx.ep_cap, 0);
             return;
         }
@@ -639,7 +767,8 @@ pub(crate) fn sys_stat(ctx: &mut SyscallContext, msg: &IpcMsg) {
     vfs_unlock();
 
     if let Some((oid, size, is_dir)) = vfs_stat {
-        write_linux_stat(stat_ptr, oid, size, is_dir);
+        let buf = build_linux_stat_dev(2, oid, size, is_dir);
+        ctx.guest_write(stat_ptr, &buf);
         reply_val(ctx.ep_cap, 0);
     } else {
         // Fall back to exact directory name stubs
@@ -655,18 +784,10 @@ pub(crate) fn sys_stat(ctx: &mut SyscallContext, msg: &IpcMsg) {
             || name == b"/usr/local" || name == b"/usr/local/bin"
             || starts_with(name, b"/dev/");
         if is_known_dir {
-            write_linux_stat(stat_ptr, 0, 4096, true);
+            let buf = build_linux_stat(0, 4096, true);
+            ctx.guest_write(stat_ptr, &buf);
             reply_val(ctx.ep_cap, 0);
         } else {
-            if ctx.pid > 1 {
-                let has_libexec = name.windows(7).any(|w| w == b"libexec");
-                let has_index = name.windows(5).any(|w| w == b"index");
-                if has_libexec || has_index {
-                    print(b"STAT: VFS-miss ");
-                    print(name);
-                    print(b"\n");
-                }
-            }
             reply_val(ctx.ep_cap, -ENOENT);
         }
     }
@@ -763,19 +884,24 @@ pub(crate) fn sys_pread64(ctx: &mut SyscallContext, msg: &IpcMsg) {
         }
         if !found { reply_val(ctx.ep_cap, -EBADF); }
     } else if ctx.child_fds[fd] == 13 {
-        // VFS file pread64
+        // VFS file pread64 — use guest_write for CoW fork children
         let mut found = false;
         for s in 0..GRP_MAX_VFS {
             if ctx.vfs_files[s][3] == fd as u64 && ctx.vfs_files[s][0] != 0 {
                 let oid = ctx.vfs_files[s][0];
-                let dst = unsafe { core::slice::from_raw_parts_mut(buf_ptr as *mut u8, count) };
+                let safe_count = count.min(4096);
+                let mut local_buf = [0u8; 4096];
+                let dst = &mut local_buf[..safe_count];
                 vfs_lock();
                 let result = unsafe { shared_store() }
                     .and_then(|store| store.read_obj_range(oid, off as usize, dst).ok());
                 vfs_unlock();
                 match result {
-                    Some(n) => reply_val(ctx.ep_cap, n as i64),
-                    None => reply_val(ctx.ep_cap, -EIO), // -EIO
+                    Some(n) => {
+                        ctx.guest_write(buf_ptr, &local_buf[..n]);
+                        reply_val(ctx.ep_cap, n as i64);
+                    }
+                    None => reply_val(ctx.ep_cap, -EIO),
                 }
                 found = true;
                 break;
@@ -889,6 +1015,42 @@ pub(crate) fn close_fd_internal(ctx: &mut SyscallContext, fd: usize) -> bool {
             }
         }
         ctx.sock_conn_id[fd] = 0xFFFF;
+    } else if ctx.child_fds[fd] == 26 {
+        // AF_UNIX listener close — deactivate listener slot
+        let slot = ctx.sock_conn_id[fd] as usize;
+        if slot < crate::fd::MAX_UNIX_LISTENERS {
+            crate::fd::UNIX_LISTEN_ACTIVE[slot].store(0, Ordering::Release);
+            unsafe { crate::fd::UNIX_LISTEN_PATH[slot] = [0; 128]; }
+        }
+        ctx.sock_conn_id[fd] = 0xFFFF;
+    } else if ctx.child_fds[fd] == 27 || ctx.child_fds[fd] == 28 {
+        // AF_UNIX connected socket close — close both pipe ends of the connection
+        let conn = ctx.sock_conn_id[fd] as usize;
+        if conn < crate::fd::MAX_UNIX_CONNS {
+            let pipe_a = unsafe { crate::fd::UNIX_CONN_PIPE_A[conn] } as usize;
+            let pipe_b = unsafe { crate::fd::UNIX_CONN_PIPE_B[conn] } as usize;
+            // Mark both pipes as writer-closed so the other side gets EOF
+            if ctx.child_fds[fd] == 27 {
+                // Client closing: client writes to pipe_a, reads from pipe_b
+                if pipe_a < MAX_PIPES { PIPE_WRITE_CLOSED[pipe_a].store(1, Ordering::Release); }
+                if pipe_b < MAX_PIPES { PIPE_READ_CLOSED[pipe_b].store(1, Ordering::Release); }
+            } else {
+                // Server closing: server writes to pipe_b, reads from pipe_a
+                if pipe_b < MAX_PIPES { PIPE_WRITE_CLOSED[pipe_b].store(1, Ordering::Release); }
+                if pipe_a < MAX_PIPES { PIPE_READ_CLOSED[pipe_a].store(1, Ordering::Release); }
+            }
+            // Free pipes if both sides closed
+            if pipe_a < MAX_PIPES
+                && PIPE_WRITE_CLOSED[pipe_a].load(Ordering::Acquire) != 0
+                && PIPE_READ_CLOSED[pipe_a].load(Ordering::Acquire) != 0
+            { pipe_free(pipe_a); }
+            if pipe_b < MAX_PIPES
+                && PIPE_WRITE_CLOSED[pipe_b].load(Ordering::Acquire) != 0
+                && PIPE_READ_CLOSED[pipe_b].load(Ordering::Acquire) != 0
+            { pipe_free(pipe_b); }
+            crate::fd::UNIX_CONN_ACTIVE[conn].store(0, Ordering::Release);
+        }
+        ctx.sock_conn_id[fd] = 0xFFFF;
     }
     ctx.child_fds[fd] = 0;
     // Clear cloexec bit
@@ -899,6 +1061,12 @@ pub(crate) fn close_fd_internal(ctx: &mut SyscallContext, fd: usize) -> bool {
 /// SYS_CLOSE (3): close fd, cleaning up associated resources.
 pub(crate) fn sys_close(ctx: &mut SyscallContext, msg: &IpcMsg) {
     let fd = msg.regs[0] as usize;
+    if ctx.pid >= 5 && fd < GRP_MAX_FDS {
+        print(b"CLOSE P"); print_u64(ctx.pid as u64);
+        print(b" fd="); print_u64(fd as u64);
+        print(b" kind="); print_u64(ctx.child_fds[fd] as u64);
+        print(b"\n");
+    }
     close_fd_internal(ctx, fd);
     reply_val(ctx.ep_cap, 0);
 }
@@ -947,7 +1115,13 @@ pub(crate) fn sys_open(ctx: &mut SyscallContext, msg: &IpcMsg) {
     let path_ptr = msg.regs[0];
     let flags = msg.regs[1] as u32;
     let mut path = [0u8; 128];
-    let path_len = copy_guest_path(path_ptr, &mut path);
+    let path_len = ctx.guest_copy_path(path_ptr, &mut path);
+    // Debug: trace open paths from P3+
+    if ctx.pid >= 3 {
+        print(b"OPEN P"); print_u64(ctx.pid as u64);
+        print(b" fl="); print_u64(flags as u64);
+        print(b" ["); for &b in &path[..path_len] { sys::debug_print(b); } print(b"]\n");
+    }
     // Resolve relative paths against CWD
     let (path, path_len) = if path_len > 0 && path[0] != b'/' {
         let mut abs = [0u8; 256];
@@ -1020,96 +1194,125 @@ pub(crate) fn sys_open(ctx: &mut SyscallContext, msg: &IpcMsg) {
             if dir_oid == 0 { dir_oid = sotos_objstore::ROOT_OID; }
             ctx.child_fds[f] = 14; // kind=14 = directory
             ctx.vfs_files[vs] = [dir_oid, 0, 0, f as u64];
+            dir_store_path(ctx, f, name);
             reply_val(ctx.ep_cap, f as i64);
         } else {
             reply_val(ctx.ep_cap, -EMFILE);
         }
     } else {
-        // Try initrd — extract basename
+        // Priority: VFS first, then initrd, then VFS O_CREAT.
+        // Step 1: Try VFS resolve (existing files)
+        vfs_lock();
+        let vfs_existing = unsafe { shared_store() }.and_then(|store| {
+            use sotos_objstore::ROOT_OID;
+            if let Ok(oid) = store.resolve_path(name, ROOT_OID) {
+                let entry = store.stat(oid)?;
+                if flags & O_TRUNC != 0 && !entry.is_dir() {
+                    store.write_obj(oid, &[]).ok();
+                    return Some((oid, 0u64, entry.is_dir()));
+                }
+                return Some((oid, entry.size, entry.is_dir()));
+            }
+            None
+        });
+        vfs_unlock();
+
+        if let Some((oid, size, is_dir)) = vfs_existing {
+            let mut vslot = None;
+            for s in 0..GRP_MAX_VFS { if ctx.vfs_files[s][0] == 0 { vslot = Some(s); break; } }
+            let mut fd = None;
+            for i in 3..GRP_MAX_FDS { if ctx.child_fds[i] == 0 { fd = Some(i); break; } }
+            if let (Some(vs), Some(f)) = (vslot, fd) {
+                ctx.child_fds[f] = if is_dir { 14 } else { 13 };
+                ctx.vfs_files[vs] = [oid, size, 0, f as u64];
+                ctx.fd_flags[f] = flags;
+                if is_dir { dir_store_path(ctx, f, name); }
+                // Track ntdll.so fd for Wine SharedUserData patch
+                if path_len >= 8 && &name[path_len-8..path_len] == b"ntdll.so" && ctx.pid < 16 {
+                    unsafe { crate::syscalls::mm::NTDLL_SO_FD[ctx.pid] = f as u8; }
+                    print(b"NTDLL-FD P"); crate::framebuffer::print_u64(ctx.pid as u64);
+                    print(b" fd="); crate::framebuffer::print_u64(f as u64);
+                    print(b"\n");
+                }
+                reply_val(ctx.ep_cap, f as i64);
+            } else {
+                reply_val(ctx.ep_cap, -EMFILE);
+            }
+            return;
+        }
+
+        // Step 2: Try initrd (basename matching)
         let mut basename_start = 0usize;
         for idx in 0..path_len {
             if name[idx] == b'/' { basename_start = idx + 1; }
         }
         let basename = &name[basename_start..];
+        let mut opened_initrd = false;
 
-        let mut slot = None;
-        for s in 0..GRP_MAX_INITRD {
-            if ctx.initrd_files[s][0] == 0 { slot = Some(s); break; }
-        }
-
-        if basename.is_empty() || slot.is_none() {
-            reply_val(ctx.ep_cap, -ENOENT);
-            return;
-        }
-        let slot = slot.unwrap();
-
-        let file_buf = ctx.initrd_file_buf_base + (slot as u64) * 0x300000;
-        const FILE_BUF_PAGES_OPEN: u64 = 576; // 2.25 MiB (for libc.so.6 ~2.1 MB)
-        let mut buf_ok = true;
-        for p in 0..FILE_BUF_PAGES_OPEN {
-            if let Ok(f) = sys::frame_alloc() {
-                if sys::map(file_buf + p * 0x1000, f, MAP_WRITABLE).is_err() {
-                    buf_ok = false; break;
+        if !basename.is_empty() {
+            let mut slot = None;
+            for s in 0..GRP_MAX_INITRD {
+                if ctx.initrd_files[s][0] == 0 { slot = Some(s); break; }
+            }
+            if let Some(slot) = slot {
+                let file_buf = ctx.initrd_file_buf_base + (slot as u64) * 0x300000;
+                const FILE_BUF_PAGES_OPEN: u64 = 576;
+                let mut buf_ok = true;
+                for p in 0..FILE_BUF_PAGES_OPEN {
+                    if let Ok(f) = sys::frame_alloc() {
+                        if sys::map(file_buf + p * 0x1000, f, MAP_WRITABLE).is_err() {
+                            buf_ok = false; break;
+                        }
+                    } else { buf_ok = false; break; }
                 }
-            } else { buf_ok = false; break; }
-        }
-        if !buf_ok {
-            reply_val(ctx.ep_cap, -ENOMEM);
-            return;
-        }
-
-        match sys::initrd_read(
-            basename.as_ptr() as u64,
-            basename.len() as u64,
-            file_buf,
-            FILE_BUF_PAGES_OPEN * 0x1000,
-        ) {
-            Ok(sz) => {
-                let mut fd = None;
-                for i in 3..GRP_MAX_FDS { if ctx.child_fds[i] == 0 { fd = Some(i); break; } }
-                if let Some(f) = fd {
-                    ctx.child_fds[f] = 12;
-                    ctx.initrd_files[slot] = [file_buf, sz, 0, f as u64];
-                    reply_val(ctx.ep_cap, f as i64);
-                } else {
-                    for p in 0..FILE_BUF_PAGES_OPEN { let _ = sys::unmap_free(file_buf + p * 0x1000); }
-                    reply_val(ctx.ep_cap, -EMFILE);
+                if buf_ok {
+                    match sys::initrd_read(
+                        basename.as_ptr() as u64,
+                        basename.len() as u64,
+                        file_buf,
+                        FILE_BUF_PAGES_OPEN * 0x1000,
+                    ) {
+                        Ok(sz) => {
+                            let mut fd = None;
+                            for i in 3..GRP_MAX_FDS { if ctx.child_fds[i] == 0 { fd = Some(i); break; } }
+                            if let Some(f) = fd {
+                                ctx.child_fds[f] = 12;
+                                ctx.initrd_files[slot] = [file_buf, sz, 0, f as u64];
+                                reply_val(ctx.ep_cap, f as i64);
+                                opened_initrd = true;
+                            } else {
+                                for p in 0..FILE_BUF_PAGES_OPEN { let _ = sys::unmap_free(file_buf + p * 0x1000); }
+                                reply_val(ctx.ep_cap, -EMFILE);
+                                opened_initrd = true;
+                            }
+                        }
+                        Err(_) => {
+                            for p in 0..FILE_BUF_PAGES_OPEN { let _ = sys::unmap_free(file_buf + p * 0x1000); }
+                        }
+                    }
                 }
             }
-            Err(_) => {
-                for p in 0..FILE_BUF_PAGES_OPEN { let _ = sys::unmap_free(file_buf + p * 0x1000); }
-                // Initrd failed — try VFS as fallback
-                let mut vfs_found = false;
+        }
+
+        // Step 3: VFS O_CREAT as last resort
+        if !opened_initrd {
+            if flags & O_CREAT != 0 {
                 vfs_lock();
                 let vfs_result = unsafe { shared_store() }.and_then(|store| {
                     use sotos_objstore::ROOT_OID;
-                    // Try resolve existing
-                    if let Ok(oid) = store.resolve_path(name, ROOT_OID) {
-                        let entry = store.stat(oid)?;
-                        // O_TRUNC: reset file size
-                        if flags & O_TRUNC != 0 && !entry.is_dir() {
-                            store.write_obj(oid, &[]).ok();
-                            return Some((oid, 0u64, false));
+                    let mut last_slash = None;
+                    for (i, &b) in name.iter().enumerate() { if b == b'/' { last_slash = Some(i); } }
+                    let (parent, fname) = match last_slash {
+                        Some(pos) => {
+                            let p = if pos == 0 { ROOT_OID } else {
+                                store.resolve_path(&name[..pos], ROOT_OID).ok()?
+                            };
+                            (p, &name[pos+1..path_len])
                         }
-                        return Some((oid, entry.size, entry.is_dir()));
-                    }
-                    // O_CREAT: create file in parent dir
-                    if flags & O_CREAT != 0 {
-                        let mut last_slash = None;
-                        for (i, &b) in name.iter().enumerate() { if b == b'/' { last_slash = Some(i); } }
-                        let (parent, fname) = match last_slash {
-                            Some(pos) => {
-                                let p = if pos == 0 { ROOT_OID } else {
-                                    store.resolve_path(&name[..pos], ROOT_OID).ok()?
-                                };
-                                (p, &name[pos+1..path_len])
-                            }
-                            None => (ROOT_OID, name),
-                        };
-                        let oid = store.create_in(fname, &[], parent).ok()?;
-                        return Some((oid, 0, false));
-                    }
-                    None
+                        None => (ROOT_OID, name),
+                    };
+                    let oid = store.create_in(fname, &[], parent).ok()?;
+                    Some((oid, 0u64, false))
                 });
                 vfs_unlock();
                 if let Some((oid, size, is_dir)) = vfs_result {
@@ -1120,13 +1323,16 @@ pub(crate) fn sys_open(ctx: &mut SyscallContext, msg: &IpcMsg) {
                     if let (Some(vs), Some(f)) = (vslot, fd) {
                         ctx.child_fds[f] = if is_dir { 14 } else { 13 };
                         ctx.vfs_files[vs] = [oid, size, 0, f as u64];
+                        ctx.fd_flags[f] = flags;  // BUG FIX: store flags for F_GETFL
                         reply_val(ctx.ep_cap, f as i64);
-                        vfs_found = true;
+                    } else {
+                        reply_val(ctx.ep_cap, -EMFILE);
                     }
-                }
-                if !vfs_found {
+                } else {
                     reply_val(ctx.ep_cap, -ENOENT);
                 }
+            } else {
+                reply_val(ctx.ep_cap, -ENOENT);
             }
         }
     }
@@ -1142,51 +1348,54 @@ pub(crate) fn sys_ioctl(ctx: &mut SyscallContext, msg: &IpcMsg) {
     if fd <= 2 {
         match req {
             TCGETS => {
-                let buf = msg.regs[2] as *mut u8;
-                if !buf.is_null() {
+                let buf_addr = msg.regs[2];
+                if buf_addr != 0 {
                     // Kernel TCGETS writes struct __kernel_termios (36 bytes on x86_64).
                     // Layout: c_iflag(4) c_oflag(4) c_cflag(4) c_lflag(4) c_line(1) c_cc[19].
-                    unsafe { core::ptr::write_bytes(buf, 0, 36); }
-                    let p = buf as *mut u32;
-                    unsafe {
-                        *p = 0x0100 | 0x0400;           // c_iflag: ICRNL | IXON
-                        *p.add(1) = 0x0001 | 0x0004;   // c_oflag: OPOST | ONLCR
-                        *p.add(2) = 0x0030 | 0x0080 | 0x000F; // c_cflag: CS8|CREAD|B38400
-                        *p.add(3) = 0x0008 | 0x0010 | 0x0020 | 0x0002 | 0x0001 | 0x8000 | 0x0200 | 0x0800; // c_lflag
-                    }
-                    let cc = unsafe { buf.add(17) };
-                    unsafe {
-                        *cc = 0x03;           // VINTR = Ctrl-C
-                        *cc.add(1) = 0x1C;   // VQUIT = Ctrl-backslash
-                        *cc.add(2) = 0x7F;   // VERASE = DEL
-                        *cc.add(3) = 0x15;   // VKILL = Ctrl-U
-                        *cc.add(4) = 0x04;   // VEOF = Ctrl-D
-                        *cc.add(6) = 0x01;   // VMIN = 1
-                        *cc.add(13) = 0x1A;  // VSUSP = Ctrl-Z
-                    }
+                    let mut termios = [0u8; 36];
+                    let ciflag = 0x0100u32 | 0x0400; // ICRNL | IXON
+                    let coflag = 0x0001u32 | 0x0004; // OPOST | ONLCR
+                    let ccflag = 0x0030u32 | 0x0080 | 0x000F; // CS8|CREAD|B38400
+                    let clflag = 0x0008u32 | 0x0010 | 0x0020 | 0x0002 | 0x0001 | 0x8000 | 0x0200 | 0x0800;
+                    termios[0..4].copy_from_slice(&ciflag.to_le_bytes());
+                    termios[4..8].copy_from_slice(&coflag.to_le_bytes());
+                    termios[8..12].copy_from_slice(&ccflag.to_le_bytes());
+                    termios[12..16].copy_from_slice(&clflag.to_le_bytes());
+                    // c_line at byte 16 = 0, c_cc starts at byte 17
+                    termios[17] = 0x03;    // VINTR = Ctrl-C
+                    termios[18] = 0x1C;    // VQUIT
+                    termios[19] = 0x7F;    // VERASE
+                    termios[20] = 0x15;    // VKILL
+                    termios[21] = 0x04;    // VEOF
+                    termios[23] = 0x01;    // VMIN
+                    termios[30] = 0x1A;    // VSUSP
+                    ctx.guest_write(buf_addr, &termios);
                 }
                 reply_val(ctx.ep_cap, 0);
             }
             TCSETS | TCSETSW | TCSETSF => reply_val(ctx.ep_cap, 0),
             TIOCGWINSZ => {
                 let ws = Winsize::default_serial();
-                let buf = msg.regs[2] as *mut Winsize;
-                if !buf.is_null() { unsafe { *buf = ws; } }
+                let buf_addr = msg.regs[2];
+                if buf_addr != 0 {
+                    let bytes: [u8; 8] = unsafe { core::mem::transmute(ws) };
+                    ctx.guest_write(buf_addr, &bytes);
+                }
                 reply_val(ctx.ep_cap, 0);
             }
             TIOCSWINSZ => reply_val(ctx.ep_cap, 0),
             TIOCGPGRP | TIOCSPGRP => {
                 if req == TIOCGPGRP {
-                    let buf = msg.regs[2] as *mut i32;
-                    if !buf.is_null() { unsafe { *buf = ctx.pid as i32; } }
+                    let buf_addr = msg.regs[2];
+                    if buf_addr != 0 { ctx.guest_write(buf_addr, &(ctx.pid as i32).to_le_bytes()); }
                 }
                 reply_val(ctx.ep_cap, 0);
             }
             FIONREAD => {
-                let buf = msg.regs[2] as *mut i32;
-                if !buf.is_null() {
-                    let avail = if unsafe { kb_has_char() } { 1i32 } else { 0i32 };
-                    unsafe { *buf = avail; }
+                let buf_addr = msg.regs[2];
+                if buf_addr != 0 {
+                    let avail: i32 = if unsafe { kb_has_char() } { 1 } else { 0 };
+                    ctx.guest_write(buf_addr, &avail.to_le_bytes());
                 }
                 reply_val(ctx.ep_cap, 0);
             }
@@ -1266,7 +1475,7 @@ pub(crate) fn sys_readv(ctx: &mut SyscallContext, msg: &IpcMsg) {
             reply_val(ctx.ep_cap, -EBADF);
         }
     } else if ctx.child_fds[fd] == 13 {
-        // VFS file readv
+        // VFS file readv — use guest_read/guest_write for CoW fork children
         let mut total: usize = 0;
         let mut found = false;
         for s_idx in 0..GRP_MAX_VFS {
@@ -1277,15 +1486,18 @@ pub(crate) fn sys_readv(ctx: &mut SyscallContext, msg: &IpcMsg) {
                 for i in 0..cnt {
                     let entry = iov_ptr + (i as u64) * 16;
                     if entry + 16 > 0x0000_8000_0000_0000 { break; }
-                    let base = unsafe { *(entry as *const u64) };
-                    let len = unsafe { *((entry + 8) as *const u64) } as usize;
+                    let base = ctx.guest_read_u64(entry);
+                    let len = ctx.guest_read_u64(entry + 8) as usize;
                     if base == 0 || len == 0 { continue; }
-                    let dst = unsafe { core::slice::from_raw_parts_mut(base as *mut u8, len) };
+                    let safe_len = len.min(4096);
+                    let mut local_buf = [0u8; 4096];
+                    let dst = &mut local_buf[..safe_len];
                     vfs_lock();
                     let n = unsafe { shared_store() }
                         .and_then(|store| store.read_obj_range(oid, pos, dst).ok())
                         .unwrap_or(0);
                     vfs_unlock();
+                    if n > 0 { ctx.guest_write(base, &local_buf[..n]); }
                     pos += n;
                     total += n;
                     if n < len { break; } // EOF mid-iovec
@@ -1489,16 +1701,20 @@ pub(crate) fn sys_writev(ctx: &mut SyscallContext, msg: &IpcMsg) {
         reply_val(ctx.ep_cap, total_sent as i64);
     } else if fd < GRP_MAX_FDS && ctx.child_fds[fd] == 13 {
         // VFS file writev: gather iovecs and write to VFS
+        // Use guest_read for CoW fork children (child_as_cap != 0)
         let cnt = iovcnt.min(16);
         let mut total: usize = 0;
         let mut ok = true;
         for i in 0..cnt {
             let entry = iov_ptr + (i as u64) * 16;
             if entry + 16 > 0x0000_8000_0000_0000 { break; }
-            let base = unsafe { *(entry as *const u64) };
-            let ilen = unsafe { *((entry + 8) as *const u64) } as usize;
+            let base = ctx.guest_read_u64(entry);
+            let ilen = ctx.guest_read_u64(entry + 8) as usize;
             if base == 0 || ilen == 0 { continue; }
-            let data = unsafe { core::slice::from_raw_parts(base as *const u8, ilen) };
+            let safe_ilen = ilen.min(4096);
+            let mut local_buf = [0u8; 4096];
+            ctx.guest_read(base, &mut local_buf[..safe_ilen]);
+            let data = &local_buf[..safe_ilen];
             // Find the VFS file slot for this fd
             let mut wrote = false;
             for s in 0..GRP_MAX_VFS {
@@ -1511,10 +1727,10 @@ pub(crate) fn sys_writev(ctx: &mut SyscallContext, msg: &IpcMsg) {
                     vfs_unlock();
                     match result {
                         Some(_) => {
-                            ctx.vfs_files[s][2] += ilen as u64;
+                            ctx.vfs_files[s][2] += safe_ilen as u64;
                             let new_end = ctx.vfs_files[s][2];
                             if new_end > ctx.vfs_files[s][1] { ctx.vfs_files[s][1] = new_end; }
-                            total += ilen;
+                            total += safe_ilen;
                             wrote = true;
                         }
                         None => { ok = false; }
@@ -1602,7 +1818,7 @@ pub(crate) fn sys_writev(ctx: &mut SyscallContext, msg: &IpcMsg) {
 pub(crate) fn sys_access(ctx: &mut SyscallContext, msg: &IpcMsg, syscall_nr: u64) {
     let path_ptr = if syscall_nr == SYS_FACCESSAT { msg.regs[1] } else { msg.regs[0] };
     let mut path = [0u8; 128];
-    let path_len = copy_guest_path(path_ptr, &mut path);
+    let path_len = ctx.guest_copy_path(path_ptr, &mut path);
     let (path, path_len) = if path_len > 0 && path[0] != b'/' {
         let mut abs = [0u8; 256];
         let alen = resolve_with_cwd(ctx.cwd, &path[..path_len], &mut abs);
@@ -1674,7 +1890,12 @@ pub(crate) fn sys_pipe(ctx: &mut SyscallContext, msg: &IpcMsg) {
             ctx.child_fds[w] = 11;
             ctx.sock_conn_id[r] = pipe_id as u32;
             ctx.sock_conn_id[w] = pipe_id as u32;
-            unsafe { *pipefd = r as i32; *pipefd.add(1) = w as i32; }
+            {
+                let mut buf = [0u8; 8];
+                buf[..4].copy_from_slice(&(r as i32).to_le_bytes());
+                buf[4..].copy_from_slice(&(w as i32).to_le_bytes());
+                ctx.guest_write(msg.regs[0], &buf);
+            }
             if ctx.pid >= 3 {
                 print(b"FD-PIPE P"); print_u64(ctx.pid as u64);
                 print(b" r="); print_u64(r as u64);
@@ -1688,6 +1909,47 @@ pub(crate) fn sys_pipe(ctx: &mut SyscallContext, msg: &IpcMsg) {
         }
     } else {
         reply_val(ctx.ep_cap, -EMFILE);
+    }
+}
+
+/// Duplicate VFS/initrd file tracking slots when dup'ing an fd.
+/// Without this, reads on the dup'd fd fail because the vfs_files/initrd_files
+/// lookup searches by fd number, and only the original fd is recorded.
+fn dup_file_slots(ctx: &mut SyscallContext, oldfd: usize, newfd: usize) {
+    let kind = ctx.child_fds[oldfd];
+    if kind == 13 || kind == 14 {
+        // VFS file/dir: clone the slot with new fd number
+        for s in 0..GRP_MAX_VFS {
+            if ctx.vfs_files[s][0] != 0 && ctx.vfs_files[s][3] == oldfd as u64 {
+                let oid = ctx.vfs_files[s][0];
+                let size = ctx.vfs_files[s][1];
+                let pos = ctx.vfs_files[s][2];
+                // Find a free vfs_files slot for the dup'd fd
+                for s2 in 0..GRP_MAX_VFS {
+                    if ctx.vfs_files[s2][0] == 0 {
+                        ctx.vfs_files[s2] = [oid, size, pos, newfd as u64];
+                        break;
+                    }
+                }
+                break;
+            }
+        }
+    } else if kind == 12 {
+        // Initrd file: clone the slot with new fd number
+        for s in 0..GRP_MAX_INITRD {
+            if ctx.initrd_files[s][0] != 0 && ctx.initrd_files[s][3] == oldfd as u64 {
+                let data = ctx.initrd_files[s][0];
+                let size = ctx.initrd_files[s][1];
+                let pos = ctx.initrd_files[s][2];
+                for s2 in 0..GRP_MAX_INITRD {
+                    if ctx.initrd_files[s2][0] == 0 {
+                        ctx.initrd_files[s2] = [data, size, pos, newfd as u64];
+                        break;
+                    }
+                }
+                break;
+            }
+        }
     }
 }
 
@@ -1712,6 +1974,7 @@ pub(crate) fn sys_dup(ctx: &mut SyscallContext, msg: &IpcMsg) {
             ctx.sock_udp_local_port[nfd] = ctx.sock_udp_local_port[oldfd];
             ctx.sock_udp_remote_ip[nfd] = ctx.sock_udp_remote_ip[oldfd];
             ctx.sock_udp_remote_port[nfd] = ctx.sock_udp_remote_port[oldfd];
+            dup_file_slots(ctx, oldfd, nfd);
             // dup does NOT set FD_CLOEXEC on new fd
             if nfd < 128 { *ctx.fd_cloexec &= !(1u128 << nfd); }
             if ctx.pid >= 3 {
@@ -1758,11 +2021,18 @@ pub(crate) fn sys_dup2(ctx: &mut SyscallContext, msg: &IpcMsg) {
         let op = ctx.sock_conn_id[oldfd] as usize;
         if ok == 11 && op < MAX_PIPES { PIPE_WRITE_REFS[op].fetch_add(1, Ordering::AcqRel); }
         else if ok == 10 && op < MAX_PIPES { PIPE_READ_REFS[op].fetch_add(1, Ordering::AcqRel); }
+        // Clean up old vfs_files slot for newfd before overwriting
+        if ctx.child_fds[newfd] == 13 || ctx.child_fds[newfd] == 14 {
+            for s in 0..GRP_MAX_VFS {
+                if ctx.vfs_files[s][3] == newfd as u64 { ctx.vfs_files[s] = [0; 4]; break; }
+            }
+        }
         ctx.child_fds[newfd] = ctx.child_fds[oldfd];
         ctx.sock_conn_id[newfd] = ctx.sock_conn_id[oldfd];
         ctx.sock_udp_local_port[newfd] = ctx.sock_udp_local_port[oldfd];
         ctx.sock_udp_remote_ip[newfd] = ctx.sock_udp_remote_ip[oldfd];
         ctx.sock_udp_remote_port[newfd] = ctx.sock_udp_remote_port[oldfd];
+        dup_file_slots(ctx, oldfd, newfd);
         // dup2 does NOT set FD_CLOEXEC on new fd
         if newfd < 128 { *ctx.fd_cloexec &= !(1u128 << newfd); }
         if ctx.pid >= 3 {
@@ -1801,21 +2071,7 @@ pub(crate) fn sys_fcntl(ctx: &mut SyscallContext, msg: &IpcMsg) {
                     ctx.sock_udp_local_port[n] = ctx.sock_udp_local_port[fd];
                     ctx.sock_udp_remote_ip[n] = ctx.sock_udp_remote_ip[fd];
                     ctx.sock_udp_remote_port[n] = ctx.sock_udp_remote_port[fd];
-                    // Copy VFS file tracking for dup'd VFS fds
-                    if ctx.child_fds[fd] == 13 || ctx.child_fds[fd] == 14 {
-                        for s in 0..GRP_MAX_VFS {
-                            if ctx.vfs_files[s][3] == fd as u64 && ctx.vfs_files[s][0] != 0 {
-                                for s2 in 0..GRP_MAX_VFS {
-                                    if ctx.vfs_files[s2][0] == 0 {
-                                        ctx.vfs_files[s2] = ctx.vfs_files[s];
-                                        ctx.vfs_files[s2][3] = n as u64;
-                                        break;
-                                    }
-                                }
-                                break;
-                            }
-                        }
-                    }
+                    dup_file_slots(ctx, fd, n);
                     // Set cloexec on new fd if F_DUPFD_CLOEXEC
                     if cmd == 1030 && n < 128 {
                         *ctx.fd_cloexec |= 1u128 << n;
@@ -1859,6 +2115,17 @@ pub(crate) fn sys_fcntl(ctx: &mut SyscallContext, msg: &IpcMsg) {
             if fd < GRP_MAX_FDS {
                 ctx.fd_flags[fd] = msg.regs[2] as u32;
             }
+            reply_val(ctx.ep_cap, 0);
+        }
+        5 => { // F_GETLK — query file lock (stub: no locks held)
+            // Write F_UNLCK (2) to l_type at offset 0 of struct flock
+            let flock_ptr = msg.regs[2];
+            if flock_ptr != 0 {
+                ctx.guest_write(flock_ptr, &2i16.to_le_bytes()); // F_UNLCK = 2
+            }
+            reply_val(ctx.ep_cap, 0);
+        }
+        6 | 7 => { // F_SETLK / F_SETLKW — set file lock (stub: always succeed)
             reply_val(ctx.ep_cap, 0);
         }
         _ => reply_val(ctx.ep_cap, -EINVAL),
@@ -1913,8 +2180,8 @@ pub(crate) fn sys_rename(ctx: &mut SyscallContext, msg: &IpcMsg) {
     let new_ptr = msg.regs[1];
     let mut old_path = [0u8; 128];
     let mut new_path = [0u8; 128];
-    let old_len = copy_guest_path(old_ptr, &mut old_path);
-    let new_len = copy_guest_path(new_ptr, &mut new_path);
+    let old_len = ctx.guest_copy_path(old_ptr, &mut old_path);
+    let new_len = ctx.guest_copy_path(new_ptr, &mut new_path);
     let (old_path, old_len) = if old_len > 0 && old_path[0] != b'/' {
         let mut abs = [0u8; 256];
         let alen = resolve_with_cwd(ctx.cwd, &old_path[..old_len], &mut abs);
@@ -1934,10 +2201,26 @@ pub(crate) fn sys_rename(ctx: &mut SyscallContext, msg: &IpcMsg) {
     let old_name = &old_path[..old_len];
     let new_name = &new_path[..new_len];
 
+    // Diagnostic: log rename attempts from P3+ (wineserver registry save)
+    if ctx.pid >= 3 {
+        print(b"RENAME P"); print_u64(ctx.pid as u64);
+        print(b" ["); for &b in old_name { sys::debug_print(b); }
+        print(b"] -> ["); for &b in new_name { sys::debug_print(b); }
+        print(b"]\n");
+    }
+
     vfs_lock();
     let result = unsafe { shared_store() }.and_then(|store| {
         use sotos_objstore::ROOT_OID;
-        let old_oid = store.resolve_path(old_name, ROOT_OID).ok()?;
+        let old_oid = match store.resolve_path(old_name, ROOT_OID) {
+            Ok(oid) => oid,
+            Err(_) => {
+                if ctx.pid >= 3 {
+                    print(b"RENAME-FAIL: old path not found\n");
+                }
+                return None;
+            }
+        };
         let mut last_slash = None;
         for (i, &b) in new_name.iter().enumerate() {
             if b == b'/' { last_slash = Some(i); }
@@ -1946,12 +2229,31 @@ pub(crate) fn sys_rename(ctx: &mut SyscallContext, msg: &IpcMsg) {
             Some(pos) => {
                 let pp = &new_name[..pos];
                 let p = if pp.is_empty() { ROOT_OID }
-                    else { store.resolve_path(pp, ROOT_OID).ok()? };
+                    else {
+                        match store.resolve_path(pp, ROOT_OID) {
+                            Ok(p) => p,
+                            Err(_) => {
+                                if ctx.pid >= 3 {
+                                    print(b"RENAME-FAIL: new parent not found [");
+                                    for &b in pp { sys::debug_print(b); }
+                                    print(b"]\n");
+                                }
+                                return None;
+                            }
+                        }
+                    };
                 (p, &new_name[pos + 1..])
             }
             None => (ROOT_OID, new_name),
         };
-        store.rename(old_oid, new_basename, new_parent).ok()?;
+        if let Err(e) = store.rename(old_oid, new_basename, new_parent) {
+            if ctx.pid >= 3 {
+                print(b"RENAME-FAIL: store.rename err=[");
+                print(e.as_bytes());
+                print(b"]\n");
+            }
+            return None;
+        }
         // Post-rename verification: check renamed entry's flags
         if let Some(entry) = store.stat(old_oid) {
             if entry.is_dir() {
@@ -1981,7 +2283,13 @@ pub(crate) fn sys_openat(ctx: &mut SyscallContext, msg: &IpcMsg) {
     let path_ptr = msg.regs[1];
     let flags = msg.regs[2] as u32;
     let mut path = [0u8; 128];
-    let path_len = copy_guest_path(path_ptr, &mut path);
+    let path_len = ctx.guest_copy_path(path_ptr, &mut path);
+    // Debug: trace openat paths from P3+ (suppress P5+ to reduce serial noise during Wine)
+    if ctx.pid >= 3 && ctx.pid < 5 {
+        print(b"OPENAT P"); print_u64(ctx.pid as u64);
+        print(b" fl=0x"); crate::framebuffer::print_hex64(flags as u64);
+        print(b" ["); for &b in &path[..path_len] { sys::debug_print(b); } print(b"]\n");
+    }
     let (path, path_len) = if path_len > 0 && path[0] != b'/' {
         let mut abs = [0u8; 256];
         let alen = resolve_with_cwd(ctx.cwd, &path[..path_len], &mut abs);
@@ -2126,8 +2434,65 @@ pub(crate) fn sys_openat(ctx: &mut SyscallContext, msg: &IpcMsg) {
             }
         }
     } else {
-        // Try to open from initrd
+        // Priority: VFS first (for existing files), then initrd, then VFS with O_CREAT.
+        // This prevents initrd basename matching from shadowing VFS data files
+        // (e.g., /.wine/wineserver data file vs wineserver binary in initrd).
         let is_lib_path = starts_with(name, b"/lib/") || starts_with(name, b"/usr/lib/");
+        let oflags = OFlags::from_bits_truncate(flags as u32);
+        let has_creat = oflags.contains(OFlags::CREAT);
+        let has_trunc = oflags.contains(OFlags::TRUNC);
+        let has_dir = oflags.contains(OFlags::DIRECTORY);
+
+        // Step 1: Try VFS resolve (existing files only)
+        vfs_lock();
+        let vfs_existing = unsafe { shared_store() }.and_then(|store| {
+            use sotos_objstore::ROOT_OID;
+            match store.resolve_path(name, ROOT_OID) {
+                Ok(oid) => {
+                    let entry = store.stat(oid)?;
+                    if has_dir && !entry.is_dir() {
+                        return None;
+                    }
+                    if has_trunc && !entry.is_dir() {
+                        store.write_obj(oid, &[]).ok();
+                        Some((oid, 0u64, entry.is_dir()))
+                    } else {
+                        Some((oid, entry.size, entry.is_dir()))
+                    }
+                }
+                Err(_) => None,
+            }
+        });
+        vfs_unlock();
+
+        if let Some((oid, size, is_dir)) = vfs_existing {
+            // VFS has this file — use it
+            let mut vslot = None;
+            for s in 0..GRP_MAX_VFS {
+                if ctx.vfs_files[s][0] == 0 { vslot = Some(s); break; }
+            }
+            let mut fd = None;
+            for i in 3..GRP_MAX_FDS { if ctx.child_fds[i] == 0 { fd = Some(i); break; } }
+            if let (Some(vs), Some(f)) = (vslot, fd) {
+                ctx.child_fds[f] = if is_dir { 14 } else { 13 };
+                ctx.vfs_files[vs] = [oid, size, 0, f as u64];
+                ctx.fd_flags[f] = flags;
+                if is_dir { dir_store_path(ctx, f, name); }
+                // Track ntdll.so fd for Wine SharedUserData patch
+                if path_len >= 8 && &name[path_len-8..path_len] == b"ntdll.so" && ctx.pid < 16 {
+                    unsafe { crate::syscalls::mm::NTDLL_SO_FD[ctx.pid] = f as u8; }
+                    print(b"NTDLL-FD P"); crate::framebuffer::print_u64(ctx.pid as u64);
+                    print(b" fd="); crate::framebuffer::print_u64(f as u64);
+                    print(b"\n");
+                }
+                reply_val(ctx.ep_cap, f as i64);
+            } else {
+                reply_val(ctx.ep_cap, -EMFILE);
+            }
+            return;
+        }
+
+        // Step 2: Try initrd (basename matching, for binaries)
         let mut basename_start = 0usize;
         for idx in 0..path_len {
             if name[idx] == b'/' { basename_start = idx + 1; }
@@ -2163,6 +2528,13 @@ pub(crate) fn sys_openat(ctx: &mut SyscallContext, msg: &IpcMsg) {
                         if let Some(f) = fd {
                             ctx.child_fds[f] = 12;
                             ctx.initrd_files[slot] = [file_buf, sz, 0, f as u64];
+                            // Track ntdll.so fd for Wine SharedUserData patch
+                            if path_len >= 8 && &name[path_len-8..path_len] == b"ntdll.so" && ctx.pid < 16 {
+                                unsafe { crate::syscalls::mm::NTDLL_SO_FD[ctx.pid] = f as u8; }
+                                print(b"NTDLL-FD P"); crate::framebuffer::print_u64(ctx.pid as u64);
+                                print(b" fd="); crate::framebuffer::print_u64(f as u64);
+                                print(b"\n");
+                            }
                             reply_val(ctx.ep_cap, f as i64);
                             opened_initrd = true;
                         } else {
@@ -2177,54 +2549,51 @@ pub(crate) fn sys_openat(ctx: &mut SyscallContext, msg: &IpcMsg) {
             }
         }
 
+        // Step 3: VFS with O_CREAT as last resort
         if !opened_initrd {
-            let oflags = OFlags::from_bits_truncate(flags as u32);
-            let has_creat = oflags.contains(OFlags::CREAT);
-            let has_trunc = oflags.contains(OFlags::TRUNC);
-            let has_dir = oflags.contains(OFlags::DIRECTORY);
-
             vfs_lock();
-            let vfs_result = unsafe { shared_store() }.and_then(|store| {
-                use sotos_objstore::ROOT_OID;
-                match store.resolve_path(name, ROOT_OID) {
-                    Ok(oid) => {
-                        let entry = store.stat(oid)?;
-                        if has_dir && !entry.is_dir() {
-                            return None;
-                        }
-                        if has_trunc && !entry.is_dir() {
-                            store.write_obj(oid, &[]).ok();
-                            Some((oid, 0u64, false))
-                        } else {
-                            Some((oid, entry.size, entry.is_dir()))
-                        }
-                    }
-                    Err(_) if has_creat => {
-                        let mut last_slash = None;
-                        for (i, &b) in name.iter().enumerate() {
-                            if b == b'/' { last_slash = Some(i); }
-                        }
-                        let (parent_oid, filename) = match last_slash {
-                            Some(pos) => {
-                                let parent_path = &name[..pos];
-                                let fname = &name[pos + 1..];
-                                let p = if parent_path.is_empty() {
-                                    ROOT_OID
-                                } else {
-                                    store.resolve_path(parent_path, ROOT_OID).ok()?
-                                };
-                                (p, fname)
+            let vfs_result = if has_creat {
+                unsafe { shared_store() }.and_then(|store| {
+                    use sotos_objstore::ROOT_OID;
+                    // Try resolve again (race-safe) then create
+                    match store.resolve_path(name, ROOT_OID) {
+                        Ok(oid) => {
+                            let entry = store.stat(oid)?;
+                            if has_trunc && !entry.is_dir() {
+                                store.write_obj(oid, &[]).ok();
+                                Some((oid, 0u64, false))
+                            } else {
+                                Some((oid, entry.size, entry.is_dir()))
                             }
-                            None => (ROOT_OID, name),
-                        };
-                        match store.create_in(filename, &[], parent_oid) {
-                            Ok(oid) => Some((oid, 0u64, false)),
-                            Err(_) => None,
+                        }
+                        Err(_) => {
+                            let mut last_slash = None;
+                            for (i, &b) in name.iter().enumerate() {
+                                if b == b'/' { last_slash = Some(i); }
+                            }
+                            let (parent_oid, filename) = match last_slash {
+                                Some(pos) => {
+                                    let parent_path = &name[..pos];
+                                    let fname = &name[pos + 1..];
+                                    let p = if parent_path.is_empty() {
+                                        ROOT_OID
+                                    } else {
+                                        store.resolve_path(parent_path, ROOT_OID).ok()?
+                                    };
+                                    (p, fname)
+                                }
+                                None => (ROOT_OID, name),
+                            };
+                            match store.create_in(filename, &[], parent_oid) {
+                                Ok(oid) => Some((oid, 0u64, false)),
+                                Err(_) => None,
+                            }
                         }
                     }
-                    Err(_) => None,
-                }
-            });
+                })
+            } else {
+                None
+            };
             vfs_unlock();
 
             if ctx.pid > 1 && has_creat && vfs_result.is_none() {
@@ -2244,15 +2613,35 @@ pub(crate) fn sys_openat(ctx: &mut SyscallContext, msg: &IpcMsg) {
                     if let (Some(vs), Some(f)) = (vslot, fd) {
                         ctx.child_fds[f] = if is_dir { 14 } else { 13 };
                         ctx.vfs_files[vs] = [oid, size, 0, f as u64];
+                        ctx.fd_flags[f] = flags;  // BUG FIX: store flags so F_GETFL returns correct mode
+                        if ctx.pid >= 5 {
+                            print(b"OPENAT-OK P"); print_u64(ctx.pid as u64);
+                            print(b" fd="); print_u64(f as u64);
+                            print(b" oid=0x"); crate::framebuffer::print_hex64(oid);
+                            print(b" vs="); print_u64(vs as u64);
+                            print(b" fl=0x"); crate::framebuffer::print_hex64(flags as u64);
+                            print(b"\n");
+                        }
                         reply_val(ctx.ep_cap, f as i64);
                     } else {
+                        if ctx.pid >= 5 {
+                            print(b"OPENAT-EMFILE P"); print_u64(ctx.pid as u64);
+                            let mut used = 0u64;
+                            for s in 0..GRP_MAX_VFS { if ctx.vfs_files[s][0] != 0 { used += 1; } }
+                            print(b" vfs_used="); print_u64(used);
+                            let mut fd_used = 0u64;
+                            for i in 3..GRP_MAX_FDS { if ctx.child_fds[i] != 0 { fd_used += 1; } }
+                            print(b" fd_used="); print_u64(fd_used);
+                            print(b"\n");
+                        }
                         reply_val(ctx.ep_cap, -EMFILE);
                     }
                 }
                 None => {
-                    // Last resort: try initrd by basename
+                    // Last resort: try initrd by basename (skip lib paths —
+                    // let ld-linux fall through to the next search path)
                     let mut found_initrd = false;
-                    if !basename.is_empty() {
+                    if !basename.is_empty() && !is_lib_path {
                         let mut slot = None;
                         for s in 0..GRP_MAX_INITRD {
                             if ctx.initrd_files[s][0] == 0 { slot = Some(s); break; }
@@ -2309,7 +2698,13 @@ pub(crate) fn sys_fstatat(ctx: &mut SyscallContext, msg: &IpcMsg) {
     let stat_ptr = msg.regs[2];
     let flags = msg.regs[3] as u32;
     let mut path = [0u8; 128];
-    let path_len = copy_guest_path(path_ptr, &mut path);
+    let path_len = ctx.guest_copy_path(path_ptr, &mut path);
+    if ctx.pid >= 4 && ctx.pid < 5 {
+        print(b"FSTATAT P"); print_u64(ctx.pid as u64);
+        print(b" dirfd="); print_u64(dirfd as u64);
+        print(b" fl=0x"); crate::framebuffer::print_hex64(flags as u64);
+        print(b" ["); for &b in &path[..path_len] { sys::debug_print(b); } print(b"]\n");
+    }
     let (path, path_len) = if path_len > 0 && path[0] != b'/' {
         let mut abs = [0u8; 256];
         let alen = resolve_with_cwd(ctx.cwd, &path[..path_len], &mut abs);
@@ -2336,7 +2731,8 @@ pub(crate) fn sys_fstatat(ctx: &mut SyscallContext, msg: &IpcMsg) {
                         break;
                     }
                 }
-                write_linux_stat_dev(stat_ptr, 1, ino, size, false);
+                let buf = build_linux_stat_dev(1, ino, size, false);
+                ctx.guest_write(stat_ptr, &buf);
             } else if ctx.child_fds[fd] == 13 || ctx.child_fds[fd] == 14 {
                 let is_vfs_dir = ctx.child_fds[fd] == 14;
                 let mut size = 0u64;
@@ -2348,9 +2744,11 @@ pub(crate) fn sys_fstatat(ctx: &mut SyscallContext, msg: &IpcMsg) {
                         break;
                     }
                 }
-                write_linux_stat_dev(stat_ptr, 2, oid, size, is_vfs_dir);
+                let buf = build_linux_stat_dev(2, oid, size, is_vfs_dir);
+                ctx.guest_write(stat_ptr, &buf);
             } else {
-                write_linux_stat(stat_ptr, fd as u64, 0, false);
+                let buf = build_linux_stat(fd as u64, 0, false);
+                ctx.guest_write(stat_ptr, &buf);
             }
             reply_val(ctx.ep_cap, 0);
         } else {
@@ -2365,7 +2763,8 @@ pub(crate) fn sys_fstatat(ctx: &mut SyscallContext, msg: &IpcMsg) {
     let basename = &name[basename_start..];
     if !basename.is_empty() {
         if let Ok(sz) = sys::initrd_read(basename.as_ptr() as u64, basename.len() as u64, 0, 0) {
-            write_linux_stat(stat_ptr, 0, sz, false);
+            let buf = build_linux_stat(0, sz, false);
+            ctx.guest_write(stat_ptr, &buf);
             reply_val(ctx.ep_cap, 0);
             return;
         }
@@ -2379,7 +2778,8 @@ pub(crate) fn sys_fstatat(ctx: &mut SyscallContext, msg: &IpcMsg) {
     });
     vfs_unlock();
     if let Some((oid, size, is_dir)) = vfs_stat {
-        write_linux_stat(stat_ptr, oid, size, is_dir);
+        let buf = build_linux_stat_dev(2, oid, size, is_dir);
+        ctx.guest_write(stat_ptr, &buf);
         reply_val(ctx.ep_cap, 0);
     } else {
         let is_known_dir = name == b"." || path_len == 0
@@ -2394,10 +2794,33 @@ pub(crate) fn sys_fstatat(ctx: &mut SyscallContext, msg: &IpcMsg) {
             || name == b"/usr/local" || name == b"/usr/local/bin"
             || starts_with(name, b"/dev/");
         if is_known_dir {
-            write_linux_stat(stat_ptr, 0, 4096, true);
+            let buf = build_linux_stat(0, 4096, true);
+            ctx.guest_write(stat_ptr, &buf);
             reply_val(ctx.ep_cap, 0);
         } else {
-            reply_val(ctx.ep_cap, -ENOENT);
+            // Check if path matches a bound AF_UNIX socket
+            let mut found_sock = false;
+            for i in 0..crate::fd::MAX_UNIX_LISTENERS {
+                if crate::fd::UNIX_LISTEN_ACTIVE[i].load(Ordering::Acquire) != 0 {
+                    let lpath = unsafe { &crate::fd::UNIX_LISTEN_PATH[i] };
+                    let llen = lpath.iter().position(|&b| b == 0).unwrap_or(128);
+                    if llen == path_len && &lpath[..llen] == name {
+                        // Return stat with S_IFSOCK mode (0o140000)
+                        let mut st = sotos_common::linux_abi::Stat::zeroed();
+                        st.st_ino = 0xA000 + i as u64;
+                        st.st_nlink = 1;
+                        st.st_mode = 0o140755; // S_IFSOCK | 0755
+                        let buf: [u8; 144] = unsafe { core::mem::transmute(st) };
+                        ctx.guest_write(stat_ptr, &buf);
+                        reply_val(ctx.ep_cap, 0);
+                        found_sock = true;
+                        break;
+                    }
+                }
+            }
+            if !found_sock {
+                reply_val(ctx.ep_cap, -ENOENT);
+            }
         }
     }
 }
@@ -2429,16 +2852,12 @@ pub(crate) fn sys_readlinkat(ctx: &mut SyscallContext, msg: &IpcMsg) {
     let out_buf = msg.regs[2];
     let bufsiz = msg.regs[3] as usize;
     let mut rpath = [0u8; 64];
-    let rpath_len = copy_guest_path(path_ptr, &mut rpath);
+    let rpath_len = ctx.guest_copy_path(path_ptr, &mut rpath);
     if rpath_len >= 14 && &rpath[..14] == b"/proc/self/exe" {
         let exe = proc_self_exe(ctx.pid);
         let elen = exe.iter().position(|&b| b == 0).unwrap_or(exe.len());
         let n = elen.min(bufsiz);
-        if out_buf != 0 && out_buf < 0x0000_8000_0000_0000 {
-            unsafe {
-                core::ptr::copy_nonoverlapping(exe.as_ptr(), out_buf as *mut u8, n);
-            }
-        }
+        ctx.guest_write(out_buf, &exe[..n]);
         reply_val(ctx.ep_cap, n as i64);
     } else {
         reply_val(ctx.ep_cap, -EINVAL);
@@ -2530,7 +2949,7 @@ pub(crate) fn sys_fadvise64(ctx: &mut SyscallContext, _msg: &IpcMsg) {
 pub(crate) fn sys_mkdir(ctx: &mut SyscallContext, msg: &IpcMsg) {
     let path_ptr = msg.regs[0];
     let mut path = [0u8; 128];
-    let plen = copy_guest_path(path_ptr, &mut path);
+    let plen = ctx.guest_copy_path(path_ptr, &mut path);
     let name = &path[..plen];
     let mut abs = [0u8; 256];
     let alen = resolve_with_cwd(ctx.cwd, name, &mut abs);
@@ -2591,9 +3010,11 @@ pub(crate) fn sys_pipe2(ctx: &mut SyscallContext, msg: &IpcMsg) {
                 if r < 128 { *ctx.fd_cloexec |= 1u128 << r; }
                 if w < 128 { *ctx.fd_cloexec |= 1u128 << w; }
             }
-            unsafe {
-                *(pipefd_ptr as *mut i32) = r as i32;
-                *((pipefd_ptr + 4) as *mut i32) = w as i32;
+            {
+                let mut buf = [0u8; 8];
+                buf[..4].copy_from_slice(&(r as i32).to_le_bytes());
+                buf[4..].copy_from_slice(&(w as i32).to_le_bytes());
+                ctx.guest_write(pipefd_ptr, &buf);
             }
             reply_val(ctx.ep_cap, 0);
         } else { reply_val(ctx.ep_cap, -EMFILE); }
@@ -2608,10 +3029,13 @@ pub(crate) fn sys_pwrite64(ctx: &mut SyscallContext, msg: &IpcMsg) {
     let offset = msg.regs[3] as usize;
     if fd < GRP_MAX_FDS && ctx.child_fds[fd] == 13 {
         let mut done = false;
+        let copy_len = count.min(4096);
+        let mut local_buf = [0u8; 4096];
+        ctx.guest_read(buf, &mut local_buf[..copy_len]);
         for s in 0..GRP_MAX_VFS {
             if ctx.vfs_files[s][3] == fd as u64 && ctx.vfs_files[s][0] != 0 {
                 let oid = ctx.vfs_files[s][0];
-                let data = unsafe { core::slice::from_raw_parts(buf as *const u8, count.min(4096)) };
+                let data = &local_buf[..copy_len];
                 vfs_lock();
                 let ok = unsafe { shared_store() }
                     .and_then(|store| store.write_obj_range(oid, offset, data).ok())
@@ -2635,13 +3059,13 @@ pub(crate) fn sys_readlink(ctx: &mut SyscallContext, msg: &IpcMsg) {
     let buf = msg.regs[1];
     let bufsiz = msg.regs[2] as usize;
     let mut path = [0u8; 128];
-    let plen = copy_guest_path(path_ptr, &mut path);
+    let plen = ctx.guest_copy_path(path_ptr, &mut path);
     let name = &path[..plen];
     if name == b"/proc/self/exe" {
         let target = proc_self_exe(ctx.pid);
         let tlen = target.iter().position(|&b| b == 0).unwrap_or(target.len());
         let n = tlen.min(bufsiz);
-        unsafe { core::ptr::copy_nonoverlapping(target.as_ptr(), buf as *mut u8, n); }
+        ctx.guest_write(buf, &target[..n]);
         reply_val(ctx.ep_cap, n as i64);
     } else { reply_val(ctx.ep_cap, -EINVAL); }
 }
@@ -2672,6 +3096,12 @@ pub(crate) fn sys_dup3(ctx: &mut SyscallContext, msg: &IpcMsg) {
                 let prev = PIPE_READ_REFS[np].fetch_sub(1, Ordering::AcqRel);
                 if prev <= 1 { PIPE_READ_CLOSED[np].store(1, Ordering::Release); }
             }
+            // Clean up old vfs_files slot for newfd before overwriting
+            if ctx.child_fds[newfd] == 13 || ctx.child_fds[newfd] == 14 {
+                for s in 0..GRP_MAX_VFS {
+                    if ctx.vfs_files[s][3] == newfd as u64 { ctx.vfs_files[s] = [0; 4]; break; }
+                }
+            }
             ctx.child_fds[newfd] = 0;
         }
         // Increment refcount for pipe being dup'd
@@ -2684,6 +3114,7 @@ pub(crate) fn sys_dup3(ctx: &mut SyscallContext, msg: &IpcMsg) {
         ctx.sock_udp_local_port[newfd] = ctx.sock_udp_local_port[oldfd];
         ctx.sock_udp_remote_ip[newfd] = ctx.sock_udp_remote_ip[oldfd];
         ctx.sock_udp_remote_port[newfd] = ctx.sock_udp_remote_port[oldfd];
+        dup_file_slots(ctx, oldfd, newfd);
         // Set or clear FD_CLOEXEC based on flags
         if newfd < 128 {
             if flags & O_CLOEXEC != 0 {
@@ -2718,18 +3149,81 @@ pub(crate) fn sys_statfs(ctx: &mut SyscallContext, msg: &IpcMsg, _syscall_nr: u6
     reply_val(ctx.ep_cap, 0);
 }
 
-/// SYS_CREAT (85): stub.
-pub(crate) fn sys_creat(ctx: &mut SyscallContext, _msg: &IpcMsg) {
-    // Treat as open(path, O_CREAT|O_WRONLY|O_TRUNC, mode)
-    // Just return -ENOENT for now; programs should use openat
-    reply_val(ctx.ep_cap, -ENOENT);
+/// SYS_CREAT (85): equivalent to open(path, O_WRONLY|O_CREAT|O_TRUNC, mode).
+pub(crate) fn sys_creat(ctx: &mut SyscallContext, msg: &IpcMsg) {
+    let path_ptr = msg.regs[0];
+    let mut path = [0u8; 128];
+    let path_len = ctx.guest_copy_path(path_ptr, &mut path);
+    // Debug: trace creat paths from P3+
+    if ctx.pid >= 3 {
+        print(b"CREAT P"); print_u64(ctx.pid as u64);
+        print(b" ["); for &b in &path[..path_len] { sys::debug_print(b); } print(b"]\n");
+    }
+    // Resolve relative paths against CWD
+    let (path, path_len) = if path_len > 0 && path[0] != b'/' {
+        let mut abs = [0u8; 256];
+        let alen = resolve_with_cwd(ctx.cwd, &path[..path_len], &mut abs);
+        let mut resolved = [0u8; 128];
+        let rlen = alen.min(127);
+        resolved[..rlen].copy_from_slice(&abs[..rlen]);
+        (resolved, rlen)
+    } else {
+        (path, path_len)
+    };
+    let name = &path[..path_len];
+    let flags = O_CREAT | O_TRUNC;
+
+    // Try VFS: resolve or create
+    vfs_lock();
+    let vfs_result = unsafe { shared_store() }.and_then(|store| {
+        use sotos_objstore::ROOT_OID;
+        if let Ok(oid) = store.resolve_path(name, ROOT_OID) {
+            let entry = store.stat(oid)?;
+            if !entry.is_dir() {
+                store.write_obj(oid, &[]).ok(); // truncate
+            }
+            return Some((oid, 0u64, false));
+        }
+        // Create file in parent dir
+        let mut last_slash = None;
+        for (i, &b) in name.iter().enumerate() { if b == b'/' { last_slash = Some(i); } }
+        let (parent, fname) = match last_slash {
+            Some(pos) => {
+                let p = if pos == 0 { ROOT_OID } else {
+                    store.resolve_path(&name[..pos], ROOT_OID).ok()?
+                };
+                (p, &name[pos+1..path_len])
+            }
+            None => (ROOT_OID, name),
+        };
+        let oid = store.create_in(fname, &[], parent).ok()?;
+        Some((oid, 0, false))
+    });
+    vfs_unlock();
+
+    if let Some((oid, size, is_dir)) = vfs_result {
+        let mut vslot = None;
+        for s in 0..GRP_MAX_VFS { if ctx.vfs_files[s][0] == 0 { vslot = Some(s); break; } }
+        let mut fd = None;
+        for i in 3..GRP_MAX_FDS { if ctx.child_fds[i] == 0 { fd = Some(i); break; } }
+        if let (Some(vs), Some(f)) = (vslot, fd) {
+            ctx.child_fds[f] = if is_dir { 14 } else { 13 };
+            ctx.vfs_files[vs] = [oid, size, 0, f as u64];
+            ctx.fd_flags[f] = O_WRONLY;
+            reply_val(ctx.ep_cap, f as i64);
+        } else {
+            reply_val(ctx.ep_cap, -EMFILE);
+        }
+    } else {
+        reply_val(ctx.ep_cap, -ENOENT);
+    }
 }
 
 /// SYS_RMDIR (84): remove directory.
 pub(crate) fn sys_rmdir(ctx: &mut SyscallContext, msg: &IpcMsg) {
     let path_ptr = msg.regs[0];
     let mut path = [0u8; 128];
-    let plen = copy_guest_path(path_ptr, &mut path);
+    let plen = ctx.guest_copy_path(path_ptr, &mut path);
     let mut abs = [0u8; 256];
     let alen = resolve_with_cwd(ctx.cwd, &path[..plen], &mut abs);
     let abs_name = &abs[..alen];
@@ -2747,11 +3241,15 @@ pub(crate) fn sys_rmdir(ctx: &mut SyscallContext, msg: &IpcMsg) {
 pub(crate) fn sys_unlink(ctx: &mut SyscallContext, msg: &IpcMsg) {
     let path_ptr = msg.regs[0];
     let mut path = [0u8; 128];
-    let plen = copy_guest_path(path_ptr, &mut path);
+    let plen = ctx.guest_copy_path(path_ptr, &mut path);
     // Resolve relative paths against CWD
     let mut abs = [0u8; 256];
     let alen = resolve_with_cwd(ctx.cwd, &path[..plen], &mut abs);
     let abs_name = &abs[..alen];
+    if ctx.pid >= 3 {
+        print(b"UNLINK P"); print_u64(ctx.pid as u64);
+        print(b" ["); for &b in abs_name { if b == 0 { break; } sys::debug_print(b); } print(b"]\n");
+    }
     vfs_lock();
     let result = unsafe { shared_store() }.and_then(|store| {
         use sotos_objstore::ROOT_OID;
@@ -2767,7 +3265,7 @@ pub(crate) fn sys_unlinkat(ctx: &mut SyscallContext, msg: &IpcMsg) {
     let path_ptr = msg.regs[1];
     let flags = msg.regs[2] as u32;
     let mut path = [0u8; 128];
-    let plen = copy_guest_path(path_ptr, &mut path);
+    let plen = ctx.guest_copy_path(path_ptr, &mut path);
     // Resolve relative paths against CWD
     let (path, plen) = if plen > 0 && path[0] != b'/' {
         let mut abs = [0u8; 256];
@@ -2780,6 +3278,11 @@ pub(crate) fn sys_unlinkat(ctx: &mut SyscallContext, msg: &IpcMsg) {
         (path, plen)
     };
     let name = &path[..plen];
+    if ctx.pid >= 3 {
+        print(b"UNLINKAT P"); print_u64(ctx.pid as u64);
+        print(b" fl=0x"); crate::framebuffer::print_hex64(flags as u64);
+        print(b" ["); for &b in name { if b == 0 { break; } sys::debug_print(b); } print(b"]\n");
+    }
     if flags & 0x200 != 0 {
         // AT_REMOVEDIR -> rmdir
         reply_val(ctx.ep_cap, 0);
@@ -2801,8 +3304,8 @@ pub(crate) fn sys_renameat(ctx: &mut SyscallContext, msg: &IpcMsg) {
     let newpath_ptr = msg.regs[3];
     let mut oldpath = [0u8; 128];
     let mut newpath = [0u8; 128];
-    let olen = copy_guest_path(oldpath_ptr, &mut oldpath);
-    let nlen = copy_guest_path(newpath_ptr, &mut newpath);
+    let olen = ctx.guest_copy_path(oldpath_ptr, &mut oldpath);
+    let nlen = ctx.guest_copy_path(newpath_ptr, &mut newpath);
     // Resolve relative paths against CWD
     let (oldpath, olen) = if olen > 0 && oldpath[0] != b'/' {
         let mut abs = [0u8; 256];
@@ -2820,21 +3323,50 @@ pub(crate) fn sys_renameat(ctx: &mut SyscallContext, msg: &IpcMsg) {
         resolved[..rlen].copy_from_slice(&abs[..rlen]);
         (resolved, rlen)
     } else { (newpath, nlen) };
+    // Diagnostic: log renameat attempts from P3+
+    if ctx.pid >= 3 {
+        print(b"RENAMEAT P"); print_u64(ctx.pid as u64);
+        print(b" ["); for &b in &oldpath[..olen] { sys::debug_print(b); }
+        print(b"] -> ["); for &b in &newpath[..nlen] { sys::debug_print(b); }
+        print(b"]\n");
+    }
     vfs_lock();
     let result = unsafe { shared_store() }.and_then(|store| {
         use sotos_objstore::ROOT_OID;
-        let oid = store.resolve_path(&oldpath[..olen], ROOT_OID).ok()?;
+        let oid = match store.resolve_path(&oldpath[..olen], ROOT_OID) {
+            Ok(o) => o,
+            Err(_) => {
+                if ctx.pid >= 3 { print(b"RENAMEAT-FAIL: old not found\n"); }
+                return None;
+            }
+        };
         // Find new parent and filename
         let mut last_slash = None;
         for (i, &b) in newpath[..nlen].iter().enumerate() { if b == b'/' { last_slash = Some(i); } }
         let (parent, fname) = match last_slash {
             Some(pos) => {
-                let p = if pos == 0 { ROOT_OID } else { store.resolve_path(&newpath[..pos], ROOT_OID).ok()? };
+                let p = if pos == 0 { ROOT_OID } else {
+                    match store.resolve_path(&newpath[..pos], ROOT_OID) {
+                        Ok(p) => p,
+                        Err(_) => {
+                            if ctx.pid >= 3 { print(b"RENAMEAT-FAIL: new parent not found\n"); }
+                            return None;
+                        }
+                    }
+                };
                 (p, &newpath[pos+1..nlen])
             }
             None => (ROOT_OID, &newpath[..nlen]),
         };
-        store.rename(oid, fname, parent).ok()
+        if let Err(e) = store.rename(oid, fname, parent) {
+            if ctx.pid >= 3 {
+                print(b"RENAMEAT-FAIL: store err=[");
+                print(e.as_bytes());
+                print(b"]\n");
+            }
+            return None;
+        }
+        Some(())
     });
     vfs_unlock();
     reply_val(ctx.ep_cap, if result.is_some() { 0 } else { -ENOENT });
@@ -2844,7 +3376,7 @@ pub(crate) fn sys_renameat(ctx: &mut SyscallContext, msg: &IpcMsg) {
 pub(crate) fn sys_mkdirat(ctx: &mut SyscallContext, msg: &IpcMsg) {
     let path_ptr = msg.regs[1];
     let mut path = [0u8; 128];
-    let plen = copy_guest_path(path_ptr, &mut path);
+    let plen = ctx.guest_copy_path(path_ptr, &mut path);
     // Resolve relative paths against CWD
     let (path, plen) = if plen > 0 && path[0] != b'/' {
         let mut abs = [0u8; 256];
@@ -2983,7 +3515,8 @@ pub(crate) fn sys_umask(ctx: &mut SyscallContext, _msg: &IpcMsg) {
 pub(crate) fn sys_faccessat2(ctx: &mut SyscallContext, msg: &IpcMsg) {
     let path_ptr = msg.regs[1];
     let mut path = [0u8; 128];
-    let plen = copy_guest_path(path_ptr, &mut path);
+    let plen = ctx.guest_copy_path(path_ptr, &mut path);
+    // Debug trace removed (was ACCESS2 P{pid} [{path}])
     // Resolve relative paths against CWD
     let (path, plen) = if plen > 0 && path[0] != b'/' {
         let mut abs = [0u8; 256];
@@ -3030,15 +3563,63 @@ pub(crate) fn sys_faccessat2(ctx: &mut SyscallContext, msg: &IpcMsg) {
 }
 
 /// SYS_CHDIR (80): change working directory.
+/// SYS_FCHDIR (81): change CWD via file descriptor.
+pub(crate) fn sys_fchdir(ctx: &mut SyscallContext, msg: &IpcMsg) {
+    let fd = msg.regs[0] as usize;
+    if ctx.pid >= 3 {
+        print(b"FCHDIR-DBG P"); print_u64(ctx.pid as u64);
+        print(b" fd="); print_u64(fd as u64);
+        if fd < crate::fd::GRP_MAX_FDS { print(b" k="); print_u64(ctx.child_fds[fd] as u64); }
+        print(b" slot="); print_u64(ctx.sock_conn_id[fd] as u64);
+        print(b" grp="); print_u64((ctx.pid.saturating_sub(1) * 8) as u64);
+        print(b"\n");
+    }
+    if fd >= GRP_MAX_FDS || ctx.child_fds[fd] != 14 {
+        reply_val(ctx.ep_cap, -EBADF);
+        return;
+    }
+    // Look up directory path stored at openat time
+    let slot = ctx.sock_conn_id[fd] as usize;
+    let grp_base = (ctx.pid.saturating_sub(1)) * 8;
+    let global_slot = grp_base + (slot & 7);
+    if global_slot >= crate::fd::MAX_DIR_SLOTS {
+        reply_val(ctx.ep_cap, -EBADF);
+        return;
+    }
+    let path = unsafe { &crate::fd::DIR_FD_PATHS[global_slot] };
+    let mut plen = 0;
+    while plen < 127 && path[plen] != 0 { plen += 1; }
+    if plen == 0 {
+        print(b"FCHDIR-ENOENT P"); print_u64(ctx.pid as u64);
+        print(b" gslot="); print_u64(global_slot as u64);
+        print(b"\n");
+        reply_val(ctx.ep_cap, -ENOENT);
+        return;
+    }
+    let copy_len = plen.min(GRP_CWD_MAX - 1);
+    ctx.cwd[..copy_len].copy_from_slice(&path[..copy_len]);
+    ctx.cwd[copy_len] = 0;
+    if ctx.pid >= 3 {
+        print(b"FCHDIR P"); print_u64(ctx.pid as u64);
+        print(b" fd="); print_u64(fd as u64);
+        print(b" ["); for &b in &ctx.cwd[..copy_len] { if b == 0 { break; } sys::debug_print(b); } print(b"]\n");
+    }
+    reply_val(ctx.ep_cap, 0);
+}
+
 pub(crate) fn sys_chdir(ctx: &mut SyscallContext, msg: &IpcMsg) {
     let path_ptr = msg.regs[0];
     let mut path = [0u8; 128];
-    let plen = copy_guest_path(path_ptr, &mut path);
+    let plen = ctx.guest_copy_path(path_ptr, &mut path);
     let name = &path[..plen];
     // Resolve relative path against current CWD
     let mut abs = [0u8; 256];
     let alen = resolve_with_cwd(ctx.cwd, name, &mut abs);
     let abs_name = &abs[..alen];
+    if ctx.pid >= 3 {
+        print(b"CHDIR P"); print_u64(ctx.pid as u64);
+        print(b" ["); for &b in abs_name { if b == 0 { break; } sys::debug_print(b); } print(b"]\n");
+    }
     // Check if target is a known directory (root, well-known, or VFS dir)
     let is_root = alen == 1 && abs[0] == b'/';
     let is_well_known = abs_name == b"/tmp" || abs_name == b"/home"

@@ -23,6 +23,7 @@ pub(crate) fn check_pending_signals(
     ep_cap: u64,
     pid: usize,
     kernel_tid: u64,
+    child_as_cap: u64,
 ) -> Option<SyscallAction> {
     let sig = sig_dequeue(pid);
     if sig == 0 {
@@ -36,7 +37,7 @@ pub(crate) fn check_pending_signals(
         }
         3 => {
             // User handler registered — deliver signal via frame injection
-            if signal_deliver(ep_cap, pid, sig, kernel_tid, 0, false) {
+            if signal_deliver(ep_cap, pid, sig, kernel_tid, 0, false, 0, 0, child_as_cap) {
                 Some(SyscallAction::Continue)    // signal_deliver already replied
             } else {
                 None // Delivery failed — fall through to normal dispatch
@@ -65,10 +66,7 @@ pub(crate) fn sys_rt_sigaction(ctx: &mut SyscallContext, msg: &IpcMsg) {
     let idx = ctx.pid - 1;
     // Write old handler to oldact
     if oldact != 0 && oldact < 0x0000_8000_0000_0000 {
-        // PWC watchpoint: check around oldact write
-        let pwc_pre = crate::fd::PIPE_WRITE_CLOSED[1].load(Ordering::Relaxed);
-        let buf = unsafe { core::slice::from_raw_parts_mut(oldact as *mut u8, ksa_size) };
-        for b in buf.iter_mut() { *b = 0; }
+        let mut buf = [0u8; 64];
         if signo > 0 && signo < 32 {
             let old_h = PROCESSES[idx].sig_handler[signo].load(Ordering::Acquire);
             let old_f = PROCESSES[idx].sig_flags[signo].load(Ordering::Acquire);
@@ -77,22 +75,15 @@ pub(crate) fn sys_rt_sigaction(ctx: &mut SyscallContext, msg: &IpcMsg) {
             buf[8..16].copy_from_slice(&old_f.to_le_bytes());
             buf[16..24].copy_from_slice(&old_r.to_le_bytes());
         }
-        let pwc_post = crate::fd::PIPE_WRITE_CLOSED[1].load(Ordering::Relaxed);
-        if pwc_pre != pwc_post {
-            crate::framebuffer::print(b"!! SIGACT-CORRUPT P");
-            crate::framebuffer::print_u64(ctx.pid as u64);
-            crate::framebuffer::print(b" oldact=0x");
-            crate::framebuffer::print_hex64(oldact);
-            crate::framebuffer::print(b" ksa=");
-            crate::framebuffer::print_u64(ksa_size as u64);
-            crate::framebuffer::print(b"\n");
-        }
+        ctx.guest_write(oldact, &buf[..ksa_size]);
     }
     // Install new handler from act
     if act_ptr != 0 && act_ptr < 0x0000_8000_0000_0000 && signo > 0 && signo < 32 {
-        let handler = unsafe { *(act_ptr as *const u64) };
-        let flags = unsafe { *((act_ptr + 8) as *const u64) };
-        let restorer = unsafe { *((act_ptr + 16) as *const u64) };
+        let mut act_buf = [0u8; 24];
+        ctx.guest_read(act_ptr, &mut act_buf);
+        let handler = u64::from_le_bytes(act_buf[0..8].try_into().unwrap());
+        let flags = u64::from_le_bytes(act_buf[8..16].try_into().unwrap());
+        let restorer = u64::from_le_bytes(act_buf[16..24].try_into().unwrap());
         PROCESSES[idx].sig_handler[signo].store(handler, Ordering::Release);
         PROCESSES[idx].sig_flags[signo].store(flags, Ordering::Release);
         PROCESSES[idx].sig_restorer[signo].store(restorer, Ordering::Release);
@@ -111,11 +102,11 @@ pub(crate) fn sys_rt_sigprocmask(ctx: &mut SyscallContext, msg: &IpcMsg) {
     let cur_mask = PROCESSES[idx].sig_blocked.load(Ordering::Acquire);
     // Write old mask
     if oldset != 0 && oldset < 0x0000_8000_0000_0000 {
-        unsafe { *(oldset as *mut u64) = cur_mask; }
+        ctx.guest_write(oldset, &cur_mask.to_le_bytes());
     }
     // Apply new mask
     if set_ptr != 0 && set_ptr < 0x0000_8000_0000_0000 {
-        let new_set = unsafe { *(set_ptr as *const u64) };
+        let new_set = ctx.guest_read_u64(set_ptr);
         // Can't block SIGKILL or SIGSTOP
         let safe_set = new_set & !((1 << SIGKILL) | (1 << 19));
         match how {
@@ -158,12 +149,11 @@ pub(crate) fn sys_sigaltstack(ctx: &mut SyscallContext, msg: &IpcMsg) {
         } else {
             0 // enabled, not currently on it
         };
-        unsafe {
-            // stack_t { ss_sp (+0), ss_flags (+8), ss_size (+16) }
-            core::ptr::write_volatile(old_ss as *mut u64, cur_sp);
-            core::ptr::write_volatile((old_ss + 8) as *mut u64, report_flags);
-            core::ptr::write_volatile((old_ss + 16) as *mut u64, cur_size);
-        }
+        let mut buf = [0u8; 24];
+        buf[0..8].copy_from_slice(&cur_sp.to_le_bytes());
+        buf[8..16].copy_from_slice(&report_flags.to_le_bytes());
+        buf[16..24].copy_from_slice(&cur_size.to_le_bytes());
+        ctx.guest_write(old_ss, &buf);
     }
 
     // Read and apply new alt stack from new_ss if non-null
@@ -174,9 +164,11 @@ pub(crate) fn sys_sigaltstack(ctx: &mut SyscallContext, msg: &IpcMsg) {
             return;
         }
 
-        let ss_sp = unsafe { core::ptr::read_volatile(new_ss as *const u64) };
-        let ss_flags = unsafe { core::ptr::read_volatile((new_ss + 8) as *const u64) };
-        let ss_size = unsafe { core::ptr::read_volatile((new_ss + 16) as *const u64) };
+        let mut ss_buf = [0u8; 24];
+        ctx.guest_read(new_ss, &mut ss_buf);
+        let ss_sp = u64::from_le_bytes(ss_buf[0..8].try_into().unwrap());
+        let ss_flags = u64::from_le_bytes(ss_buf[8..16].try_into().unwrap());
+        let ss_size = u64::from_le_bytes(ss_buf[16..24].try_into().unwrap());
 
         if ss_flags & SS_DISABLE != 0 {
             // Disabling alt stack
@@ -204,7 +196,7 @@ pub(crate) fn sys_sigaltstack(ctx: &mut SyscallContext, msg: &IpcMsg) {
 pub(crate) fn sys_rt_sigpending(ctx: &mut SyscallContext, msg: &IpcMsg) {
     let set_ptr = msg.regs[0];
     if set_ptr != 0 {
-        unsafe { *(set_ptr as *mut u64) = 0; } // empty pending set
+        ctx.guest_write(set_ptr, &0u64.to_le_bytes()); // empty pending set
     }
     reply_val(ctx.ep_cap, 0);
 }
@@ -236,49 +228,65 @@ pub(crate) fn sys_rt_sigqueueinfo(ctx: &mut SyscallContext, _msg: &IpcMsg) {
 /// Returns SyscallAction::Break if signal terminates the process.
 pub(crate) fn sys_signal_trampoline(ctx: &mut SyscallContext, msg: &IpcMsg) -> SyscallAction {
     let child_tid = msg.regs[6];
-    let sig = sig_dequeue(ctx.pid);
+    let mut sig = sig_dequeue(ctx.pid);
+
+    // If no init-side signal, check kernel-generated signal (regs[17]).
+    // The kernel's #PF handler stores SIGSEGV here when user code accesses kernel addresses.
+    if sig == 0 {
+        let mut probe_regs = [0u64; 20];
+        if sys::get_thread_regs(child_tid, &mut probe_regs).is_ok() {
+            let kernel_sig = probe_regs[17];
+            if kernel_sig > 0 && kernel_sig < 32 {
+                sig = kernel_sig;
+            }
+        }
+    }
+
     if sig != 0 {
+        // For kernel-generated signals (#PF SIGSEGV), read fault address and error code.
+        let (fault_addr, fault_code) = if sig == 11 {
+            sys::get_fault_info(child_tid)
+        } else {
+            (0u64, 0u64)
+        };
         match sig_dispatch(ctx.pid, sig) {
             1 => return SyscallAction::Break, // terminated
+            2 => {
+                reply_val(ctx.ep_cap, -EINTR);
+                return SyscallAction::Continue;
+            }
             3 => {
-                if signal_deliver(ctx.ep_cap, ctx.pid, sig, child_tid, 0, true) {
+                if signal_deliver(ctx.ep_cap, ctx.pid, sig, child_tid, 0, true, fault_addr, fault_code, ctx.child_as_cap) {
                     return SyscallAction::Continue;
                 }
             }
-            _ => {}
+            _ => {} // ignored — fall through to resume
         }
     }
+
     // No signal — resume with saved pre-interrupt state via rt_sigreturn
-    let mut saved_regs = [0u64; 18];
+    let mut saved_regs = [0u64; 20];
     if sys::get_thread_regs(child_tid, &mut saved_regs).is_ok() {
         let saved_rsp = saved_regs[15];
+        // Use real RIP/RFLAGS if from interrupt context, else SYSCALL convention
+        let real_rip = if saved_regs[18] != 0 { saved_regs[18] } else { saved_regs[2] };
+        let real_rflags = if saved_regs[19] != 0 { saved_regs[19] } else { saved_regs[10] };
         let frame_size = sotos_common::SIGNAL_FRAME_SIZE as u64;
         let new_rsp = ((saved_rsp - frame_size) & !0xF) - 8;
-        let fp = new_rsp as *mut u64;
-        unsafe {
-            core::ptr::write_volatile(fp.add(0),  vdso::SIGRETURN_RESTORER_ADDR);
-            core::ptr::write_volatile(fp.add(1),  0);
-            core::ptr::write_volatile(fp.add(2),  saved_regs[0]);
-            core::ptr::write_volatile(fp.add(3),  saved_regs[1]);
-            core::ptr::write_volatile(fp.add(4),  saved_regs[2]);
-            core::ptr::write_volatile(fp.add(5),  saved_regs[3]);
-            core::ptr::write_volatile(fp.add(6),  saved_regs[4]);
-            core::ptr::write_volatile(fp.add(7),  saved_regs[5]);
-            core::ptr::write_volatile(fp.add(8),  saved_regs[6]);
-            core::ptr::write_volatile(fp.add(9),  saved_regs[7]);
-            core::ptr::write_volatile(fp.add(10), saved_regs[8]);
-            core::ptr::write_volatile(fp.add(11), saved_regs[9]);
-            core::ptr::write_volatile(fp.add(12), saved_regs[10]);
-            core::ptr::write_volatile(fp.add(13), saved_regs[11]);
-            core::ptr::write_volatile(fp.add(14), saved_regs[12]);
-            core::ptr::write_volatile(fp.add(15), saved_regs[13]);
-            core::ptr::write_volatile(fp.add(16), saved_regs[14]);
-            core::ptr::write_volatile(fp.add(17), saved_regs[2]);
-            core::ptr::write_volatile(fp.add(18), saved_rsp);
-            core::ptr::write_volatile(fp.add(19), saved_regs[10]);
-            core::ptr::write_volatile(fp.add(20), saved_regs[16]);
-            core::ptr::write_volatile(fp.add(21), 0);
-        }
+        // Build frame in local buffer, write to child's AS
+        let frame_data: [u64; 23] = [
+            vdso::SIGRETURN_RESTORER_ADDR, 0,
+            saved_regs[0], saved_regs[1], saved_regs[2], saved_regs[3],
+            saved_regs[4], saved_regs[5], saved_regs[6], saved_regs[7],
+            saved_regs[8], saved_regs[9], saved_regs[10], saved_regs[11],
+            saved_regs[12], saved_regs[13], saved_regs[14],
+            real_rip, saved_rsp, real_rflags, saved_regs[16],
+            0, 0, // old_mask, ucontext_ptr
+        ];
+        let frame_bytes: &[u8] = unsafe {
+            core::slice::from_raw_parts(frame_data.as_ptr() as *const u8, frame_data.len() * 8)
+        };
+        ctx.guest_write(new_rsp, frame_bytes);
         let reply = sotos_common::IpcMsg {
             tag: sotos_common::SIG_REDIRECT_TAG,
             regs: [

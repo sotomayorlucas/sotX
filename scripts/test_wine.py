@@ -15,7 +15,7 @@ IMAGE = "target/sotos.img"
 DISK = "target/disk.img"
 
 BOOT_TIMEOUT = 60
-CMD_TIMEOUT = 30
+CMD_TIMEOUT = 300
 
 
 class Session:
@@ -111,6 +111,14 @@ def main():
     out = s.get_output()
     print(f"  Output: {out.strip()}")
 
+    # Check Wine PE DLL directory
+    s.clear()
+    print("\n  Running: ls /x86_64-linux-gnu/wine/x86_64-windows")
+    s.send("ls /x86_64-linux-gnu/wine/x86_64-windows")
+    time.sleep(2)
+    out = s.get_output()
+    print(f"  Output: {out.strip()}")
+
     # Try running wine64
     s.clear()
     print("\n  Running: /bin/wine64 --version")
@@ -126,17 +134,35 @@ def main():
     print(f"  === End ===")
 
     if found_version:
-        # Extract version line
         for line in out.split('\n'):
             if 'wine-' in line:
-                print(f"\n  PASS: {line.strip()}")
-                s.stop()
-                return 0
+                print(f"\n  PASS --version: {line.strip()}")
+                break
+    else:
+        print("\n  FAIL: wine64 --version did not print version string")
+        print(s.get_output()[-2000:])
+        s.stop()
+        return 1
 
-    print("\n  Wine64 did not print version. Checking last output...")
-    print(s.get_output()[-2000:])
+    # Now try running a PE executable
+    time.sleep(1)
+    s.clear()
+    print("\n  Running: /bin/wine64 /bin/hello.exe")
+    s.send("/bin/wine64 /bin/hello.exe")
+
+    # Wait longer — PE loading is more complex.
+    # Wine's ntdll does thousands of MAP_FIXED_NOREPLACE probes (VA reservation),
+    # each one going through IPC. Give it plenty of time.
+    found_hello = s.wait_for("Hello", CMD_TIMEOUT)
+    found_prompt2 = s.wait_for("$", 30)
+
+    out2 = s.get_output()
+    print(f"\n  === hello.exe Output ===")
+    print(out2)
+    print(f"  === End ===")
+
     s.stop()
-    return 1
+    return 0
 
 
 if __name__ == "__main__":

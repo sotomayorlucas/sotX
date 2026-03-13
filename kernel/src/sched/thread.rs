@@ -136,6 +136,10 @@ pub struct Thread {
     /// Set by arch_prctl(ARCH_SET_FS) or SYS_SET_FSBASE syscall.
     pub fs_base: u64,
 
+    /// GS segment base (user value, held in IA32_KERNEL_GS_BASE while in kernel).
+    /// Set by arch_prctl(ARCH_SET_GS). Wine uses GS for the Thread Environment Block.
+    pub gs_base: u64,
+
     // --- Signal delivery support ---
 
     /// Saved user-mode register state from the last syscall redirect.
@@ -160,6 +164,27 @@ pub struct Thread {
     /// Pending async signals bitmask (set by SYS_SIGNAL_INJECT).
     /// Checked by the timer interrupt handler on return-to-user.
     pub pending_signals: u64,
+
+    /// Kernel-generated signal number (e.g., SIGSEGV from #PF handler).
+    /// Returned via get_thread_signal_regs in regs[17] and cleared on read.
+    /// This bridges kernel-generated signals to init's signal dispatcher.
+    pub kernel_signal: u64,
+
+    /// Fault address (CR2) from the last #PF that generated a kernel signal.
+    /// Passed to init for siginfo.si_addr and ucontext gregs[22] (CR2).
+    pub fault_addr: u64,
+
+    /// Page fault error code from the last #PF that generated a kernel signal.
+    /// Passed to init for ucontext gregs[19] (ERR).
+    pub fault_code: u64,
+
+    /// Real user RIP at time of interrupt (separate from signal_saved_regs which
+    /// keeps original RCX intact). Set by save_signal_context_current for #PF/timer.
+    pub signal_saved_rip: u64,
+
+    /// Real user RFLAGS at time of interrupt (separate from signal_saved_regs which
+    /// keeps original R11 intact).
+    pub signal_saved_rflags: u64,
 }
 
 impl Thread {
@@ -216,11 +241,17 @@ impl Thread {
             ipc_timeout: 0,
             ipc_timed_out: false,
             fs_base: 0,
+            gs_base: 0,
             redirect_saved_regs: [0; 18],
             signal_saved_regs: [0; 18],
             signal_ctx_valid: false,
             signal_trampoline: 0,
             pending_signals: 0,
+            kernel_signal: 0,
+            fault_addr: 0,
+            fault_code: 0,
+            signal_saved_rip: 0,
+            signal_saved_rflags: 0,
         }
     }
 
@@ -281,11 +312,17 @@ impl Thread {
             ipc_timeout: 0,
             ipc_timed_out: false,
             fs_base: 0,
+            gs_base: 0,
             redirect_saved_regs: [0; 18],
             signal_saved_regs: [0; 18],
             signal_ctx_valid: false,
             signal_trampoline: 0,
             pending_signals: 0,
+            kernel_signal: 0,
+            fault_addr: 0,
+            fault_code: 0,
+            signal_saved_rip: 0,
+            signal_saved_rflags: 0,
         }
     }
 }
