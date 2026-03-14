@@ -15,30 +15,36 @@ use super::context::SyscallContext;
 // ─── Time syscalls ──────────────────────────────────────────────
 
 /// SYS_CLOCK_GETTIME (228): return monotonic/realtime clock.
+/// CLOCK_REALTIME(0): elapsed + epoch offset. CLOCK_MONOTONIC(1): elapsed only.
 pub(crate) fn sys_clock_gettime(ctx: &mut SyscallContext, msg: &IpcMsg) {
+    let clock_id = msg.regs[0];
     let tp_ptr = msg.regs[1];
-    if tp_ptr != 0 && tp_ptr < 0x0000_8000_0000_0000 {
+    if tp_ptr != 0 {
         let tsc = rdtsc();
         let boot_tsc = BOOT_TSC.load(Ordering::Acquire);
         let elapsed_ns = if tsc > boot_tsc { (tsc - boot_tsc) / 2 } else { 0 };
-        let total_ns = elapsed_ns + UPTIME_OFFSET_NS;
-        let tp = unsafe { core::slice::from_raw_parts_mut(tp_ptr as *mut u8, 16) };
+        let total_ns = if clock_id == 1 { elapsed_ns } else { elapsed_ns + UPTIME_OFFSET_NS };
+        let mut tp = [0u8; 16];
         tp[0..8].copy_from_slice(&((total_ns / 1_000_000_000) as i64).to_le_bytes());
         tp[8..16].copy_from_slice(&((total_ns % 1_000_000_000) as i64).to_le_bytes());
+        ctx.guest_write(tp_ptr, &tp);
     }
     reply_val(ctx.ep_cap, 0);
 }
 
-/// SYS_GETTIMEOFDAY (96): return time of day.
+/// SYS_GETTIMEOFDAY (96): return time of day (always CLOCK_REALTIME).
 pub(crate) fn sys_gettimeofday(ctx: &mut SyscallContext, msg: &IpcMsg) {
-    let tv = msg.regs[0] as *mut u64;
-    if !tv.is_null() {
+    let tv_ptr = msg.regs[0];
+    if tv_ptr != 0 {
         let tsc = rdtsc();
         let boot_tsc = BOOT_TSC.load(Ordering::Acquire);
         let elapsed_us = if tsc > boot_tsc { (tsc - boot_tsc) / 2000 } else { 0 };
         let total_secs = elapsed_us / 1_000_000 + UPTIME_OFFSET_SECS;
         let usecs = elapsed_us % 1_000_000;
-        unsafe { *tv = total_secs; *tv.add(1) = usecs; }
+        let mut tv = [0u8; 16];
+        tv[0..8].copy_from_slice(&total_secs.to_le_bytes());
+        tv[8..16].copy_from_slice(&usecs.to_le_bytes());
+        ctx.guest_write(tv_ptr, &tv);
     }
     reply_val(ctx.ep_cap, 0);
 }
@@ -52,10 +58,9 @@ pub(crate) fn sys_nanosleep(ctx: &mut SyscallContext, _msg: &IpcMsg) {
 pub(crate) fn sys_clock_getres(ctx: &mut SyscallContext, msg: &IpcMsg) {
     let tp = msg.regs[1];
     if tp != 0 {
-        unsafe {
-            *(tp as *mut u64) = 0;       // tv_sec = 0
-            *((tp + 8) as *mut u64) = 1;  // tv_nsec = 1 (1ns resolution)
-        }
+        let mut buf = [0u8; 16];
+        buf[8] = 1; // tv_nsec = 1 (1ns resolution)
+        ctx.guest_write(tp, &buf);
     }
     reply_val(ctx.ep_cap, 0);
 }

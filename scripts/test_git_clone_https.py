@@ -185,7 +185,6 @@ def main():
     # and the user can retry with GIT_SSL_NO_VERIFY=1
     cmd = (f"HOME=/tmp "
            f"GIT_TRACE=2 "
-           f"GIT_SSL_NO_VERIFY=1 "
            f"SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt "
            f"/usr/bin/git clone {clone_url} {clone_dest}")
     print(f"  cmd: {cmd}")
