@@ -1635,34 +1635,24 @@ pub(crate) fn sys_readv(ctx: &mut SyscallContext, msg: &IpcMsg) {
             reply_val(ctx.ep_cap, -EAGAIN);
         }
     } else if ctx.child_fds[fd] == 10 {
-        // Pipe read via readv: non-blocking with kernel-side retry
+        // Pipe read via readv: use guest_read/guest_write for cross-AS children
         let pipe_id = ctx.sock_conn_id[fd] as usize;
         let cnt = iovcnt.min(16);
         let mut total = 0usize;
-        // Log iov structure for debugging
-        if ctx.pid >= 3 && cnt > 0 {
-            print(b"PIPEV-R P"); print_u64(ctx.pid as u64);
-            print(b" fd="); print_u64(fd as u64);
-            print(b" iovcnt="); print_u64(cnt as u64);
-            for j in 0..cnt.min(3) {
-                let e = iov_ptr + (j as u64) * 16;
-                if e + 16 > 0x0000_8000_0000_0000 { break; }
-                let b = unsafe { *(e as *const u64) };
-                let l = unsafe { *((e + 8) as *const u64) };
-                print(b" ["); print_u64(b); print(b","); print_u64(l); print(b"]");
-            }
-            print(b"\n");
-        }
         for i in 0..cnt {
             let entry = iov_ptr + (i as u64) * 16;
-            if entry + 16 > 0x0000_8000_0000_0000 { break; }
-            let base = unsafe { *(entry as *const u64) };
-            let ilen = unsafe { *((entry + 8) as *const u64) } as usize;
+            let base = ctx.guest_read_u64(entry);
+            let ilen = ctx.guest_read_u64(entry + 8) as usize;
             if base == 0 || ilen == 0 { continue; }
-            let dst = unsafe { core::slice::from_raw_parts_mut(base as *mut u8, ilen) };
-            let n = pipe_read(pipe_id, dst);
+            // Read pipe data into local buffer, then guest_write to child
+            let safe_len = ilen.min(4096);
+            let mut local_buf = [0u8; 4096];
+            let n = pipe_read(pipe_id, &mut local_buf[..safe_len]);
+            if n > 0 {
+                ctx.guest_write(base, &local_buf[..n]);
+            }
             total += n;
-            if n < ilen { break; } // short read or no data
+            if n < safe_len { break; }
         }
         if total > 0 {
             // Log data read
