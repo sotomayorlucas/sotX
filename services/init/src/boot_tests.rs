@@ -1321,13 +1321,13 @@ pub(crate) fn run_busybox_test() {
                     // regs[0] = dst_ip, regs[1..7] = data (56 bytes max)
                     let copy_len = len.min(56);
                     let data = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, copy_len) };
-                    let packed_tag = NET_CMD_UDP_SENDTO
-                        | ((copy_len as u64) << 16)
-                        | ((src_port as u64) << 32)
-                        | ((dst_port as u64) << 48);
+                    let packed_tag = NET_CMD_UDP_SENDTO | ((copy_len as u64) << 16);
+                    let packed_r0 = (dst_ip as u64)
+                        | ((dst_port as u64) << 32)
+                        | ((src_port as u64) << 48);
                     let mut send_msg = sotos_common::IpcMsg {
                         tag: packed_tag,
-                        regs: [dst_ip as u64, 0, 0, 0, 0, 0, 0, 0],
+                        regs: [packed_r0, 0, 0, 0, 0, 0, 0, 0],
                     };
                     unsafe {
                         let dst = &mut send_msg.regs[1] as *mut u64 as *mut u8;

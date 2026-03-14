@@ -109,6 +109,8 @@ static IPC_ARG1: AtomicU64 = AtomicU64::new(0);
 static IPC_ARG2: AtomicU64 = AtomicU64::new(0);
 static IPC_ARG3: AtomicU64 = AtomicU64::new(0);
 static IPC_RESULT: AtomicU64 = AtomicU64::new(0);
+/// Total bytes of last UDP recv (stored for multi-chunk reads).
+static IPC_UDP_RECV_TOTAL: AtomicU64 = AtomicU64::new(0);
 static mut IPC_DATA_BUF: [u8; 4096] = [0; 4096];
 static IPC_EP_CAP: AtomicU64 = AtomicU64::new(0);
 const IPC_HANDLER_STACK: u64 = 0xD01000;
@@ -1161,13 +1163,14 @@ fn process_ipc_cmd(
         }
 
         CMD_UDP_SENDTO => {
-            // Packed format: tag = CMD | (data_len<<16) | (src_port<<32) | (dst_port<<48)
-            // arg0 = dst_ip
+            // Packed: tag(32-bit) = CMD | (data_len<<16)
+            // arg0 = regs[0] = dst_ip(32) | dst_port(16@32) | src_port(16@48)
             let raw_tag = IPC_RAW_TAG.load(Ordering::Acquire);
-            let dst_ip = arg0 as u32;
-            let dst_port = ((raw_tag >> 48) & 0xFFFF) as u16;
-            let src_port = ((raw_tag >> 32) & 0xFFFF) as u16;
+            let dst_ip = (arg0 & 0xFFFFFFFF) as u32;
+            let dst_port = ((arg0 >> 32) & 0xFFFF) as u16;
+            let src_port = ((arg0 >> 48) & 0xFFFF) as u16;
             let data_len = (((raw_tag >> 16) & 0xFFFF) as usize).min(56);
+
             let data = unsafe {
                 core::slice::from_raw_parts(
                     core::ptr::addr_of!(IPC_DATA_BUF) as *const u8,
@@ -1210,10 +1213,18 @@ fn process_ipc_cmd(
 
         CMD_UDP_RECV => {
             let port = arg0 as u16;
-            // Always read full datagrams (up to 512B) to avoid smoltcp Truncated error.
-            // IPC handler clamps result to 64 bytes for transport.
-            let max_len = 512usize;
+            let offset = arg2 as usize;
 
+            // If offset > 0, return next chunk from previously-stored IPC_DATA_BUF
+            if offset > 0 {
+                let total = IPC_UDP_RECV_TOTAL.load(Ordering::Acquire) as usize;
+                if offset >= total { return 0; }
+                // Return remaining bytes from stored buffer (IPC handler copies from offset)
+                return (total - offset) as u64;
+            }
+
+            // offset == 0: poll for new datagram
+            let max_len = 512usize;
             let slot = match find_udp_slot(port) {
                 Some(s) => s,
                 None => { return 0; },
@@ -1231,6 +1242,7 @@ fn process_ipc_cmd(
                         )
                     };
                     if let Ok((n, _ep)) = sock.recv_slice(ipc_buf) {
+                        IPC_UDP_RECV_TOTAL.store(n as u64, Ordering::Release);
                         return n as u64;
                     }
                 }
@@ -1249,6 +1261,7 @@ fn process_ipc_cmd(
                         )
                     };
                     if let Ok((n, _ep)) = sock.recv_slice(ipc_buf) {
+                        IPC_UDP_RECV_TOTAL.store(n as u64, Ordering::Release);
                         return n as u64;
                     }
                 }
@@ -1329,8 +1342,8 @@ pub extern "C" fn ipc_handler_thread() -> ! {
                 );
             }
         } else if cmd == CMD_UDP_SENDTO {
-            // New packed format: tag = CMD | (data_len<<16) | (src_port<<32) | (dst_port<<48)
-            // regs[0] = dst_ip, regs[1..7] = data (up to 56 bytes)
+            // Packed: tag(32-bit) = CMD | (data_len<<16)
+            // regs[0] = dst_ip|dst_port|src_port, regs[1..7] = data (56 bytes max)
             let avail = (((msg.tag >> 16) & 0xFFFF) as usize).min(56);
             unsafe {
                 let src = &msg.regs[1] as *const u64 as *const u8;
@@ -1367,15 +1380,14 @@ pub extern "C" fn ipc_handler_thread() -> ! {
 
         // TCP_RECV / UDP_RECV: copy data into reply regs
         if (cmd == CMD_TCP_RECV || cmd == CMD_UDP_RECV) && result > 0 {
+            // For UDP_RECV with offset (arg2 > 0), copy from IPC_DATA_BUF[offset..]
+            let offset = if cmd == CMD_UDP_RECV { arg2 as usize } else { 0 };
             let n = (result as usize).min(64);
-            reply.tag = n as u64; // clamp to IPC transport limit
+            reply.tag = n as u64;
             unsafe {
+                let src = (core::ptr::addr_of!(IPC_DATA_BUF) as *const u8).add(offset);
                 let dst = &mut reply.regs[0] as *mut u64 as *mut u8;
-                core::ptr::copy_nonoverlapping(
-                    core::ptr::addr_of!(IPC_DATA_BUF) as *const u8,
-                    dst,
-                    n,
-                );
+                core::ptr::copy_nonoverlapping(src, dst, n);
             }
         }
 

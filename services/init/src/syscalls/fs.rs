@@ -515,13 +515,13 @@ pub(crate) fn sys_write(ctx: &mut SyscallContext, msg: &IpcMsg) {
                 reply_val(ctx.ep_cap, -EDESTADDRREQ);
             } else {
                 let send_len = len.min(56);
-                let packed_tag = NET_CMD_UDP_SENDTO
-                    | ((send_len as u64) << 16)
-                    | ((src_port as u64) << 32)
-                    | ((remote_port as u64) << 48);
+                let packed_tag = NET_CMD_UDP_SENDTO | ((send_len as u64) << 16);
+                let packed_r0 = (remote_ip as u64)
+                    | ((remote_port as u64) << 32)
+                    | ((src_port as u64) << 48);
                 let mut req = sotos_common::IpcMsg {
                     tag: packed_tag,
-                    regs: [remote_ip as u64, 0, 0, 0, 0, 0, 0, 0],
+                    regs: [packed_r0, 0, 0, 0, 0, 0, 0, 0],
                 };
                 let data = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, send_len) };
                 unsafe {

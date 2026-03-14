@@ -441,18 +441,17 @@ pub(crate) fn sys_sendto(ctx: &mut SyscallContext, msg: &IpcMsg) {
             (ctx.sock_udp_remote_ip[fd], ctx.sock_udp_remote_port[fd])
         };
         let src_port = ctx.sock_udp_local_port[fd];
-        // Pack metadata into tag+regs[0] to maximize data space:
-        // tag = CMD | (data_len << 16) | (src_port << 32) | (dst_port << 48)
-        // regs[0] = dst_ip
+        // Pack: tag(32-bit) = CMD | (data_len << 16)
+        // regs[0] = dst_ip | (dst_port << 32) | (src_port << 48)
         // regs[1..7] = data (56 bytes max)
         let send_len = len.min(56);
-        let packed_tag = NET_CMD_UDP_SENDTO
-            | ((send_len as u64) << 16)
-            | ((src_port as u64) << 32)
-            | ((dst_port as u64) << 48);
+        let packed_tag = NET_CMD_UDP_SENDTO | ((send_len as u64) << 16);
+        let packed_r0 = (dst_ip as u64)
+            | ((dst_port as u64) << 32)
+            | ((src_port as u64) << 48);
         let mut req = IpcMsg {
             tag: packed_tag,
-            regs: [dst_ip as u64, 0, 0, 0, 0, 0, 0, 0],
+            regs: [packed_r0, 0, 0, 0, 0, 0, 0, 0],
         };
         let mut data_buf = [0u8; 56];
         ctx.guest_read(buf_ptr, &mut data_buf[..send_len]);
@@ -460,9 +459,10 @@ pub(crate) fn sys_sendto(ctx: &mut SyscallContext, msg: &IpcMsg) {
             let dst = &mut req.regs[1] as *mut u64 as *mut u8;
             core::ptr::copy_nonoverlapping(data_buf.as_ptr(), dst, send_len);
         }
-        let _ = sys::call_timeout(net_cap, &req, 500);
-        // Always return full len — c-ares needs this to proceed to poll/recvfrom
-        reply_val(ep_cap, len as i64);
+        match sys::call_timeout(net_cap, &req, 500) {
+            Ok(resp) => reply_val(ep_cap, resp.regs[0] as i64),
+            Err(_) => reply_val(ep_cap, -EIO),
+        }
     } else {
         // TCP send — multi-chunk loop (same as sys_write for kind=16)
         let net_cap = NET_EP_CAP.load(Ordering::Acquire);
@@ -642,13 +642,13 @@ pub(crate) fn sys_sendmsg(ctx: &mut SyscallContext, msg: &IpcMsg) {
         };
         let src_port = ctx.sock_udp_local_port[fd];
         let send_len = iov_len.min(56);
-        let packed_tag = NET_CMD_UDP_SENDTO
-            | ((send_len as u64) << 16)
-            | ((src_port as u64) << 32)
-            | ((dst_port as u64) << 48);
+        let packed_tag = NET_CMD_UDP_SENDTO | ((send_len as u64) << 16);
+        let packed_r0 = (dst_ip as u64)
+            | ((dst_port as u64) << 32)
+            | ((src_port as u64) << 48);
         let mut req = IpcMsg {
             tag: packed_tag,
-            regs: [dst_ip as u64, 0, 0, 0, 0, 0, 0, 0],
+            regs: [packed_r0, 0, 0, 0, 0, 0, 0, 0],
         };
         let data = unsafe { core::slice::from_raw_parts(iov_base as *const u8, send_len) };
         unsafe {
@@ -711,26 +711,53 @@ pub(crate) fn sys_recvfrom(ctx: &mut SyscallContext, msg: &IpcMsg) {
     } else if ctx.child_fds[fd] != 16 && ctx.child_fds[fd] != 17 {
         reply_val(ep_cap, -EBADF);
     } else if ctx.child_fds[fd] == 17 {
-        // UDP recvfrom
+        // UDP recvfrom — multi-chunk: DNS responses can be >64 bytes
         let net_cap = NET_EP_CAP.load(Ordering::Acquire);
         if net_cap == 0 { reply_val(ep_cap, -EADDRNOTAVAIL); return; }
         let src_port = ctx.sock_udp_local_port[fd];
-        let recv_len = len.min(64);
+        let max_recv = len.min(512); // DNS responses up to 512 bytes
         let mut got = 0usize;
+        // First call: offset=0, triggers net service to poll for new datagram
         for _attempt in 0..50u32 {
             let req = IpcMsg {
                 tag: NET_CMD_UDP_RECV,
-                regs: [src_port as u64, recv_len as u64, 0, 0, 0, 0, 0, 0],
+                regs: [src_port as u64, max_recv as u64, 0, 0, 0, 0, 0, 0],
             };
             match sys::call_timeout(net_cap, &req, 5000) {
                 Ok(resp) => {
-                    let n = resp.tag as usize;
-                    if n > 0 && n <= recv_len {
+                    let chunk = resp.tag as usize; // bytes in this chunk (0-64)
+                    if chunk > 0 {
+                        // Write first chunk to child buffer
                         let src = unsafe {
-                            core::slice::from_raw_parts(&resp.regs[0] as *const u64 as *const u8, n)
+                            core::slice::from_raw_parts(&resp.regs[0] as *const u64 as *const u8, chunk)
                         };
                         ctx.guest_write(buf_ptr, src);
-                        got = n;
+                        got = chunk;
+                        // Fetch remaining chunks if datagram > 64 bytes
+                        // resp.regs[0] was overwritten with data, but the net service
+                        // stored total in IPC_UDP_RECV_TOTAL. We can compute: if
+                        // chunk == 64 and we need more, keep fetching with offset.
+                        let mut offset = chunk;
+                        while offset < max_recv && chunk == 64 {
+                            let cont_req = IpcMsg {
+                                tag: NET_CMD_UDP_RECV,
+                                regs: [src_port as u64, max_recv as u64, offset as u64, 0, 0, 0, 0, 0],
+                            };
+                            match sys::call_timeout(net_cap, &cont_req, 500) {
+                                Ok(cont_resp) => {
+                                    let cont_n = cont_resp.tag as usize;
+                                    if cont_n == 0 { break; }
+                                    let cont_src = unsafe {
+                                        core::slice::from_raw_parts(&cont_resp.regs[0] as *const u64 as *const u8, cont_n)
+                                    };
+                                    ctx.guest_write(buf_ptr + offset as u64, cont_src);
+                                    got += cont_n;
+                                    offset += cont_n;
+                                    if cont_n < 64 { break; } // last chunk
+                                }
+                                Err(_) => break,
+                            }
+                        }
                         break;
                     }
                 }
