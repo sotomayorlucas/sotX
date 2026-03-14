@@ -578,7 +578,7 @@ fn exec_loaded_elf(file_size: usize, bin_name: &[u8], argv: &[[u8; MAX_EXEC_ARG_
     }
 
     // Allocate stack (32 pages = 128 KiB — glibc ld-linux needs ~66 KiB during startup)
-    const CHILD_STACK_PAGES: u64 = 32;
+    const CHILD_STACK_PAGES: u64 = 256; // 1 MiB (was 128KB — too small for git+TLS)
     const CHILD_STACK_SIZE: u64 = CHILD_STACK_PAGES * 0x1000;
     let stack_addr = NEXT_CHILD_STACK.fetch_add(CHILD_STACK_SIZE, Ordering::SeqCst);
     let mut stack_frames = [0u64; CHILD_STACK_PAGES as usize];

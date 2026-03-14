@@ -73,6 +73,19 @@ impl CpuContext {
 const STACK_FRAMES: usize = 4;
 const STACK_SIZE: usize = STACK_FRAMES * 4096;
 
+/// FPU/SSE save area for fxsave64/fxrstor64. Must be 16-byte aligned, 512 bytes.
+#[repr(C, align(16))]
+#[derive(Clone, Copy)]
+pub struct FpuState {
+    pub data: [u8; 512],
+}
+
+impl FpuState {
+    pub const fn zeroed() -> Self {
+        Self { data: [0u8; 512] }
+    }
+}
+
 /// Thread Control Block.
 #[derive(Clone, Copy)]
 #[allow(dead_code)]
@@ -170,6 +183,12 @@ pub struct Thread {
     /// This bridges kernel-generated signals to init's signal dispatcher.
     pub kernel_signal: u64,
 
+    /// FPU/SSE save area (512 bytes, must be 16-byte aligned).
+    /// Saved by fxsave64 during context switch out, restored by fxrstor64 on switch in.
+    /// Without this, XMM registers are clobbered across context switches,
+    /// causing corruption in musl's SSE-optimized memcpy/strcmp.
+    pub fpu_state: FpuState,
+
     /// Fault address (CR2) from the last #PF that generated a kernel signal.
     /// Passed to init for siginfo.si_addr and ucontext gregs[22] (CR2).
     pub fault_addr: u64,
@@ -248,6 +267,7 @@ impl Thread {
             signal_trampoline: 0,
             pending_signals: 0,
             kernel_signal: 0,
+            fpu_state: FpuState::zeroed(),
             fault_addr: 0,
             fault_code: 0,
             signal_saved_rip: 0,
@@ -319,6 +339,7 @@ impl Thread {
             signal_trampoline: 0,
             pending_signals: 0,
             kernel_signal: 0,
+            fpu_state: FpuState::zeroed(),
             fault_addr: 0,
             fault_code: 0,
             signal_saved_rip: 0,

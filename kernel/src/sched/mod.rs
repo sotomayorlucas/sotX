@@ -423,6 +423,7 @@ pub fn init() {
         signal_trampoline: 0,
         pending_signals: 0,
         kernel_signal: 0,
+        fpu_state: thread::FpuState::zeroed(),
         fault_addr: 0,
         fault_code: 0,
         signal_saved_rip: 0,
@@ -480,6 +481,7 @@ pub fn create_idle_thread() -> usize {
         signal_trampoline: 0,
         pending_signals: 0,
         kernel_signal: 0,
+        fpu_state: thread::FpuState::zeroed(),
         fault_addr: 0,
         fault_code: 0,
         signal_saved_rip: 0,
@@ -1369,7 +1371,7 @@ pub fn schedule() {
     // Discard target for dead threads (slot freed before context switch).
     let mut discard_rsp: u64 = 0;
 
-    let switch_info: Option<(*mut u64, u64)> = {
+    let switch_info: Option<(*mut u64, u64, usize, *const u8)> = {
         let mut sched = SCHEDULER.lock();
         let percpu = percpu::current_percpu();
 
@@ -1495,16 +1497,39 @@ pub fn schedule() {
         let new_gs_base = new_t.gs_base;
         write_kernel_gs_base_msr(new_gs_base);
 
-        Some((old_rsp_ptr, new_rsp))
+        // Save the FPU area addresses as raw pointers (avoids double-borrow).
+        // old_rsp_ptr already gives us a pointer into the old thread's CpuContext.
+        // We go from rsp field → Thread struct → fpu_state via byte offset.
+        // Simpler: just store old_idx and compute later from the pool.
+        let old_fpu_idx = old_idx;
+        let new_fpu_ptr = new_t.fpu_state.data.as_ptr();
+
+        Some((old_rsp_ptr, new_rsp, old_fpu_idx, new_fpu_ptr))
     };
     // Lock is dropped here ^
 
-    if let Some((old_rsp_ptr, new_rsp)) = switch_info {
+    if let Some((old_rsp_ptr, new_rsp, old_fpu_idx, new_fpu)) = switch_info {
         unsafe {
+            // Save current thread's FPU/SSE state before switching.
+            // Re-acquire the old thread's fpu_state pointer from the pool.
+            {
+                let sched = SCHEDULER.lock();
+                if let Some(old_t) = sched.threads.get_by_index(old_fpu_idx as u32) {
+                    let fpu_ptr = old_t.fpu_state.data.as_ptr() as *mut u8;
+                    core::arch::asm!("fxsave64 [{}]", in(reg) fpu_ptr, options(nostack));
+                }
+            }
             context_switch(old_rsp_ptr, new_rsp);
+            // After context_switch: we're the NEW thread. Restore FPU.
+            // Check if the state was ever saved (first u16 = FCW; 0 means uninitialized).
+            let fcw = *(new_fpu as *const u16);
+            if fcw != 0 {
+                core::arch::asm!("fxrstor64 [{}]", in(reg) new_fpu, options(nostack));
+            } else {
+                // First context switch for this thread — initialize FPU to default state.
+                core::arch::asm!("fninit", options(nostack));
+            }
         }
-        // After context_switch returns, we're running as the NEW thread
-        // that was previously switched away from. Call finish_switch.
         finish_switch();
     }
 }
