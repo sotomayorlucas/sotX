@@ -1032,7 +1032,7 @@ fn process_ipc_cmd(
 
         CMD_TCP_RECV => {
             let conn_id = arg0 as usize;
-            let max_len = (arg1 as usize).min(64); // IPC limit: 8 regs × 8 bytes = 64
+            let max_len = (arg1 as usize).min(64); // IPC reply carries 64B; caller loops for more
             if conn_id >= MAX_TCP {
                 return 0;
             }

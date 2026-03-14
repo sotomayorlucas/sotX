@@ -237,39 +237,47 @@ pub(crate) fn sys_read(ctx: &mut SyscallContext, msg: &IpcMsg) {
             reply_val(ctx.ep_cap, to_read as i64);
         }
         16 => {
-            // TCP socket read: NET_CMD_TCP_RECV (retry up to 5000 times)
+            // TCP socket read: multi-chunk to fill large buffers (TLS needs 16KB+)
             let net_cap = NET_EP_CAP.load(Ordering::Acquire);
             let conn_id = ctx.sock_conn_id[fd] as u64;
-            let recv_len = len.min(64);
-            let mut got = 0usize;
-            let mut tcp_retries = 0u32;
-            while tcp_retries < 5000 {
+            let max_read = len.min(32768); // cap at 32KB per read
+            let mut total = 0usize;
+            let mut empty_retries = 0u32;
+            while total < max_read && empty_retries < 5000 {
+                let chunk = (max_read - total).min(64);
                 let req = IpcMsg {
                     tag: NET_CMD_TCP_RECV,
-                    regs: [conn_id, recv_len as u64, 0, 0, 0, 0, 0, 0],
+                    regs: [conn_id, chunk as u64, 0, 0, 0, 0, 0, 0],
                 };
                 match sys::call_timeout(net_cap, &req, 200) {
                     Ok(resp) => {
-                        let n = resp.tag as usize; // tag = byte count
-                        if n > 0 && n <= recv_len {
+                        let n = resp.tag as usize;
+                        if n > 0 && n <= chunk {
                             let src = unsafe {
                                 core::slice::from_raw_parts(&resp.regs[0] as *const u64 as *const u8, n)
                             };
-                            ctx.guest_write(buf_ptr, src);
-                            got = n;
-                            break;
+                            ctx.guest_write(buf_ptr + total as u64, src);
+                            total += n;
+                            empty_retries = 0; // reset on progress
+                            if n < chunk { break; } // short read = no more data buffered
+                        } else {
+                            // No data available
+                            if total > 0 { break; } // return what we have
+                            empty_retries += 1;
+                            sys::yield_now();
                         }
-                        // n==0: no data yet, retry
                     }
-                    Err(_) => {} // timeout, retry
+                    Err(_) => {
+                        if total > 0 { break; }
+                        empty_retries += 1;
+                        sys::yield_now();
+                    }
                 }
-                sys::yield_now();
-                tcp_retries += 1;
             }
-            if got > 0 {
-                reply_val(ctx.ep_cap, got as i64);
+            if total > 0 {
+                reply_val(ctx.ep_cap, total as i64);
             } else {
-                reply_val(ctx.ep_cap, -EAGAIN); // -EAGAIN after exhausting retries
+                reply_val(ctx.ep_cap, -EAGAIN);
             }
         }
         17 => {
