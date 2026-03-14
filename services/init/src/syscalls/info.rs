@@ -24,9 +24,11 @@ pub(crate) fn sys_clock_gettime(ctx: &mut SyscallContext, msg: &IpcMsg) {
         let boot_tsc = BOOT_TSC.load(Ordering::Acquire);
         let elapsed_ns = if tsc > boot_tsc { (tsc - boot_tsc) / 2 } else { 0 };
         let total_ns = if clock_id == 1 { elapsed_ns } else { elapsed_ns + UPTIME_OFFSET_NS };
+        let secs = (total_ns / 1_000_000_000) as i64;
+        let nsecs = (total_ns % 1_000_000_000) as i64;
         let mut tp = [0u8; 16];
-        tp[0..8].copy_from_slice(&((total_ns / 1_000_000_000) as i64).to_le_bytes());
-        tp[8..16].copy_from_slice(&((total_ns % 1_000_000_000) as i64).to_le_bytes());
+        tp[0..8].copy_from_slice(&secs.to_le_bytes());
+        tp[8..16].copy_from_slice(&nsecs.to_le_bytes());
         ctx.guest_write(tp_ptr, &tp);
     }
     reply_val(ctx.ep_cap, 0);

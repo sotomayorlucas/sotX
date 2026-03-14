@@ -67,10 +67,11 @@ impl FdEntry {
 // Uptime offset: make the system appear to have been running for 3 days.
 // Applied to clock_gettime, gettimeofday, sysinfo, /proc/uptime.
 // ---------------------------------------------------------------------------
-// Clock offset: make timestamps appear as 2026-03-01 UTC for TLS cert validation.
-// 2026-03-01 00:00:00 UTC = ~1772236800 seconds since epoch.
-pub(crate) const UPTIME_OFFSET_NS: u64 = 1_772_236_800 * 1_000_000_000;
-pub(crate) const UPTIME_OFFSET_SECS: u64 = 1_772_236_800;
+// Clock offset: make timestamps appear as 2026-03-14 12:00 UTC for TLS cert validation.
+// 2026-03-14 12:00:00 UTC = 1773360000 seconds since epoch.
+// GitHub's cert: notBefore=2026-03-06 (must be AFTER this date).
+pub(crate) const UPTIME_OFFSET_NS: u64 = 1_773_360_000 * 1_000_000_000;
+pub(crate) const UPTIME_OFFSET_SECS: u64 = 1_773_360_000;
 
 // ---------------------------------------------------------------------------
 // Epoll event flags (Linux ABI)

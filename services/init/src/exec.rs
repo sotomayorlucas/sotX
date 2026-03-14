@@ -702,8 +702,12 @@ fn exec_loaded_elf(file_size: usize, bin_name: &[u8], argv: &[[u8; MAX_EXEC_ARG_
         *sp.add(i) = 25; i += 1; *sp.add(i) = random_addr; i += 1;
         // AT_ENTRY(9) — main binary's entry point (NOT interpreter)
         *sp.add(i) = 9; i += 1; *sp.add(i) = main_base + elf_info.entry; i += 1;
-        // AT_SYSINFO_EHDR(33) — vDSO base
-        *sp.add(i) = 33; i += 1; *sp.add(i) = vdso::VDSO_BASE; i += 1;
+        // AT_SYSINFO_EHDR(33) — vDSO base (only if vDSO is mapped in this AS)
+        // For exec into fresh AS (target_as != 0), vDSO isn't mapped.
+        // musl will fall back to raw syscalls, which have the correct epoch offset.
+        if target_as == 0 {
+            *sp.add(i) = 33; i += 1; *sp.add(i) = vdso::VDSO_BASE; i += 1;
+        }
         // AT_UID(11), AT_EUID(12), AT_GID(13), AT_EGID(14)
         // All four required: musl checks UID==EUID && GID==EGID for secure mode
         *sp.add(i) = 11; i += 1; *sp.add(i) = 0; i += 1; // AT_UID
