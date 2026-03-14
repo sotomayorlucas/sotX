@@ -103,6 +103,7 @@ const CMD_NET_MIRROR: u64 = 12;
 // IPC atomic command queue
 static NET_MIRROR: AtomicU64 = AtomicU64::new(0);
 static IPC_CMD: AtomicU64 = AtomicU64::new(0);
+static IPC_RAW_TAG: AtomicU64 = AtomicU64::new(0);
 static IPC_ARG0: AtomicU64 = AtomicU64::new(0);
 static IPC_ARG1: AtomicU64 = AtomicU64::new(0);
 static IPC_ARG2: AtomicU64 = AtomicU64::new(0);
@@ -1160,10 +1161,13 @@ fn process_ipc_cmd(
         }
 
         CMD_UDP_SENDTO => {
+            // Packed format: tag = CMD | (data_len<<16) | (src_port<<32) | (dst_port<<48)
+            // arg0 = dst_ip
+            let raw_tag = IPC_RAW_TAG.load(Ordering::Acquire);
             let dst_ip = arg0 as u32;
-            let dst_port = arg1 as u16;
-            let src_port = arg2 as u16;
-            let data_len = (IPC_ARG3.load(Ordering::Acquire) as usize).min(512);
+            let dst_port = ((raw_tag >> 48) & 0xFFFF) as u16;
+            let src_port = ((raw_tag >> 32) & 0xFFFF) as u16;
+            let data_len = (((raw_tag >> 16) & 0xFFFF) as usize).min(56);
             let data = unsafe {
                 core::slice::from_raw_parts(
                     core::ptr::addr_of!(IPC_DATA_BUF) as *const u8,
@@ -1298,7 +1302,7 @@ pub extern "C" fn ipc_handler_thread() -> ! {
             Err(_) => continue,
         };
 
-        let cmd = msg.tag;
+        let cmd = msg.tag & 0xFFFF; // low 16 bits = command
         let arg0 = msg.regs[0];
         let arg1 = msg.regs[1];
         let arg2 = msg.regs[2];
@@ -1325,9 +1329,11 @@ pub extern "C" fn ipc_handler_thread() -> ! {
                 );
             }
         } else if cmd == CMD_UDP_SENDTO {
-            let avail = (msg.regs[3] as usize).min(32);
+            // New packed format: tag = CMD | (data_len<<16) | (src_port<<32) | (dst_port<<48)
+            // regs[0] = dst_ip, regs[1..7] = data (up to 56 bytes)
+            let avail = (((msg.tag >> 16) & 0xFFFF) as usize).min(56);
             unsafe {
-                let src = &msg.regs[4] as *const u64 as *const u8;
+                let src = &msg.regs[1] as *const u64 as *const u8;
                 core::ptr::copy_nonoverlapping(
                     src,
                     core::ptr::addr_of_mut!(IPC_DATA_BUF) as *mut u8,
@@ -1341,6 +1347,7 @@ pub extern "C" fn ipc_handler_thread() -> ! {
         IPC_ARG1.store(arg1, Ordering::Release);
         IPC_ARG2.store(arg2, Ordering::Release);
         IPC_ARG3.store(msg.regs[3], Ordering::Release);
+        IPC_RAW_TAG.store(msg.tag, Ordering::Release);
         IPC_RESULT.store(0, Ordering::Release);
         IPC_CMD.store(cmd, Ordering::Release);
 

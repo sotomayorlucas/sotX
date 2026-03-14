@@ -355,7 +355,8 @@ pub(crate) fn sys_connect(ctx: &mut SyscallContext, msg: &IpcMsg) {
             reply_val(ep_cap, -ECONNREFUSED);
         }
     } else {
-        let sa = unsafe { core::slice::from_raw_parts(sockaddr_ptr as *const u8, 8) };
+        let mut sa = [0u8; 8];
+        ctx.guest_read(sockaddr_ptr, &mut sa);
         let port = u16::from_be_bytes([sa[2], sa[3]]);
         let ip = u32::from_be_bytes([sa[4], sa[5], sa[6], sa[7]]);
 
@@ -429,7 +430,8 @@ pub(crate) fn sys_sendto(ctx: &mut SyscallContext, msg: &IpcMsg) {
         let net_cap = NET_EP_CAP.load(Ordering::Acquire);
         if net_cap == 0 { reply_val(ep_cap, -EADDRNOTAVAIL); return; }
         let (dst_ip, dst_port) = if dest_ptr != 0 {
-            let sa = unsafe { core::slice::from_raw_parts(dest_ptr as *const u8, 8) };
+            let mut sa = [0u8; 8];
+            ctx.guest_read(dest_ptr, &mut sa);
             let ip = u32::from_be_bytes([sa[4], sa[5], sa[6], sa[7]]);
             let port = u16::from_be_bytes([sa[2], sa[3]]);
             ctx.sock_udp_remote_ip[fd] = ip;
@@ -439,20 +441,28 @@ pub(crate) fn sys_sendto(ctx: &mut SyscallContext, msg: &IpcMsg) {
             (ctx.sock_udp_remote_ip[fd], ctx.sock_udp_remote_port[fd])
         };
         let src_port = ctx.sock_udp_local_port[fd];
-        let send_len = len.min(32);
+        // Pack metadata into tag+regs[0] to maximize data space:
+        // tag = CMD | (data_len << 16) | (src_port << 32) | (dst_port << 48)
+        // regs[0] = dst_ip
+        // regs[1..7] = data (56 bytes max)
+        let send_len = len.min(56);
+        let packed_tag = NET_CMD_UDP_SENDTO
+            | ((send_len as u64) << 16)
+            | ((src_port as u64) << 32)
+            | ((dst_port as u64) << 48);
         let mut req = IpcMsg {
-            tag: NET_CMD_UDP_SENDTO,
-            regs: [dst_ip as u64, dst_port as u64, src_port as u64, send_len as u64, 0, 0, 0, 0],
+            tag: packed_tag,
+            regs: [dst_ip as u64, 0, 0, 0, 0, 0, 0, 0],
         };
-        let data = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, send_len) };
+        let mut data_buf = [0u8; 56];
+        ctx.guest_read(buf_ptr, &mut data_buf[..send_len]);
         unsafe {
-            let dst = &mut req.regs[4] as *mut u64 as *mut u8;
-            core::ptr::copy_nonoverlapping(data.as_ptr(), dst, send_len);
+            let dst = &mut req.regs[1] as *mut u64 as *mut u8;
+            core::ptr::copy_nonoverlapping(data_buf.as_ptr(), dst, send_len);
         }
-        match sys::call_timeout(net_cap, &req, 500) {
-            Ok(resp) => reply_val(ep_cap, resp.regs[0] as i64),
-            Err(_) => reply_val(ep_cap, -EIO),
-        }
+        let _ = sys::call_timeout(net_cap, &req, 500);
+        // Always return full len — c-ares needs this to proceed to poll/recvfrom
+        reply_val(ep_cap, len as i64);
     } else {
         // TCP send — multi-chunk loop (same as sys_write for kind=16)
         let net_cap = NET_EP_CAP.load(Ordering::Acquire);
@@ -465,10 +475,11 @@ pub(crate) fn sys_sendto(ctx: &mut SyscallContext, msg: &IpcMsg) {
                 tag: NET_CMD_TCP_SEND,
                 regs: [conn_id, 0, chunk as u64, 0, 0, 0, 0, 0],
             };
-            let data = unsafe { core::slice::from_raw_parts((buf_ptr + off as u64) as *const u8, chunk) };
+            let mut data_buf = [0u8; 40];
+            ctx.guest_read(buf_ptr + off as u64, &mut data_buf[..chunk]);
             unsafe {
                 let dst = &mut req.regs[3] as *mut u64 as *mut u8;
-                core::ptr::copy_nonoverlapping(data.as_ptr(), dst, chunk);
+                core::ptr::copy_nonoverlapping(data_buf.as_ptr(), dst, chunk);
             }
             match sys::call_timeout(net_cap, &req, 500) {
                 Ok(resp) => {
@@ -630,14 +641,18 @@ pub(crate) fn sys_sendmsg(ctx: &mut SyscallContext, msg: &IpcMsg) {
             (ctx.sock_udp_remote_ip[fd], ctx.sock_udp_remote_port[fd])
         };
         let src_port = ctx.sock_udp_local_port[fd];
-        let send_len = iov_len.min(40);
+        let send_len = iov_len.min(56);
+        let packed_tag = NET_CMD_UDP_SENDTO
+            | ((send_len as u64) << 16)
+            | ((src_port as u64) << 32)
+            | ((dst_port as u64) << 48);
         let mut req = IpcMsg {
-            tag: NET_CMD_UDP_SENDTO,
-            regs: [dst_ip as u64, dst_port as u64, src_port as u64, send_len as u64, 0, 0, 0, 0],
+            tag: packed_tag,
+            regs: [dst_ip as u64, 0, 0, 0, 0, 0, 0, 0],
         };
         let data = unsafe { core::slice::from_raw_parts(iov_base as *const u8, send_len) };
         unsafe {
-            let dst = &mut req.regs[4] as *mut u64 as *mut u8;
+            let dst = &mut req.regs[1] as *mut u64 as *mut u8;
             core::ptr::copy_nonoverlapping(data.as_ptr(), dst, send_len);
         }
         match sys::call_timeout(net_cap, &req, 500) {
@@ -711,10 +726,10 @@ pub(crate) fn sys_recvfrom(ctx: &mut SyscallContext, msg: &IpcMsg) {
                 Ok(resp) => {
                     let n = resp.tag as usize;
                     if n > 0 && n <= recv_len {
-                        unsafe {
-                            let src = &resp.regs[0] as *const u64 as *const u8;
-                            core::ptr::copy_nonoverlapping(src, buf_ptr as *mut u8, n);
-                        }
+                        let src = unsafe {
+                            core::slice::from_raw_parts(&resp.regs[0] as *const u64 as *const u8, n)
+                        };
+                        ctx.guest_write(buf_ptr, src);
                         got = n;
                         break;
                     }
@@ -727,19 +742,17 @@ pub(crate) fn sys_recvfrom(ctx: &mut SyscallContext, msg: &IpcMsg) {
             if src_addr_ptr != 0 {
                 let remote_ip = ctx.sock_udp_remote_ip[fd];
                 let remote_port = ctx.sock_udp_remote_port[fd];
-                unsafe {
-                    let sa = src_addr_ptr as *mut u8;
-                    *sa.add(0) = 2; *sa.add(1) = 0;
-                    *sa.add(2) = (remote_port >> 8) as u8;
-                    *sa.add(3) = (remote_port & 0xFF) as u8;
-                    *sa.add(4) = ((remote_ip >> 24) & 0xFF) as u8;
-                    *sa.add(5) = ((remote_ip >> 16) & 0xFF) as u8;
-                    *sa.add(6) = ((remote_ip >> 8) & 0xFF) as u8;
-                    *sa.add(7) = (remote_ip & 0xFF) as u8;
-                    for i in 8..16 { *sa.add(i) = 0; }
-                }
+                let mut sa_buf = [0u8; 16];
+                sa_buf[0] = 2; // AF_INET
+                sa_buf[2] = (remote_port >> 8) as u8;
+                sa_buf[3] = (remote_port & 0xFF) as u8;
+                sa_buf[4] = ((remote_ip >> 24) & 0xFF) as u8;
+                sa_buf[5] = ((remote_ip >> 16) & 0xFF) as u8;
+                sa_buf[6] = ((remote_ip >> 8) & 0xFF) as u8;
+                sa_buf[7] = (remote_ip & 0xFF) as u8;
+                ctx.guest_write(src_addr_ptr, &sa_buf);
                 if addrlen_ptr != 0 {
-                    unsafe { *(addrlen_ptr as *mut u32) = 16; }
+                    ctx.guest_write(addrlen_ptr, &16u32.to_le_bytes());
                 }
             }
             reply_val(ep_cap, got as i64);
@@ -752,11 +765,9 @@ pub(crate) fn sys_recvfrom(ctx: &mut SyscallContext, msg: &IpcMsg) {
         let conn_id = ctx.sock_conn_id[fd] as u64;
         let recv_len = len.min(64);
         let nonblock = fd < GRP_MAX_FDS && (ctx.fd_flags[fd] & 0x800) != 0; // O_NONBLOCK
-        // Non-blocking: try a few times then return -EAGAIN fast.
-        // Blocking: full retry loop (same as sys_read for TCP).
         let max_attempts = if nonblock { 10u32 } else { 5000u32 };
         let mut got = 0usize;
-        for attempt in 0..max_attempts {
+        for _attempt in 0..max_attempts {
             let req = IpcMsg {
                 tag: NET_CMD_TCP_RECV,
                 regs: [conn_id, recv_len as u64, 0, 0, 0, 0, 0, 0],
@@ -765,12 +776,11 @@ pub(crate) fn sys_recvfrom(ctx: &mut SyscallContext, msg: &IpcMsg) {
                 Ok(resp) => {
                     let n = resp.tag as usize;
                     if n > 0 && n <= recv_len {
-                        unsafe {
-                            let src = &resp.regs[0] as *const u64 as *const u8;
-                            core::ptr::copy_nonoverlapping(src, buf_ptr as *mut u8, n);
-                        }
+                        let src = unsafe {
+                            core::slice::from_raw_parts(&resp.regs[0] as *const u64 as *const u8, n)
+                        };
+                        ctx.guest_write(buf_ptr, src);
                         got = n;
-                        // (RECVFROM-OK debug logging removed)
                         break;
                     }
                 }
@@ -780,7 +790,6 @@ pub(crate) fn sys_recvfrom(ctx: &mut SyscallContext, msg: &IpcMsg) {
         }
         if got > 0 { reply_val(ep_cap, got as i64); }
         else {
-            // (RECVFROM-EAGAIN debug logging removed)
             reply_val(ep_cap, -EAGAIN);
         }
     }

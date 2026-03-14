@@ -514,14 +514,18 @@ pub(crate) fn sys_write(ctx: &mut SyscallContext, msg: &IpcMsg) {
             if net_cap == 0 || remote_ip == 0 {
                 reply_val(ctx.ep_cap, -EDESTADDRREQ);
             } else {
-                let send_len = len.min(32);
+                let send_len = len.min(56);
+                let packed_tag = NET_CMD_UDP_SENDTO
+                    | ((send_len as u64) << 16)
+                    | ((src_port as u64) << 32)
+                    | ((remote_port as u64) << 48);
                 let mut req = sotos_common::IpcMsg {
-                    tag: NET_CMD_UDP_SENDTO,
-                    regs: [remote_ip as u64, remote_port as u64, src_port as u64, send_len as u64, 0, 0, 0, 0],
+                    tag: packed_tag,
+                    regs: [remote_ip as u64, 0, 0, 0, 0, 0, 0, 0],
                 };
                 let data = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, send_len) };
                 unsafe {
-                    let dst = &mut req.regs[4] as *mut u64 as *mut u8;
+                    let dst = &mut req.regs[1] as *mut u64 as *mut u8;
                     core::ptr::copy_nonoverlapping(data.as_ptr(), dst, send_len);
                 }
                 match sys::call_timeout(net_cap, &req, 500) {
@@ -847,6 +851,22 @@ pub(crate) fn sys_lseek(ctx: &mut SyscallContext, msg: &IpcMsg) {
             }
         }
         if !found { reply_val(ctx.ep_cap, -EBADF); }
+    } else if ctx.child_fds[fd] == 15 {
+        // Virtual file (kind=15): support lseek via dir_pos/dir_len
+        let file_size = *ctx.dir_len as i64;
+        let cur_pos = *ctx.dir_pos as i64;
+        let new_pos = match whence {
+            0 => offset_val,                    // SEEK_SET
+            1 => cur_pos + offset_val,          // SEEK_CUR
+            2 => file_size + offset_val,        // SEEK_END
+            _ => { reply_val(ctx.ep_cap, -EINVAL); return; }
+        };
+        if new_pos < 0 {
+            reply_val(ctx.ep_cap, -EINVAL);
+        } else {
+            *ctx.dir_pos = new_pos as usize;
+            reply_val(ctx.ep_cap, new_pos);
+        }
     } else {
         reply_val(ctx.ep_cap, -ESPIPE); // -ESPIPE (not seekable)
     }
@@ -1619,6 +1639,25 @@ pub(crate) fn sys_readv(ctx: &mut SyscallContext, msg: &IpcMsg) {
             };
             let _ = sys::send(ctx.ep_cap, &reply);
         }
+    } else if ctx.child_fds[fd] == 15 {
+        // Virtual file (procfs/etc) readv: read from dir_buf into iovecs
+        let cnt = iovcnt.min(16);
+        let mut total = 0usize;
+        for i in 0..cnt {
+            let entry = iov_ptr + (i as u64) * 16;
+            let base = ctx.guest_read_u64(entry);
+            let ilen = ctx.guest_read_u64(entry + 8) as usize;
+            if base == 0 || ilen == 0 { continue; }
+            let avail = if *ctx.dir_pos < *ctx.dir_len { *ctx.dir_len - *ctx.dir_pos } else { 0 };
+            let to_read = ilen.min(avail);
+            if to_read > 0 {
+                ctx.guest_write(base, &ctx.dir_buf[*ctx.dir_pos..*ctx.dir_pos + to_read]);
+                *ctx.dir_pos += to_read;
+                total += to_read;
+            }
+            if to_read < ilen { break; }
+        }
+        reply_val(ctx.ep_cap, total as i64);
     } else if ctx.child_fds[fd] == 2 {
         // stdout/stderr readv -> -EBADF (write-only)
         reply_val(ctx.ep_cap, -EBADF);
@@ -2134,17 +2173,18 @@ pub(crate) fn sys_fcntl(ctx: &mut SyscallContext, msg: &IpcMsg) {
 
 /// SYS_GETCWD (79): get current working directory.
 pub(crate) fn sys_getcwd(ctx: &mut SyscallContext, msg: &IpcMsg) {
-    let buf = msg.regs[0] as *mut u8;
+    let buf_addr = msg.regs[0];
     let size = msg.regs[1] as usize;
     let mut cwd_len = 0;
     while cwd_len < GRP_CWD_MAX && ctx.cwd[cwd_len] != 0 { cwd_len += 1; }
     if cwd_len == 0 { cwd_len = 1; ctx.cwd[0] = b'/'; }
     if size > cwd_len {
-        unsafe {
-            core::ptr::copy_nonoverlapping(ctx.cwd.as_ptr(), buf, cwd_len);
-            *buf.add(cwd_len) = 0;
-        }
-        reply_val(ctx.ep_cap, buf as i64);
+        // Use guest_write for cross-AS children (fork-exec)
+        let mut tmp = [0u8; GRP_CWD_MAX + 1];
+        tmp[..cwd_len].copy_from_slice(&ctx.cwd[..cwd_len]);
+        tmp[cwd_len] = 0;
+        ctx.guest_write(buf_addr, &tmp[..cwd_len + 1]);
+        reply_val(ctx.ep_cap, buf_addr as i64);
     } else {
         reply_val(ctx.ep_cap, -ERANGE);
     }

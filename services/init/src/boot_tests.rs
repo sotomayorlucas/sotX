@@ -1317,16 +1317,22 @@ pub(crate) fn run_busybox_test() {
                     let net_cap = NET_EP_CAP.load(Ordering::Acquire);
                     if net_cap == 0 { reply_val(ep_cap, -ECONNREFUSED); continue; }
                     // Net service CMD_UDP_SENDTO layout:
-                    // regs[0]=dst_ip, regs[1]=dst_port, regs[2]=src_port, regs[3]=data_len, regs[4..]=data
-                    // IPC handler copies from regs[4..] into IPC_DATA_BUF, length from regs[3]
-                    let copy_len = len.min(32); // max 32 bytes inline (4 regs)
+                    // Packed: tag = CMD | (len<<16) | (src_port<<32) | (dst_port<<48)
+                    // regs[0] = dst_ip, regs[1..7] = data (56 bytes max)
+                    let copy_len = len.min(56);
                     let data = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, copy_len) };
-                    let mut dregs = [0u64; 4];
-                    for k in 0..copy_len { dregs[k / 8] |= (data[k] as u64) << ((k % 8) * 8); }
-                    let send_msg = sotos_common::IpcMsg {
-                        tag: NET_CMD_UDP_SENDTO,
-                        regs: [dst_ip as u64, dst_port as u64, src_port as u64, copy_len as u64, dregs[0], dregs[1], dregs[2], dregs[3]],
+                    let packed_tag = NET_CMD_UDP_SENDTO
+                        | ((copy_len as u64) << 16)
+                        | ((src_port as u64) << 32)
+                        | ((dst_port as u64) << 48);
+                    let mut send_msg = sotos_common::IpcMsg {
+                        tag: packed_tag,
+                        regs: [dst_ip as u64, 0, 0, 0, 0, 0, 0, 0],
                     };
+                    unsafe {
+                        let dst = &mut send_msg.regs[1] as *mut u64 as *mut u8;
+                        core::ptr::copy_nonoverlapping(data.as_ptr(), dst, copy_len);
+                    }
                     let _ = sys::call(net_cap, &send_msg);
                     reply_val(ep_cap, len as i64);
                 } else {
