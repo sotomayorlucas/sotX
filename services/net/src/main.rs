@@ -111,6 +111,8 @@ static IPC_ARG3: AtomicU64 = AtomicU64::new(0);
 static IPC_RESULT: AtomicU64 = AtomicU64::new(0);
 /// Total bytes of last UDP recv (stored for multi-chunk reads).
 static IPC_UDP_RECV_TOTAL: AtomicU64 = AtomicU64::new(0);
+/// Total bytes of last TCP recv (stored for multi-chunk reads).
+static IPC_TCP_RECV_TOTAL: AtomicU64 = AtomicU64::new(0);
 static mut IPC_DATA_BUF: [u8; 4096] = [0; 4096];
 static IPC_EP_CAP: AtomicU64 = AtomicU64::new(0);
 const IPC_HANDLER_STACK: u64 = 0xD01000;
@@ -1032,16 +1034,27 @@ fn process_ipc_cmd(
 
         CMD_TCP_RECV => {
             let conn_id = arg0 as usize;
-            let max_len = (arg1 as usize).min(64); // IPC reply carries 64B; caller loops for more
+            let offset = arg2 as usize; // 0 = fresh read, >0 = serve from buffer
             if conn_id >= MAX_TCP {
                 return 0;
             }
+
+            // If offset > 0, serve from previously-stored IPC_DATA_BUF (no socket read)
+            if offset > 0 {
+                let total = IPC_TCP_RECV_TOTAL.load(core::sync::atomic::Ordering::Acquire) as usize;
+                if offset >= total { return 0; }
+                return (total - offset) as u64;
+            }
+
             let handle = match unsafe { TCP_SLOTS[conn_id] } {
                 Some(h) => h,
                 None => return 0,
             };
 
-            // Try immediate read (data may already be buffered)
+            // Read up to 4096 bytes in one shot (not 64!) for bulk throughput
+            let max_len = 4096usize;
+
+            // Try immediate read
             {
                 let sock = sockets.get_mut::<tcp::Socket>(handle);
                 if sock.can_recv() {
@@ -1052,7 +1065,10 @@ fn process_ipc_cmd(
                         )
                     };
                     if let Ok(n) = sock.recv_slice(ipc_buf) {
-                        if n > 0 { return n as u64; }
+                        if n > 0 {
+                            IPC_TCP_RECV_TOTAL.store(n as u64, core::sync::atomic::Ordering::Release);
+                            return n as u64;
+                        }
                     }
                 }
             }
@@ -1068,16 +1084,18 @@ fn process_ipc_cmd(
                         )
                     };
                     if let Ok(n) = sock.recv_slice(ipc_buf) {
-                        if n > 0 { return n as u64; }
+                        if n > 0 {
+                            IPC_TCP_RECV_TOTAL.store(n as u64, core::sync::atomic::Ordering::Release);
+                            return n as u64;
+                        }
                     }
                 }
                 if !sock.is_active() {
-                    // Connection closed by remote — signal EOF (not "no data yet")
-                    return 0xFFFE; // sentinel: EOF
+                    return 0xFFFE; // EOF sentinel
                 }
                 sys::yield_now();
             }
-            0 // no data after polling (not EOF, just slow)
+            0
         }
 
         CMD_TCP_CLOSE => {
@@ -1381,14 +1399,18 @@ pub extern "C" fn ipc_handler_thread() -> ! {
 
         // TCP_RECV / UDP_RECV: copy data into reply regs
         if (cmd == CMD_TCP_RECV || cmd == CMD_UDP_RECV) && result > 0 {
-            // For UDP_RECV with offset (arg2 > 0), copy from IPC_DATA_BUF[offset..]
-            let offset = if cmd == CMD_UDP_RECV { arg2 as usize } else { 0 };
-            let n = (result as usize).min(64);
-            reply.tag = n as u64;
-            unsafe {
-                let src = (core::ptr::addr_of!(IPC_DATA_BUF) as *const u8).add(offset);
-                let dst = &mut reply.regs[0] as *mut u64 as *mut u8;
-                core::ptr::copy_nonoverlapping(src, dst, n);
+            // Pass through EOF sentinel WITHOUT clamping or copying data
+            if result == 0xFFFE {
+                reply.tag = 0xFFFE;
+            } else {
+                let offset = if cmd == CMD_UDP_RECV || cmd == CMD_TCP_RECV { arg2 as usize } else { 0 };
+                let n = (result as usize).min(64);
+                reply.tag = n as u64;
+                unsafe {
+                    let src = (core::ptr::addr_of!(IPC_DATA_BUF) as *const u8).add(offset);
+                    let dst = &mut reply.regs[0] as *mut u64 as *mut u8;
+                    core::ptr::copy_nonoverlapping(src, dst, n);
+                }
             }
         }
 

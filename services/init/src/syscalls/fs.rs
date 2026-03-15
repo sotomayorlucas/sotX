@@ -237,41 +237,67 @@ pub(crate) fn sys_read(ctx: &mut SyscallContext, msg: &IpcMsg) {
             reply_val(ctx.ep_cap, to_read as i64);
         }
         16 => {
-            // TCP socket read: multi-chunk to fill large buffers (TLS needs 16KB+)
+            // TCP socket read: bulk transfer via multi-chunk IPC.
+            // Net service reads up to 4096 bytes on first call (offset=0).
+            // Subsequent calls fetch from stored buffer (offset>0) — no socket poll.
+            // This reduces IPC+poll overhead from 256 calls per 16KB to ~64.
             let net_cap = NET_EP_CAP.load(Ordering::Acquire);
             let conn_id = ctx.sock_conn_id[fd] as u64;
-            let max_read = len.min(32768); // cap at 32KB per read
+            let max_read = len.min(32768);
             let mut total = 0usize;
             let mut empty_retries = 0u32;
             let mut saw_eof = false;
+
             while total < max_read && empty_retries < 5000 {
-                let chunk = (max_read - total).min(64);
+                // First IPC: offset=0 triggers socket read (up to 4KB)
                 let req = IpcMsg {
                     tag: NET_CMD_TCP_RECV,
-                    regs: [conn_id, chunk as u64, 0, 0, 0, 0, 0, 0],
+                    regs: [conn_id, 64, 0, 0, 0, 0, 0, 0],
                 };
                 match sys::call_timeout(net_cap, &req, 200) {
                     Ok(resp) => {
-                        let n = resp.tag as usize;
-                        if n == 0xFFFE {
-                            // EOF sentinel: remote closed connection
-                            saw_eof = true;
-                            break;
-                        }
-                        if n > 0 && n <= chunk {
-                            let src = unsafe {
-                                core::slice::from_raw_parts(&resp.regs[0] as *const u64 as *const u8, n)
-                            };
-                            ctx.guest_write(buf_ptr + total as u64, src);
-                            total += n;
-                            empty_retries = 0;
-                            if n < chunk { break; } // short read = no more data buffered
-                        } else {
-                            // n==0: no data yet (not EOF)
-                            if total > 0 { break; } // return what we have
+                        let first_n = resp.tag as usize;
+                        if first_n == 0xFFFE { saw_eof = true; break; }
+                        if first_n == 0 {
+                            if total > 0 { break; }
                             empty_retries += 1;
                             sys::yield_now();
+                            continue;
                         }
+                        // Write first 64 bytes
+                        let actual_first = first_n.min(64);
+                        let src = unsafe {
+                            core::slice::from_raw_parts(&resp.regs[0] as *const u64 as *const u8, actual_first)
+                        };
+                        ctx.guest_write(buf_ptr + total as u64, src);
+                        total += actual_first;
+                        empty_retries = 0;
+
+                        // Fetch remaining bytes from buffer (offset > 0, no socket poll)
+                        let mut buf_offset = actual_first;
+                        while total < max_read && buf_offset < 4096 {
+                            let cont_req = IpcMsg {
+                                tag: NET_CMD_TCP_RECV,
+                                regs: [conn_id, 64, buf_offset as u64, 0, 0, 0, 0, 0],
+                            };
+                            match sys::call_timeout(net_cap, &cont_req, 100) {
+                                Ok(cont_resp) => {
+                                    let cn = cont_resp.tag as usize;
+                                    if cn == 0 || cn == 0xFFFE { break; }
+                                    let actual_cn = cn.min(64);
+                                    let cont_src = unsafe {
+                                        core::slice::from_raw_parts(&cont_resp.regs[0] as *const u64 as *const u8, actual_cn)
+                                    };
+                                    ctx.guest_write(buf_ptr + total as u64, cont_src);
+                                    total += actual_cn;
+                                    buf_offset += actual_cn;
+                                    if actual_cn < 64 { break; } // last chunk from buffer
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                        // If we got less than 64 on the first read, socket is drained
+                        if first_n < 64 { break; }
                     }
                     Err(_) => {
                         if total > 0 { break; }
@@ -280,11 +306,10 @@ pub(crate) fn sys_read(ctx: &mut SyscallContext, msg: &IpcMsg) {
                     }
                 }
             }
-            // TCP read tracing disabled to reduce serial overhead during clone
             if total > 0 {
                 reply_val(ctx.ep_cap, total as i64);
             } else if saw_eof {
-                reply_val(ctx.ep_cap, 0); // EOF: remote closed connection
+                reply_val(ctx.ep_cap, 0);
             } else {
                 reply_val(ctx.ep_cap, -EAGAIN);
             }
@@ -1565,7 +1590,7 @@ pub(crate) fn sys_readv(ctx: &mut SyscallContext, msg: &IpcMsg) {
             reply_val(ctx.ep_cap, -EBADF);
         }
     } else if ctx.child_fds[fd] == 16 {
-        // TCP socket readv -> gather into iovecs via multi-chunk TCP_RECV
+        // TCP socket readv: bulk transfer with buffered IPC (4KB per socket read)
         let net_cap = NET_EP_CAP.load(Ordering::Acquire);
         let conn_id = ctx.sock_conn_id[fd] as u64;
         let mut total = 0usize;
@@ -1579,6 +1604,7 @@ pub(crate) fn sys_readv(ctx: &mut SyscallContext, msg: &IpcMsg) {
             let mut off = 0usize;
             let mut empty = 0u32;
             while off < ilen && !saw_eof {
+                // First IPC: offset=0 reads up to 4KB from socket
                 let chunk = (ilen - off).min(64);
                 let req = sotos_common::IpcMsg {
                     tag: NET_CMD_TCP_RECV,
@@ -1588,7 +1614,7 @@ pub(crate) fn sys_readv(ctx: &mut SyscallContext, msg: &IpcMsg) {
                     Ok(resp) => {
                         let n = resp.tag as usize;
                         if n == 0xFFFE { saw_eof = true; break; }
-                        if n > 0 && n <= chunk {
+                        if n > 0 && n <= 64 {
                             let src = unsafe {
                                 core::slice::from_raw_parts(&resp.regs[0] as *const u64 as *const u8, n)
                             };
@@ -1596,7 +1622,31 @@ pub(crate) fn sys_readv(ctx: &mut SyscallContext, msg: &IpcMsg) {
                             off += n;
                             total += n;
                             empty = 0;
-                            if n < chunk { break; }
+                            // Fetch remaining from buffer (no socket poll)
+                            let mut buf_off = n;
+                            while off < ilen && buf_off < 4096 {
+                                let cr = sotos_common::IpcMsg {
+                                    tag: NET_CMD_TCP_RECV,
+                                    regs: [conn_id, 64, buf_off as u64, 0, 0, 0, 0, 0],
+                                };
+                                match sys::call_timeout(net_cap, &cr, 100) {
+                                    Ok(r) => {
+                                        let cn = r.tag as usize;
+                                        if cn == 0 || cn == 0xFFFE { break; }
+                                        let an = cn.min(64);
+                                        let cs = unsafe {
+                                            core::slice::from_raw_parts(&r.regs[0] as *const u64 as *const u8, an)
+                                        };
+                                        ctx.guest_write(base + off as u64, cs);
+                                        off += an;
+                                        total += an;
+                                        buf_off += an;
+                                        if an < 64 { break; }
+                                    }
+                                    Err(_) => break,
+                                }
+                            }
+                            if n < 64 { break; }
                         } else {
                             if total > 0 || off > 0 { break; }
                             empty += 1;
