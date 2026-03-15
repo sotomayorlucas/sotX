@@ -348,14 +348,24 @@ pub(crate) extern "C" fn child_handler() -> ! {
         }
     }
 
+    // Use shorter timeout for Wine child processes (P6+) to detect if they die
+    let recv_ticks: u32 = if pid >= 6 { 5000 } else { 50000 };
+    let mut recv_fails: u32 = 0;
+
     loop {
-        // Use recv_timeout (50000 ticks) to detect hung children.
-        // Wine's double-fork + CoW causes many VMM faults before next syscall.
-        let msg = match sys::recv_timeout(ep_cap, 50000) {
-            Ok(m) => m,
+        let msg = match sys::recv_timeout(ep_cap, recv_ticks) {
+            Ok(m) => { recv_fails = 0; m },
             Err(e) => {
+                recv_fails += 1;
+                if pid >= 6 && recv_fails <= 3 {
+                    print(b"P"); print_u64(pid as u64);
+                    print(b"-WAIT #"); print_u64(recv_fails as u64);
+                    print(b"\n");
+                    continue; // retry — thread might be CoW-faulting
+                }
                 print(b"HANDLER-ERR P"); print_u64(pid as u64);
                 print(b" e="); print_u64(e as u64);
+                print(b" fails="); print_u64(recv_fails as u64);
                 print(b"\n");
                 break;
             },
@@ -400,10 +410,8 @@ pub(crate) extern "C" fn child_handler() -> ! {
         // PIPE_RETRY_TAG it will re-increment via mark_pipe_retry().
         clear_pipe_retry(pid);
 
-        // Trace syscalls — disabled during git clone to reduce serial overhead.
-        // 43K+ lines of AS-SYS tracing cause ~5s of serial I/O per second,
-        // which disrupts TLS session timing and causes false #GP crashes.
-        if false {
+        // Trace syscalls for Wine child processes (P6+)
+        if pid >= 6 {
             print(b"AS-SYS P"); print_u64(pid as u64);
             print(b" #"); print_u64(syscall_nr);
             print(b" a0="); crate::framebuffer::print_hex64(msg.regs[0]);
@@ -919,6 +927,13 @@ pub(crate) extern "C" fn child_handler() -> ! {
                     let fork_fsbase = saved_regs[16];
                     let fork_gsbase = saved_regs[17];
 
+                    // Diagnostic: show fork context for Wine child processes
+                    if fork_cpid >= 6 {
+                        print(b"FK-CTX cpid="); print_u64(fork_cpid as u64);
+                        print(b" rip="); crate::framebuffer::print_hex64(fork_rip);
+                        print(b" fs="); crate::framebuffer::print_hex64(fork_fsbase);
+                        print(b"\n");
+                    }
                     let frame_rsp = fork_rsp - 56;
                     // Write fork frame (callee-saved regs) to parent's stack
                     if parent_as != 0 {

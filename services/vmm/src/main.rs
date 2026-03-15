@@ -87,8 +87,8 @@ pub extern "C" fn _start() -> ! {
                     };
 
                     fault_count += 1;
-                    // Log first 50 faults, then every 1000th
-                    if fault_count <= 50 || fault_count % 1000 == 0 {
+                    // Log first 200 faults, then every 1000th
+                    if fault_count <= 200 || fault_count % 1000 == 0 {
                         print(b"VF t=");
                         print_hex16(fault.tid as u64);
                         print(b" a=");
@@ -180,6 +180,20 @@ pub extern "C" fn _start() -> ! {
                             print_hex16(fault.tid as u64);
                             print(b"\n");
                         }
+                        continue;
+                    }
+
+                    // Guard: instruction fetch on unmapped page → SIGSEGV.
+                    // This catches NULL function pointer calls and wild jumps.
+                    // Data accesses to unmapped pages are demand-paged normally.
+                    if code & 0x10 != 0 {
+                        print(b"VMM: SEGV-EXEC t=");
+                        print_hex16(fault.tid as u64);
+                        print(b" a=");
+                        print_hex64(fault.addr);
+                        print(b"\n");
+                        let _ = sys::signal_inject(fault.tid as u64, 11); // SIGSEGV
+                        let _ = sys::thread_resume(fault.tid as u64);
                         continue;
                     }
 
