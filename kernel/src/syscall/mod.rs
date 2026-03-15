@@ -406,6 +406,11 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
         return;
     }
 
+    // Trace: log first direct kernel syscall >= 100 to verify the path works
+    if frame.rax == SYS_AS_CLONE {
+        crate::kprintln!("K-DIRECT AS_CLONE rdi={}", frame.rdi);
+    }
+
     match frame.rax {
         // SYS_YIELD — give up remaining timeslice
         0 => {
@@ -1665,6 +1670,26 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
             frame.rax = mm::frame::free_count() as u64;
         }
 
+        // SYS_DEBUG_PROFILE_CR3 (253) — set the CR3 to profile via LAPIC timer.
+        // rdi = as_cap (READ). Extracts CR3 from the cap and stores it for profiling.
+        // rdi = 0 to disable profiling.
+        253 => {
+            use crate::arch::x86_64::idt::DEBUG_PROFILE_CR3;
+            if frame.rdi == 0 {
+                DEBUG_PROFILE_CR3.store(0, core::sync::atomic::Ordering::Release);
+                frame.rax = 0;
+            } else {
+                match cap::validate(frame.rdi as u32, Rights::READ) {
+                    Ok(CapObject::AddrSpace { cr3 }) => {
+                        crate::kprintln!("PROFILE: cr3={:#x} from cap={}", cr3, frame.rdi);
+                        DEBUG_PROFILE_CR3.store(cr3, core::sync::atomic::Ordering::Release);
+                        frame.rax = 0;
+                    }
+                    _ => { frame.rax = SysError::InvalidCap as i64 as u64; }
+                }
+            }
+        }
+
         // SYS_DEBUG_PHYS_READ (254) — read u64 from physical address via HHDM
         254 => {
             let phys_addr = frame.rdi;
@@ -1783,6 +1808,18 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
                     if paging::is_wx_relaxed(cr3) {
                         paging::set_wx_relaxed(child_cr3, true);
                     }
+                    // Auto-enable RIP profiler on the 5th+ AS clone (Wine P7+)
+                    {
+                        use core::sync::atomic::{AtomicU32, Ordering};
+                        static CLONE_COUNT: AtomicU32 = AtomicU32::new(0);
+                        let n = CLONE_COUNT.fetch_add(1, Ordering::Relaxed);
+                        crate::kprintln!("AS-CLONE #{} cr3={:#x}", n, child_cr3);
+                        if n >= 2 {
+                            crate::arch::x86_64::idt::DEBUG_PROFILE_CR3
+                                .store(child_cr3, Ordering::Release);
+                        }
+                    }
+
                     match cap::insert(CapObject::AddrSpace { cr3: child_cr3 }, Rights::ALL, None) {
                         Some(cap_id) => {
                             fault::register_cr3_cap(child_cr3, cap_id.raw());

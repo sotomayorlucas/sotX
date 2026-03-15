@@ -632,9 +632,48 @@ core::arch::global_asm!(
 ///
 /// `gprs`: pointer to 15 saved GPRs [rax,rbx,rcx,rdx,rsi,rdi,rbp,r8..r15]
 /// `iframe`: pointer to interrupt frame [rip,cs,rflags,rsp,ss]
+/// CR3 of a target process to profile. Set by init via SYS_DEBUG_SET_PROFILE_CR3.
+/// When the LAPIC timer fires and the current CR3 matches, we sample the user RIP.
+pub static DEBUG_PROFILE_CR3: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 #[no_mangle]
 extern "C" fn lapic_timer_user_handler(gprs: *mut u64, iframe: *mut u64) {
     lapic::eoi();
+
+    // Lock-free RIP profiler: sample user RIP when current CR3 matches target.
+    // No scheduler locks — reads CR3 register and interrupt frame directly.
+    {
+        use core::sync::atomic::Ordering;
+        let target_cr3 = DEBUG_PROFILE_CR3.load(Ordering::Relaxed);
+        if target_cr3 != 0 {
+            let current_cr3 = crate::mm::paging::read_cr3();
+            if current_cr3 == target_cr3 {
+                static PROF_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                static PROF_LAST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+                static PROF_REPEAT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                let user_rip = unsafe { *iframe };
+                let user_rsp = unsafe { *iframe.add(3) };
+                let n = PROF_COUNT.fetch_add(1, Ordering::Relaxed);
+                let last = PROF_LAST.load(Ordering::Relaxed);
+
+                if user_rip == last {
+                    let r = PROF_REPEAT.fetch_add(1, Ordering::Relaxed);
+                    // Log repeated RIP at exponential intervals
+                    if r == 10 || r == 100 || r == 500 || r == 2000 {
+                        crate::kprintln!("PROF-SPIN rip={:#x} rsp={:#x} x{}", user_rip, user_rsp, r);
+                    }
+                } else {
+                    let prev = PROF_REPEAT.swap(0, Ordering::Relaxed);
+                    PROF_LAST.store(user_rip, Ordering::Relaxed);
+                    // Log first 10 unique RIPs, then every 20th
+                    if n < 10 || n % 20 == 0 {
+                        crate::kprintln!("PROF rip={:#x} rsp={:#x} #{} (prev x{})",
+                            user_rip, user_rsp, n, prev);
+                    }
+                }
+            }
+        }
+    }
 
     // Check if current thread has pending async signals
     let percpu = super::percpu::current_percpu();

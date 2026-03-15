@@ -183,11 +183,12 @@ pub extern "C" fn _start() -> ! {
                         continue;
                     }
 
-                    // Guard: instruction fetch on unmapped page → SIGSEGV.
-                    // This catches NULL function pointer calls and wild jumps.
-                    // Data accesses to unmapped pages are demand-paged normally.
-                    if code & 0x10 != 0 {
-                        print(b"VMM: SEGV-EXEC t=");
+                    // Guard: instruction fetch on NULL page → SIGSEGV.
+                    // Only reject execution from the first 64KB (NULL pointer calls).
+                    // Higher addresses with instruction-fetch faults are legitimate
+                    // demand paging (CoW child processes need shared code pages mapped).
+                    if code & 0x10 != 0 && vaddr_raw < 0x10000 {
+                        print(b"VMM: SEGV-NULL t=");
                         print_hex16(fault.tid as u64);
                         print(b" a=");
                         print_hex64(fault.addr);
