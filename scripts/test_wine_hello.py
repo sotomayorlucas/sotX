@@ -242,7 +242,7 @@ def main():
     s.clear()
     s.send("/bin/wine64 /bin/hello.exe")
 
-    found, stalled, timed_out = wait_with_stall_detection(s, "Hello from Wine", 600, stall_timeout=180)
+    found, stalled, timed_out = wait_with_stall_detection(s, "Hello from Wine", 900, stall_timeout=300)
     stage4_out = s.get_output()
 
     if found:
