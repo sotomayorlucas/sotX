@@ -656,19 +656,22 @@ extern "C" fn lapic_timer_user_handler(gprs: *mut u64, iframe: *mut u64) {
                 let n = PROF_COUNT.fetch_add(1, Ordering::Relaxed);
                 let last = PROF_LAST.load(Ordering::Relaxed);
 
+                // GPRs: [rax,rbx,rcx,rdx,rsi,rdi,rbp,r8..r15]
+                let user_rdi = unsafe { *gprs.add(5) }; // lock address
+                let user_rax = unsafe { *gprs };        // lock value
+
                 if user_rip == last {
                     let r = PROF_REPEAT.fetch_add(1, Ordering::Relaxed);
-                    // Log repeated RIP at exponential intervals
-                    if r == 10 || r == 100 || r == 500 || r == 2000 {
-                        crate::kprintln!("PROF-SPIN rip={:#x} rsp={:#x} x{}", user_rip, user_rsp, r);
+                    if r == 10 || r == 100 || r == 500 {
+                        crate::kprintln!("PROF-SPIN rip={:#x} rdi={:#x} rax={:#x} x{}",
+                            user_rip, user_rdi, user_rax, r);
                     }
                 } else {
                     let prev = PROF_REPEAT.swap(0, Ordering::Relaxed);
                     PROF_LAST.store(user_rip, Ordering::Relaxed);
-                    // Log first 10 unique RIPs, then every 20th
                     if n < 10 || n % 20 == 0 {
-                        crate::kprintln!("PROF rip={:#x} rsp={:#x} #{} (prev x{})",
-                            user_rip, user_rsp, n, prev);
+                        crate::kprintln!("PROF rip={:#x} rdi={:#x} rax={:#x} #{} (prev x{})",
+                            user_rip, user_rdi, user_rax, n, prev);
                     }
                 }
             }
