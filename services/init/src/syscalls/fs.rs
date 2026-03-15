@@ -1637,6 +1637,14 @@ pub(crate) fn sys_readv(ctx: &mut SyscallContext, msg: &IpcMsg) {
             let mut local_buf = [0u8; 4096];
             let n = pipe_read(pipe_id, &mut local_buf[..safe_len]);
             if n > 0 {
+                // Trace pipe readv for P3 to detect heap corruption source
+                if ctx.pid == 3 {
+                    print(b"PRV P3 base="); crate::framebuffer::print_hex64(base);
+                    print(b" ilen="); print_u64(ilen as u64);
+                    print(b" n="); print_u64(n as u64);
+                    print(b" iov="); print_u64(i as u64);
+                    print(b"\n");
+                }
                 ctx.guest_write(base, &local_buf[..n]);
             }
             total += n;
