@@ -997,8 +997,40 @@ pub(crate) extern "C" fn child_handler() -> ! {
                         } else { print(b"FK-PTE-A ABSENT\n"); }
                     }
                     print(b"FK2 P"); print_u64(pid as u64); print(b"\n");
+                    // Directly test if code after FK2 runs at all
+                    // Fix glibc fork spin: eagerly copy TLS page into a private
+                    // writable frame and patch tid/pid/spinning variable.
+                    print(b"CHK-FS="); crate::framebuffer::print_hex64(fork_fsbase); print(b"\n");
+                    if fork_fsbase != 0 {
+                        let tls_vaddr = fork_fsbase & !0xFFF;
+                        if let Ok(nf) = sys::frame_alloc() {
+                            if sys::frame_copy(nf, child_as_cap, tls_vaddr).is_ok() {
+                                let _ = sys::unmap_from(child_as_cap, tls_vaddr);
+                                let _ = sys::map_into(child_as_cap, tls_vaddr, nf, 2);
+                                // Page is now private+writable. Patch via vm_write.
+                                let tid_val = fork_cpid as u32;
+                                let one: u32 = 1;
+                                let _ = sys::vm_write(child_as_cap, fork_fsbase + 0x2D0,
+                                    &tid_val as *const u32 as u64, 4);
+                                let _ = sys::vm_write(child_as_cap, fork_fsbase + 0x2D4,
+                                    &tid_val as *const u32 as u64, 4);
+                                let _ = sys::vm_write(child_as_cap, fork_fsbase + 0x2E0,
+                                    &one as *const u32 as u64, 4);
+                                print(b"TLS-PATCHED cpid="); print_u64(fork_cpid as u64);
+                                print(b"\n");
+                            }
+                        }
+                        // Also copy TLS+0x1000 (second page of TLS block)
+                        let tls_vaddr2 = tls_vaddr + 0x1000;
+                        if let Ok(nf2) = sys::frame_alloc() {
+                            if sys::frame_copy(nf2, child_as_cap, tls_vaddr2).is_ok() {
+                                let _ = sys::unmap_from(child_as_cap, tls_vaddr2);
+                                let _ = sys::map_into(child_as_cap, tls_vaddr2, nf2, 2);
+                            }
+                        }
+                    }
 
-                    // Eagerly copy stack pages for child (8 pages upward)
+                    // Eagerly copy stack pages for child (8 pages upward from fork RSP)
                     {
                         let base_page = frame_rsp & !0xFFF;
                         for i in 0..8u64 {
@@ -1010,25 +1042,6 @@ pub(crate) extern "C" fn child_handler() -> ! {
                                 }
                             }
                         }
-                    }
-                    print(b"FK2B\n");
-                    // Fix glibc fork spin: write fork_cpid as TID into the child's
-                    // TLS at multiple offsets where glibc might check the thread ID.
-                    // Offset 0x2D0 = tid, 0x2D4 = pid, 0x2E0 = possibly cancelhandling
-                    // or setup_failed flag that glibc checks during atfork.
-                    print(b"PRE-TLS fs="); crate::framebuffer::print_hex64(fork_fsbase);
-                    print(b" cpid="); print_u64(fork_cpid as u64);
-                    print(b"\n");
-                    if fork_fsbase != 0 {
-                        // Write child TID to TLS tid/pid fields + the spinning address
-                        let tid_val = fork_cpid as u32;
-                        let one: u32 = 1;
-                        let _ = sys::vm_write(child_as_cap, fork_fsbase + 0x2D0,
-                            &tid_val as *const u32 as u64, 4);
-                        let _ = sys::vm_write(child_as_cap, fork_fsbase + 0x2D4,
-                            &tid_val as *const u32 as u64, 4);
-                        let _ = sys::vm_write(child_as_cap, fork_fsbase + 0x2E0,
-                            &one as *const u32 as u64, 4);
                     }
                     print(b"FK3 P"); print_u64(pid as u64); print(b"\n");
 
@@ -1409,6 +1422,33 @@ pub(crate) extern "C" fn child_handler() -> ! {
                     }
                 }
 
+                // Fix glibc fork spin: eagerly copy TLS page and patch TID.
+                if fork_fsbase != 0 {
+                    let tls_vaddr = fork_fsbase & !0xFFF;
+                    if let Ok(nf) = sys::frame_alloc() {
+                        if sys::frame_copy(nf, child_as_cap, tls_vaddr).is_ok() {
+                            let _ = sys::unmap_from(child_as_cap, tls_vaddr);
+                            let _ = sys::map_into(child_as_cap, tls_vaddr, nf, 2);
+                            let tid_val = fork_cpid as u32;
+                            let one: u32 = 1;
+                            let _ = sys::vm_write(child_as_cap, fork_fsbase + 0x2D0,
+                                &tid_val as *const u32 as u64, 4);
+                            let _ = sys::vm_write(child_as_cap, fork_fsbase + 0x2D4,
+                                &tid_val as *const u32 as u64, 4);
+                            let _ = sys::vm_write(child_as_cap, fork_fsbase + 0x2E0,
+                                &one as *const u32 as u64, 4);
+                            print(b"TLS-FIX2 cpid="); print_u64(fork_cpid as u64); print(b"\n");
+                        }
+                    }
+                    let tls_vaddr2 = (fork_fsbase & !0xFFF) + 0x1000;
+                    if let Ok(nf2) = sys::frame_alloc() {
+                        if sys::frame_copy(nf2, child_as_cap, tls_vaddr2).is_ok() {
+                            let _ = sys::unmap_from(child_as_cap, tls_vaddr2);
+                            let _ = sys::map_into(child_as_cap, tls_vaddr2, nf2, 2);
+                        }
+                    }
+                }
+
                 // Create endpoint for child process
                 let child_ep = match sys::endpoint_create() {
                     Ok(e) => e,
@@ -1416,8 +1456,6 @@ pub(crate) extern "C" fn child_handler() -> ! {
                 };
 
                 // Create child thread in the cloned AS at the TLS trampoline.
-                // The trampoline sets FS_BASE via syscall, then jumps to COW_FORK_RESTORE
-                // which does xor eax + pop regs + ret to fork_rip.
                 let child_thread = match sys::thread_create_in(
                     child_as_cap,
                     child_entry,
