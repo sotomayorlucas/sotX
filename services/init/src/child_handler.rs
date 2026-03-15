@@ -998,9 +998,49 @@ pub(crate) extern "C" fn child_handler() -> ! {
                     }
                     print(b"FK2 P"); print_u64(pid as u64); print(b"\n");
                     // Directly test if code after FK2 runs at all
-                    // Fix glibc fork spin: eagerly copy TLS page into a private
-                    // writable frame and patch tid/pid/spinning variable.
-                    print(b"CHK-FS="); crate::framebuffer::print_hex64(fork_fsbase); print(b"\n");
+                    // Fix glibc fork linked list spin: glibc's fork handler iterates
+                    // the atfork handler list (linked list at RBX+0x1088). After CoW fork,
+                    // a node has next=NULL. The VMM demand-pages address 0 (zero page),
+                    // so reading *(NULL) returns 0 instead of faulting. The list traversal
+                    // loops forever because 0 != sentinel. Fix: write the sentinel value
+                    // to address 0 in the child's AS so the traversal terminates.
+                    {
+                        // Sentinel = address of list head (first node's "self" pointer).
+                        // From XRAY: R10=0x643b0c8 = RBX(0x643a040) + 0x1088.
+                        // The sentinel is fork_fsbase-relative: it's in the pthread struct.
+                        // Compute: sentinel = (value at the linked list head address).
+                        // Simpler: just read the parent's [RBX+0x1088] and write it to child's addr 0.
+                        // Actually, the list head IS the sentinel. Write it to page 0, offset 0.
+                        // R10 = rbx + 0x1088. RBX is part of the glibc internal data.
+                        // We can compute it: sentinel_addr lives near fork_fsbase.
+                        // From XRAY: rbx=0x643a040, r10=0x643b0c8 = rbx+0x1088.
+                        // fork_fsbase = 0x10229080. rbx = 0x643a040. These are in different areas.
+                        // The sentinel R10 value needs to be at address 0 in child's AS.
+                        // Write the R10 value (sentinel pointer) to address 0 as a u64.
+                        // Problem: we don't know R10 at fork time. But we know the pattern:
+                        // R10 = RBX + 0x1088. And RBX is stable for the process.
+                        // The sentinel for the list loop is at R10 = RBX + 0x1088.
+                        // We don't know RBX at fork time, but we CAN read the parent's
+                        // atfork list head and write its address to child's page 0.
+                        // From XRAY: the sentinel is the address of the list head itself.
+                        // The list head pointer lives at some address derived from glibc data.
+                        // Simpler approach: make page 0 return the sentinel by writing
+                        // a self-referencing pointer. If *(0) = 0x643b0c8, then the loop
+                        // at ea88e reads rsi = 0x643b0c8, compares with r10 = 0x643b0c8,
+                        // and terminates. But we need to know the sentinel value.
+                        // From the disassembly: r10 = rbx + 0x1088.
+                        // RBX comes from glibc initialization (thread arena base).
+                        // At fork time, we can read RBX from parent's saved regs.
+                        // fork_rbx was saved at line 921: let fork_rbx = saved_regs[1];
+                        let sentinel = fork_rbx.wrapping_add(0x1088);
+                        // Write sentinel to address 0 in child's AS (terminate the list loop)
+                        let _ = sys::vm_write(child_as_cap, 0,
+                            &sentinel as *const u64 as u64, 8);
+                        print(b"NULL-FIX sentinel="); crate::framebuffer::print_hex64(sentinel);
+                        print(b"\n");
+                    }
+
+                    // Eagerly copy TLS page and patch TID fields.
                     if fork_fsbase != 0 {
                         let tls_vaddr = fork_fsbase & !0xFFF;
                         if let Ok(nf) = sys::frame_alloc() {

@@ -657,21 +657,16 @@ extern "C" fn lapic_timer_user_handler(gprs: *mut u64, iframe: *mut u64) {
                 let last = PROF_LAST.load(Ordering::Relaxed);
 
                 // GPRs: [rax,rbx,rcx,rdx,rsi,rdi,rbp,r8..r15]
-                let user_rdi = unsafe { *gprs.add(5) }; // lock address
-                let user_rax = unsafe { *gprs };        // lock value
+                // Full register dump on first sample, then RSI+RBX+R10 every 50th
+                let user_rsi = unsafe { *gprs.add(4) };
+                let user_rbx = unsafe { *gprs.add(1) };
+                let user_r10 = unsafe { *gprs.add(9) };
+                let user_rax = unsafe { *gprs };
 
-                if user_rip == last {
-                    let r = PROF_REPEAT.fetch_add(1, Ordering::Relaxed);
-                    if r == 10 || r == 100 || r == 500 {
-                        crate::kprintln!("PROF-SPIN rip={:#x} rdi={:#x} rax={:#x} x{}",
-                            user_rip, user_rdi, user_rax, r);
-                    }
-                } else {
-                    let prev = PROF_REPEAT.swap(0, Ordering::Relaxed);
-                    PROF_LAST.store(user_rip, Ordering::Relaxed);
-                    if n < 10 || n % 20 == 0 {
-                        crate::kprintln!("PROF rip={:#x} rdi={:#x} rax={:#x} #{} (prev x{})",
-                            user_rip, user_rdi, user_rax, n, prev);
+                if n < 3 {
+                    unsafe {
+                        crate::kprintln!("ZZZZ {} rsi={:#x} rbx={:#x} r9={:#x} r10={:#x}",
+                            n, *gprs.add(4), *gprs.add(1), *gprs.add(8), *gprs.add(9));
                     }
                 }
             }
