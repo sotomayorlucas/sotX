@@ -1011,6 +1011,25 @@ pub(crate) extern "C" fn child_handler() -> ! {
                             }
                         }
                     }
+                    print(b"FK2B\n");
+                    // Fix glibc fork spin: write fork_cpid as TID into the child's
+                    // TLS at multiple offsets where glibc might check the thread ID.
+                    // Offset 0x2D0 = tid, 0x2D4 = pid, 0x2E0 = possibly cancelhandling
+                    // or setup_failed flag that glibc checks during atfork.
+                    print(b"PRE-TLS fs="); crate::framebuffer::print_hex64(fork_fsbase);
+                    print(b" cpid="); print_u64(fork_cpid as u64);
+                    print(b"\n");
+                    if fork_fsbase != 0 {
+                        // Write child TID to TLS tid/pid fields + the spinning address
+                        let tid_val = fork_cpid as u32;
+                        let one: u32 = 1;
+                        let _ = sys::vm_write(child_as_cap, fork_fsbase + 0x2D0,
+                            &tid_val as *const u32 as u64, 4);
+                        let _ = sys::vm_write(child_as_cap, fork_fsbase + 0x2D4,
+                            &tid_val as *const u32 as u64, 4);
+                        let _ = sys::vm_write(child_as_cap, fork_fsbase + 0x2E0,
+                            &one as *const u32 as u64, 4);
+                    }
                     print(b"FK3 P"); print_u64(pid as u64); print(b"\n");
 
                     let child_ep = match sys::endpoint_create() {
@@ -1025,6 +1044,33 @@ pub(crate) extern "C" fn child_handler() -> ! {
                         Err(_) => { reply_val(ep_cap, -ENOMEM); continue; }
                     };
                     let _ = sys::signal_entry(child_thread, vdso::SIGNAL_TRAMPOLINE_ADDR);
+
+                    // CLONE_CHILD_SETTID: write the child's TID to *ctid in the child's AS.
+                    // glibc passes ctid = &pthread.tid (in TLS). Without this, the child's
+                    // TID field stays 0 (or parent's TID), causing glibc's atfork handlers
+                    // to spin waiting for the TID to be set.
+                    let ctid_ptr = msg.regs[3];
+                    if flags & CLONE_CHILD_SETTID != 0 && ctid_ptr != 0 {
+                        let tid_val = fork_cpid as u32;
+                        let _ = sys::vm_write(child_as_cap, ctid_ptr,
+                            &tid_val as *const u32 as u64, 4);
+                    }
+                    // CLONE_CHILD_CLEARTID: store ctid for exit cleanup
+                    if flags & CLONE_CHILD_CLEARTID != 0 && ctid_ptr != 0 {
+                        PROCESSES[fork_cpid - 1].clear_tid.store(ctid_ptr, Ordering::Release);
+                    }
+                    // CLONE_PARENT_SETTID: write child TID to *ptid in parent's AS
+                    let ptid_ptr = msg.regs[2];
+                    if flags & CLONE_PARENT_SETTID != 0 && ptid_ptr != 0 {
+                        if parent_as != 0 {
+                            let tid_val = fork_cpid as u32;
+                            let _ = sys::vm_write(parent_as, ptid_ptr,
+                                &tid_val as *const u32 as u64, 4);
+                        } else {
+                            unsafe { core::ptr::write_volatile(ptid_ptr as *mut u32, fork_cpid as u32); }
+                        }
+                    }
+
                     print(b"FK4 P"); print_u64(pid as u64); print(b"\n");
 
                     let cidx = fork_cpid - 1;

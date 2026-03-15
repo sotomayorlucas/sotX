@@ -144,7 +144,8 @@ pub(crate) static CHILD_SETUP_AS_CAP: AtomicU64 = AtomicU64::new(0);
 
 // Clone flag constants — sourced from linux_abi (linux-raw-sys)
 pub(crate) use linux_abi::{CLONE_VM, CLONE_FILES, CLONE_SIGHAND, CLONE_THREAD,
-                           CLONE_SETTLS, CLONE_PARENT_SETTID, CLONE_CHILD_CLEARTID};
+                           CLONE_SETTLS, CLONE_PARENT_SETTID, CLONE_CHILD_SETTID,
+                           CLONE_CHILD_CLEARTID};
 
 // ---------------------------------------------------------------------------
 // Futex wait queue (Phase 4)

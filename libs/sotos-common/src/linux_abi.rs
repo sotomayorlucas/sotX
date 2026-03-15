@@ -304,6 +304,7 @@ pub const CLONE_SIGHAND: u64        = k::CLONE_SIGHAND as u64;
 pub const CLONE_THREAD: u64         = k::CLONE_THREAD as u64;
 pub const CLONE_SETTLS: u64         = k::CLONE_SETTLS as u64;
 pub const CLONE_PARENT_SETTID: u64  = k::CLONE_PARENT_SETTID as u64;
+pub const CLONE_CHILD_SETTID: u64   = k::CLONE_CHILD_SETTID as u64;
 pub const CLONE_CHILD_CLEARTID: u64 = k::CLONE_CHILD_CLEARTID as u64;
 
 // ---------------------------------------------------------------
