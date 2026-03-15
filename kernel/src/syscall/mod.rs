@@ -246,7 +246,7 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
     // as an IPC message to the LUCAS handler. The handler translates Linux
     // syscalls to sotOS primitives and replies with the result.
     if let Some(ep_raw) = sched::get_current_redirect_ep() {
-        // Intercept arch_prctl — requires Ring 0 (FS_BASE/GS_BASE MSR writes).
+// Intercept arch_prctl — requires Ring 0 (FS_BASE/GS_BASE MSR writes).
         // Linux syscall 158 = arch_prctl: rdi = subcommand, rsi = addr.
         if frame.rax == 158 {
             match frame.rdi {

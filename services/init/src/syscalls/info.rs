@@ -267,8 +267,17 @@ pub(crate) fn sys_futex(ctx: &mut SyscallContext, msg: &IpcMsg) {
     let val = msg.regs[2] as u32;
     match op {
         0 => { // FUTEX_WAIT
-            let result = futex_wait(uaddr, val);
-            reply_val(ctx.ep_cap, result);
+            // Read the futex value from the child's address space (not init's).
+            // Without this, CoW fork children read stale/wrong values → -EAGAIN spin.
+            let mut buf = [0u8; 4];
+            ctx.guest_read(uaddr, &mut buf);
+            let current = u32::from_le_bytes(buf);
+            if current != val {
+                reply_val(ctx.ep_cap, -EAGAIN);
+            } else {
+                let result = futex_wait(uaddr, val);
+                reply_val(ctx.ep_cap, result);
+            }
         }
         1 => { // FUTEX_WAKE
             let result = futex_wake(uaddr, val);

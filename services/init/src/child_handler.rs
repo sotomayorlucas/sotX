@@ -348,8 +348,11 @@ pub(crate) extern "C" fn child_handler() -> ! {
         }
     }
 
-    // Use shorter timeout for Wine child processes (P6+) to detect if they die
-    let recv_ticks: u32 = if pid >= 6 { 5000 } else { 50000 };
+    // All processes use the same generous timeout.
+    // Short timeouts cause a race: recv_timeout expiry coincides with the
+    // child's endpoint::call(), consuming the message and leaving the child
+    // blocked forever waiting for a reply that was discarded.
+    let recv_ticks: u32 = 50000;
     let mut recv_fails: u32 = 0;
 
     loop {
@@ -357,12 +360,14 @@ pub(crate) extern "C" fn child_handler() -> ! {
             Ok(m) => { recv_fails = 0; m },
             Err(e) => {
                 recv_fails += 1;
-                if pid >= 6 && recv_fails <= 3 {
-                    print(b"P"); print_u64(pid as u64);
-                    print(b"-WAIT #"); print_u64(recv_fails as u64);
+                // Log timeout but keep waiting — short timeouts race with
+                // CoW faults and cause the handler to miss the child's syscall
+                if recv_fails <= 5 || recv_fails % 100 == 0 {
+                    print(b"HANDLER-WAIT P"); print_u64(pid as u64);
+                    print(b" #"); print_u64(recv_fails as u64);
                     print(b"\n");
-                    continue; // retry — thread might be CoW-faulting
                 }
+                if recv_fails < 1000 { continue; }
                 print(b"HANDLER-ERR P"); print_u64(pid as u64);
                 print(b" e="); print_u64(e as u64);
                 print(b" fails="); print_u64(recv_fails as u64);
@@ -414,8 +419,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
         if pid >= 6 {
             print(b"AS-SYS P"); print_u64(pid as u64);
             print(b" #"); print_u64(syscall_nr);
-            print(b" a0="); crate::framebuffer::print_hex64(msg.regs[0]);
-            print(b" a1="); crate::framebuffer::print_hex64(msg.regs[1]);
+            print(b" ep="); print_u64(ep_cap);
             print(b"\n");
         }
 
