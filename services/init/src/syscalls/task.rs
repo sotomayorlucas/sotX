@@ -214,6 +214,14 @@ pub(crate) fn sys_waitid(ctx: &mut SyscallContext, _msg: &IpcMsg) {
 fn exit_cleanup(ctx: &mut SyscallContext, status: u64) {
     let pid = ctx.pid;
     if pid == 0 || pid > MAX_PROCS { return; }
+    // Process death alarm (P3-P6 covers Wine processes)
+    if pid >= 3 && pid <= 6 {
+        crate::framebuffer::print(b"\n!!! PROC-DEATH P");
+        crate::framebuffer::print_u64(pid as u64);
+        crate::framebuffer::print(b" exit_code=");
+        crate::framebuffer::print_u64(status);
+        crate::framebuffer::print(b"\n");
+    }
     // Override exit code for processes that received deadlock-induced EOF.
     // The deadlock detector closed their pipe write-ends, causing EOF which
     // makes the process exit non-zero. Treat as clean exit (0) so the

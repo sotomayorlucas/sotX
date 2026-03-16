@@ -1379,6 +1379,14 @@ pub(crate) fn sys_epoll_wait(ctx: &mut SyscallContext, msg: &IpcMsg) {
                 }
             }
         }
+        // Wineserver EPOLLHUP/ERR tracing (pid 3-5)
+        if revents & 0x18 != 0 && ctx.pid >= 3 && ctx.pid <= 5 {
+            print(b"!!! EPOLL-HUP P"); print_u64(ctx.pid as u64);
+            print(b" fd="); print_u64(rfd as u64);
+            print(b" k="); print_u64(if rfd < GRP_MAX_FDS { ctx.child_fds[rfd] as u64 } else { 99 });
+            print(b" ev="); crate::framebuffer::print_hex64(revents as u64);
+            print(b"\n");
+        }
         if revents != 0 {
             let ep = events_ptr + (ready_count as u64) * 12;
             let mut evbuf = [0u8; 12];
