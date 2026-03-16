@@ -126,16 +126,20 @@ pub extern "C" fn _start() -> ! {
                         continue;
                     }
 
-                    // Guard: Infinite loop detection (same address > 4 times).
+                    // Guard: Infinite loop detection (same address > 8 times).
+                    // Inject SIGSEGV instead of leaving thread suspended.
                     if fault_track[slot].0 == vaddr_raw {
                         fault_track[slot].1 += 1;
-                        if fault_track[slot].1 > 4 {
-                            print(b"VMM: LOOP-KILL t=");
+                        if fault_track[slot].1 > 8 {
+                            print(b"VMM: SEGV t=");
                             print_hex16(fault.tid as u64);
                             print(b" a=");
                             print_hex64(fault.addr);
                             print(b"\n");
-                            continue; // leave thread suspended
+                            let _ = sys::signal_inject(fault.tid as u64, 11); // SIGSEGV
+                            let _ = sys::thread_resume(fault.tid as u64);
+                            fault_track[slot].1 = 0;
+                            continue;
                         }
                     } else {
                         fault_track[slot] = (vaddr_raw, 1);

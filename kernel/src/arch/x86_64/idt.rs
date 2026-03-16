@@ -268,11 +268,20 @@ extern "x86-interrupt" fn general_protection_handler(frame: InterruptStackFrame,
         }
         kprintln!("#GP regs: rax={:#x} rbx={:#x} rcx={:#x} rdx={:#x}", rax, rbx, rcx, rdx);
         kprintln!("#GP regs: rdi={:#x} rsi={:#x} rbp={:#x}", rdi, rsi, rbp);
-        // Set SIGSEGV pending so parent sees WIFSIGNALED, then exit thread.
+        // Deliver SIGSEGV to the thread so Wine's exception handler can process it.
+        // Don't kill the thread — Wine's ntdll has a vectored exception handler
+        // that catches SIGSEGV and emulates protected instructions.
         if let Some(tid) = crate::sched::current_tid() {
-            crate::sched::set_pending_signal(tid, 11);
+            crate::sched::set_pending_signal(tid, 11); // SIGSEGV
+            // Store fault info so init can populate siginfo.si_addr
+            crate::sched::set_fault_info_current(
+                frame.instruction_pointer.as_u64(), // fault address = RIP
+                0, // error code
+            );
         }
-        crate::sched::exit_current(); // diverges — no swapgs back needed
+        // Return to user — the pending signal will be delivered by the
+        // LAPIC timer handler or the next syscall's signal check.
+        unsafe { core::arch::asm!("swapgs", options(nomem, nostack, preserves_flags)); }
         return;
     }
     panic!("EXCEPTION: general protection fault (code {})\n{:#?}", code, frame);
