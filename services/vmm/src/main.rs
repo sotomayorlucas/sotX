@@ -187,11 +187,10 @@ pub extern "C" fn _start() -> ! {
                         continue;
                     }
 
-                    // Guard: instruction fetch on NULL page → SIGSEGV.
-                    // Only reject execution from the first 64KB (NULL pointer calls).
-                    // Higher addresses with instruction-fetch faults are legitimate
-                    // demand paging (CoW child processes need shared code pages mapped).
-                    if code & 0x10 != 0 && vaddr_raw < 0x10000 {
+                    // Guard: instruction fetch on actual NULL page (page 0) → SIGSEGV.
+                    // Wine maps pages 1+ (0x1000+) for NT compatibility, so only
+                    // reject execution from page 0 (NULL function pointer calls).
+                    if code & 0x10 != 0 && vaddr_raw == 0 {
                         print(b"VMM: SEGV-NULL t=");
                         print_hex16(fault.tid as u64);
                         print(b" a=");
