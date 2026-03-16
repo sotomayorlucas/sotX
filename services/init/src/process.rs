@@ -542,17 +542,16 @@ pub(crate) fn futex_wait(addr: u64, expected: u32) -> i64 {
         return -(linux_abi::ENOMEM);
     }
 
-    let current = unsafe { core::ptr::read_volatile(addr as *const u32) };
-    if current != expected {
-        FUTEX_ADDR[slot].store(0, Ordering::Release);
-        return -(linux_abi::EAGAIN);
-    }
+    // NOTE: the value check (current == expected) is done by the CALLER
+    // using ctx.guest_read (correct for separate-AS children). We skip
+    // the redundant direct-read check here because `addr` may now be a
+    // physical address key (for shared futex matching across processes).
 
     let mut spins = 0u64;
     while FUTEX_WOKEN[slot].load(Ordering::Acquire) == 0 {
         sys::yield_now();
         spins += 1;
-        if spins > 10_000 {
+        if spins > 500_000 {
             FUTEX_ADDR[slot].store(0, Ordering::Release);
             return -(linux_abi::ETIMEDOUT);
         }

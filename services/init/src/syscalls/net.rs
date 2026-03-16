@@ -1404,7 +1404,11 @@ pub(crate) fn sys_epoll_wait(ctx: &mut SyscallContext, msg: &IpcMsg) {
         }
         reply_val(ep_cap, ready_count as i64);
     } else {
-        let deadline = rdtsc() + (timeout as u64).min(30000) * 2_000_000;
+        // Scale timeout by 100x for QEMU TCG: wineserver's 16ms timeout
+        // is way too short in emulation. Without this, wineserver exits
+        // before P6 (hello.exe) finishes library loading.
+        let scale = if ctx.pid >= 3 && ctx.pid <= 5 { 100u64 } else { 1u64 };
+        let deadline = rdtsc() + (timeout as u64).min(30000) * 2_000_000 * scale;
         loop {
             let mut found = false;
             for i in 0..MAX_EPOLL_ENTRIES {

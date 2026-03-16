@@ -268,19 +268,38 @@ pub(crate) fn sys_futex(ctx: &mut SyscallContext, msg: &IpcMsg) {
     match op {
         0 => { // FUTEX_WAIT
             // Read the futex value from the child's address space (not init's).
-            // Without this, CoW fork children read stale/wrong values → -EAGAIN spin.
             let mut buf = [0u8; 4];
             ctx.guest_read(uaddr, &mut buf);
             let current = u32::from_le_bytes(buf);
             if current != val {
                 reply_val(ctx.ep_cap, -EAGAIN);
             } else {
-                let result = futex_wait(uaddr, val);
+                // For shared futexes (Wine client↔server), we need the
+                // physical address to match across processes. Translate
+                // uaddr to physical if possible, otherwise use virtual.
+                let key = if ctx.child_as_cap != 0 {
+                    match sotos_common::sys::pte_read(ctx.child_as_cap, uaddr & !0xFFF) {
+                        Ok((phys, _flags)) => phys | (uaddr & 0xFFF),
+                        Err(_) => uaddr,
+                    }
+                } else {
+                    uaddr
+                };
+                let result = futex_wait(key, val);
                 reply_val(ctx.ep_cap, result);
             }
         }
         1 => { // FUTEX_WAKE
-            let result = futex_wake(uaddr, val);
+            // Translate to physical address for shared futex matching
+            let key = if ctx.child_as_cap != 0 {
+                match sotos_common::sys::pte_read(ctx.child_as_cap, uaddr & !0xFFF) {
+                    Ok((phys, _flags)) => phys | (uaddr & 0xFFF),
+                    Err(_) => uaddr,
+                }
+            } else {
+                uaddr
+            };
+            let result = futex_wake(key, val);
             reply_val(ctx.ep_cap, result);
         }
         _ => reply_val(ctx.ep_cap, 0), // other ops: stub

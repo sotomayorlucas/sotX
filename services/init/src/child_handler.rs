@@ -482,8 +482,8 @@ pub(crate) extern "C" fn child_handler() -> ! {
         // PIPE_RETRY_TAG it will re-increment via mark_pipe_retry().
         clear_pipe_retry(pid);
 
-        // Trace syscalls for Wine child processes (P6+)
-        if pid >= 6 {
+        // Trace syscalls for Wine processes (P4+ covers wineserver + hello.exe)
+        if pid >= 4 {
             print(b"AS-SYS P"); print_u64(pid as u64);
             print(b" #"); print_u64(syscall_nr);
             print(b" ep="); print_u64(ep_cap);
@@ -769,6 +769,20 @@ pub(crate) extern "C" fn child_handler() -> ! {
                     }
                 }
 
+                // Strip WINESERVERSOCKET env var: the inherited fd is CLOEXEC-closed
+                // during exec. Without this, Wine tries to reuse the dead fd instead
+                // of connecting to the existing wineserver via socket path.
+                {
+                    let mut dst = 0usize;
+                    for i in 0..exec_envc {
+                        if !exec_envp[i].starts_with(b"WINESERVERSOCKET=") {
+                            if dst != i { exec_envp[dst] = exec_envp[i]; }
+                            dst += 1;
+                        }
+                    }
+                    exec_envc = dst;
+                }
+
                 while EXEC_LOCK.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Relaxed).is_err() { sys::yield_now(); }
 
                 // ALWAYS create a fresh AS for exec so that fork/clone_cow
@@ -933,22 +947,10 @@ pub(crate) extern "C" fn child_handler() -> ! {
                         PROCESSES[pid - 1].mmap_next.store(fresh_mmap, Ordering::Release);
 
                         EXEC_LOCK.store(0, Ordering::Release);
-                        // Kill the OLD thread by redirecting it to exit stub.
-                        // Without this, the old thread resumes in child_exec_main
-                        // (init's AS) and makes syscalls that corrupt Wine state
-                        // (root cause of Wine's "partial write 64").
-                        {
-                            let exit_reply = sotos_common::IpcMsg {
-                                tag: sotos_common::SIG_REDIRECT_TAG,
-                                regs: [
-                                    crate::vdso::EXIT_STUB_ADDR, // RIP → exit(0) stub
-                                    0, 0, 0,
-                                    0x900000, // RSP (init stack, safe for exit)
-                                    0, 0, 0,
-                                ],
-                            };
-                            let _ = sys::send(ep_cap, &exit_reply);
-                        }
+                        // Do NOT reply to the old thread. Leave it blocked forever
+                        // on the old endpoint. This keeps the process (P2) alive,
+                        // which keeps the wineserver AF_UNIX socket open, which
+                        // prevents wineserver from shutting down before P6 connects.
                         ep_cap = new_ep;
                         // Exec always creates its own AS now — use vm_read/vm_write
                         child_as_cap = exec_target_as;

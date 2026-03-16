@@ -1164,22 +1164,8 @@ pub(crate) fn close_cloexec_fds(ctx: &mut SyscallContext) {
         let fd = bits.trailing_zeros() as usize;
         if fd >= 128 { break; }
         let k = ctx.child_fds[fd];
-        // Preserve AF_UNIX connected sockets through exec.
-        // Wine's wineserver connection (kind=27/28) must survive exec so
-        // the child process can communicate with wineserver via
-        // WINESERVERSOCKET. Wine sets SOCK_CLOEXEC on creation and
-        // normally clears it in the fork child, but our fork+exec path
-        // doesn't run Wine's fcntl(server_fd, F_SETFD, 0).
-        if k == 27 || k == 28 {
-            // Keep the socket alive — just clear the CLOEXEC bit
-            if fd < 128 { *ctx.fd_cloexec &= !(1u128 << fd); }
-            print(b"CLOEXEC-KEEP P"); print_u64(ctx.pid as u64);
-            print(b" fd="); print_u64(fd as u64);
-            print(b" k="); print_u64(k as u64);
-            print(b"\n");
-            bits &= !(1u128 << fd);
-            continue;
-        }
+        // Close AF_UNIX sockets during exec (don't preserve).
+        // P6 will reconnect to wineserver via socket path.
         print(b"CLOEXEC-CLOSE P"); print_u64(ctx.pid as u64);
         print(b" fd="); print_u64(fd as u64);
         print(b" kind="); print_u64(k as u64);

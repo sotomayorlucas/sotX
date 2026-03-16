@@ -26,6 +26,7 @@ const EXIT_STUB_OFF: usize = 0x130; // exit_group(rdi) stub
 const COW_FORK_RESTORE_OFF: usize = 0x140; // CoW fork child restore: xor eax + pop regs + ret
 const FORK_TLS_TRAMPOLINE_OFF: usize = 0x160; // dynamic: arch_prctl(SET_FS+SET_GS,X) then jmp COW_FORK_RESTORE
 const PRE_TLS_TRAMPOLINE_OFF: usize = 0x1C0; // exec-time: arch_prctl(SET_FS,PRE_TLS) then jmp exec_entry
+const YIELD_LOOP_OFF: usize = 0x1E0; // yield loop stub (keeps thread alive without exiting)
 const DATA_OFF: usize = 0xE00; // boot_tsc storage
 
 /// Virtual address of the signal trampoline (for SYS_SIGNAL_ENTRY).
@@ -46,6 +47,10 @@ pub const EXIT_STUB_ADDR: u64 = VDSO_BASE + (TEXT_OFF + EXIT_STUB_OFF) as u64;
 /// CoW fork child restore trampoline: xor eax,eax + pop callee-saved + ret.
 /// Child returns from fork() with RAX=0.
 pub const COW_FORK_RESTORE_ADDR: u64 = VDSO_BASE + (TEXT_OFF + COW_FORK_RESTORE_OFF) as u64;
+
+/// Yield loop: thread yields CPU in an infinite loop (keeps process alive).
+/// Used for orphaned exec threads that must NOT exit (to keep wineserver connections alive).
+pub const YIELD_LOOP_ADDR: u64 = VDSO_BASE + (TEXT_OFF + YIELD_LOOP_OFF) as u64;
 
 /// Fork TLS trampoline: written dynamically before each fork.
 /// Does arch_prctl(ARCH_SET_FS, fork_fsbase), then jumps to COW_FORK_RESTORE_ADDR.
@@ -494,6 +499,22 @@ pub fn forge(page: &mut [u8], boot_tsc: u64) {
     page[c + 10] = 0x41;  // pop r15
     page[c + 11] = 0x5F;
     page[c + 12] = 0xC3;  // ret
+
+    // ---- Yield loop (at TEXT_OFF + YIELD_LOOP_OFF) ----
+    // Infinite loop: mov eax,24(sched_yield); syscall; jmp back
+    //   mov eax, 24  → B8 18 00 00 00
+    //   syscall       → 0F 05
+    //   jmp -7        → EB F7
+    let y = TEXT_OFF + YIELD_LOOP_OFF;
+    page[y]     = 0xB8;
+    page[y + 1] = 0x18; // 24 = sched_yield
+    page[y + 2] = 0x00;
+    page[y + 3] = 0x00;
+    page[y + 4] = 0x00;
+    page[y + 5] = 0x0F; // syscall
+    page[y + 6] = 0x05;
+    page[y + 7] = 0xEB; // jmp rel8
+    page[y + 8] = 0xF7; // -9 (back to mov)
 }
 
 /// Write a dynamic fork TLS trampoline at FORK_TLS_TRAMPOLINE_ADDR.
