@@ -399,10 +399,12 @@ pub fn forge(page: &mut [u8], boot_tsc: u64) {
     // ---- Signal trampoline (at TEXT_OFF + SIGNAL_TRAMPOLINE_OFF) ----
     // Entered by the kernel when a timer interrupt detects a pending async signal.
     // All GPRs are the user's original values (restored by the timer handler).
-    // Just calls SYSCALL(0x7F00) to let LUCAS deliver the signal.
+    // Calls SYSCALL(0x7F00) to let LUCAS deliver the signal.
+    // If the syscall returns normally (shouldn't happen, but can in edge cases
+    // when the IPC reply is not SIG_REDIRECT), retry instead of crashing.
     //   mov eax, 0x7F00   → B8 00 7F 00 00
     //   syscall            → 0F 05
-    //   ud2                → 0F 0B (should never be reached)
+    //   jmp -7 (back to mov) → EB F7
     let t = TEXT_OFF + SIGNAL_TRAMPOLINE_OFF;
     page[t]     = 0xB8;  // mov eax, imm32
     page[t + 1] = 0x00;
@@ -411,8 +413,8 @@ pub fn forge(page: &mut [u8], boot_tsc: u64) {
     page[t + 4] = 0x00;
     page[t + 5] = 0x0F;  // syscall
     page[t + 6] = 0x05;
-    page[t + 7] = 0x0F;  // ud2
-    page[t + 8] = 0x0B;
+    page[t + 7] = 0xEB;  // jmp rel8
+    page[t + 8] = 0xF7;  // -9 (back to offset t)
 
     // ---- Sigreturn restorer (at TEXT_OFF + SIGRETURN_RESTORER_OFF) ----
     // Used as sa_restorer / fallback restorer. Just calls rt_sigreturn.

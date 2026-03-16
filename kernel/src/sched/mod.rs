@@ -1031,6 +1031,11 @@ pub fn get_thread_signal_regs(tid: ThreadId) -> Option<[u64; 20]> {
                 // Real RIP/RFLAGS from interrupt frame (not clobbered by SYSCALL)
                 regs[18] = t.signal_saved_rip;
                 regs[19] = t.signal_saved_rflags;
+                // Auto-clear: context consumed. Next timer interrupt can save
+                // fresh context. Without this, signal_ctx_valid stays true
+                // forever, and all future get_thread_regs calls return this
+                // stale RIP — causing Wine to jump to garbage addresses.
+                t.signal_ctx_valid = false;
                 return Some(regs);
             }
             let mut regs = [0u64; 20];

@@ -228,17 +228,19 @@ pub(crate) fn sys_rt_sigqueueinfo(ctx: &mut SyscallContext, _msg: &IpcMsg) {
 /// Returns SyscallAction::Break if signal terminates the process.
 pub(crate) fn sys_signal_trampoline(ctx: &mut SyscallContext, msg: &IpcMsg) -> SyscallAction {
     let child_tid = msg.regs[6];
+
+    // Read saved regs ONCE (get_thread_signal_regs auto-clears signal_ctx_valid,
+    // so calling it twice would lose the real RIP on the second call).
+    let mut saved_regs = [0u64; 20];
+    let regs_ok = sys::get_thread_regs(child_tid, &mut saved_regs).is_ok();
+
     let mut sig = sig_dequeue(ctx.pid);
 
     // If no init-side signal, check kernel-generated signal (regs[17]).
-    // The kernel's #PF handler stores SIGSEGV here when user code accesses kernel addresses.
-    if sig == 0 {
-        let mut probe_regs = [0u64; 20];
-        if sys::get_thread_regs(child_tid, &mut probe_regs).is_ok() {
-            let kernel_sig = probe_regs[17];
-            if kernel_sig > 0 && kernel_sig < 32 {
-                sig = kernel_sig;
-            }
+    if sig == 0 && regs_ok {
+        let kernel_sig = saved_regs[17];
+        if kernel_sig > 0 && kernel_sig < 32 {
+            sig = kernel_sig;
         }
     }
 
@@ -264,39 +266,54 @@ pub(crate) fn sys_signal_trampoline(ctx: &mut SyscallContext, msg: &IpcMsg) -> S
         }
     }
 
-    // No signal — resume with saved pre-interrupt state via rt_sigreturn
-    let mut saved_regs = [0u64; 20];
-    if sys::get_thread_regs(child_tid, &mut saved_regs).is_ok() {
-        let saved_rsp = saved_regs[15];
-        // Use real RIP/RFLAGS if from interrupt context, else SYSCALL convention
-        let real_rip = if saved_regs[18] != 0 { saved_regs[18] } else { saved_regs[2] };
-        let real_rflags = if saved_regs[19] != 0 { saved_regs[19] } else { saved_regs[10] };
-        let frame_size = sotos_common::SIGNAL_FRAME_SIZE as u64;
-        let new_rsp = ((saved_rsp - frame_size) & !0xF) - 8;
-        // Build frame in local buffer, write to child's AS
-        let frame_data: [u64; 23] = [
-            vdso::SIGRETURN_RESTORER_ADDR, 0,
-            saved_regs[0], saved_regs[1], saved_regs[2], saved_regs[3],
-            saved_regs[4], saved_regs[5], saved_regs[6], saved_regs[7],
-            saved_regs[8], saved_regs[9], saved_regs[10], saved_regs[11],
-            saved_regs[12], saved_regs[13], saved_regs[14],
-            real_rip, saved_rsp, real_rflags, saved_regs[16],
-            0, 0, // old_mask, ucontext_ptr
-        ];
-        let frame_bytes: &[u8] = unsafe {
-            core::slice::from_raw_parts(frame_data.as_ptr() as *const u8, frame_data.len() * 8)
-        };
-        ctx.guest_write(new_rsp, frame_bytes);
-        let reply = sotos_common::IpcMsg {
-            tag: sotos_common::SIG_REDIRECT_TAG,
-            regs: [
-                vdso::SIGRETURN_RESTORER_ADDR, 0, 0, 0,
-                new_rsp, 0, 0, 0,
-            ],
-        };
-        let _ = sys::send(ctx.ep_cap, &reply);
-    } else {
-        reply_val(ctx.ep_cap, 0);
+    // No signal — resume with saved pre-interrupt state via rt_sigreturn.
+    // CRITICAL: We MUST always send SIG_REDIRECT_TAG, never a normal reply.
+    if !regs_ok {
+        sys::yield_now();
+        if sys::get_thread_regs(child_tid, &mut saved_regs).is_err() {
+            crate::framebuffer::print(b"SIGNAL-RESUME-FAIL P");
+            crate::framebuffer::print_u64(ctx.pid as u64);
+            crate::framebuffer::print(b" tid=");
+            crate::framebuffer::print_u64(child_tid);
+            crate::framebuffer::print(b"\n");
+            let reply = sotos_common::IpcMsg {
+                tag: sotos_common::SIG_REDIRECT_TAG,
+                regs: [
+                    vdso::SIGRETURN_RESTORER_ADDR, 0, 0, 0,
+                    0x900000, 0, 0, 0,
+                ],
+            };
+            let _ = sys::send(ctx.ep_cap, &reply);
+            return SyscallAction::Continue;
+        }
     }
+    let saved_rsp = saved_regs[15];
+    // Use real RIP/RFLAGS if from interrupt context, else SYSCALL convention
+    let real_rip = if saved_regs[18] != 0 { saved_regs[18] } else { saved_regs[2] };
+    let real_rflags = if saved_regs[19] != 0 { saved_regs[19] } else { saved_regs[10] };
+    let frame_size = sotos_common::SIGNAL_FRAME_SIZE as u64;
+    let new_rsp = ((saved_rsp - frame_size) & !0xF) - 8;
+    // Build frame in local buffer, write to child's AS
+    let frame_data: [u64; 23] = [
+        vdso::SIGRETURN_RESTORER_ADDR, 0,
+        saved_regs[0], saved_regs[1], saved_regs[2], saved_regs[3],
+        saved_regs[4], saved_regs[5], saved_regs[6], saved_regs[7],
+        saved_regs[8], saved_regs[9], saved_regs[10], saved_regs[11],
+        saved_regs[12], saved_regs[13], saved_regs[14],
+        real_rip, saved_rsp, real_rflags, saved_regs[16],
+        0, 0, // old_mask, ucontext_ptr
+    ];
+    let frame_bytes: &[u8] = unsafe {
+        core::slice::from_raw_parts(frame_data.as_ptr() as *const u8, frame_data.len() * 8)
+    };
+    ctx.guest_write(new_rsp, frame_bytes);
+    let reply = sotos_common::IpcMsg {
+        tag: sotos_common::SIG_REDIRECT_TAG,
+        regs: [
+            vdso::SIGRETURN_RESTORER_ADDR, 0, 0, 0,
+            new_rsp, 0, 0, 0,
+        ],
+    };
+    let _ = sys::send(ctx.ep_cap, &reply);
     SyscallAction::Continue
 }
