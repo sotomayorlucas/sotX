@@ -46,6 +46,27 @@ fn sysroot_init(store: &mut ObjectStore) {
             }
         }
     }
+    // Create /var hierarchy (needed by apk package manager)
+    if store.resolve_path(b"var", ROOT_OID).is_err() {
+        let _ = store.mkdir(b"var", ROOT_OID);
+    }
+    if let Ok(var_oid) = store.resolve_path(b"var", ROOT_OID) {
+        if store.find_in(b"cache", var_oid).is_none() { let _ = store.mkdir(b"cache", var_oid); }
+        if let Some(cache_oid) = store.find_in(b"cache", var_oid) {
+            if store.find_in(b"apk", cache_oid).is_none() { let _ = store.mkdir(b"apk", cache_oid); }
+        }
+        if store.find_in(b"lib", var_oid).is_none() { let _ = store.mkdir(b"lib", var_oid); }
+        if let Some(lib_oid) = store.find_in(b"lib", var_oid) {
+            if store.find_in(b"apk", lib_oid).is_none() { let _ = store.mkdir(b"apk", lib_oid); }
+        }
+    }
+    // Create /etc/apk directory
+    if store.resolve_path(b"etc", ROOT_OID).is_err() {
+        let _ = store.mkdir(b"etc", ROOT_OID);
+    }
+    if let Ok(etc_oid) = store.resolve_path(b"etc", ROOT_OID) {
+        if store.find_in(b"apk", etc_oid).is_none() { let _ = store.mkdir(b"apk", etc_oid); }
+    }
     // Create /run/user/0 for XDG_RUNTIME_DIR (needed by Wine server directory)
     if store.resolve_path(b"run", ROOT_OID).is_err() {
         let _ = store.mkdir(b"run", ROOT_OID);

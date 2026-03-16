@@ -168,6 +168,20 @@ pub(crate) fn open_virtual_file(name: &[u8], dir_buf: &mut [u8]) -> Option<usize
             let n = c.len().min(dir_buf.len());
             dir_buf[..n].copy_from_slice(&c[..n]);
             gen_len = n;
+        } else if name == b"/etc/apk/repositories" {
+            // Alpine package manager repos (HTTP only — no TLS support)
+            let c = b"http://dl-cdn.alpinelinux.org/alpine/v3.21/main\nhttp://dl-cdn.alpinelinux.org/alpine/v3.21/community\n";
+            let n = c.len().min(dir_buf.len());
+            dir_buf[..n].copy_from_slice(&c[..n]);
+            gen_len = n;
+        } else if name == b"/etc/apk/world" {
+            gen_len = 0; // empty world file (no manually installed packages)
+        } else if name == b"/etc/apk/arch" {
+            let c = b"x86_64\n";
+            dir_buf[..c.len()].copy_from_slice(c);
+            gen_len = c.len();
+        } else if starts_with(name, b"/etc/apk/keys/") {
+            gen_len = 0; // empty key stubs
         } else if name == b"/etc/gai.conf" || name == b"/etc/host.conf"
                || name == b"/etc/services" || name == b"/etc/protocols"
                || name == b"/etc/shells" || name == b"/etc/inputrc"
@@ -482,8 +496,8 @@ pub(crate) extern "C" fn child_handler() -> ! {
         // PIPE_RETRY_TAG it will re-increment via mark_pipe_retry().
         clear_pipe_retry(pid);
 
-        // Trace syscalls for Wine processes (P4+ covers wineserver + hello.exe)
-        if pid >= 4 {
+        // Trace syscalls for child processes (P3+ covers all user commands)
+        if pid >= 3 {
             print(b"AS-SYS P"); print_u64(pid as u64);
             print(b" #"); print_u64(syscall_nr);
             print(b" ep="); print_u64(ep_cap);
@@ -637,6 +651,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
 
             // SYS_execve(path, argv, envp) — generic: loads any ELF from initrd
             SYS_EXECVE => {
+                print(b"EXEC P"); print_u64(pid as u64); print(b"\n");
                 let path_ptr = msg.regs[0];
                 let argv_ptr = msg.regs[1];
                 let envp_ptr = msg.regs[2];
@@ -947,10 +962,13 @@ pub(crate) extern "C" fn child_handler() -> ! {
                         PROCESSES[pid - 1].mmap_next.store(fresh_mmap, Ordering::Release);
 
                         EXEC_LOCK.store(0, Ordering::Release);
-                        // Do NOT reply to the old thread. Leave it blocked forever
-                        // on the old endpoint. This keeps the process (P2) alive,
-                        // which keeps the wineserver AF_UNIX socket open, which
-                        // prevents wineserver from shutting down before P6 connects.
+                        print(b"EXEC-OK P"); print_u64(pid as u64);
+                        print(b" new_ep="); print_u64(new_ep);
+                        print(b" as="); print_u64(exec_target_as);
+                        print(b"\n");
+                        // Reply to old thread → it resumes in child_exec_main,
+                        // calls linux_exit(1), which terminates the process cleanly.
+                        reply_val(ep_cap, 0);
                         ep_cap = new_ep;
                         // Exec always creates its own AS now — use vm_read/vm_write
                         child_as_cap = exec_target_as;

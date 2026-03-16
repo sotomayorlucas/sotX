@@ -433,7 +433,11 @@ fn exec_loaded_elf(file_size: usize, bin_name: &[u8], argv: &[[u8; MAX_EXEC_ARG_
     // ET_DYN (PIE): each process gets a unique 16MB slot to avoid code overlap.
     // ET_EXEC uses the fixed address from the ELF (main_base = 0).
     let main_base: u64 = if elf_info.elf_type == 3 {
-        NEXT_DYN_BASE.fetch_add(DYN_BASE_SLOT_SIZE, Ordering::SeqCst)
+        let b = NEXT_DYN_BASE.fetch_add(DYN_BASE_SLOT_SIZE, Ordering::SeqCst);
+        crate::framebuffer::print(b"DYN-BASE "); crate::framebuffer::print_hex64(b);
+        crate::framebuffer::print(b" entry="); crate::framebuffer::print_hex64(b + elf_info.entry);
+        crate::framebuffer::print(b"\n");
+        b
     } else {
         0
     };
@@ -841,6 +845,10 @@ fn exec_loaded_elf(file_size: usize, bin_name: &[u8], argv: &[[u8; MAX_EXEC_ARG_
         }
     };
     let _ = sys::signal_entry(new_thread, vdso::SIGNAL_TRAMPOLINE_ADDR);
+
+    // NOTE: vDSO page is already mapped by the pre-TLS trampoline code above
+    // (it creates a custom copy with the trampoline embedded). Do NOT re-map
+    // or it would overwrite the trampoline with the original vDSO content.
 
     // Record page info for per-process cleanup on exit
     LAST_EXEC_STACK_BASE.store(stack_addr, Ordering::Release);
