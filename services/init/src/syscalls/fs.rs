@@ -577,51 +577,33 @@ pub(crate) fn sys_write(ctx: &mut SyscallContext, msg: &IpcMsg) {
             }
         }
         11 => {
-            // Pipe write: write to shared pipe buffer
+            // Pipe write (blocking): write ALL bytes to shared pipe buffer.
+            // Retry indefinitely until reader drains or reader closes.
             let pipe_id = ctx.sock_conn_id[fd] as usize;
-            // Read child's data into local buffer (handles CoW fork)
-            let safe_len = len.min(4096);
-            let mut local_buf = [0u8; 4096];
-            ctx.guest_read(buf_ptr, &mut local_buf[..safe_len]);
-            let src = &local_buf[..safe_len];
-            // Pipe write tracing (disabled during clone to reduce serial overhead)
-            if false && ctx.pid >= 3 {
-                print(b"PIPE-W P"); print_u64(ctx.pid as u64);
-                print(b" fd="); print_u64(fd as u64);
-                print(b" len="); print_u64(len as u64);
-                print(b" [");
-                let show = safe_len.min(80);
-                for i in 0..show {
-                    if src[i] == 0x0A { print(b"\\n"); }
-                    else if src[i] >= 0x20 && src[i] < 0x7F {
-                        sys::debug_print(src[i]);
-                    } else { print(b"."); }
-                }
-                print(b"]\n");
-                // Hex dump for small pipe writes
-                if safe_len <= 8 {
-                    print(b"  hex:");
-                    for i in 0..safe_len {
-                        print(b" 0x");
-                        crate::framebuffer::print_hex64(src[i] as u64);
+            let mut total_written = 0usize;
+            let mut broken = false;
+            while total_written < len && !broken {
+                let chunk = (len - total_written).min(4096);
+                let mut local_buf = [0u8; 4096];
+                ctx.guest_read(buf_ptr + total_written as u64, &mut local_buf[..chunk]);
+                let mut off = 0usize;
+                while off < chunk {
+                    let n = pipe_write(pipe_id, &local_buf[off..chunk]);
+                    if n > 0 { off += n; }
+                    else {
+                        if pipe_reader_closed(pipe_id) { broken = true; break; }
+                        sys::yield_now();
                     }
-                    print(b"\n");
                 }
+                total_written += off;
             }
-            let mut written = 0usize;
-            let mut retries = 0u32;
-            while written < safe_len {
-                let n = pipe_write(pipe_id, &src[written..]);
-                written += n;
-                if n == 0 {
-                    retries += 1;
-                    if retries > 10000 { break; }
-                    sys::yield_now();
-                } else {
-                    retries = 0;
-                }
+            if total_written > 0 {
+                reply_val(ctx.ep_cap, total_written as i64);
+            } else if broken {
+                reply_val(ctx.ep_cap, -EPIPE);
+            } else {
+                reply_val(ctx.ep_cap, 0);
             }
-            reply_val(ctx.ep_cap, written as i64);
         }
         13 => {
             // VFS file: write via shared ObjectStore
