@@ -678,9 +678,12 @@ pub(crate) fn sys_write(ctx: &mut SyscallContext, msg: &IpcMsg) {
             }
         }
         27 | 28 => {
-            // AF_UNIX connected socket write.
+            // AF_UNIX connected socket write (blocking).
             // kind=27 (client): write to pipe_a (client→server)
             // kind=28 (server): write to pipe_b (server→client)
+            // Must block until ALL bytes are written (blocking socket semantics).
+            // Wine's wineserver IPC sends large messages; partial writes cause
+            // "wine client error" and abort the connection.
             let conn = ctx.sock_conn_id[fd] as usize;
             if conn < crate::fd::MAX_UNIX_CONNS {
                 let pipe_id = if ctx.child_fds[fd] == 27 {
@@ -688,21 +691,34 @@ pub(crate) fn sys_write(ctx: &mut SyscallContext, msg: &IpcMsg) {
                 } else {
                     unsafe { crate::fd::UNIX_CONN_PIPE_B[conn] as usize }
                 };
-                let safe_len = len.min(4096);
-                let mut local_buf = [0u8; 4096];
-                ctx.guest_read(buf_ptr, &mut local_buf[..safe_len]);
-                let mut written = 0usize;
-                let mut retries = 0u32;
-                while written < safe_len {
-                    let n = pipe_write(pipe_id, &local_buf[written..safe_len]);
-                    written += n;
-                    if n == 0 {
-                        retries += 1;
-                        if retries > 10000 { break; }
-                        sys::yield_now();
-                    } else { retries = 0; }
+                // Write ALL bytes (blocking socket semantics). Retry indefinitely
+                // until the reader drains the pipe. Wine's wineserver IPC requires
+                // full writes — partial writes cause fatal "wine client error".
+                let mut total_written = 0usize;
+                let mut broken = false;
+                while total_written < len && !broken {
+                    let chunk = (len - total_written).min(4096);
+                    let mut local_buf = [0u8; 4096];
+                    ctx.guest_read(buf_ptr + total_written as u64, &mut local_buf[..chunk]);
+                    let mut chunk_off = 0usize;
+                    while chunk_off < chunk {
+                        let n = pipe_write(pipe_id, &local_buf[chunk_off..chunk]);
+                        if n > 0 {
+                            chunk_off += n;
+                        } else {
+                            if pipe_reader_closed(pipe_id) { broken = true; break; }
+                            sys::yield_now();
+                        }
+                    }
+                    total_written += chunk_off;
                 }
-                reply_val(ctx.ep_cap, written as i64);
+                if total_written > 0 {
+                    reply_val(ctx.ep_cap, total_written as i64);
+                } else if broken {
+                    reply_val(ctx.ep_cap, -EPIPE);
+                } else {
+                    reply_val(ctx.ep_cap, 0);
+                }
             } else {
                 reply_val(ctx.ep_cap, -EBADF);
             }
@@ -1920,22 +1936,61 @@ pub(crate) fn sys_writev(ctx: &mut SyscallContext, msg: &IpcMsg) {
             ctx.guest_read(base, &mut local_buf[..safe_ilen]);
             let src = &local_buf[..safe_ilen];
             let mut written = 0usize;
-            let mut retries = 0u32;
             while written < safe_ilen {
                 let n = pipe_write(pipe_id, &src[written..]);
-                written += n;
-                if n == 0 {
-                    retries += 1;
-                    if retries > 10000 { break; }
-                    sys::yield_now();
+                if n > 0 {
+                    written += n;
                 } else {
-                    retries = 0;
+                    if pipe_reader_closed(pipe_id) { break; }
+                    sys::yield_now();
                 }
             }
             total += written;
-            if written < safe_ilen { break; } // pipe full, stop
+            if written < safe_ilen { break; }
         }
         reply_val(ctx.ep_cap, total as i64);
+    } else if fd < GRP_MAX_FDS && (ctx.child_fds[fd] == 27 || ctx.child_fds[fd] == 28) {
+        // AF_UNIX socket writev: gather iovecs and write to pipe (blocking)
+        let conn = ctx.sock_conn_id[fd] as usize;
+        if conn < crate::fd::MAX_UNIX_CONNS {
+            let pipe_id = if ctx.child_fds[fd] == 27 {
+                unsafe { crate::fd::UNIX_CONN_PIPE_A[conn] as usize }
+            } else {
+                unsafe { crate::fd::UNIX_CONN_PIPE_B[conn] as usize }
+            };
+            let cnt = iovcnt.min(16);
+            let mut total = 0usize;
+            for i in 0..cnt {
+                let entry = iov_ptr + (i as u64) * 16;
+                if entry + 16 > 0x0000_8000_0000_0000 { break; }
+                let base = ctx.guest_read_u64(entry);
+                let ilen = ctx.guest_read_u64(entry + 8) as usize;
+                if base == 0 || ilen == 0 { continue; }
+                // Write full iovec (blocking)
+                let mut iov_written = 0usize;
+                while iov_written < ilen {
+                    let chunk = (ilen - iov_written).min(4096);
+                    let mut local_buf = [0u8; 4096];
+                    ctx.guest_read(base + iov_written as u64, &mut local_buf[..chunk]);
+                    let mut off = 0usize;
+                    while off < chunk {
+                        let n = pipe_write(pipe_id, &local_buf[off..chunk]);
+                        if n > 0 { off += n; }
+                        else {
+                            if pipe_reader_closed(pipe_id) { break; }
+                            sys::yield_now();
+                        }
+                    }
+                    iov_written += off;
+                    if off < chunk { break; }
+                }
+                total += iov_written;
+                if iov_written < ilen { break; }
+            }
+            reply_val(ctx.ep_cap, total as i64);
+        } else {
+            reply_val(ctx.ep_cap, -EBADF);
+        }
     } else {
         reply_val(ctx.ep_cap, -EBADF);
     }

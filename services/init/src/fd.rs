@@ -381,6 +381,11 @@ pub(crate) fn pipe_read(pipe_id: usize, buf: &mut [u8]) -> usize {
 /// 1. PIPE_WRITE_CLOSED must be set
 /// 2. PIPE_WRITE_REFS must be 0
 /// 3. No living process may still have this pipe's write end open
+pub(crate) fn pipe_reader_closed(pipe_id: usize) -> bool {
+    if pipe_id >= MAX_PIPES { return false; }
+    PIPE_READ_CLOSED[pipe_id].load(Ordering::Acquire) != 0
+}
+
 pub(crate) fn pipe_writer_closed(pipe_id: usize) -> bool {
     if pipe_id >= MAX_PIPES { return false; }
     if PIPE_WRITE_CLOSED[pipe_id].load(Ordering::Acquire) == 0 { return false; }

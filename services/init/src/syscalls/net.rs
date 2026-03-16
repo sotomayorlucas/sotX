@@ -593,11 +593,13 @@ pub(crate) fn sys_sendmsg(ctx: &mut SyscallContext, msg: &IpcMsg) {
             let mut local_buf = [0u8; 4096];
             ctx.guest_read(iov_base, &mut local_buf[..safe_len]);
             let mut written = 0usize;
-            let mut retries = 0u32;
             while written < safe_len {
                 let n = pipe_write(pipe_id, &local_buf[written..safe_len]);
-                written += n;
-                if n == 0 { retries += 1; if retries > 10000 { break; } sys::yield_now(); }
+                if n > 0 { written += n; }
+                else {
+                    if pipe_reader_closed(pipe_id) { break; }
+                    sys::yield_now();
+                }
             }
             // Record message boundary so recvmsg reads exactly one sendmsg worth
             let direction = if ctx.child_fds[fd] == 27 { 0usize } else { 1 };
