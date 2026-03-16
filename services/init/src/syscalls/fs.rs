@@ -578,8 +578,13 @@ pub(crate) fn sys_write(ctx: &mut SyscallContext, msg: &IpcMsg) {
         }
         11 => {
             // Pipe write (blocking): write ALL bytes to shared pipe buffer.
-            // Retry indefinitely until reader drains or reader closes.
             let pipe_id = ctx.sock_conn_id[fd] as usize;
+            // Trace pipe writes from wineserver (pid 5) for IPC debugging
+            if ctx.pid == 5 && len > 60 {
+                print(b"PW5 fd="); print_u64(fd as u64);
+                print(b" len="); print_u64(len as u64);
+                print(b"\n");
+            }
             let mut total_written = 0usize;
             let mut broken = false;
             while total_written < len && !broken {
@@ -591,7 +596,7 @@ pub(crate) fn sys_write(ctx: &mut SyscallContext, msg: &IpcMsg) {
                     let n = pipe_write(pipe_id, &local_buf[off..chunk]);
                     if n > 0 { off += n; }
                     else {
-                        if pipe_reader_closed(pipe_id) { broken = true; break; }
+                        sys::yield_now(); // reader may be slow, keep trying
                         sys::yield_now();
                     }
                 }
@@ -688,7 +693,7 @@ pub(crate) fn sys_write(ctx: &mut SyscallContext, msg: &IpcMsg) {
                         if n > 0 {
                             chunk_off += n;
                         } else {
-                            if pipe_reader_closed(pipe_id) { broken = true; break; }
+                            sys::yield_now(); // reader may be slow, keep trying
                             sys::yield_now();
                         }
                     }
@@ -1923,7 +1928,7 @@ pub(crate) fn sys_writev(ctx: &mut SyscallContext, msg: &IpcMsg) {
                 if n > 0 {
                     written += n;
                 } else {
-                    if pipe_reader_closed(pipe_id) { break; }
+                    sys::yield_now(); // reader may be slow, keep trying
                     sys::yield_now();
                 }
             }
@@ -1959,7 +1964,7 @@ pub(crate) fn sys_writev(ctx: &mut SyscallContext, msg: &IpcMsg) {
                         let n = pipe_write(pipe_id, &local_buf[off..chunk]);
                         if n > 0 { off += n; }
                         else {
-                            if pipe_reader_closed(pipe_id) { break; }
+                            sys::yield_now(); // reader may be slow, keep trying
                             sys::yield_now();
                         }
                     }

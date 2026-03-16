@@ -281,7 +281,7 @@ pub(crate) static FORK_SOCK_READY: AtomicU64 = AtomicU64::new(0);
 // Shared pipe buffers (inter-handler communication)
 // ---------------------------------------------------------------------------
 pub(crate) const MAX_PIPES: usize = 16;
-pub(crate) const PIPE_BUF_SIZE: usize = 524288; // 512KB per pipe (Wine IPC needs large buffers)
+pub(crate) const PIPE_BUF_SIZE: usize = 262144; // 256KB per pipe (Wine IPC needs large buffers)
 
 /// Pipe data buffer (ring buffer).
 pub(crate) static mut PIPE_BUF: [[u8; PIPE_BUF_SIZE]; MAX_PIPES] = [[0; PIPE_BUF_SIZE]; MAX_PIPES];

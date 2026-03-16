@@ -597,7 +597,7 @@ pub(crate) fn sys_sendmsg(ctx: &mut SyscallContext, msg: &IpcMsg) {
                 let n = pipe_write(pipe_id, &local_buf[written..safe_len]);
                 if n > 0 { written += n; }
                 else {
-                    if pipe_reader_closed(pipe_id) { break; }
+                    sys::yield_now(); // reader may be slow, keep trying
                     sys::yield_now();
                 }
             }
