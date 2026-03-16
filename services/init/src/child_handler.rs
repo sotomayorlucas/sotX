@@ -933,6 +933,22 @@ pub(crate) extern "C" fn child_handler() -> ! {
                         PROCESSES[pid - 1].mmap_next.store(fresh_mmap, Ordering::Release);
 
                         EXEC_LOCK.store(0, Ordering::Release);
+                        // Kill the OLD thread by redirecting it to exit stub.
+                        // Without this, the old thread resumes in child_exec_main
+                        // (init's AS) and makes syscalls that corrupt Wine state
+                        // (root cause of Wine's "partial write 64").
+                        {
+                            let exit_reply = sotos_common::IpcMsg {
+                                tag: sotos_common::SIG_REDIRECT_TAG,
+                                regs: [
+                                    crate::vdso::EXIT_STUB_ADDR, // RIP → exit(0) stub
+                                    0, 0, 0,
+                                    0x900000, // RSP (init stack, safe for exit)
+                                    0, 0, 0,
+                                ],
+                            };
+                            let _ = sys::send(ep_cap, &exit_reply);
+                        }
                         ep_cap = new_ep;
                         // Exec always creates its own AS now — use vm_read/vm_write
                         child_as_cap = exec_target_as;
