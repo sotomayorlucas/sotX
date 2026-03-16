@@ -32,12 +32,13 @@ pub fn init(memory_map: &MemoryMapResponse, hhdm_offset: u64) {
 
 // ---------------------------------------------------------------
 // Frame refcount table — tracks CoW sharing.
-// Index = (phys_addr >> 12). Max 128K frames = 512MB RAM.
+// Index = (phys_addr >> 12). Supports up to 2GB RAM (524288 frames).
 // Refcount 0 = untracked (normal single-owner frame).
 // Refcount 1 = shared but only one reference left (can make writable).
 // Refcount >= 2 = shared, CoW copy needed on write.
+// Table size: 524288 × 2 bytes = 1 MB static allocation.
 // ---------------------------------------------------------------
-const MAX_REFCOUNT_FRAMES: usize = 131072;
+const MAX_REFCOUNT_FRAMES: usize = 524288; // 512K frames = 2GB RAM
 static FRAME_REFCOUNT: spin::Mutex<[u16; MAX_REFCOUNT_FRAMES]> =
     spin::Mutex::new([0u16; MAX_REFCOUNT_FRAMES]);
 
