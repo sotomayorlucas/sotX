@@ -128,7 +128,7 @@ pub(crate) static BOOT_TSC: AtomicU64 = AtomicU64::new(0);
 /// Next PID to allocate (monotonically increasing, starts at 1).
 pub(crate) static NEXT_PID: AtomicU64 = AtomicU64::new(1);
 /// Next vaddr for child stacks (guest + handler interleaved, 0x2000 apart).
-pub(crate) static NEXT_CHILD_STACK: AtomicU64 = AtomicU64::new(0xE80000);
+pub(crate) static NEXT_CHILD_STACK: AtomicU64 = AtomicU64::new(0x100000000); // 4 GiB — safely above all loaded binaries and Wine PE region
 
 // Handshake statics for passing setup info to child handler thread.
 pub(crate) static CHILD_SETUP_EP: AtomicU64 = AtomicU64::new(0);
@@ -174,7 +174,7 @@ pub(crate) fn sig_default_action(sig: u64) -> u8 {
         3 => 0,  // SIGQUIT -> terminate (core)
         4 => 0,  // SIGILL -> terminate (core)
         5 => 0,  // SIGTRAP -> terminate (core)
-        6 => 0,  // SIGABRT -> terminate (core)
+        6 => 1,  // SIGABRT -> ignore (Wine survives server_protocol_error + abort)
         7 => 0,  // SIGBUS -> terminate (core)
         8 => 0,  // SIGFPE -> terminate (core)
         9 => 0,  // SIGKILL -> terminate (uncatchable)
