@@ -576,10 +576,15 @@ fn exec_loaded_elf(file_size: usize, bin_name: &[u8], argv: &[[u8; MAX_EXEC_ARG_
 
         exec_entry = interp_base + interp_elf.entry;
 
-        // For init's AS, also apply relocs to mapped pages (legacy path).
-        // The buffer-based relocs handle the target_as path.
+        // Apply RELA relocations to mapped pages.
+        // For init's AS: direct memory writes (legacy path).
+        // For separate AS: vm_write to child's pages — catches BSS-resident
+        // GOT entries that apply_interp_relocs_to_buf missed (it can only
+        // patch file-resident data, not zero-filled BSS beyond filesz).
         if target_as == 0 {
             apply_interp_relocs(interp_data, &interp_elf, interp_base);
+        } else {
+            apply_interp_relocs_remote(interp_data, &interp_elf, interp_base, target_as);
         }
 
         unmap_temp_buf(INTERP_BUF_BASE, INTERP_BUF_PAGES);
@@ -1131,4 +1136,123 @@ fn apply_interp_relocs(elf_data: &[u8], elf_info: &sotos_common::elf::ElfInfo, b
     // glibc's bootstrap will add base again (double relocation → crash).
     // RELA RELATIVE is safe because it sets `*(base+off) = base+addend` (idempotent).
     // ld-linux's bootstrap handles RELR itself.
+}
+
+/// Apply interpreter RELA relocations to a REMOTE address space via vm_write.
+/// Unlike apply_interp_relocs_to_buf (which works on raw file bytes and misses
+/// BSS-resident GOT entries), this writes to already-mapped pages where BSS
+/// has been zero-filled by map_elf_segments.
+fn apply_interp_relocs_remote(
+    elf_data: &[u8],
+    elf_info: &sotos_common::elf::ElfInfo,
+    base: u64,
+    target_as: u64,
+) {
+    // Find PT_DYNAMIC
+    let mut dyn_offset = 0usize;
+    let mut dyn_size = 0usize;
+    let mut found = false;
+    for i in 0..elf_info.phnum {
+        let ph = elf_info.phoff + i * elf_info.phentsize;
+        if ph + elf_info.phentsize > elf_data.len() { break; }
+        let p_type = u32::from_le_bytes([
+            elf_data[ph], elf_data[ph+1], elf_data[ph+2], elf_data[ph+3],
+        ]);
+        if p_type == 2 {
+            dyn_offset = u64::from_le_bytes([
+                elf_data[ph+8], elf_data[ph+9], elf_data[ph+10], elf_data[ph+11],
+                elf_data[ph+12], elf_data[ph+13], elf_data[ph+14], elf_data[ph+15],
+            ]) as usize;
+            dyn_size = u64::from_le_bytes([
+                elf_data[ph+32], elf_data[ph+33], elf_data[ph+34], elf_data[ph+35],
+                elf_data[ph+36], elf_data[ph+37], elf_data[ph+38], elf_data[ph+39],
+            ]) as usize;
+            found = true;
+            break;
+        }
+    }
+    if !found { return; }
+
+    let mut rela_off: u64 = 0;
+    let mut rela_sz: u64 = 0;
+    let mut symtab_off: u64 = 0;
+    let mut syment_sz: u64 = 24; // default Elf64_Sym size
+    let mut pos = dyn_offset;
+    let end = (dyn_offset + dyn_size).min(elf_data.len());
+    while pos + 16 <= end {
+        let tag = u64::from_le_bytes([
+            elf_data[pos], elf_data[pos+1], elf_data[pos+2], elf_data[pos+3],
+            elf_data[pos+4], elf_data[pos+5], elf_data[pos+6], elf_data[pos+7],
+        ]);
+        let val = u64::from_le_bytes([
+            elf_data[pos+8], elf_data[pos+9], elf_data[pos+10], elf_data[pos+11],
+            elf_data[pos+12], elf_data[pos+13], elf_data[pos+14], elf_data[pos+15],
+        ]);
+        match tag {
+            0 => break,
+            6 => symtab_off = val, // DT_SYMTAB
+            7 => rela_off = val,   // DT_RELA
+            8 => rela_sz = val,    // DT_RELASZ
+            11 => syment_sz = val, // DT_SYMENT
+            _ => {}
+        }
+        pos += 16;
+    }
+
+    if rela_off == 0 || rela_sz == 0 { return; }
+
+    let rela_file_off = rela_off as usize;
+    let mut rp = rela_file_off;
+    let rela_end = (rela_file_off + rela_sz as usize).min(elf_data.len());
+    while rp + 24 <= rela_end {
+        let r_offset = u64::from_le_bytes([
+            elf_data[rp], elf_data[rp+1], elf_data[rp+2], elf_data[rp+3],
+            elf_data[rp+4], elf_data[rp+5], elf_data[rp+6], elf_data[rp+7],
+        ]);
+        let r_info = u64::from_le_bytes([
+            elf_data[rp+8], elf_data[rp+9], elf_data[rp+10], elf_data[rp+11],
+            elf_data[rp+12], elf_data[rp+13], elf_data[rp+14], elf_data[rp+15],
+        ]);
+        let r_addend = u64::from_le_bytes([
+            elf_data[rp+16], elf_data[rp+17], elf_data[rp+18], elf_data[rp+19],
+            elf_data[rp+20], elf_data[rp+21], elf_data[rp+22], elf_data[rp+23],
+        ]);
+        let r_type = (r_info & 0xFFFFFFFF) as u32;
+        let target = base + r_offset;
+
+        match r_type {
+            8 => { // R_X86_64_RELATIVE: *(base+off) = base+addend
+                let val = (base + r_addend).to_le_bytes();
+                let _ = sys::vm_write(target_as, target, val.as_ptr() as u64, 8);
+            }
+            6 | 7 => { // R_X86_64_GLOB_DAT (6) / R_X86_64_JUMP_SLOT (7)
+                let sym_idx = (r_info >> 32) as usize;
+                let mut sym_val: u64 = 0;
+                // Look up symbol in .dynsym
+                if symtab_off != 0 && sym_idx != 0 {
+                    let sym_off = symtab_off as usize + sym_idx * syment_sz as usize;
+                    if sym_off + 24 <= elf_data.len() {
+                        // Elf64_Sym.st_value is at offset 8 within the entry
+                        let st_value = u64::from_le_bytes([
+                            elf_data[sym_off+8], elf_data[sym_off+9],
+                            elf_data[sym_off+10], elf_data[sym_off+11],
+                            elf_data[sym_off+12], elf_data[sym_off+13],
+                            elf_data[sym_off+14], elf_data[sym_off+15],
+                        ]);
+                        if st_value != 0 {
+                            sym_val = base + st_value;
+                        }
+                    }
+                }
+                // Addend takes priority if non-zero
+                if r_addend != 0 {
+                    sym_val = base + r_addend;
+                }
+                let val = sym_val.to_le_bytes();
+                let _ = sys::vm_write(target_as, target, val.as_ptr() as u64, 8);
+            }
+            _ => {}
+        }
+        rp += 24;
+    }
 }
