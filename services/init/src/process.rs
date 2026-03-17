@@ -477,6 +477,9 @@ pub(crate) fn proc_group_init(pid: usize) {
     p.mem_group.store(idx as u64, Ordering::Release);
     p.sig_group.store(idx as u64, Ordering::Release);
     p.clear_tid.store(0, Ordering::Release);
+    // Clear stale signal state from previous use of this process slot
+    p.sig_pending.store(0, Ordering::Release);
+    p.sig_blocked.store(0, Ordering::Release);
     fd_grp_init(idx);
 }
 

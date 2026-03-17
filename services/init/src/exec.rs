@@ -1261,45 +1261,10 @@ fn apply_relr_to_buf(
         }
     }
 
-    // RELR: compact relative relocations
-    if relr_off == 0 || relr_sz == 0 { return applied; }
-    let mut rp = relr_off as usize;
-    let relr_end = (rp + relr_sz as usize).min(elf_data.len());
-    let mut where_addr: u64 = 0;
-    while rp + 8 <= relr_end {
-        let entry = u64::from_le_bytes(elf_data[rp..rp+8].try_into().unwrap());
-        if entry & 1 == 0 {
-            // Absolute address entry
-            if let Some(foff) = vaddr_to_file_offset(entry, segments, seg_count) {
-                if foff + 8 <= elf_data.len() {
-                    let old = u64::from_le_bytes(elf_data[foff..foff+8].try_into().unwrap());
-                    let val = (old + base).to_le_bytes();
-                    elf_data[foff..foff+8].copy_from_slice(&val);
-                    applied += 1;
-                }
-            }
-            where_addr = entry + 8;
-        } else {
-            // Bitmap entry: each bit represents an 8-byte slot
-            let bitmap = entry >> 1;
-            let base_addr = where_addr;
-            for bit in 0..63u64 {
-                if bitmap & (1 << bit) != 0 {
-                    let addr = base_addr + bit * 8;
-                    if let Some(foff) = vaddr_to_file_offset(addr, segments, seg_count) {
-                        if foff + 8 <= elf_data.len() {
-                            let old = u64::from_le_bytes(elf_data[foff..foff+8].try_into().unwrap());
-                            let val = (old + base).to_le_bytes();
-                            elf_data[foff..foff+8].copy_from_slice(&val);
-                            applied += 1;
-                        }
-                    }
-                }
-            }
-            where_addr = base_addr + 63 * 8;
-        }
-        rp += 8;
-    }
+    // RELR: NOT pre-applied. RELR format is `*ptr += base` which is NOT
+    // idempotent. Static PIE binaries (musl) have their own _dlstart bootstrap
+    // that applies RELR. Pre-applying would double-relocate → all pointers
+    // off by `base`, causing an infinite loop in demand-paged zero pages.
     applied
 }
 
