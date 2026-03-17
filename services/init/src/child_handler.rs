@@ -180,8 +180,9 @@ pub(crate) fn open_virtual_file(name: &[u8], dir_buf: &mut [u8]) -> Option<usize
             dir_buf[..n].copy_from_slice(&c[..n]);
             gen_len = n;
         } else if name == b"/etc/apk/repositories" {
-            // Alpine package manager repos (HTTP only — no TLS support)
-            let c = b"http://dl-cdn.alpinelinux.org/alpine/v3.21/main\nhttp://dl-cdn.alpinelinux.org/alpine/v3.21/community\n";
+            // Alpine repos via HTTPS proxy on host (10.0.2.2:8080)
+            // Use `just run-https` to auto-start the proxy
+            let c = b"http://10.0.2.2:8080/https://dl-cdn.alpinelinux.org/alpine/v3.20/main\nhttp://10.0.2.2:8080/https://dl-cdn.alpinelinux.org/alpine/v3.20/community\n";
             let n = c.len().min(dir_buf.len());
             dir_buf[..n].copy_from_slice(&c[..n]);
             gen_len = n;

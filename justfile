@@ -157,6 +157,21 @@ create-test-disk:
 create-rootfs-disk ROOTFS="rootfs":
     python scripts/mkdisk.py --size 256 --rootfs {{ROOTFS}}
 
+# Run with HTTPS proxy (auto-starts proxy on host, guest can download Alpine packages)
+run-https: image
+    @echo "Starting HTTPS proxy on port 8080..."
+    python scripts/https_proxy.py -p 8080 &
+    @sleep 1
+    "{{QEMU}}" \
+        -drive format=raw,file={{IMAGE}} \
+        -device virtio-net-pci,netdev=n0 \
+        -netdev user,id=n0 \
+        -serial stdio \
+        -display none \
+        -no-reboot \
+        -m 1024M; \
+    kill %1 2>/dev/null || true
+
 # Run with virtio-net (and virtio-blk)
 run-net: image create-test-disk
     "{{QEMU}}" \
