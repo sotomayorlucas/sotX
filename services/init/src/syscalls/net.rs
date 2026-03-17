@@ -720,9 +720,9 @@ pub(crate) fn sys_recvfrom(ctx: &mut SyscallContext, msg: &IpcMsg) {
         let src_port = ctx.sock_udp_local_port[fd];
         let max_recv = len.min(512); // DNS responses up to 512 bytes
         let mut got = 0usize;
-        // Retry for DNS responses — each CMD_UDP_RECV polls net service for ~5ms.
-        // 200 attempts × 5ms = ~1s total, enough for SLIRP DNS via 8.8.8.8.
-        for _attempt in 0..200u32 {
+        // Each CMD_UDP_RECV polls net service for ~50ms (two-level yield).
+        // 3 retries = ~150ms, enough for SLIRP DNS round-trip (~15ms).
+        for _attempt in 0..3u32 {
             let req = IpcMsg {
                 tag: NET_CMD_UDP_RECV,
                 regs: [src_port as u64, max_recv as u64, 0, 0, 0, 0, 0, 0],

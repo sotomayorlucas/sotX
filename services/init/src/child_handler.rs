@@ -1089,34 +1089,13 @@ pub(crate) extern "C" fn child_handler() -> ! {
                     if need_trampoline && parent_as != 0 {
                         vdso::write_fork_tls_trampoline_in(child_as_cap, fork_fsbase, fork_gsbase);
                     }
-                    // Write fork frame to CHILD's AS (deferred from before clone_cow).
-                    // Must happen after clone so CoW doesn't discard our writes.
-                    if parent_as != 0 {
-                        let mut frame_data = [0u8; 56];
-                        frame_data[0..8].copy_from_slice(&fork_rbx.to_le_bytes());
-                        frame_data[8..16].copy_from_slice(&fork_rbp.to_le_bytes());
-                        frame_data[16..24].copy_from_slice(&fork_r12.to_le_bytes());
-                        frame_data[24..32].copy_from_slice(&fork_r13.to_le_bytes());
-                        frame_data[32..40].copy_from_slice(&fork_r14.to_le_bytes());
-                        frame_data[40..48].copy_from_slice(&fork_r15.to_le_bytes());
-                        frame_data[48..56].copy_from_slice(&fork_rip.to_le_bytes());
-                        let _ = sys::vm_write(child_as_cap, frame_rsp, frame_data.as_ptr() as u64, 56);
-                    }
-                    // Directly test if code after FK2 runs at all
                     // Fix glibc fork linked list spin: glibc's fork handler iterates
                     // the atfork handler list (linked list at RBX+0x1088). After CoW fork,
                     // a node has next=NULL. The VMM demand-pages address 0 (zero page),
                     // so reading *(NULL) returns 0 instead of faulting. The list traversal
                     // loops forever because 0 != sentinel. Fix: write the sentinel value
                     // to address 0 in the child's AS so the traversal terminates.
-                    // Fix glibc fork linked list spin: after CoW fork, the atfork
-                    // handler list has a node with next=NULL. The VMM demand-pages
-                    // address 0 (zero page), so *(NULL)=0 != sentinel → infinite loop.
-                    // Write the list sentinel (rbx+0x1088) to address 0 so the loop
-                    // terminates. Only apply when rbx looks like a valid glibc pointer
-                    // (non-zero, in user space) to avoid corrupting Wine's NT TIB.
-                    // Fix glibc fork atfork list: write sentinel to address 0 AND
-                    // make the list head self-referencing (empty circular list).
+                    // Make the list head self-referencing (empty circular list).
                     if fork_rbx != 0 {
                         let head_addr = fork_rbx.wrapping_add(0x1088);
                         // Patch NULL page so *(NULL) returns sentinel (stops infinite loop)
@@ -1129,6 +1108,42 @@ pub(crate) extern "C" fn child_handler() -> ! {
                             let _ = sys::vm_write(child_as_cap, head_addr + 8,
                                 &head_addr as *const u64 as u64, 8);
                         }
+                    }
+
+                    // Eagerly copy stack pages for child BEFORE writing fork frame.
+                    // This matches SYS_FORK's approach: make pages private+writable
+                    // first, then vm_write the fork frame into the writable pages.
+                    // Without this, vm_write triggers kernel CoW (allocates frame A),
+                    // then eager copy replaces with frame B — but if frame_copy or
+                    // map_into fails, the fork frame data can be lost, causing the
+                    // child to ret into garbage (e.g. PRE_TLS canary at 0xB7002C).
+                    {
+                        let base_page = frame_rsp & !0xFFF;
+                        for i in 0..8u64 {
+                            let pg = base_page + i * 0x1000;
+                            if let Ok(nf) = sys::frame_alloc() {
+                                if sys::frame_copy(nf, child_as_cap, pg).is_ok() {
+                                    let _ = sys::unmap_from(child_as_cap, pg);
+                                    let _ = sys::map_into(child_as_cap, pg, nf, 2);
+                                }
+                            }
+                        }
+                    }
+
+                    // Write fork frame AFTER eager stack copy so it goes into the
+                    // child's now-private writable stack pages (no CoW needed).
+                    // (frame_copy copied the original pre-fork content; vm_write then
+                    // writes the fork frame into the child's private stack page.)
+                    if parent_as != 0 {
+                        let mut frame_data = [0u8; 56];
+                        frame_data[0..8].copy_from_slice(&fork_rbx.to_le_bytes());
+                        frame_data[8..16].copy_from_slice(&fork_rbp.to_le_bytes());
+                        frame_data[16..24].copy_from_slice(&fork_r12.to_le_bytes());
+                        frame_data[24..32].copy_from_slice(&fork_r13.to_le_bytes());
+                        frame_data[32..40].copy_from_slice(&fork_r14.to_le_bytes());
+                        frame_data[40..48].copy_from_slice(&fork_r15.to_le_bytes());
+                        frame_data[48..56].copy_from_slice(&fork_rip.to_le_bytes());
+                        let _ = sys::vm_write(child_as_cap, frame_rsp, frame_data.as_ptr() as u64, 56);
                     }
 
                     // Eagerly copy TLS page and patch TID fields.
@@ -1157,20 +1172,6 @@ pub(crate) extern "C" fn child_handler() -> ! {
                             if sys::frame_copy(nf2, child_as_cap, tls_vaddr2).is_ok() {
                                 let _ = sys::unmap_from(child_as_cap, tls_vaddr2);
                                 let _ = sys::map_into(child_as_cap, tls_vaddr2, nf2, 2);
-                            }
-                        }
-                    }
-
-                    // Eagerly copy stack pages for child (8 pages upward from fork RSP)
-                    {
-                        let base_page = frame_rsp & !0xFFF;
-                        for i in 0..8u64 {
-                            let pg = base_page + i * 0x1000;
-                            if let Ok(nf) = sys::frame_alloc() {
-                                if sys::frame_copy(nf, child_as_cap, pg).is_ok() {
-                                    let _ = sys::unmap_from(child_as_cap, pg);
-                                    let _ = sys::map_into(child_as_cap, pg, nf, 2);
-                                }
                             }
                         }
                     }

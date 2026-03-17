@@ -1238,6 +1238,14 @@ fn process_ipc_cmd(
                 let ep = IpEndpoint::new(IpAddress::Ipv4(ip_from_u32(dst_ip)), dst_port);
                 let _ = sock.send_slice(data, ep);
                 iface.poll(now(), device, sockets);
+                // Extra polls for ARP resolution — the first poll sends an ARP
+                // request for the DNS server (10.0.2.3). We need a reply before
+                // the actual UDP packet can be transmitted.
+                for _ in 0..20u32 {
+                    sys::yield_now();
+                    device.net.ack_irq();
+                    iface.poll(now(), device, sockets);
+                }
                 data_len as u64
             } else {
                 0
@@ -1281,10 +1289,17 @@ fn process_ipc_cmd(
                 }
             }
 
-            // Poll for new data — short timeout to avoid blocking other IPC.
-            // Init's recvfrom retries many times; each call here is ~5ms max.
-            for _iter in 0..500u32 {
-                sys::yield_now();
+            // Poll for new data with enough delay for QEMU/SLIRP to process
+            // the DNS response (~15ms wall clock). Each yield causes a vCPU
+            // exit (~10µs in TCG). We do 50 yields between each iface.poll()
+            // check (~500µs gap), and repeat 100 times → ~50ms total. This
+            // gives SLIRP plenty of time to resolve and inject the response.
+            for _poll_round in 0..100u32 {
+                // Yield multiple times to give QEMU's event loop time to
+                // deliver the virtio RX packet from SLIRP
+                for _ in 0..50u32 {
+                    sys::yield_now();
+                }
                 device.net.ack_irq();
                 iface.poll(now(), device, sockets);
                 let sock = sockets.get_mut::<udp::Socket>(handle);
