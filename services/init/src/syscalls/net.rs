@@ -60,20 +60,7 @@ fn poll_fd_readable(ctx: &SyscallContext, fd: usize) -> bool {
                 pipe_has_data(pipe_a) || pipe_writer_closed(pipe_a)
             } else { false }
         }
-        17 => {
-            // UDP socket: check net service for pending datagram (non-destructive)
-            let net_cap = NET_EP_CAP.load(Ordering::Acquire);
-            if net_cap == 0 { return false; }
-            let src_port = ctx.sock_udp_local_port[fd];
-            let req = IpcMsg {
-                tag: crate::net::NET_CMD_UDP_HAS_DATA,
-                regs: [src_port as u64, 0, 0, 0, 0, 0, 0, 0],
-            };
-            match sys::call_timeout(net_cap, &req, 1000) {
-                Ok(resp) => resp.regs[0] != 0,
-                Err(_) => false,
-            }
-        }
+        17 => false, // UDP: never report readable in poll — rely on recvfrom's own retry
         2 | 8 | 12 | 13 | 14 | 15 | 16 | 22 | 23 | 25 => true, // always "ready"
         _ => true, // default: report readable
     }

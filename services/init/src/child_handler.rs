@@ -1045,18 +1045,11 @@ pub(crate) extern "C" fn child_handler() -> ! {
                         print(b"\n");
                     }
                     let frame_rsp = fork_rsp - 56;
-                    // Write fork frame (callee-saved regs) to parent's stack
-                    if parent_as != 0 {
-                        let mut frame_data = [0u8; 56];
-                        frame_data[0..8].copy_from_slice(&fork_rbx.to_le_bytes());
-                        frame_data[8..16].copy_from_slice(&fork_rbp.to_le_bytes());
-                        frame_data[16..24].copy_from_slice(&fork_r12.to_le_bytes());
-                        frame_data[24..32].copy_from_slice(&fork_r13.to_le_bytes());
-                        frame_data[32..40].copy_from_slice(&fork_r14.to_le_bytes());
-                        frame_data[40..48].copy_from_slice(&fork_r15.to_le_bytes());
-                        frame_data[48..56].copy_from_slice(&fork_rip.to_le_bytes());
-                        let _ = sys::vm_write(parent_as, frame_rsp, frame_data.as_ptr() as u64, 56);
-                    } else {
+                    // Write fork frame (callee-saved regs) to stack.
+                    // For parent_as != 0: defer to AFTER clone_cow (write to child_as_cap).
+                    // vm_write before clone triggers CoW on the parent page, so the child
+                    // inherits the ORIGINAL page without the fork frame.
+                    if parent_as == 0 {
                         unsafe {
                             *((frame_rsp) as *mut u64) = fork_rbx;
                             *((frame_rsp + 8) as *mut u64) = fork_rbp;
@@ -1095,6 +1088,19 @@ pub(crate) extern "C" fn child_handler() -> ! {
                     // vDSO page (CoW-safe: allocates new frame, copies, writes).
                     if need_trampoline && parent_as != 0 {
                         vdso::write_fork_tls_trampoline_in(child_as_cap, fork_fsbase, fork_gsbase);
+                    }
+                    // Write fork frame to CHILD's AS (deferred from before clone_cow).
+                    // Must happen after clone so CoW doesn't discard our writes.
+                    if parent_as != 0 {
+                        let mut frame_data = [0u8; 56];
+                        frame_data[0..8].copy_from_slice(&fork_rbx.to_le_bytes());
+                        frame_data[8..16].copy_from_slice(&fork_rbp.to_le_bytes());
+                        frame_data[16..24].copy_from_slice(&fork_r12.to_le_bytes());
+                        frame_data[24..32].copy_from_slice(&fork_r13.to_le_bytes());
+                        frame_data[32..40].copy_from_slice(&fork_r14.to_le_bytes());
+                        frame_data[40..48].copy_from_slice(&fork_r15.to_le_bytes());
+                        frame_data[48..56].copy_from_slice(&fork_rip.to_le_bytes());
+                        let _ = sys::vm_write(child_as_cap, frame_rsp, frame_data.as_ptr() as u64, 56);
                     }
                     // Directly test if code after FK2 runs at all
                     // Fix glibc fork linked list spin: glibc's fork handler iterates
@@ -1469,17 +1475,9 @@ pub(crate) extern "C" fn child_handler() -> ! {
 
                 let frame_rsp = fork_rsp - 56;
                 // Write fork frame (callee-saved regs) to parent's stack
-                if parent_as != 0 {
-                    let mut frame_data = [0u8; 56];
-                    frame_data[0..8].copy_from_slice(&fork_rbx.to_le_bytes());
-                    frame_data[8..16].copy_from_slice(&fork_rbp.to_le_bytes());
-                    frame_data[16..24].copy_from_slice(&fork_r12.to_le_bytes());
-                    frame_data[24..32].copy_from_slice(&fork_r13.to_le_bytes());
-                    frame_data[32..40].copy_from_slice(&fork_r14.to_le_bytes());
-                    frame_data[40..48].copy_from_slice(&fork_r15.to_le_bytes());
-                    frame_data[48..56].copy_from_slice(&fork_rip.to_le_bytes());
-                    let _ = sys::vm_write(parent_as, frame_rsp, frame_data.as_ptr() as u64, 56);
-                } else {
+                // NOTE: For parent_as != 0, the vm_write is deferred until AFTER
+                // the eager stack page copy to avoid the copy overwriting the frame.
+                if parent_as == 0 {
                     unsafe {
                         *((frame_rsp) as *mut u64) = fork_rbx;
                         *((frame_rsp + 8) as *mut u64) = fork_rbp;
@@ -1546,6 +1544,21 @@ pub(crate) extern "C" fn child_handler() -> ! {
                             }
                         }
                     }
+                }
+
+                // Write fork frame AFTER eager stack copy so it isn't overwritten.
+                // (frame_copy copies the original pre-write content; vm_write then
+                // writes the fork frame into the child's now-private stack page.)
+                if parent_as != 0 {
+                    let mut frame_data = [0u8; 56];
+                    frame_data[0..8].copy_from_slice(&fork_rbx.to_le_bytes());
+                    frame_data[8..16].copy_from_slice(&fork_rbp.to_le_bytes());
+                    frame_data[16..24].copy_from_slice(&fork_r12.to_le_bytes());
+                    frame_data[24..32].copy_from_slice(&fork_r13.to_le_bytes());
+                    frame_data[32..40].copy_from_slice(&fork_r14.to_le_bytes());
+                    frame_data[40..48].copy_from_slice(&fork_r15.to_le_bytes());
+                    frame_data[48..56].copy_from_slice(&fork_rip.to_le_bytes());
+                    let _ = sys::vm_write(child_as_cap, frame_rsp, frame_data.as_ptr() as u64, 56);
                 }
 
                 // Fix glibc fork spin: eagerly copy TLS page and patch TID.
