@@ -863,7 +863,9 @@ pub(crate) fn sys_stat(ctx: &mut SyscallContext, msg: &IpcMsg) {
             || name == b"/tmp" || name == b"/home" || name == b"/var"
             || name == b"/usr/bin" || name == b"/usr/lib"
             || name == b"/usr/sbin" || name == b"/usr/lib64"
-            || name == b"/usr/share" || name == b"/usr/libexec"
+            || name == b"/usr/share" || name == b"/usr/share/terminfo"
+            || name == b"/usr/share/terminfo/x"
+            || name == b"/usr/libexec"
             || name == b"/usr/libexec/git-core"
             || name == b"/usr/local" || name == b"/usr/local/bin"
             || starts_with(name, b"/dev/");
@@ -1232,8 +1234,9 @@ pub(crate) fn sys_open(ctx: &mut SyscallContext, msg: &IpcMsg) {
             reply_val(ctx.ep_cap, -EMFILE);
         }
     } else if starts_with(name, b"/etc/") || starts_with(name, b"/proc/")
-           || starts_with(name, b"/sys/") {
-        // Virtual files first, then fall through to VFS for real /etc/ files
+           || starts_with(name, b"/sys/")
+           || starts_with(name, b"/usr/share/terminfo/") {
+        // Virtual files first, then fall through to VFS for real files
         let virt_len = open_virtual_file(name, ctx.dir_buf);
         if let Some(gen_len) = virt_len {
             *ctx.dir_len = gen_len;
@@ -2644,7 +2647,7 @@ pub(crate) fn sys_openat(ctx: &mut SyscallContext, msg: &IpcMsg) {
     let flags = msg.regs[2] as u32;
     let mut path = [0u8; 128];
     let path_len = ctx.guest_copy_path(path_ptr, &mut path);
-    // Debug: trace openat paths for P6 only (Wine hello.exe debugging)
+    // Debug: trace openat paths for P6+ (Wine)
     if ctx.pid == 6 {
         print(b"OPENAT P"); print_u64(ctx.pid as u64);
         print(b" fl=0x"); crate::framebuffer::print_hex64(flags as u64);
@@ -2677,7 +2680,8 @@ pub(crate) fn sys_openat(ctx: &mut SyscallContext, msg: &IpcMsg) {
             reply_val(ctx.ep_cap, -EMFILE);
         }
     } else if starts_with(name, b"/etc/") || starts_with(name, b"/proc/")
-           || starts_with(name, b"/sys/") {
+           || starts_with(name, b"/sys/")
+           || starts_with(name, b"/usr/share/terminfo/") {
         let virt_len = open_virtual_file(name, ctx.dir_buf);
         if let Some(gen_len) = virt_len {
             *ctx.dir_len = gen_len;
@@ -3175,7 +3179,9 @@ pub(crate) fn sys_fstatat(ctx: &mut SyscallContext, msg: &IpcMsg) {
             || name == b"/tmp" || name == b"/home" || name == b"/var"
             || name == b"/usr/bin" || name == b"/usr/lib"
             || name == b"/usr/sbin" || name == b"/usr/lib64"
-            || name == b"/usr/share" || name == b"/usr/libexec"
+            || name == b"/usr/share" || name == b"/usr/share/terminfo"
+            || name == b"/usr/share/terminfo/x"
+            || name == b"/usr/libexec"
             || name == b"/usr/libexec/git-core"
             || name == b"/usr/local" || name == b"/usr/local/bin"
             || starts_with(name, b"/dev/");

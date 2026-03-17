@@ -203,6 +203,16 @@ pub(crate) fn open_virtual_file(name: &[u8], dir_buf: &mut [u8]) -> Option<usize
             return None;
         }
         Some(gen_len)
+    } else if name == b"/usr/share/terminfo/x/xterm"
+           || name == b"/usr/share/terminfo/d/dumb" {
+        // Serve terminfo data directly from initrd
+        if let Ok(sz) = sotos_common::sys::initrd_read(
+            b"xterm\0".as_ptr() as u64, 5, dir_buf.as_mut_ptr() as u64,
+            dir_buf.len() as u64,
+        ) {
+            return Some(sz as usize);
+        }
+        return Some(0);
     } else if starts_with(name, b"/proc/") || starts_with(name, b"/sys/") {
         let gen_len: usize;
         if name == b"/proc/self/maps" || name == b"/proc/self/smaps" {
@@ -582,6 +592,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
         }
 
         let syscall_nr = msg.tag;
+
 
         // === PWC watchpoint: detect spurious pipe close (should not fire after deadlock fix) ===
         if pid >= 3 && pid <= 5 {
