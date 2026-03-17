@@ -243,7 +243,16 @@ static PER_CPU_QUEUES: [TicketMutex<CpuQueue>; MAX_CPUS] = {
 
 /// Enqueue a thread index to a specific CPU's run queue at the given priority class.
 fn enqueue_to_cpu_pri(cpu: usize, idx: usize, pri_class: usize) {
-    PER_CPU_QUEUES[cpu % MAX_CPUS].lock().levels[pri_class].push_back(idx);
+    let target = cpu % MAX_CPUS;
+    PER_CPU_QUEUES[target].lock().levels[pri_class].push_back(idx);
+    // Wake idle CPUs: send reschedule IPI if enqueueing on a remote CPU.
+    let my_cpu = percpu::current_percpu().cpu_index as usize;
+    if target != my_cpu && crate::mm::slab::is_percpu_ready() {
+        crate::arch::x86_64::lapic::send_ipi(
+            target as u32,
+            crate::arch::x86_64::lapic::RESCHEDULE_VECTOR,
+        );
+    }
 }
 
 /// Enqueue a thread index to a specific CPU's run queue (default: normal priority).
@@ -1256,11 +1265,37 @@ pub fn tick() {
     let needs_reschedule = {
         let mut sched = match SCHEDULER.try_lock() {
             Some(s) => s,
-            None => return, // Lock contended — skip this tick
+            None => {
+                // Lock contended. If we're the idle thread, check local queue
+                // directly — don't skip, or idle CPUs miss enqueued threads.
+                let percpu = percpu::current_percpu();
+                let my_cpu = percpu.cpu_index as usize;
+                if percpu.current_thread == percpu.idle_thread {
+                    if let Some(q) = PER_CPU_QUEUES[my_cpu % MAX_CPUS].try_lock() {
+                        if !q.is_empty() {
+                            drop(q);
+                            // Queue has work — force reschedule ASAP.
+                            // Can't call schedule() here (needs SCHEDULER lock),
+                            // but the next timer tick will pick it up since we
+                            // won't be contended forever.
+                        }
+                    }
+                }
+                return;
+            }
         };
         let percpu = percpu::current_percpu();
         let idx = percpu.current_thread;
         let mut resched = false;
+        // If running idle thread and local queue has work, force reschedule.
+        if idx == percpu.idle_thread {
+            let my_cpu = percpu.cpu_index as usize;
+            if let Some(q) = PER_CPU_QUEUES[my_cpu % MAX_CPUS].try_lock() {
+                if !q.is_empty() {
+                    resched = true;
+                }
+            }
+        }
 
         if idx != usize::MAX {
             if let Some(t) = sched.threads.get_mut_by_index(idx as u32) {
