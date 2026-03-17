@@ -639,44 +639,45 @@ extern "C" fn lapic_timer_user_handler(gprs: *mut u64, iframe: *mut u64) {
         if pending != 0 && tramp != 0 {
             let sig = pending.trailing_zeros() as u64;
 
-            unsafe {
-                // Read original user state from the interrupt frame
-                let original_rip    = *iframe;
-                let original_rsp    = *iframe.add(3);
-                let original_rflags = *iframe.add(2);
+            // Signal 0 is not a real signal — never deliver it.
+            if sig > 0 && sig < 64 {
+                unsafe {
+                    // Read original user state from the interrupt frame
+                    let original_rip    = *iframe;
+                    let original_rsp    = *iframe.add(3);
+                    let original_rflags = *iframe.add(2);
 
-                // Build the full saved GPR array
-                let mut saved_gprs = [0u64; 15];
-                for i in 0..15 {
-                    saved_gprs[i] = *gprs.add(i);
+                    // Build the full saved GPR array
+                    let mut saved_gprs = [0u64; 15];
+                    for i in 0..15 {
+                        saved_gprs[i] = *gprs.add(i);
+                    }
+
+                    // Save context — returns false if a signal is already in progress
+                    // (#PF handler saved it, or a previous timer delivery hasn't completed).
+                    let did_save = crate::sched::save_signal_context_current(
+                        &saved_gprs, original_rip, original_rsp, original_rflags,
+                    );
+
+                    if did_save {
+                        // New signal delivery — clear bit, set kernel_signal, redirect.
+                        crate::sched::clear_pending_signal_by_idx(idx as u32, sig);
+                        crate::sched::set_kernel_signal_current(sig);
+
+                        if sig == 11 {
+                            let cr2 = Cr2::read_raw();
+                            crate::sched::set_fault_info_current(cr2, 5);
+                        }
+
+                        *iframe = tramp;  // RIP = trampoline address
+                    }
+                    // If !did_save: signal already in progress. Leave the pending bit
+                    // set — it will be delivered after the current handler completes
+                    // and signal_ctx_valid is cleared by rt_sigreturn.
                 }
-
-                // Save context — returns false if #PF handler already saved it.
-                let did_save = crate::sched::save_signal_context_current(
-                    &saved_gprs, original_rip, original_rsp, original_rflags,
-                );
-
-                // Clear the pending signal bit
+            } else {
+                // Clear stale bit 0 (signal 0) to prevent infinite checks
                 crate::sched::clear_pending_signal_by_idx(idx as u32, sig);
-
-                // Store signal number so init can discover it via get_thread_regs[17].
-                // This bridges VMM-injected signals (signal_inject) to init's dispatcher.
-                crate::sched::set_kernel_signal_current(sig);
-
-                // For SIGSEGV (11), save CR2 and a synthetic error code so init can
-                // populate siginfo.si_addr and ucontext gregs[19]/[22].
-                if sig == 11 {
-                    let cr2 = Cr2::read_raw();
-                    // Synthetic code: present(1) + user(4) = 5 for typical user read fault
-                    crate::sched::set_fault_info_current(cr2, 5);
-                }
-
-                if did_save {
-                    // Normal timer-based signal delivery: redirect to trampoline.
-                    *iframe = tramp;  // RIP = trampoline address
-                }
-                // If !did_save: #PF handler already redirected to trampoline
-                // and saved context. Just clear the pending bit (done above).
             }
         }
     }

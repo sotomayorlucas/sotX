@@ -1078,7 +1078,9 @@ pub fn get_signal_trampoline_by_idx(idx: u32) -> u64 {
 }
 
 /// Set a pending signal bit on a thread.
+/// Signal 0 is rejected (not a real signal).
 pub fn set_pending_signal(tid: ThreadId, sig: u64) {
+    if sig == 0 || sig >= 64 { return; }
     let mut sched = SCHEDULER.lock();
     if let Some(slot) = sched.slot_of(tid) {
         if let Some(t) = sched.threads.get_mut_by_index(slot) {
