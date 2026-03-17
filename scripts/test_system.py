@@ -290,6 +290,16 @@ def test_quote_passthrough(q: QemuSerial) -> TestResult:
     return TestResult("pipe/quote_passthrough", ok, detail, out)
 
 
+@test("busybox_pipe", "pipe")
+def test_busybox_pipe(q: QemuSerial) -> TestResult:
+    """Real busybox pipe: echo | cat with fork+exec."""
+    m = q.mark()
+    q.send('busybox sh -c "echo real-pipe-ok | busybox cat"', 20)
+    out = q.output_since(m)
+    ok, detail = check_output(out, ["real-pipe-ok", "exit_code=0"])
+    return TestResult("pipe/busybox_pipe", ok, detail, out)
+
+
 # ── Process Management (fork/exec) ───────────────────────────────────────
 
 @test("busybox_echo", "process")
