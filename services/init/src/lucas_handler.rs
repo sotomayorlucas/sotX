@@ -39,10 +39,35 @@ fn sysroot_init(store: &mut ObjectStore) {
         }
     }
     if let Ok(usr_oid) = store.resolve_path(b"usr", ROOT_OID) {
-        let sub: &[&[u8]] = &[b"lib", b"lib64", b"bin", b"sbin"];
+        let sub: &[&[u8]] = &[b"lib", b"lib64", b"bin", b"sbin", b"share"];
         for name in sub {
             if store.find_in(name, usr_oid).is_none() {
                 let _ = store.mkdir(name, usr_oid);
+            }
+        }
+        // Create /usr/share/terminfo/x/ for ncurses (nano, htop)
+        if let Some(share_oid) = store.find_in(b"share", usr_oid) {
+            if store.find_in(b"terminfo", share_oid).is_none() {
+                let _ = store.mkdir(b"terminfo", share_oid);
+            }
+            if let Some(ti_oid) = store.find_in(b"terminfo", share_oid) {
+                if store.find_in(b"x", ti_oid).is_none() {
+                    let _ = store.mkdir(b"x", ti_oid);
+                }
+                // Copy xterm terminfo from initrd to /usr/share/terminfo/x/xterm
+                if let Some(x_oid) = store.find_in(b"x", ti_oid) {
+                    if store.find_in(b"xterm", x_oid).is_none() {
+                        let mut buf = [0u8; 4096];
+                        if let Ok(sz) = sotos_common::sys::initrd_read(
+                            b"xterm\0".as_ptr() as u64, 5, buf.as_mut_ptr() as u64, 4096
+                        ) {
+                            let sz = sz as usize;
+                            if sz > 0 && sz <= 4096 {
+                                let _ = store.create_in(b"xterm", &buf[..sz], x_oid);
+                            }
+                        }
+                    }
+                }
             }
         }
     }

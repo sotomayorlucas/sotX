@@ -1274,9 +1274,64 @@ pub(crate) fn sys_open(ctx: &mut SyscallContext, msg: &IpcMsg) {
                 reply_val(ctx.ep_cap, -ENOENT);
             }
         }
+    } else if name == b"/proc" {
+        // /proc as virtual directory — populate with PID entries for htop
+        use sotos_common::linux_abi::{DT_REG, DT_DIR};
+        let mut fd_slot = None;
+        for i in 3..GRP_MAX_FDS { if ctx.child_fds[i] == 0 { fd_slot = Some(i); break; } }
+        let mut vs = None;
+        for s in 0..GRP_MAX_VFS { if ctx.vfs_files[s][0] == 0 { vs = Some(s); break; } }
+        if let (Some(f), Some(s)) = (fd_slot, vs) {
+            ctx.child_fds[f] = 14;
+            ctx.vfs_files[s] = [1, 0, 0xDEAD, f as u64]; // sentinel=0xDEAD prevents VFS repopulate
+            *ctx.dir_len = 0;
+            *ctx.dir_pos = 0;
+            // Add procfs entries as linux_dirent64
+            let entries: &[(&[u8], u8)] = &[
+                (b".", DT_DIR), (b"..", DT_DIR),
+                (b"stat", DT_REG), (b"meminfo", DT_REG), (b"cpuinfo", DT_REG),
+                (b"uptime", DT_REG), (b"loadavg", DT_REG), (b"version", DT_REG),
+                (b"self", DT_DIR),
+            ];
+            for (ename, dtype) in entries {
+                let reclen = ((19 + ename.len() + 1 + 7) / 8) * 8;
+                if *ctx.dir_len + reclen > ctx.dir_buf.len() { break; }
+                let d = &mut ctx.dir_buf[*ctx.dir_len..*ctx.dir_len + reclen];
+                for b in d.iter_mut() { *b = 0; }
+                d[0..8].copy_from_slice(&1u64.to_le_bytes()); // ino
+                d[8..16].copy_from_slice(&((*ctx.dir_len + reclen) as u64).to_le_bytes());
+                d[16..18].copy_from_slice(&(reclen as u16).to_le_bytes());
+                d[18] = *dtype;
+                let n = ename.len().min(reclen - 19);
+                d[19..19+n].copy_from_slice(&ename[..n]);
+                *ctx.dir_len += reclen;
+            }
+            // Add PID entries for active processes
+            for i in 0..16usize {
+                if crate::process::PROCESSES[i].state.load(core::sync::atomic::Ordering::Acquire) == 1 {
+                    let pid = i + 1;
+                    let mut nbuf = [0u8; 8];
+                    let nlen = crate::child_handler::fmt_u64(pid as u64, &mut nbuf);
+                    let ename = &nbuf[..nlen];
+                    let reclen = ((19 + nlen + 1 + 7) / 8) * 8;
+                    if *ctx.dir_len + reclen > ctx.dir_buf.len() { break; }
+                    let d = &mut ctx.dir_buf[*ctx.dir_len..*ctx.dir_len + reclen];
+                    for b in d.iter_mut() { *b = 0; }
+                    d[0..8].copy_from_slice(&(pid as u64 + 100).to_le_bytes());
+                    d[8..16].copy_from_slice(&((*ctx.dir_len + reclen) as u64).to_le_bytes());
+                    d[16..18].copy_from_slice(&(reclen as u16).to_le_bytes());
+                    d[18] = DT_DIR;
+                    d[19..19+nlen].copy_from_slice(ename);
+                    *ctx.dir_len += reclen;
+                }
+            }
+            reply_val(ctx.ep_cap, f as i64);
+        } else {
+            reply_val(ctx.ep_cap, -EMFILE);
+        }
     } else if name == b"/" || name == b"/bin" || name == b"/lib"
            || name == b"/lib64" || name == b"/sbin" || name == b"/tmp"
-           || name == b"/usr" || name == b"/etc" || name == b"/proc"
+           || name == b"/usr" || name == b"/etc"
            || name == b"." {
         // Directory opens -> resolve VFS OID + DirList fd (for getdents64)
         let mut fd = None;
@@ -2621,7 +2676,8 @@ pub(crate) fn sys_openat(ctx: &mut SyscallContext, msg: &IpcMsg) {
         } else {
             reply_val(ctx.ep_cap, -EMFILE);
         }
-    } else if starts_with(name, b"/etc/") {
+    } else if starts_with(name, b"/etc/") || starts_with(name, b"/proc/")
+           || starts_with(name, b"/sys/") {
         let virt_len = open_virtual_file(name, ctx.dir_buf);
         if let Some(gen_len) = virt_len {
             *ctx.dir_len = gen_len;

@@ -97,6 +97,17 @@ unsafe fn copy_guest_path_saved(guest_ptr: u64, out: &mut [u8], fork_rsp: u64, p
     i
 }
 
+/// Format a u64 as decimal into buf, return bytes written.
+pub(crate) fn fmt_u64(val: u64, buf: &mut [u8]) -> usize {
+    if val == 0 { buf[0] = b'0'; return 1; }
+    let mut tmp = [0u8; 20];
+    let mut n = 0;
+    let mut v = val;
+    while v > 0 { tmp[n] = b'0' + (v % 10) as u8; n += 1; v /= 10; }
+    for j in 0..n { buf[j] = tmp[n - 1 - j]; }
+    n
+}
+
 /// Format /proc/uptime as "SECS.00 SECS.00\n"
 fn fmt_uptime(secs: u64, buf: &mut [u8; 32]) -> usize {
     let mut i = 0usize;
@@ -207,6 +218,46 @@ pub(crate) fn open_virtual_file(name: &[u8], dir_buf: &mut [u8]) -> Option<usize
             let n = info.len().min(dir_buf.len());
             dir_buf[..n].copy_from_slice(&info[..n]);
             gen_len = n;
+        } else if name == b"/proc/stat" {
+            // Global CPU stats — htop needs this to start
+            let tsc = rdtsc();
+            let jiffies = tsc / 20_000_000; // ~100Hz jiffies at 2GHz
+            let idle = jiffies * 95 / 100; // 95% idle
+            let user = jiffies * 3 / 100;
+            let sys = jiffies * 2 / 100;
+            let mut w = [0u8; 512];
+            let mut p = 0usize;
+            // "cpu  user nice system idle iowait irq softirq steal"
+            let hdr = b"cpu  ";
+            w[p..p+hdr.len()].copy_from_slice(hdr); p += hdr.len();
+            p += fmt_u64(user, &mut w[p..]);
+            w[p] = b' '; p += 1;
+            p += fmt_u64(0, &mut w[p..]); // nice
+            w[p] = b' '; p += 1;
+            p += fmt_u64(sys, &mut w[p..]);
+            w[p] = b' '; p += 1;
+            p += fmt_u64(idle, &mut w[p..]);
+            w[p..p+8].copy_from_slice(b" 0 0 0 0"); p += 8;
+            w[p] = b'\n'; p += 1;
+            // cpu0 line (same values, single CPU)
+            let cpu0 = b"cpu0 ";
+            w[p..p+cpu0.len()].copy_from_slice(cpu0); p += cpu0.len();
+            p += fmt_u64(user, &mut w[p..]);
+            w[p] = b' '; p += 1;
+            p += fmt_u64(0, &mut w[p..]);
+            w[p] = b' '; p += 1;
+            p += fmt_u64(sys, &mut w[p..]);
+            w[p] = b' '; p += 1;
+            p += fmt_u64(idle, &mut w[p..]);
+            w[p..p+8].copy_from_slice(b" 0 0 0 0"); p += 8;
+            w[p] = b'\n'; p += 1;
+            // Mandatory extra lines
+            let extra = b"intr 0\nctxt 0\nbtime 0\nprocesses 1\nprocs_running 1\nprocs_blocked 0\n";
+            let e = extra.len().min(w.len() - p);
+            w[p..p+e].copy_from_slice(&extra[..e]); p += e;
+            let n = p.min(dir_buf.len());
+            dir_buf[..n].copy_from_slice(&w[..n]);
+            gen_len = n;
         } else if name == b"/proc/version" {
             let info = b"Linux version 5.15.0-sotOS (root@sotOS) (gcc 12.0) #1 SMP PREEMPT\n";
             let n = info.len().min(dir_buf.len());
@@ -246,9 +297,67 @@ pub(crate) fn open_virtual_file(name: &[u8], dir_buf: &mut [u8]) -> Option<usize
                || starts_with(name, b"/sys/devices/") {
             // Generic /sys stub: return empty
             gen_len = 0;
+        } else if name == b"/proc" || name == b"/proc/" {
+            // /proc directory listing — generate PID entries for htop
+            let mut p = 0usize;
+            // Standard procfs entries
+            for entry_name in [b"stat" as &[u8], b"meminfo", b"cpuinfo", b"uptime",
+                               b"loadavg", b"version", b"self"] {
+                if p + entry_name.len() + 1 >= dir_buf.len() { break; }
+                dir_buf[p..p+entry_name.len()].copy_from_slice(entry_name);
+                p += entry_name.len();
+                dir_buf[p] = b'\n'; p += 1;
+            }
+            // Add PID entries for active processes
+            for i in 0..MAX_PROCS {
+                if PROCESSES[i].state.load(core::sync::atomic::Ordering::Acquire) == 1 {
+                    let pid = i + 1;
+                    let n = fmt_u64(pid as u64, &mut dir_buf[p..]);
+                    p += n;
+                    dir_buf[p] = b'\n'; p += 1;
+                }
+            }
+            gen_len = p;
         } else if starts_with(name, b"/proc/self/") || starts_with(name, b"/proc/1/") {
             // Unhandled /proc/self/* paths: return empty (non-fatal for fastfetch)
             gen_len = 0;
+        } else if starts_with(name, b"/proc/") {
+            // /proc/N/stat, /proc/N/statm, /proc/N/cmdline for arbitrary PIDs (htop)
+            let rest = &name[6..];
+            // Parse PID (digits before '/')
+            let mut pid_val = 0u64;
+            let mut slash_pos = 0;
+            for j in 0..rest.len() {
+                if rest[j] == b'/' { slash_pos = j; break; }
+                if rest[j] >= b'0' && rest[j] <= b'9' {
+                    pid_val = pid_val * 10 + (rest[j] - b'0') as u64;
+                }
+            }
+            if slash_pos > 0 && pid_val > 0 {
+                let subpath = &rest[slash_pos+1..];
+                if subpath == b"stat" {
+                    let n = crate::exec::format_proc_self_stat(dir_buf, pid_val as usize);
+                    gen_len = n;
+                } else if subpath == b"statm" {
+                    let c = b"1024 512 256 128 0 256 0\n";
+                    let n = c.len().min(dir_buf.len());
+                    dir_buf[..n].copy_from_slice(&c[..n]);
+                    gen_len = n;
+                } else if subpath == b"cmdline" {
+                    let c = b"[sotOS]\0";
+                    dir_buf[..c.len()].copy_from_slice(c);
+                    gen_len = c.len();
+                } else if subpath == b"status" {
+                    let c = b"Name:\tsotOS\nState:\tS (sleeping)\nPid:\t1\nUid:\t0\t0\t0\t0\nGid:\t0\t0\t0\t0\nVmRSS:\t2048 kB\n";
+                    let n = c.len().min(dir_buf.len());
+                    dir_buf[..n].copy_from_slice(&c[..n]);
+                    gen_len = n;
+                } else {
+                    gen_len = 0; // unknown subpath
+                }
+            } else {
+                gen_len = 0;
+            }
         } else {
             return None;
         }
