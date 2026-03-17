@@ -1281,7 +1281,8 @@ fn process_ipc_cmd(
                 }
             }
 
-            // Poll for new data — SLIRP DNS typically responds within 50ms.
+            // Poll for new data — short timeout to avoid blocking other IPC.
+            // Init's recvfrom retries many times; each call here is ~5ms max.
             for _iter in 0..500u32 {
                 sys::yield_now();
                 device.net.ack_irq();
@@ -1322,7 +1323,11 @@ fn process_ipc_cmd(
 
         CMD_UDP_HAS_DATA => {
             // Non-destructive check: does the UDP socket on this port have data?
+            // yield+ack_irq gives QEMU's event loop time to deliver SLIRP's
+            // DNS response to the virtio RX queue before we poll.
             let port = arg0 as u16;
+            sys::yield_now();
+            device.net.ack_irq();
             iface.poll(now(), device, sockets);
             if let Some(slot) = find_udp_slot(port) {
                 let handle = unsafe { UDP_SLOTS[slot].0.unwrap() };

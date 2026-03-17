@@ -706,9 +706,10 @@ fn exec_loaded_elf(file_size: usize, bin_name: &[u8], argv: &[[u8; MAX_EXEC_ARG_
         *sp.add(i) = 25; i += 1; *sp.add(i) = random_addr; i += 1;
         // AT_ENTRY(9) — main binary's entry point (NOT interpreter)
         *sp.add(i) = 9; i += 1; *sp.add(i) = main_base + elf_info.entry; i += 1;
-        // AT_SYSINFO_EHDR(33) — vDSO base (only if vDSO is mapped in this AS)
-        // For exec into fresh AS (target_as != 0), vDSO isn't mapped.
-        // musl will fall back to raw syscalls, which have the correct epoch offset.
+        // AT_SYSINFO_EHDR(33) — vDSO base address
+        // Only set for init's own AS where the original vDSO is mapped.
+        // For separate AS, the vDSO page is a modified copy (with trampoline)
+        // that may confuse musl's ELF parser.
         if target_as == 0 {
             *sp.add(i) = 33; i += 1; *sp.add(i) = vdso::VDSO_BASE; i += 1;
         }
@@ -771,6 +772,7 @@ fn exec_loaded_elf(file_size: usize, bin_name: &[u8], argv: &[[u8; MAX_EXEC_ARG_
     }
 
     // Write a trampoline at the vDSO pre-TLS setup stub.
+    // (This also maps a private vDSO copy into target_as if target_as != 0.)
     let trampoline_addr = crate::vdso::PRE_TLS_TRAMPOLINE_ADDR;
     let trampoline_page = trampoline_addr & !0xFFF;
     let trampoline_off = (trampoline_addr - trampoline_page) as usize;

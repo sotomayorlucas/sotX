@@ -60,7 +60,7 @@ fn poll_fd_readable(ctx: &SyscallContext, fd: usize) -> bool {
                 pipe_has_data(pipe_a) || pipe_writer_closed(pipe_a)
             } else { false }
         }
-        17 => false, // UDP: never report readable in poll — rely on recvfrom's own retry
+        17 => true, // UDP: report readable — recvfrom does the real waiting via CMD_UDP_RECV
         2 | 8 | 12 | 13 | 14 | 15 | 16 | 22 | 23 | 25 => true, // always "ready"
         _ => true, // default: report readable
     }
@@ -720,8 +720,9 @@ pub(crate) fn sys_recvfrom(ctx: &mut SyscallContext, msg: &IpcMsg) {
         let src_port = ctx.sock_udp_local_port[fd];
         let max_recv = len.min(512); // DNS responses up to 512 bytes
         let mut got = 0usize;
-        // Retry for DNS responses (poll() should have confirmed data is available).
-        for _attempt in 0..50u32 {
+        // Retry for DNS responses — each CMD_UDP_RECV polls net service for ~5ms.
+        // 200 attempts × 5ms = ~1s total, enough for SLIRP DNS via 8.8.8.8.
+        for _attempt in 0..200u32 {
             let req = IpcMsg {
                 tag: NET_CMD_UDP_RECV,
                 regs: [src_port as u64, max_recv as u64, 0, 0, 0, 0, 0, 0],
