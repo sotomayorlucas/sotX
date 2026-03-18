@@ -135,6 +135,74 @@ pub fn parse_config_for_hid_kbd(buf: &[u8]) -> Option<HidKbdInfo> {
     None
 }
 
+/// Mass storage interface info (Bulk-Only Transport).
+pub struct MassStorageInfo {
+    pub interface_num: u8,
+    pub ep_bulk_in: u8,   // e.g., 0x81
+    pub ep_bulk_out: u8,  // e.g., 0x02
+    pub max_packet_in: u16,
+    pub max_packet_out: u16,
+}
+
+/// Parse a USB configuration descriptor for a Mass Storage interface.
+/// Class=0x08 (Mass Storage), SubClass=0x06 (SCSI), Protocol=0x50 (BBB).
+pub fn parse_config_for_mass_storage(buf: &[u8]) -> Option<MassStorageInfo> {
+    if buf.len() < 4 || buf[1] != 2 { return None; } // DT_CONFIGURATION
+    let total_len = u16::from_le_bytes([buf[2], buf[3]]) as usize;
+    let total_len = total_len.min(buf.len());
+
+    let mut offset = 0;
+    let mut in_mass_storage = false;
+    let mut iface_num = 0u8;
+    let mut ep_in = 0u8;
+    let mut ep_out = 0u8;
+    let mut pkt_in = 0u16;
+    let mut pkt_out = 0u16;
+
+    while offset + 2 <= total_len {
+        let desc_len = buf[offset] as usize;
+        let desc_type = buf[offset + 1];
+        if desc_len < 2 { break; }
+
+        if desc_type == 4 && offset + 9 <= total_len {
+            // Interface descriptor
+            let bclass = buf[offset + 5];
+            let bsubclass = buf[offset + 6];
+            let bprotocol = buf[offset + 7];
+            if bclass == 0x08 && bsubclass == 0x06 && bprotocol == 0x50 {
+                in_mass_storage = true;
+                iface_num = buf[offset + 2];
+            } else {
+                in_mass_storage = false;
+            }
+        } else if desc_type == 5 && in_mass_storage && offset + 7 <= total_len {
+            // Endpoint descriptor
+            let ep_addr = buf[offset + 2];
+            let max_pkt = u16::from_le_bytes([buf[offset + 4], buf[offset + 5]]);
+            if ep_addr & 0x80 != 0 {
+                ep_in = ep_addr;
+                pkt_in = max_pkt;
+            } else {
+                ep_out = ep_addr;
+                pkt_out = max_pkt;
+            }
+        }
+        offset += desc_len;
+    }
+
+    if ep_in != 0 && ep_out != 0 {
+        Some(MassStorageInfo {
+            interface_num: iface_num,
+            ep_bulk_in: ep_in,
+            ep_bulk_out: ep_out,
+            max_packet_in: pkt_in,
+            max_packet_out: pkt_out,
+        })
+    } else {
+        None
+    }
+}
+
 /// Convert a USB endpoint address to xHCI Device Context Index (DCI).
 /// IN endpoints: DCI = ep_num * 2 + 1
 /// OUT endpoints: DCI = ep_num * 2

@@ -325,6 +325,21 @@ pub extern "C" fn _start() -> ! {
 
     // Parse config descriptor to find HID keyboard.
     let cfg_buf = unsafe { core::slice::from_raw_parts(DATA_BUF_VADDR as *const u8, 64) };
+    // Check for mass storage device
+    if let Some(ms_info) = usb::parse_config_for_mass_storage(cfg_buf) {
+        print(b"xhci: USB Mass Storage found: iface=");
+        print_u32(ms_info.interface_num as u32);
+        print(b" ep_in=");
+        print_hex32(ms_info.ep_bulk_in as u32);
+        print(b" ep_out=");
+        print_hex32(ms_info.ep_bulk_out as u32);
+        print(b" maxpkt=");
+        print_u32(ms_info.max_packet_in as u32);
+        sys::debug_print(b'\n');
+        // TODO: setup bulk endpoints, run SCSI INQUIRY, expose block device via IPC
+        print(b"xhci: mass storage detected (bulk transfer not yet implemented)\n");
+    }
+
     let hid_info = match usb::parse_config_for_hid_kbd(cfg_buf) {
         Some(info) => {
             print(b"xhci: HID kbd found: iface=");
