@@ -74,7 +74,7 @@ mod boot_tests;
 
 use framebuffer::{print, print_u64, print_hex64, print_hex, fb_init};
 use exec::MAP_WRITABLE;
-use boot_tests::{test_dynamic_linking, run_linux_test, run_musl_test,
+use boot_tests::{test_dynamic_linking, test_wasm, run_linux_test, run_musl_test,
                  run_dynamic_test, run_busybox_test, producer,
                  run_phase_validation, run_benchmarks};
 
@@ -265,6 +265,9 @@ pub extern "C" fn _start() -> ! {
 
     // --- Phase 7: Dynamic linking test ---
     test_dynamic_linking();
+
+    // --- Phase 8: WASM SFI interpreter test ---
+    test_wasm();
 
     // --- Wait for spawned processes to finish ---
     for _ in 0..200 { sys::yield_now(); }
