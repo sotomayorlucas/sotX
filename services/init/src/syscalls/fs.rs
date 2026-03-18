@@ -2065,21 +2065,20 @@ pub(crate) fn sys_writev(ctx: &mut SyscallContext, msg: &IpcMsg) {
             let base = ctx.guest_read_u64(entry);
             let ilen = ctx.guest_read_u64(entry + 8) as usize;
             if ilen == 0 { continue; }
-            // If base reads as 0 but len > 0, retry once (vm_read may have
-            // raced with a CoW fault being processed by the VMM).
+            // If base reads as 0 but len > 0, retry with yields (vm_read may
+            // race with CoW faults being processed by the VMM). Wine's IPC
+            // writev uses large multi-iovec messages that need all pages present.
             let base = if base == 0 && ilen > 0 {
-                sys::yield_now();
-                let retry = ctx.guest_read_u64(entry);
-                if retry == 0 {
-                    // Genuine NULL iovec — skip (EFAULT in Linux)
-                    print(b"WRITEV-NULL-IOV P"); print_u64(ctx.pid as u64);
-                    print(b" iov="); print_u64(i as u64);
-                    print(b" len="); print_u64(ilen as u64);
-                    print(b" as_cap="); print_u64(ctx.child_as_cap);
-                    print(b"\n");
+                let mut retry_val = 0u64;
+                for _attempt in 0..10 {
+                    sys::yield_now();
+                    retry_val = ctx.guest_read_u64(entry);
+                    if retry_val != 0 { break; }
+                }
+                if retry_val == 0 {
                     continue;
                 }
-                retry
+                retry_val
             } else if base == 0 {
                 continue;
             } else {
@@ -2400,6 +2399,16 @@ pub(crate) fn sys_dup2(ctx: &mut SyscallContext, msg: &IpcMsg) {
             for s in 0..GRP_MAX_VFS {
                 if ctx.vfs_files[s][3] == newfd as u64 { ctx.vfs_files[s] = [0; 4]; break; }
             }
+        }
+        // Wine redirects stdout/stderr to /dev/null during PE init.
+        // Preserve stdout (fd 1) and stderr (fd 2) for serial output
+        // so PE program output (printf → write(1)) reaches the terminal.
+        let oldkind = ctx.child_fds[oldfd];
+        if (newfd == 1 || newfd == 2) && oldkind == 8 {
+            // dup2(/dev/null, stdout/stderr) — keep as serial output (kind=2)
+            // Just succeed without actually redirecting
+            reply_val(ctx.ep_cap, newfd as i64);
+            return;
         }
         ctx.child_fds[newfd] = ctx.child_fds[oldfd];
         ctx.sock_conn_id[newfd] = ctx.sock_conn_id[oldfd];
