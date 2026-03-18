@@ -356,7 +356,18 @@ pub(crate) fn sys_read(ctx: &mut SyscallContext, msg: &IpcMsg) {
                 ctx.guest_write(buf_ptr, &tmp[..n]);
                 reply_val(ctx.ep_cap, n as i64);
             } else if pipe_writer_closed(pipe_id) {
-                reply_val(ctx.ep_cap, 0); // EOF
+                // Track consecutive EOF reads on this pipe. After 500 EOFs,
+                // return -EIO to break infinite retry loops (e.g., Wine's
+                // glibc init spinning on read(0) after fork).
+                static mut PIPE_EOF_COUNT: [u32; 64] = [0; 64];
+                let eof_count = unsafe { &mut PIPE_EOF_COUNT[fd.min(63)] };
+                *eof_count += 1;
+                if *eof_count > 500 {
+                    *eof_count = 0;
+                    reply_val(ctx.ep_cap, -5); // -EIO
+                } else {
+                    reply_val(ctx.ep_cap, 0); // EOF
+                }
             } else {
                 // No data, writer alive — ask kernel to retry after yielding.
                 // Deadlock detection: if both this process AND another are
