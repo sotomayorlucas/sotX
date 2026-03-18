@@ -1781,6 +1781,11 @@ fn dispatch_command(line: &[u8]) {
             cmd_snap(arg);
         } else if eq(line, b"snapshot") {
             cmd_snap(b"list");
+        } else if starts_with(line, b"lua ") {
+            let code = trim(&line[4..]);
+            cmd_lua(code);
+        } else if eq(line, b"lua") {
+            print(b"usage: lua <code>\nexample: lua print(1+2)\n");
         } else if eq(line, b"exit") {
             print(b"bye!\n");
             linux_exit(0);
@@ -3812,6 +3817,23 @@ fn cmd_traceroute(host: &[u8]) {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Lua interpreter
+// ---------------------------------------------------------------------------
+
+/// Lua output callback — writes to stdout.
+fn lua_output(s: &[u8]) {
+    linux_write(1, s.as_ptr(), s.len());
+}
+
+/// Execute Lua code from the command line.
+fn cmd_lua(code: &[u8]) {
+    let mut vm = sotos_lua::LuaVm::new();
+    vm.init_stdlib();
+    vm.set_output(lua_output);
+    let _result = vm.run(code);
 }
 
 #[panic_handler]
