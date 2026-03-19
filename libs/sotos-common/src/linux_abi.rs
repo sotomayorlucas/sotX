@@ -285,6 +285,30 @@ pub const MAP_FIXED: u32   = k::MAP_FIXED;
 pub const MAP_ANONYMOUS: u32 = k::MAP_ANONYMOUS;
 
 // ---------------------------------------------------------------
+// madvise(2) flags
+// ---------------------------------------------------------------
+
+pub const MADV_NORMAL: u32      = 0;
+pub const MADV_RANDOM: u32      = 1;
+pub const MADV_SEQUENTIAL: u32  = 2;
+pub const MADV_WILLNEED: u32    = 3;
+pub const MADV_DONTNEED: u32    = 4;
+pub const MADV_FREE: u32        = 8;
+pub const MADV_HUGEPAGE: u32    = 14;
+pub const MADV_NOHUGEPAGE: u32  = 15;
+
+// ---------------------------------------------------------------
+// SysV IPC constants
+// ---------------------------------------------------------------
+
+pub const IPC_CREAT: u32  = 0o1000;
+pub const IPC_EXCL: u32   = 0o2000;
+pub const IPC_RMID: u32   = 0;
+pub const IPC_SET: u32    = 1;
+pub const IPC_STAT: u32   = 2;
+pub const SHM_RDONLY: u32 = 0o10000;
+
+// ---------------------------------------------------------------
 // fcntl(2) commands — sourced from linux-raw-sys
 // ---------------------------------------------------------------
 
@@ -577,3 +601,41 @@ pub const AT_EGID: u64         = k::AT_EGID as u64;
 pub const AT_CLKTCK: u64       = k::AT_CLKTCK as u64;
 pub const AT_RANDOM: u64       = k::AT_RANDOM as u64;
 pub const AT_SYSINFO_EHDR: u64 = k::AT_SYSINFO_EHDR as u64;
+
+// ---------------------------------------------------------------
+// Stub syscall bypass table (β₁ aniquilación)
+// ---------------------------------------------------------------
+// These Linux syscalls always return -ENOSYS. The kernel can
+// short-circuit them in the redirect path without IPC round-trip.
+
+pub const STUB_BYPASS_SYSCALLS: &[u64] = &[
+    SYS_LINK,           // 86
+    SYS_SYMLINK,        // 88
+    SYS_FCHMOD,         // 91
+    SYS_FCHOWN,         // 93
+    SYS_LCHOWN,         // 94
+    SYS_FLOCK,          // 73
+    SYS_FALLOCATE,      // 285
+    SYS_UTIMES,         // 235
+    SYS_UTIMENSAT,      // 280
+    SYS_LINKAT,         // 265
+    SYS_SYMLINKAT,      // 266
+    SYS_FCHMODAT,       // 268
+    SYS_FCHOWNAT,       // 260
+    SYS_MKNOD,          // 133
+    SYS_MKNODAT,        // 259
+    SYS_MSYNC,          // 26
+    SYS_ALARM,          // 37
+    SYS_UNSHARE,        // 272
+    SYS_CAPGET,         // 125
+    SYS_CAPSET,         // 126
+    SYS_PERSONALITY,    // 135
+    SYS_SCHED_SETSCHEDULER, // 144
+    SYS_SCHED_GETPARAM, // 143 (also stub)
+    SYS_SCHED_GET_PRIORITY_MAX, // 146
+    SYS_SCHED_GET_PRIORITY_MIN, // 147
+    SYS_SETUID,         // 105
+    SYS_SETGID,         // 106
+    SYS_INOTIFY_ADD_WATCH, // 254
+    SYS_INOTIFY_RM_WATCH,  // 255
+];

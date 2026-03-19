@@ -5,7 +5,7 @@
 
 use crate::process::MAX_PROCS;
 
-pub(crate) const MAX_VMAS: usize = 1024;
+pub(crate) const MAX_VMAS: usize = 4096;
 
 #[derive(Clone, Copy, PartialEq)]
 #[repr(u8)]

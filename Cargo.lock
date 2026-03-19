@@ -39,6 +39,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2f8a2ca5ac02d09563609681103aada9e1777d54fc57a5acd7a41404f9c93b6e"
 
 [[package]]
+name = "elf"
+version = "0.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4445909572dbd556c457c849c4ca58623d84b27c8fff1e74b0b4227d8b90d17b"
+
+[[package]]
 name = "embedded-graphics"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -170,6 +176,7 @@ dependencies = [
 name = "sotos-kernel"
 version = "0.1.0"
 dependencies = [
+ "elf",
  "limine",
  "sotos-common",
  "spin",
@@ -189,10 +196,6 @@ version = "0.1.0"
 
 [[package]]
 name = "sotos-mouse"
-version = "0.1.0"
-
-[[package]]
-name = "sotos-net"
 version = "0.1.0"
 
 [[package]]

@@ -296,10 +296,14 @@ pub fn send(ep_handle: PoolHandle, msg: Message) -> Result<(), SysError> {
 
     match action {
         SendAction::ReplyToCaller(tid) => {
+            #[cfg(feature = "ipc-audit")]
+            crate::ipc::audit::record(my_tid.0, tid, raw);
             sched::write_ipc_msg(sched::ThreadId(tid), msg);
             sched::wake(sched::ThreadId(tid));
         }
         SendAction::Rendezvous(tid) => {
+            #[cfg(feature = "ipc-audit")]
+            crate::ipc::audit::record(my_tid.0, tid, raw);
             sched::write_ipc_msg(sched::ThreadId(tid), msg);
             sched::wake(sched::ThreadId(tid));
         }
@@ -487,6 +491,8 @@ pub fn call(ep_handle: PoolHandle, msg: Message) -> Result<Message, SysError> {
 
     match action {
         CallAction::RendezvousThenWait(recv_tid) => {
+            #[cfg(feature = "ipc-audit")]
+            crate::ipc::audit::record(my_tid.0, recv_tid, raw);
             let mut msg = msg;
             process_cap_transfer(&mut msg);
             sched::write_ipc_msg(sched::ThreadId(recv_tid), msg);
@@ -606,6 +612,66 @@ fn cancel_caller(ep_raw: u32, tid: ThreadId) {
         // Fix endpoint state if queue is now empty.
         if ep.send_queue_len == 0 && ep.state == EndpointState::SendWait {
             ep.state = EndpointState::Idle;
+        }
+    }
+}
+
+/// Fused IPC call for the syscall redirect hot path (ρ_fuse + ρ_ooo).
+/// Batches lock acquisitions: endpoint pool → per-thread IPC → scheduler.
+/// `caller_tid` avoids an extra SCHEDULER.lock() for current_tid().
+///
+/// Lock profile per syscall (rendezvous path):
+///   1× endpoint pool lock, 2× per-thread IPC lock, 1× SCHEDULER.lock()
+/// vs. original call(): 1× endpoint + 7× SCHEDULER.lock()
+pub fn call_fused(ep_handle: PoolHandle, msg: Message, caller_tid: sched::ThreadId) -> Result<Message, SysError> {
+    let raw = ep_handle.raw();
+
+    // Check for remote routing first.
+    if crate::ipc::route::try_remote_send(raw, &msg) {
+        // Remote route doesn't support call semantics, fall back to regular call.
+        return call(ep_handle, msg);
+    }
+
+    let (core_id, local) = decode_handle(raw);
+
+    // Process cap transfer before taking any scheduler locks.
+    let mut msg = msg;
+    process_cap_transfer(&mut msg);
+
+    let action = {
+        let mut pool = PER_CORE_ENDPOINTS[core_id].lock();
+        let ep = pool.get_mut(local).ok_or(SysError::NotFound)?;
+
+        match ep.state {
+            EndpointState::RecvWait => {
+                let recv_tid = ep.receiver.take().unwrap();
+                ep.caller = Some(caller_tid.0);
+                ep.state = EndpointState::Idle;
+                CallAction::RendezvousThenWait(recv_tid)
+            }
+            EndpointState::Idle | EndpointState::SendWait => {
+                if !ep.enqueue_sender(caller_tid.0 | CALLER_BIT) {
+                    return Err(SysError::OutOfResources);
+                }
+                ep.state = EndpointState::SendWait;
+                CallAction::Block
+            }
+        }
+    };
+    // Endpoint pool lock dropped here.
+
+    match action {
+        CallAction::RendezvousThenWait(recv_tid) => {
+            #[cfg(feature = "ipc-audit")]
+            crate::ipc::audit::record(caller_tid.0, recv_tid, raw);
+            sched::call_fused_preblock_rendezvous(
+                sched::ThreadId(recv_tid), msg, raw,
+            );
+            Ok(sched::call_fused_postwake())
+        }
+        CallAction::Block => {
+            sched::call_fused_preblock(msg, raw);
+            Ok(sched::call_fused_postwake())
         }
     }
 }

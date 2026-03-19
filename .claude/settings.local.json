@@ -56,7 +56,9 @@
       "Bash(xxd:*)",
       "Bash(echo ls:*)",
       "Bash(taskkill:*)",
-      "Bash(rust-objdump:*)"
+      "Bash(rust-objdump:*)",
+      "Bash(CARGO_ENCODED_RUSTFLAGS=\"-Clink-arg=-Tlinker.ld\\\\x1f-Crelocation-model=static\" cargo check:*)",
+      "Bash(just run-xhci:*)"
     ]
   }
 }

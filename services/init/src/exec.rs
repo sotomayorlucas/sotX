@@ -72,17 +72,13 @@ pub(crate) static LAST_EXEC_ELF_LO: AtomicU64 = AtomicU64::new(0);
 pub(crate) static LAST_EXEC_ELF_HI: AtomicU64 = AtomicU64::new(0);
 /// Whether last exec used a dynamic interpreter.
 pub(crate) static LAST_EXEC_HAS_INTERP: AtomicU64 = AtomicU64::new(0);
-/// Temp buffer for execve ELF loading (separate from SPAWN/DL buffers).
-pub(crate) const EXEC_BUF_BASE: u64 = 0x5400000;
-pub(crate) const EXEC_BUF_PAGES: u64 = 1536; // 6 MiB (apk is ~5.2 MiB)
-pub(crate) const EXEC_TEMP_MAP: u64 = 0x5900000; // past EXEC_BUF_BASE + 1280*4K
-/// Temp buffer for loading the interpreter ELF (for dynamic binaries).
-pub(crate) const INTERP_BUF_BASE: u64 = 0xA000000; // Far from other regions
+// Address constants centralized in sotos_common
+pub(crate) use sotos_common::{EXEC_BUF_BASE, INTERP_BUF_BASE, INTERP_LOAD_BASE};
+pub(crate) const EXEC_BUF_PAGES: u64 = 12288; // 48 MiB (mesa is 38 MB)
+pub(crate) const EXEC_TEMP_MAP: u64 = 0x8400000; // past EXEC_BUF_BASE + 12288*4K
 pub(crate) const INTERP_BUF_PAGES: u64 = 220; // ~900 KiB, enough for ld-musl (~845 KiB)
-/// Load base for the dynamic interpreter (ET_DYN, position-independent).
 /// Each ET_EXEC exec allocates a unique 2MB slot from NEXT_INTERP_BASE so
 /// concurrent glibc processes don't share ld-linux pages (GOT, link_map).
-pub(crate) const INTERP_LOAD_BASE: u64 = 0x6000000;
 pub(crate) static NEXT_INTERP_BASE: AtomicU64 = AtomicU64::new(INTERP_LOAD_BASE);
 const INTERP_SLOT_SIZE: u64 = 0x200000; // 2 MiB per interpreter instance
 /// Per-process ELF code base for ET_DYN (PIE) binaries.
@@ -695,13 +691,17 @@ fn exec_loaded_elf(file_size: usize, bin_name: &[u8], argv: &[[u8; MAX_EXEC_ARG_
     let phdr_vaddr = elf_base + elf_info.phoff as u64;
 
     // Environment: user envp first (overrides defaults), then defaults for non-overridden keys
-    let defaults: [&[u8]; 5] = [
+    let defaults: [&[u8]; 8] = [
         b"TERM=xterm\0", b"HOME=/root\0",
         b"TERMINFO=/usr/share/terminfo\0", b"PATH=/usr/bin:/bin:/usr/sbin:/sbin\0",
-        b"XDG_RUNTIME_DIR=/run/user/0\0",
+        b"XDG_RUNTIME_DIR=/tmp\0",
+        b"XKB_CONFIG_ROOT=/usr/share/X11/xkb\0",
+        b"XKB_DEFAULT_RULES=evdev\0",
+        b"LIBSEAT_BACKEND=builtin\0",
     ];
-    let default_keys: [&[u8]; 5] = [b"TERM", b"HOME", b"TERMINFO", b"PATH", b"XDG_RUNTIME_DIR"];
-    let mut env_addrs = [0u64; MAX_EXEC_ENVS + 5];
+    let default_keys: [&[u8]; 8] = [b"TERM", b"HOME", b"TERMINFO", b"PATH", b"XDG_RUNTIME_DIR", b"XKB_CONFIG_ROOT", b"XKB_DEFAULT_RULES", b"LIBSEAT_BACKEND"];
+    let mut env_addrs = [0u64; MAX_EXEC_ENVS + 8];
+    let mut env_addrs = [0u64; MAX_EXEC_ENVS + 6];
     let mut env_count: usize = 0;
 
     // User env vars first (they take priority — libc uses first occurrence)

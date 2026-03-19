@@ -145,8 +145,10 @@ impl AddressSpace {
         let pml4_phys = alloc_table_frame(); // already zeroed
         let pml4_virt = pml4_phys + hhdm_offset();
 
-        // Copy upper-half PML4 entries from boot tables.
-        let boot = read_cr3() & !0xFFF;
+        // Copy upper-half PML4 entries from the boot page tables.
+        // Use boot_cr3() (saved at init) rather than read_cr3() to avoid
+        // copying from a user AS if called after context switches start.
+        let boot = boot_cr3();
         let boot_pml4_virt = boot + hhdm_offset();
 
         unsafe {
@@ -156,6 +158,10 @@ impl AddressSpace {
                 *dst.add(i) = *src.add(i);
             }
         }
+
+        // Verify kernel code is mapped (PML4[511] must be present).
+        let entry_511 = unsafe { *(pml4_virt as *const u64).add(511) };
+        debug_assert!(entry_511 & 1 != 0, "new_user: PML4[511] not present after copy! boot_cr3={:#x} pml4={:#x}", boot, pml4_phys);
 
         Self { pml4_phys }
     }

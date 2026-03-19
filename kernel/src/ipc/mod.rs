@@ -23,6 +23,9 @@ pub mod notify;
 pub mod route;
 pub mod typed_payload;
 
+#[cfg(feature = "ipc-audit")]
+pub mod audit;
+
 #[allow(unused_imports)]
 pub use channel::ChannelId;
 #[allow(unused_imports)]

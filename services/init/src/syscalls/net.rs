@@ -319,6 +319,26 @@ pub(crate) fn sys_connect(ctx: &mut SyscallContext, msg: &IpcMsg) {
         } else { 0 };
         let mut abs = [0u8; 128];
         abs[..alen.min(127)].copy_from_slice(&abs_full[..alen.min(127)]);
+        // Special case: seatd stub socket
+        if ctx.pid == 2 {
+            print(b"SEATD-CHK alen="); print_u64(alen as u64);
+            print(b" ["); for &b in &abs[..alen.min(30)] { if b != 0 { sys::debug_print(b); } } print(b"]\n");
+        }
+        if alen >= 15 && &abs[..15] == b"/run/seatd.sock" {
+            if let Some(slot) = crate::seatd::seatd_alloc() {
+                ctx.child_fds[fd] = 33; // seatd socket
+                ctx.sock_conn_id[fd] = slot as u32;
+                print(b"seatd: client P"); print_u64(pid as u64);
+                print(b" fd="); print_u64(fd as u64);
+                print(b" slot="); print_u64(slot as u64);
+                print(b"\n");
+                reply_val(ep_cap, 0);
+            } else {
+                reply_val(ep_cap, -ECONNREFUSED);
+            }
+            return;
+        }
+
         // Find matching listener
         let mut found_listener: Option<usize> = None;
         for i in 0..MAX_UNIX_LISTENERS {
@@ -515,6 +535,24 @@ pub(crate) fn sys_sendmsg(ctx: &mut SyscallContext, msg: &IpcMsg) {
     // AF_UNIX listener: no peer connected
     if ctx.child_fds[fd] == 26 {
         reply_val(ep_cap, -EAGAIN);
+        return;
+    }
+    // seatd: parse sendmsg as seatd protocol write
+    if ctx.child_fds[fd] == 33 {
+        let mut hdr = [0u8; 56];
+        ctx.guest_read(msghdr_ptr, &mut hdr);
+        let msg_iov = u64::from_le_bytes(hdr[16..24].try_into().unwrap());
+        let msg_iovlen = u64::from_le_bytes(hdr[24..32].try_into().unwrap()) as usize;
+        if msg_iovlen > 0 {
+            let mut iov_buf = [0u8; 16];
+            ctx.guest_read(msg_iov, &mut iov_buf);
+            let iov_base = u64::from_le_bytes(iov_buf[0..8].try_into().unwrap());
+            let iov_len = u64::from_le_bytes(iov_buf[8..16].try_into().unwrap());
+            let ret = crate::seatd::seatd_write(ctx, fd, iov_base, iov_len);
+            reply_val(ep_cap, ret);
+        } else {
+            reply_val(ep_cap, 0);
+        }
         return;
     }
     // AF_UNIX connected socket: write to pipe + SCM_RIGHTS
@@ -929,6 +967,47 @@ pub(crate) fn sys_recvmsg(ctx: &mut SyscallContext, msg: &IpcMsg) {
     // AF_UNIX listener socket: no data to receive
     if ctx.child_fds[fd] == 26 {
         reply_val(ep_cap, -EAGAIN);
+        return;
+    }
+    // seatd socket: serve inline response + SCM_RIGHTS for DRM fd
+    if ctx.child_fds[fd] == 33 {
+        let slot = ctx.sock_conn_id[fd] as usize;
+        let mut hdr = [0u8; 56];
+        ctx.guest_read(msghdr_ptr, &mut hdr);
+        let msg_iov = u64::from_le_bytes(hdr[16..24].try_into().unwrap());
+        let msg_iovlen = u64::from_le_bytes(hdr[24..32].try_into().unwrap()) as usize;
+        let msg_control = u64::from_le_bytes(hdr[32..40].try_into().unwrap());
+        let msg_controllen = u64::from_le_bytes(hdr[40..48].try_into().unwrap()) as usize;
+        if msg_iovlen == 0 { reply_val(ep_cap, 0); return; }
+        let mut iov_buf = [0u8; 16];
+        ctx.guest_read(msg_iov, &mut iov_buf);
+        let iov_base = u64::from_le_bytes(iov_buf[0..8].try_into().unwrap());
+        let iov_len = u64::from_le_bytes(iov_buf[8..16].try_into().unwrap()) as usize;
+
+        // Read seatd response into iovec buffer
+        let ret = crate::seatd::seatd_read(ctx, fd, iov_base, iov_len as u64);
+
+        // If OPEN_DEVICE response, attach DRM fd via SCM_RIGHTS
+        if let Some(drm_fd) = crate::seatd::seatd_get_scm_fd(slot) {
+            if msg_control != 0 && msg_controllen >= 20 {
+                // Build cmsg: cmsg_len(8) + level(4) + type(4) + fd(4)
+                let mut cmsg = [0u8; 24];
+                cmsg[0..8].copy_from_slice(&20u64.to_ne_bytes()); // CMSG_LEN(4)
+                cmsg[8..12].copy_from_slice(&1i32.to_ne_bytes()); // SOL_SOCKET
+                cmsg[12..16].copy_from_slice(&1i32.to_ne_bytes()); // SCM_RIGHTS
+                cmsg[16..20].copy_from_slice(&(drm_fd as i32).to_ne_bytes());
+                let write_len = 20.min(msg_controllen);
+                ctx.guest_write(msg_control, &cmsg[..write_len]);
+                // Update msg_controllen in the header
+                hdr[40..48].copy_from_slice(&(write_len as u64).to_le_bytes());
+                ctx.guest_write(msghdr_ptr, &hdr);
+                print(b"seatd: SCM_RIGHTS fd=");
+                crate::framebuffer::print_u64(drm_fd as u64);
+                print(b"\n");
+            }
+        }
+
+        reply_val(ep_cap, if ret > 0 { ret } else { 0 });
         return;
     }
     // AF_UNIX connected socket: read from pipe + SCM_RIGHTS
@@ -1506,10 +1585,20 @@ pub(crate) fn sys_epoll_wait(ctx: &mut SyscallContext, msg: &IpcMsg) {
                         revents |= 1;
                     } else if kind == 26 || kind == 27 || kind == 28 {
                         if poll_fd_readable(ctx, rfd) { revents |= 1; }
+                    } else if kind == 31 || kind == 32 {
+                        // evdev: check if input events available
+                        let device = if kind == 31 { 0u8 } else { 1u8 };
+                        if crate::evdev::evdev_poll(device) & 1 != 0 { revents |= 1; }
+                    } else if kind == 30 {
+                        // DRM: always readable (for page flip events)
+                        revents |= 1;
+                    } else if kind == 33 {
+                        // seatd: always readable (inline responses)
+                        revents |= 1;
                     }
                 }
                 if wanted & 4 != 0 {
-                    if kind == 2 || kind == 8 || kind == 11 || kind == 16 || kind == 17 || kind == 22 || kind == 27 || kind == 28 {
+                    if kind == 2 || kind == 8 || kind == 11 || kind == 16 || kind == 17 || kind == 22 || kind == 27 || kind == 28 || kind == 30 {
                         revents |= 4;
                     }
                 }

@@ -6,9 +6,12 @@ use crate::fd::*;
 
 /// Aggregated mutable references to per-process state.
 /// Created once per syscall dispatch in child_handler, passed to sub-handlers.
+/// Holds the per-group FD lock (ρ_repl) — released automatically on Drop.
 pub(crate) struct SyscallContext<'a> {
     pub pid: usize,
     pub ep_cap: u64,
+    /// FD group index — lock is held while this context is alive.
+    pub guard_fdg: usize,
 
     /// If non-zero, this child has its own address space (CoW fork).
     /// All child memory reads/writes must use sys::vm_read/vm_write.
@@ -183,6 +186,17 @@ impl SyscallContext<'_> {
         }
         out[pos] = 0;
         pos
+    }
+}
+
+/// RAII lock release: when SyscallContext is dropped (end of match arm,
+/// break, continue, or return), the per-group FD lock is released.
+/// guard_fdg == usize::MAX means no lock was acquired (skip unlock).
+impl Drop for SyscallContext<'_> {
+    fn drop(&mut self) {
+        if self.guard_fdg < crate::process::MAX_PROCS {
+            fd_grp_unlock(self.guard_fdg);
+        }
     }
 }
 

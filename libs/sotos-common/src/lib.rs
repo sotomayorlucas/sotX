@@ -12,6 +12,33 @@ pub mod spsc;
 pub mod typed_channel;
 
 // ---------------------------------------------------------------
+// SyncUnsafeCell — Rust 2024-safe replacement for `static mut`
+// ---------------------------------------------------------------
+
+/// A wrapper around `UnsafeCell` that implements `Sync`, allowing it to be
+/// used in `static` items without `static mut` (which is UB in Rust 2024).
+///
+/// Safety: The caller must ensure exclusive access when mutating, just like
+/// `static mut`. This is semantically equivalent but avoids the Rust 2024
+/// `static_mut_refs` lint and future UB.
+#[repr(transparent)]
+pub struct SyncUnsafeCell<T>(core::cell::UnsafeCell<T>);
+
+unsafe impl<T> Sync for SyncUnsafeCell<T> {}
+
+impl<T> SyncUnsafeCell<T> {
+    /// Create a new `SyncUnsafeCell` with the given value.
+    pub const fn new(value: T) -> Self {
+        Self(core::cell::UnsafeCell::new(value))
+    }
+
+    /// Get a raw pointer to the inner value.
+    pub const fn get(&self) -> *mut T {
+        self.0.get()
+    }
+}
+
+// ---------------------------------------------------------------
 // Stack canary support for userspace processes
 // ---------------------------------------------------------------
 // Only compiled for userspace (not kernel, which has its own definitions).
@@ -169,6 +196,14 @@ pub enum Syscall {
     CallTimeout = 135,
     /// Receive with timeout (ep_cap in rdi[31:0], timeout in rdi[63:32]).
     RecvTimeout = 136,
+    /// Create a shared memory region (N pages).
+    ShmCreate = 180,
+    /// Map shared memory into an address space.
+    ShmMap = 181,
+    /// Unmap shared memory from an address space.
+    ShmUnmap = 182,
+    /// Destroy shared memory, free frames when refcount=0.
+    ShmDestroy = 183,
     /// Write a single byte to serial (COM1).
     DebugPrint = 255,
     /// Non-blocking serial read (returns byte or u64::MAX if none).
@@ -208,6 +243,43 @@ pub const MAX_CPUS: usize = 16;
 pub const KB_RING_ADDR: u64 = 0x510000;
 /// Mouse event ring buffer virtual address (shared: kernel, kbd, init).
 pub const MOUSE_RING_ADDR: u64 = 0x520000;
+
+// ---------------------------------------------------------------
+// Address layout constants (kernel + userspace)
+// ---------------------------------------------------------------
+
+/// User process stack base address (before ASLR jitter).
+pub const PROCESS_STACK_BASE: u64 = 0x900000;
+/// ASLR jitter range for stack placement (pages).
+pub const ASLR_JITTER_PAGES: u64 = 16;
+/// Virtio/device BAR0 MMIO mapping base.
+pub const BAR0_VIRT_BASE: u64 = 0xC00000;
+/// Framebuffer user-accessible mapping base.
+pub const FB_USER_BASE: u64 = 0x4000000;
+/// Heap (brk) base address for init child processes.
+pub const BRK_BASE: u64 = 0x2000000;
+/// Maximum heap size (1 MiB).
+pub const BRK_LIMIT: u64 = 0x100000;
+/// Anonymous mmap region base for init child processes.
+pub const MMAP_BASE: u64 = 0x3000000;
+/// Dynamic interpreter (ld.so) load base address.
+pub const INTERP_LOAD_BASE: u64 = 0x6000000;
+/// Buffer for loading interpreter ELF data.
+pub const INTERP_BUF_BASE: u64 = 0xA000000;
+/// Spawn buffer base (temp for process creation).
+pub const SPAWN_BUF_BASE: u64 = 0x5000000;
+/// Exec buffer base (temp for execve ELF loading).
+pub const EXEC_BUF_BASE: u64 = 0x5400000;
+/// vDSO page base address.
+pub const VDSO_BASE: u64 = 0xB80000;
+/// Child process heap base (above Wine PE region).
+pub const CHILD_BRK_BASE: u64 = 0x200000000;
+/// Child region size (256 MiB per child).
+pub const CHILD_REGION_SIZE: u64 = 0x20000000;
+/// Child mmap offset from brk base.
+pub const CHILD_MMAP_OFFSET: u64 = 0x8000000;
+/// Pre-TLS canary location (below vDSO).
+pub const PRE_TLS_ADDR: u64 = 0xB70000;
 
 /// Well-known virtual address of the BootInfo page (mapped read-only for init).
 pub const BOOT_INFO_ADDR: u64 = 0xB00000;
@@ -377,6 +449,15 @@ pub const SYS_GET_FAULT_INFO: u64 = 176;
 /// Enable/disable W^X relaxation for an address space.
 /// rdi = as_cap (WRITE), rsi = 1 (relax) / 0 (enforce).
 pub const SYS_WX_RELAX: u64 = 177;
+
+/// Create a shared memory region.
+pub const SYS_SHM_CREATE: u64 = 180;
+/// Map shared memory into an address space.
+pub const SYS_SHM_MAP: u64 = 181;
+/// Unmap shared memory from an address space.
+pub const SYS_SHM_UNMAP: u64 = 182;
+/// Destroy shared memory, free frames when refcount=0.
+pub const SYS_SHM_DESTROY: u64 = 183;
 
 /// Special syscall number used by the async signal trampoline.
 /// When the kernel redirects a user thread to the signal trampoline (from
@@ -1193,6 +1274,32 @@ pub mod sys {
     #[inline(always)]
     pub fn wx_relax(as_cap: u64, enable: u64) -> Result<(), i64> {
         check_unit(syscall2(super::SYS_WX_RELAX, as_cap, enable))
+    }
+
+    /// Create a shared memory region with `num_pages` physical frames.
+    /// Returns the handle (index) on success.
+    #[inline(always)]
+    pub fn shm_create(num_pages: u64) -> Result<u64, i64> {
+        check_val(syscall1(super::SYS_SHM_CREATE, num_pages))
+    }
+
+    /// Map a shared memory region into an address space.
+    /// `flags`: bit 0 = writable.
+    #[inline(always)]
+    pub fn shm_map(handle: u64, as_cap: u64, vaddr: u64, flags: u64) -> Result<(), i64> {
+        check_unit(syscall4(super::SYS_SHM_MAP, handle, as_cap, vaddr, flags))
+    }
+
+    /// Unmap a shared memory region from an address space.
+    #[inline(always)]
+    pub fn shm_unmap(handle: u64, as_cap: u64, vaddr: u64) -> Result<(), i64> {
+        check_unit(syscall3(super::SYS_SHM_UNMAP, handle, as_cap, vaddr))
+    }
+
+    /// Destroy a shared memory region, freeing frames when refcount=0.
+    #[inline(always)]
+    pub fn shm_destroy(handle: u64) -> Result<(), i64> {
+        check_unit(syscall1(super::SYS_SHM_DESTROY, handle))
     }
 
     /// Change file permissions (chmod).

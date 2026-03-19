@@ -113,6 +113,77 @@ fn sysroot_init(store: &mut ObjectStore) {
             }
         }
     }
+    // Create /usr/share/X11/xkb/ hierarchy and copy XKB files from initrd
+    // (needed by xkbcommon for keyboard layouts — weston requires this)
+    if let Ok(usr_oid) = store.resolve_path(b"usr", ROOT_OID) {
+        if let Some(share_oid) = store.find_in(b"share", usr_oid) {
+            print(b"XKB: creating /usr/share/X11...\n");
+            if store.find_in(b"X11", share_oid).is_none() {
+                match store.mkdir(b"X11", share_oid) {
+                    Ok(_) => print(b"XKB: X11 dir created\n"),
+                    Err(_) => print(b"XKB: X11 mkdir FAILED\n"),
+                }
+            }
+            if let Some(x11_oid) = store.find_in(b"X11", share_oid) {
+                if store.find_in(b"xkb", x11_oid).is_none() { let _ = store.mkdir(b"xkb", x11_oid); }
+                if let Some(xkb_oid) = store.find_in(b"xkb", x11_oid) {
+                    // Create subdirs
+                    let subdirs: &[&[u8]] = &[b"rules", b"keycodes", b"types", b"compat", b"symbols", b"geometry"];
+                    for d in subdirs {
+                        if store.find_in(d, xkb_oid).is_none() { let _ = store.mkdir(d, xkb_oid); }
+                    }
+                    // Copy XKB files from initrd into VFS
+                    let xkb_files: &[(&[u8], &[u8], &[u8])] = &[
+                        (b"rules", b"evdev", b"xkb_rules_evdev\0"),
+                        (b"keycodes", b"evdev", b"xkb_keycodes_evdev\0"),
+                        (b"types", b"complete", b"xkb_types_complete\0"),
+                        (b"types", b"basic", b"xkb_types_basic\0"),
+                        (b"compat", b"complete", b"xkb_compat_complete\0"),
+                        (b"compat", b"basic", b"xkb_compat_basic\0"),
+                        (b"symbols", b"us", b"xkb_symbols_us\0"),
+                        (b"symbols", b"pc", b"xkb_symbols_pc\0"),
+                        (b"symbols", b"latin", b"xkb_symbols_latin\0"),
+                        (b"symbols", b"inet", b"xkb_symbols_inet\0"),
+                    ];
+                    // Use a 128KB buffer for large xkb files
+                    let buf_ptr = 0x5300000u64; // temp page (below EXEC_BUF_BASE)
+                    let buf_pages = 32u64; // 128 KiB
+                    let mut mapped = false;
+                    for p in 0..buf_pages {
+                        if let Ok(f) = sotos_common::sys::frame_alloc() {
+                            let _ = sotos_common::sys::map(buf_ptr + p * 0x1000, f, 2);
+                            mapped = true;
+                        }
+                    }
+                    print(b"XKB: mapped="); crate::framebuffer::print_u64(mapped as u64); print(b"\n");
+                    if mapped {
+                        let buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr as *mut u8, (buf_pages * 0x1000) as usize) };
+                        for &(subdir, fname, initrd_name) in xkb_files {
+                            if let Some(dir_oid) = store.find_in(subdir, xkb_oid) {
+                                if store.find_in(fname, dir_oid).is_none() {
+                                    let name_len = initrd_name.len() - 1; // exclude NUL
+                                    print(b"XKB: reading "); print(initrd_name);
+                                    if let Ok(sz) = sotos_common::sys::initrd_read(
+                                        initrd_name.as_ptr() as u64, name_len as u64,
+                                        buf.as_mut_ptr() as u64, buf.len() as u64
+                                    ) {
+                                        let sz = sz as usize;
+                                        if sz > 0 && sz <= buf.len() {
+                                            let _ = store.create_in(fname, &buf[..sz], dir_oid);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // Unmap temp buffer
+                        for p in 0..buf_pages {
+                            let _ = sotos_common::sys::unmap_free(buf_ptr + p * 0x1000);
+                        }
+                    }
+                }
+            }
+        }
+    }
     print(b"LUCAS: sysroot dirs initialized\n");
 }
 
@@ -185,6 +256,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                     pid: pid as usize,
                     ep_cap,
                     child_as_cap: 0, // PID 1 shares init's address space
+                    guard_fdg: usize::MAX,
                     current_brk: &mut tg.brk,
                     mmap_next: &mut tg.mmap_next,
                     my_brk_base: BRK_BASE,
@@ -221,6 +293,8 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             }
         };
     }
+
+    // seatd: handled inline in child_handler (kind=33 seatd socket)
 
     // ── Main syscall loop ──
     loop {

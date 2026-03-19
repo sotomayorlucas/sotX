@@ -48,6 +48,11 @@ enum WaitAction {
 }
 
 /// Wait on a notification: if pending, clear and return; otherwise block.
+///
+/// SMP fix: sets thread state to Blocked while holding NOTIFICATIONS lock,
+/// so signal() on another CPU always finds the thread Blocked when it wakes.
+/// Without this, there's a race window between registering as waiter and
+/// actually blocking where signal()'s wake() finds state=Running and no-ops.
 pub fn wait(handle: PoolHandle) -> Result<(), SysError> {
     let action = {
         let mut ns = NOTIFICATIONS.lock();
@@ -59,15 +64,22 @@ pub fn wait(handle: PoolHandle) -> Result<(), SysError> {
         } else {
             let my_tid = sched::current_tid().ok_or(SysError::InvalidArg)?;
             n.waiting = Some(my_tid.0);
+            // Set Blocked while NOTIFICATIONS lock is held (SMP atomicity).
+            // signal() can only run after we release this lock, at which
+            // point our state is Blocked and wake() will succeed.
+            sched::block_current_state_only();
             WaitAction::Block
         }
     };
-    // NOTIFICATIONS lock dropped.
+    // NOTIFICATIONS lock dropped. signal() can now fire and wake us.
 
     match action {
         WaitAction::AlreadyPending => Ok(()),
         WaitAction::Block => {
-            sched::block_current();
+            // If signal() already woke us (set Ready + enqueued), schedule()
+            // handles it via the self-switch guard: dequeues us, sets Running,
+            // returns without context switch.
+            sched::schedule();
             Ok(())
         }
     }

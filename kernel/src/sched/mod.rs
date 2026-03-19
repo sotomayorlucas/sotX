@@ -18,7 +18,7 @@ use thread::Thread;
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use crate::arch::x86_64::percpu;
 use crate::ipc::endpoint::Message;
 use crate::pool::{Pool, PoolHandle};
@@ -241,6 +241,11 @@ static PER_CPU_QUEUES: [TicketMutex<CpuQueue>; MAX_CPUS] = {
     [INIT; MAX_CPUS]
 };
 
+/// Global ready queue for unaffinitized threads (Graham's list scheduling).
+/// Dequeue order: local CPU → global queue → work-steal from other CPUs.
+/// Provides (2-1/p) competitive ratio for makespan minimization.
+static GLOBAL_READY: TicketMutex<CpuQueue> = TicketMutex::new(CpuQueue::new());
+
 /// Enqueue a thread index to a specific CPU's run queue at the given priority class.
 fn enqueue_to_cpu_pri(cpu: usize, idx: usize, pri_class: usize) {
     let target = cpu % MAX_CPUS;
@@ -263,12 +268,19 @@ fn enqueue_to_cpu(cpu: usize, idx: usize) {
 
 /// Dequeue from the current CPU's queue, or work-steal from others.
 /// Priority-aware: always dequeues highest priority available.
+/// Lock ordering: local PER_CPU → GLOBAL_READY → remote PER_CPU (steal).
 fn dequeue_from_any(my_cpu: usize) -> Option<usize> {
-    // Try own queue first (highest priority first).
+    // 1. Try own queue first (highest priority first).
     if let Some(idx) = PER_CPU_QUEUES[my_cpu % MAX_CPUS].lock().pop_front() {
         return Some(idx);
     }
-    // Work stealing: try other CPUs, steal lowest-priority work.
+    // 2. Graham: try global ready queue (unaffinitized threads).
+    if let Some(mut gq) = GLOBAL_READY.try_lock() {
+        if let Some(idx) = gq.pop_front() {
+            return Some(idx);
+        }
+    }
+    // 3. Work stealing: try other CPUs, steal lowest-priority work.
     for offset in 1..MAX_CPUS {
         let victim = (my_cpu + offset) % MAX_CPUS;
         if let Some(mut q) = PER_CPU_QUEUES[victim].try_lock() {
@@ -330,6 +342,49 @@ fn dequeue_non_depleted(my_cpu: usize, sched: &mut Scheduler) -> Option<usize> {
 /// Maximum threads the scheduler can track.
 const MAX_THREADS: usize = 256;
 
+// ---------------------------------------------------------------------------
+// Per-thread IPC state (Phase 2: ρ_ooo — false dependency elimination)
+// ---------------------------------------------------------------------------
+
+/// Per-thread IPC message buffer and role, protected by per-slot spinlocks.
+/// Eliminates SCHEDULER.lock() for IPC message read/write operations.
+pub struct ThreadIpcState {
+    pub msg: Message,
+    pub role: IpcRole,
+    pub endpoint: Option<u32>,
+}
+
+impl ThreadIpcState {
+    const fn new() -> Self {
+        Self {
+            msg: Message::empty(),
+            role: IpcRole::None,
+            endpoint: None,
+        }
+    }
+}
+
+/// Per-thread IPC state indexed by pool slot (0..MAX_THREADS).
+/// Each slot has its own spinlock — zero cross-thread contention.
+pub static THREAD_IPC: [Mutex<ThreadIpcState>; MAX_THREADS] = {
+    const INIT: Mutex<ThreadIpcState> = Mutex::new(ThreadIpcState::new());
+    [INIT; MAX_THREADS]
+};
+
+/// Lock-free TID → pool slot mapping (0xFFFF_FFFF = unmapped).
+/// Enables O(1) tid→slot lookup without SCHEDULER.lock().
+static TID_TO_SLOT: [AtomicU32; MAX_THREADS] = {
+    const INIT: AtomicU32 = AtomicU32::new(0xFFFF_FFFF);
+    [INIT; MAX_THREADS]
+};
+
+/// Lock-free TID → slot lookup. Returns None if TID is unmapped.
+pub fn tid_to_slot_external(tid: ThreadId) -> Option<u32> {
+    if (tid.0 as usize) >= MAX_THREADS { return None; }
+    let slot = TID_TO_SLOT[tid.0 as usize].load(Ordering::Acquire);
+    if slot == 0xFFFF_FFFF { None } else { Some(slot) }
+}
+
 pub struct Scheduler {
     pub threads: Pool<Thread>,
     pub domains: Pool<SchedDomain>,
@@ -348,16 +403,24 @@ impl Scheduler {
         }
     }
 
-    /// Enqueue a thread to its preferred CPU's queue (or current CPU if no preference).
+    /// Enqueue a thread to its preferred CPU's queue, or to the global ready
+    /// queue if the thread has no CPU affinity (Graham's list scheduling).
     /// Uses the thread's priority to select the correct multi-level queue.
     pub fn enqueue(&self, idx: usize) {
-        let (target_cpu, pri_class) = self.threads.get_by_index(idx as u32)
+        let (target_cpu, pri_class, has_affinity) = self.threads.get_by_index(idx as u32)
             .map(|t| {
-                let cpu = t.preferred_cpu.unwrap_or(percpu::current_percpu().cpu_index) as usize;
-                (cpu, priority_class(t.priority))
+                let has_aff = t.preferred_cpu.is_some();
+                let cpu = t.preferred_cpu.unwrap_or(0) as usize;
+                (cpu, priority_class(t.priority), has_aff)
             })
-            .unwrap_or_else(|| (percpu::current_percpu().cpu_index as usize, 2));
-        enqueue_to_cpu_pri(target_cpu, idx, pri_class);
+            .unwrap_or_else(|| (percpu::current_percpu().cpu_index as usize, 2, false));
+
+        if has_affinity {
+            enqueue_to_cpu_pri(target_cpu, idx, pri_class);
+        } else {
+            // Graham's list scheduling: unaffinitized threads go to global queue.
+            GLOBAL_READY.lock().levels[pri_class].push_back(idx);
+        }
     }
 
     /// Get pool slot index for a ThreadId. O(1).
@@ -369,10 +432,11 @@ impl Scheduler {
         }
     }
 
-    /// Register a tid→slot mapping.
+    /// Register a tid→slot mapping (both internal + lock-free external).
     fn register_tid(&mut self, tid: ThreadId, slot: usize) {
         if (tid.0 as usize) < MAX_THREADS {
             self.tid_to_slot[tid.0 as usize] = Some(slot as u32);
+            TID_TO_SLOT[tid.0 as usize].store(slot as u32, Ordering::Release);
         }
     }
 
@@ -380,6 +444,7 @@ impl Scheduler {
     fn unregister_tid(&mut self, tid: ThreadId) {
         if (tid.0 as usize) < MAX_THREADS {
             self.tid_to_slot[tid.0 as usize] = None;
+            TID_TO_SLOT[tid.0 as usize].store(0xFFFF_FFFF, Ordering::Release);
         }
     }
 }
@@ -630,6 +695,21 @@ pub fn block_current() {
     schedule();
 }
 
+/// Set state to Blocked WITHOUT calling schedule(). Used when the caller
+/// must hold an outer lock (e.g., NOTIFICATIONS) during the state transition
+/// to prevent missed-wakeup races on SMP. The caller must call schedule()
+/// after releasing the outer lock.
+pub fn block_current_state_only() {
+    let percpu = percpu::current_percpu();
+    let idx = percpu.current_thread;
+    if idx != usize::MAX {
+        let mut sched = SCHEDULER.lock();
+        if let Some(t) = sched.threads.get_mut_by_index(idx as u32) {
+            t.state = ThreadState::Blocked;
+        }
+    }
+}
+
 /// Suspend the current thread due to a page fault and switch away.
 pub fn fault_current() {
     {
@@ -677,43 +757,37 @@ pub fn wake(tid: ThreadId) {
 }
 
 /// Store IPC state on the current thread before blocking.
+/// Uses per-thread IPC lock (no SCHEDULER.lock() needed).
 pub fn set_current_ipc(ep_id: u32, role: IpcRole, msg: Message) {
     let percpu = percpu::current_percpu();
     let idx = percpu.current_thread;
-    if idx != usize::MAX {
-        let mut sched = SCHEDULER.lock();
-        if let Some(t) = sched.threads.get_mut_by_index(idx as u32) {
-            t.ipc_endpoint = Some(ep_id);
-            t.ipc_role = role;
-            t.ipc_msg = msg;
-        }
+    if idx != usize::MAX && idx < MAX_THREADS {
+        let mut ipc = THREAD_IPC[idx].lock();
+        ipc.endpoint = Some(ep_id);
+        ipc.role = role;
+        ipc.msg = msg;
     }
 }
 
 /// Clear IPC state on the current thread after waking.
+/// Uses per-thread IPC lock (no SCHEDULER.lock() needed).
 pub fn clear_current_ipc() {
     let percpu = percpu::current_percpu();
     let idx = percpu.current_thread;
-    if idx != usize::MAX {
-        let mut sched = SCHEDULER.lock();
-        if let Some(t) = sched.threads.get_mut_by_index(idx as u32) {
-            t.ipc_endpoint = None;
-            t.ipc_role = IpcRole::None;
-        }
+    if idx != usize::MAX && idx < MAX_THREADS {
+        let mut ipc = THREAD_IPC[idx].lock();
+        ipc.endpoint = None;
+        ipc.role = IpcRole::None;
     }
 }
 
 /// Write a message into a specific thread's IPC buffer. O(1).
-/// Returns false if the thread is no longer Blocked (e.g., timed out).
+/// Uses per-thread IPC lock + lock-free TID→slot lookup.
 pub fn write_ipc_msg(tid: ThreadId, msg: Message) -> bool {
-    let mut sched = SCHEDULER.lock();
-    if let Some(slot) = sched.slot_of(tid) {
-        if let Some(t) = sched.threads.get_mut_by_index(slot) {
-            if t.state == ThreadState::Blocked {
-                t.ipc_msg = msg;
-                return true;
-            }
-        }
+    if let Some(slot) = tid_to_slot_external(tid) {
+        let mut ipc = THREAD_IPC[slot as usize].lock();
+        ipc.msg = msg;
+        return true;
     }
     false
 }
@@ -754,37 +828,34 @@ pub fn global_ticks() -> u64 {
 }
 
 /// Read the message from a specific thread's IPC buffer. O(1).
+/// Uses per-thread IPC lock + lock-free TID→slot lookup.
 pub fn read_ipc_msg(tid: ThreadId) -> Message {
-    let sched = SCHEDULER.lock();
-    if let Some(slot) = sched.slot_of(tid) {
-        if let Some(t) = sched.threads.get_by_index(slot) {
-            return t.ipc_msg;
-        }
+    if let Some(slot) = tid_to_slot_external(tid) {
+        let ipc = THREAD_IPC[slot as usize].lock();
+        return ipc.msg;
     }
     Message::empty()
 }
 
 /// Write a message into the current thread's IPC buffer (without touching endpoint/role).
+/// Uses per-thread IPC lock (no SCHEDULER.lock() needed).
 pub fn set_current_msg(msg: Message) {
     let percpu = percpu::current_percpu();
     let idx = percpu.current_thread;
-    if idx != usize::MAX {
-        let mut sched = SCHEDULER.lock();
-        if let Some(t) = sched.threads.get_mut_by_index(idx as u32) {
-            t.ipc_msg = msg;
-        }
+    if idx != usize::MAX && idx < MAX_THREADS {
+        let mut ipc = THREAD_IPC[idx].lock();
+        ipc.msg = msg;
     }
 }
 
 /// Read the current thread's own IPC message buffer (after being woken).
+/// Uses per-thread IPC lock (no SCHEDULER.lock() needed).
 pub fn current_ipc_msg() -> Message {
     let percpu = percpu::current_percpu();
     let idx = percpu.current_thread;
-    if idx != usize::MAX {
-        let sched = SCHEDULER.lock();
-        if let Some(t) = sched.threads.get_by_index(idx as u32) {
-            return t.ipc_msg;
-        }
+    if idx != usize::MAX && idx < MAX_THREADS {
+        let ipc = THREAD_IPC[idx].lock();
+        return ipc.msg;
     }
     Message::empty()
 }
@@ -901,6 +972,27 @@ pub fn get_current_redirect_ep() -> Option<u32> {
         }
     }
     None
+}
+
+/// Fused redirect preparation (ρ_fuse): get redirect endpoint + save regs +
+/// get tid in ONE SCHEDULER.lock() acquisition (replaces 3 separate locks).
+/// Returns (ep_raw, tid) or None if no redirect endpoint set.
+pub fn prepare_redirect(frame: &TrapFrame, user_rsp: u64) -> Option<(u32, ThreadId)> {
+    let percpu = percpu::current_percpu();
+    let idx = percpu.current_thread;
+    if idx == usize::MAX { return None; }
+    let mut sched = SCHEDULER.lock();
+    let t = sched.threads.get_mut_by_index(idx as u32)?;
+    let ep = t.redirect_ep?;
+    // Save full register state so LUCAS can read via SYS_GET_THREAD_REGS
+    t.redirect_saved_regs = [
+        frame.rax, frame.rbx, frame.rcx, frame.rdx,
+        frame.rsi, frame.rdi, frame.rbp, frame.r8,
+        frame.r9,  frame.r10, frame.r11, frame.r12,
+        frame.r13, frame.r14, frame.r15, user_rsp,
+        t.fs_base, t.gs_base,
+    ];
+    Some((ep, t.id))
 }
 
 /// Set a thread's syscall redirect endpoint.
@@ -1196,6 +1288,96 @@ pub fn is_current_user_thread() -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Fused IPC helpers (ρ_fuse + ρ_ooo: batched lock acquisitions for hot path)
+// ---------------------------------------------------------------------------
+
+/// Fused call pre-block (rendezvous): write msg to receiver, wake it,
+/// set caller IPC state, block caller.
+/// Uses per-thread IPC locks for message access, SCHEDULER.lock() only for
+/// run-queue mutation (wake + block). Replaces 5 separate lock acquisitions.
+pub fn call_fused_preblock_rendezvous(
+    recv_tid: ThreadId, msg: Message, ep_raw: u32,
+) {
+    let caller_slot = percpu::current_percpu().current_thread;
+    let recv_slot = tid_to_slot_external(recv_tid)
+        .unwrap_or_else(|| {
+            SCHEDULER.lock().slot_of(recv_tid).unwrap_or(0)
+        }) as usize;
+
+    // Step 1: Write message to receiver (per-thread lock, zero cross-thread contention)
+    {
+        let mut recv_ipc = THREAD_IPC[recv_slot].lock();
+        recv_ipc.msg = msg;
+    }
+
+    // Step 2: Set caller IPC state (per-thread lock)
+    if caller_slot != usize::MAX && caller_slot < MAX_THREADS {
+        let mut caller_ipc = THREAD_IPC[caller_slot].lock();
+        caller_ipc.endpoint = Some(ep_raw);
+        caller_ipc.role = IpcRole::Caller;
+        caller_ipc.msg = Message::empty();
+    }
+
+    // Step 3: Wake receiver + block caller (SCHEDULER.lock() for run-queue only)
+    {
+        let mut sched = SCHEDULER.lock();
+        if let Some(t) = sched.threads.get_mut_by_index(recv_slot as u32) {
+            t.ipc_timed_out = false;
+            if t.state == ThreadState::Blocked {
+                t.state = ThreadState::Ready;
+                t.timeslice = TIMESLICE;
+                sched.enqueue(recv_slot);
+            }
+        }
+        if caller_slot != usize::MAX {
+            if let Some(t) = sched.threads.get_mut_by_index(caller_slot as u32) {
+                t.state = ThreadState::Blocked;
+            }
+        }
+    }
+    schedule();
+}
+
+/// Fused call pre-block (no receiver ready): store msg in own IPC buffer, block.
+/// Uses per-thread IPC lock for message, SCHEDULER.lock() only for state change.
+pub fn call_fused_preblock(msg: Message, ep_raw: u32) {
+    let caller_slot = percpu::current_percpu().current_thread;
+
+    // Set caller IPC state (per-thread lock)
+    if caller_slot != usize::MAX && caller_slot < MAX_THREADS {
+        let mut ipc = THREAD_IPC[caller_slot].lock();
+        ipc.endpoint = Some(ep_raw);
+        ipc.role = IpcRole::Caller;
+        ipc.msg = msg;
+    }
+
+    // Block (SCHEDULER.lock() for run-queue)
+    {
+        if caller_slot != usize::MAX {
+            let mut sched = SCHEDULER.lock();
+            if let Some(t) = sched.threads.get_mut_by_index(caller_slot as u32) {
+                t.state = ThreadState::Blocked;
+            }
+        }
+    }
+    schedule();
+}
+
+/// Fused call post-wakeup: read reply + clear IPC state (per-thread lock only).
+/// No SCHEDULER.lock() needed.
+pub fn call_fused_postwake() -> Message {
+    let idx = percpu::current_percpu().current_thread;
+    if idx != usize::MAX && idx < MAX_THREADS {
+        let mut ipc = THREAD_IPC[idx].lock();
+        let msg = ipc.msg;
+        ipc.endpoint = None;
+        ipc.role = IpcRole::None;
+        return msg;
+    }
+    Message::empty()
+}
+
+// ---------------------------------------------------------------------------
 // Scheduling Domain API
 // ---------------------------------------------------------------------------
 
@@ -1423,46 +1605,125 @@ fn check_domain_refills(sched: &mut Scheduler, global_now: u64) {
 /// in the run queue until after context_switch completes (when finish_switch
 /// is called by the new thread). This avoids a race where another CPU could
 /// dequeue and run the old thread before its RSP is saved.
+///
+/// ρ_buf optimization: per-CPU queue dequeue happens BEFORE taking
+/// SCHEDULER.lock(), eliminating O(p) contention on the global lock for
+/// queue operations. SCHEDULER.lock() is only held for thread state
+/// validation and context-switch setup.
 pub fn schedule() {
     // Discard target for dead threads (slot freed before context switch).
     let mut discard_rsp: u64 = 0;
 
+    // Phase 1: Dequeue candidate from per-CPU queues (per-CPU locks only,
+    // NO global SCHEDULER.lock()). This is the ρ_buf decoupling buffer.
+    let percpu_early = percpu::current_percpu();
+    let old_idx_early = percpu_early.current_thread;
+    if old_idx_early == usize::MAX {
+        return;
+    }
+    let my_cpu = percpu_early.cpu_index as usize;
+    let candidate = dequeue_from_any(my_cpu);
+
+    // Fast path: idle CPU with empty queues → skip SCHEDULER.lock() entirely.
+    // This eliminates O(p) contention from idle cores on the global lock,
+    // which starves active threads on QEMU TCG with 4+ vCPUs.
+    if candidate.is_none() && old_idx_early == percpu_early.idle_thread {
+        return;
+    }
+
+    // Phase 2: Lock SCHEDULER for thread state + context-switch setup.
     let switch_info: Option<(*mut u64, u64, usize, *const u8)> = {
         let mut sched = SCHEDULER.lock();
         let percpu = percpu::current_percpu();
 
         let old_idx = percpu.current_thread;
         if old_idx == usize::MAX {
+            // If candidate was dequeued, put it back.
+            if let Some(idx) = candidate {
+                sched.enqueue(idx);
+            }
             return;
         }
 
-        // Try to dequeue a non-depleted thread from per-core queue (with work stealing).
-        let my_cpu = percpu.cpu_index as usize;
-        let new_idx = match dequeue_non_depleted(my_cpu, &mut sched) {
-            Some(idx) => idx,
-            None => {
-                // No other thread ready.
+        // Validate candidate against domain/compute constraints.
+        let new_idx = if let Some(idx) = candidate {
+            // Validate: check compute target + domain status.
+            let valid = {
+                let ct = sched.threads.get_by_index(idx as u32).map(|t| t.compute_target);
+                if ct != Some(ComputeTarget::Cpu) && ct.is_some() {
+                    false // GPU/NPU thread — re-enqueue
+                } else {
+                    let dom_idx = sched.threads.get_by_index(idx as u32).and_then(|t| t.domain_idx);
+                    match dom_idx {
+                        None => true, // No domain — always runnable
+                        Some(di) => {
+                            let is_active = sched.domains.get_by_index(di)
+                                .map_or(true, |d| d.state == DomainState::Active);
+                            if !is_active {
+                                // Park in domain's suspended list.
+                                if let Some(dom) = sched.domains.get_mut_by_index(di) {
+                                    dom.suspended.push(idx);
+                                }
+                            }
+                            is_active
+                        }
+                    }
+                }
+            };
+            if valid {
+                idx
+            } else {
+                // Invalid candidate. Re-enqueue if not suspended.
+                let was_suspended = sched.threads.get_by_index(idx as u32)
+                    .and_then(|t| t.domain_idx).is_some();
+                if !was_suspended {
+                    sched.enqueue(idx);
+                }
+                // Fall through to idle/stay logic
                 let old_t = match sched.threads.get_mut_by_index(old_idx as u32) {
                     Some(t) => t,
                     None => return,
                 };
-
                 if old_t.state == ThreadState::Running {
-                    // Still running, just reset timeslice.
                     old_t.timeslice = TIMESLICE;
                     return;
                 }
-
-                // Current thread is blocked/dead/faulted but run queue is empty.
-                // Switch to idle thread.
                 let idle_idx = percpu.idle_thread;
-                if old_idx == idle_idx {
-                    // Already idle, nothing to do.
-                    return;
-                }
+                if old_idx == idle_idx { return; }
                 idle_idx
             }
+        } else {
+            // No candidate from any queue.
+            let old_t = match sched.threads.get_mut_by_index(old_idx as u32) {
+                Some(t) => t,
+                None => return,
+            };
+
+            if old_t.state == ThreadState::Running {
+                // Still running, just reset timeslice.
+                old_t.timeslice = TIMESLICE;
+                return;
+            }
+
+            // Current thread is blocked/dead/faulted but run queue is empty.
+            // Switch to idle thread.
+            let idle_idx = percpu.idle_thread;
+            if old_idx == idle_idx {
+                // Already idle, nothing to do.
+                return;
+            }
+            idle_idx
         };
+
+        // Self-switch guard: if we dequeued ourselves (e.g., woken between
+        // block_current_state_only and schedule on SMP), skip context switch.
+        if new_idx == old_idx {
+            if let Some(t) = sched.threads.get_mut_by_index(new_idx as u32) {
+                t.state = ThreadState::Running;
+                t.timeslice = TIMESLICE;
+            }
+            return;
+        }
 
         // Handle old thread state.
         let old_is_dead = sched.threads.get_by_index(old_idx as u32)
@@ -1532,6 +1793,27 @@ pub fn schedule() {
         if target_cr3 != 0 {
             let current_cr3 = crate::mm::paging::read_cr3();
             if target_cr3 != current_cr3 {
+                // Sanity check: verify PML4 entry 511 (kernel code) is present.
+                // A missing entry causes a triple fault on the next interrupt.
+                let hhdm = crate::mm::hhdm_offset();
+                let pml4_ptr = (target_cr3 + hhdm) as *const u64;
+                let entry_511 = unsafe { *pml4_ptr.add(511) };
+                if entry_511 & 1 == 0 {
+                    // PML4[511] not present — kernel code would be unmapped!
+                    // Re-copy from boot CR3 to repair.
+                    let boot = crate::mm::paging::boot_cr3();
+                    let boot_pml4 = (boot + hhdm) as *const u64;
+                    let dst_pml4 = (target_cr3 + hhdm) as *mut u64;
+                    unsafe {
+                        for i in 256..512 {
+                            let src_val = *boot_pml4.add(i);
+                            if *dst_pml4.add(i) & 1 == 0 && src_val & 1 != 0 {
+                                *dst_pml4.add(i) = src_val;
+                            }
+                        }
+                    }
+                    crate::kprintln!("SCHED: repaired PML4 high entries for cr3={:#x}", target_cr3);
+                }
                 unsafe {
                     core::arch::asm!(
                         "mov cr3, {}",

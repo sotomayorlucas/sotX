@@ -5,7 +5,7 @@
 
 use sotos_common::sys;
 use sotos_common::linux_abi::*;
-use sotos_common::IpcMsg;
+use sotos_common::{IpcMsg, SyncUnsafeCell};
 use core::sync::atomic::Ordering;
 use crate::exec::reply_val;
 use crate::process::*;
@@ -21,23 +21,20 @@ const MAP_FIXED_NOREPLACE_FLAG: u32 = 0x100000;
 
 /// Per-process ntdll.so base address tracker (for Wine syscall dispatcher).
 /// Set when we detect the initial ntdll.so reservation mmap.
-pub(crate) static mut NTDLL_SO_BASE: [u64; 16] = [0; 16];
+pub(crate) static NTDLL_SO_BASE: SyncUnsafeCell<[u64; 16]> = SyncUnsafeCell::new([0; 16]);
 /// Per-process fd that holds ntdll.so (Unix side). Set by openat handler.
-pub(crate) static mut NTDLL_SO_FD: [u8; 16] = [0xFF; 16];
+pub(crate) static NTDLL_SO_FD: SyncUnsafeCell<[u8; 16]> = SyncUnsafeCell::new([0xFF; 16]);
 
 /// Wine SharedUserData fixup: ensure PE ntdll.dll uses the indirect call
 /// path (`call [0x7ffe1000]`) instead of the direct `syscall` instruction.
-/// This is critical because Wine's PE syscall numbers are NOT Linux syscall
-/// numbers — they're Wine-internal NT syscall numbers that get misinterpreted
-/// by our kernel.
 /// Per-process flag: set once we've confirmed the dispatcher pointer is valid.
-static mut WINE_KUSD_DONE: [bool; 16] = [false; 16];
+static WINE_KUSD_DONE: SyncUnsafeCell<[bool; 16]> = SyncUnsafeCell::new([false; 16]);
 
 fn wine_patch_shared_user_data(ctx: &mut SyscallContext, addr: u64) {
     // Only fire for addresses overlapping the KUSD pages (0x7ffe0000..0x7ffe2000)
     if addr > 0x7ffe1000 || addr + 0x1000 < 0x7ffe0000 { return; }
     if ctx.pid >= 16 { return; }
-    if unsafe { WINE_KUSD_DONE[ctx.pid] } { return; }
+    if unsafe { (*WINE_KUSD_DONE.get())[ctx.pid] } { return; }
 
     // Read current SystemCall byte at offset 0x308
     let mut flag = [0u8; 1];
@@ -52,7 +49,7 @@ fn wine_patch_shared_user_data(ctx: &mut SyscallContext, addr: u64) {
 
     // Set up dispatcher pointer at 0x7ffe1000
     let pid = ctx.pid;
-    let ntdll_base = unsafe { NTDLL_SO_BASE[pid] };
+    let ntdll_base = unsafe { (*NTDLL_SO_BASE.get())[pid] };
     if ntdll_base == 0 {
         print(b" NO-BASE\n");
         return;
@@ -74,7 +71,7 @@ fn wine_patch_shared_user_data(ctx: &mut SyscallContext, addr: u64) {
         let check = u64::from_le_bytes(disp_ptr);
         if check == disp_addr {
             print(b" wrote-disp="); crate::framebuffer::print_hex64(disp_addr);
-            unsafe { WINE_KUSD_DONE[ctx.pid] = true; }
+            unsafe { (*WINE_KUSD_DONE.get())[ctx.pid] = true; }
         } else {
             // Page not mapped — allocate and map it
             if let Ok(f) = sys::frame_alloc() {
@@ -82,7 +79,7 @@ fn wine_patch_shared_user_data(ctx: &mut SyscallContext, addr: u64) {
                     ctx.guest_zero_page(0x7ffe1000);
                     ctx.guest_write(0x7ffe1000, &ptr_bytes);
                     print(b" mapped-disp="); crate::framebuffer::print_hex64(disp_addr);
-                    unsafe { WINE_KUSD_DONE[ctx.pid] = true; }
+                    unsafe { (*WINE_KUSD_DONE.get())[ctx.pid] = true; }
                 }
             }
         }
@@ -91,9 +88,9 @@ fn wine_patch_shared_user_data(ctx: &mut SyscallContext, addr: u64) {
         let ptr_bytes = disp_addr.to_le_bytes();
         ctx.guest_write(0x7ffe1000, &ptr_bytes);
         print(b" fix-disp="); crate::framebuffer::print_hex64(disp_addr);
-        unsafe { WINE_KUSD_DONE[ctx.pid] = true; }
+        unsafe { (*WINE_KUSD_DONE.get())[ctx.pid] = true; }
     } else {
-        unsafe { WINE_KUSD_DONE[ctx.pid] = true; }
+        unsafe { (*WINE_KUSD_DONE.get())[ctx.pid] = true; }
     }
     print(b"\n");
 }
@@ -248,9 +245,9 @@ pub(crate) fn sys_mmap(ctx: &mut SyscallContext, msg: &IpcMsg) {
     // Track ntdll.so load base: when we see a non-fixed file mmap matching
     // the ntdll.so fd, the returned base is the ELF load base.
     if !map_fixed && fd >= 0 && ctx.pid < 16 {
-        let ntdll_fd = unsafe { NTDLL_SO_FD[ctx.pid] };
+        let ntdll_fd = unsafe { (*NTDLL_SO_FD.get())[ctx.pid] };
         if ntdll_fd != 0xFF && fd as u8 == ntdll_fd {
-            unsafe { NTDLL_SO_BASE[ctx.pid] = base; }
+            unsafe { (*NTDLL_SO_BASE.get())[ctx.pid] = base; }
             print(b"NTDLL-BASE P"); crate::framebuffer::print_u64(ctx.pid as u64);
             print(b" base="); crate::framebuffer::print_hex64(base);
             print(b"\n");
@@ -258,7 +255,7 @@ pub(crate) fn sys_mmap(ctx: &mut SyscallContext, msg: &IpcMsg) {
             // The 0x7ffe0000 mmap may have happened BEFORE ntdll base was known,
             // causing the patch to bail with "NO-BASE". Now we can compute the
             // correct dispatcher address.
-            if !unsafe { WINE_KUSD_DONE[ctx.pid] } {
+            if !unsafe { (*WINE_KUSD_DONE.get())[ctx.pid] } {
                 wine_patch_shared_user_data(ctx, 0x7ffe0000);
             }
         }
@@ -330,6 +327,16 @@ pub(crate) fn sys_mmap(ctx: &mut SyscallContext, msg: &IpcMsg) {
                     }
                 }
             }
+        }
+
+        // DRM dumb buffer mmap: delegate to drm module
+        if fdu < GRP_MAX_FDS && ctx.child_fds[fdu] == 30 {
+            let ret = crate::drm::drm_mmap(ctx, offset, aligned_len, base);
+            if ret >= 0 {
+                vma_insert(ctx.memg, base, base + aligned_len, prot_u8, flags_u8, VmaLabel::Anonymous);
+            }
+            reply_val(ctx.ep_cap, ret);
+            return;
         }
 
         if file_data == 0 && !is_vfs {
@@ -628,6 +635,215 @@ pub(crate) fn sys_mremap(ctx: &mut SyscallContext, msg: &IpcMsg) {
         }
     } else {
         reply_val(ctx.ep_cap, -ENOMEM);
+    }
+}
+
+/// SYS_MADVISE (28): memory advisory hints.
+///
+/// MADV_DONTNEED zeroes the pages (Linux semantics for private anonymous mappings).
+/// Other hints are accepted but treated as no-ops.
+pub(crate) fn sys_madvise(ctx: &mut SyscallContext, msg: &IpcMsg) {
+    let addr = msg.regs[0];
+    let len = msg.regs[1];
+    let advice = msg.regs[2] as u32;
+
+    // Validate alignment
+    if addr & 0xFFF != 0 {
+        reply_val(ctx.ep_cap, -EINVAL);
+        return;
+    }
+
+    match advice {
+        MADV_DONTNEED => {
+            // Zero the affected pages (Linux semantics: subsequent reads return zero).
+            let pages = (len + 0xFFF) / 0x1000;
+            for p in 0..pages {
+                ctx.guest_zero_page(addr + p * 0x1000);
+            }
+            reply_val(ctx.ep_cap, 0);
+        }
+        MADV_NORMAL | MADV_RANDOM | MADV_SEQUENTIAL | MADV_WILLNEED
+        | MADV_FREE | MADV_HUGEPAGE | MADV_NOHUGEPAGE => {
+            // Accept but ignore advisory hints.
+            reply_val(ctx.ep_cap, 0);
+        }
+        _ => reply_val(ctx.ep_cap, -EINVAL),
+    }
+}
+
+// ─── SysV Shared Memory ─────────────────────────────────────────
+
+const MAX_SHM_SEGMENTS: usize = 32;
+/// Maximum size per SHM segment (4 MiB).
+const SHM_MAX_SIZE: u64 = 4 * 1024 * 1024;
+
+/// A SysV shared memory segment.
+struct ShmSegment {
+    active: bool,
+    key: u32,
+    size: u64,
+    /// Physical frames backing this segment.
+    frames: [u64; 1024], // up to 4 MiB
+    frame_count: usize,
+    /// Virtual address where this is mapped (per-process, simplified).
+    mapped_addr: [u64; 16], // per-pid
+}
+
+static SHM_SEGMENTS: SyncUnsafeCell<[ShmSegment; MAX_SHM_SEGMENTS]> = {
+    const EMPTY: ShmSegment = ShmSegment {
+        active: false, key: 0, size: 0,
+        frames: [0; 1024], frame_count: 0,
+        mapped_addr: [0; 16],
+    };
+    SyncUnsafeCell::new([EMPTY; MAX_SHM_SEGMENTS])
+};
+
+/// SYS_SHMGET (29): create or get a SysV shared memory segment.
+pub(crate) fn sys_shmget(ctx: &mut SyscallContext, msg: &IpcMsg) {
+    let key = msg.regs[0] as u32;
+    let size = msg.regs[1];
+    let flags = msg.regs[2] as u32;
+
+    unsafe {
+        // Check if segment with this key already exists
+        if key != 0 {
+            for i in 0..MAX_SHM_SEGMENTS {
+                if (*SHM_SEGMENTS.get())[i].active && (*SHM_SEGMENTS.get())[i].key == key {
+                    if flags & IPC_CREAT != 0 && flags & IPC_EXCL != 0 {
+                        reply_val(ctx.ep_cap, -EEXIST);
+                        return;
+                    }
+                    reply_val(ctx.ep_cap, i as i64);
+                    return;
+                }
+            }
+        }
+
+        if size == 0 || size > SHM_MAX_SIZE {
+            reply_val(ctx.ep_cap, -EINVAL);
+            return;
+        }
+
+        // Allocate a new segment
+        let slot = match (0..MAX_SHM_SEGMENTS).find(|&i| !(*SHM_SEGMENTS.get())[i].active) {
+            Some(s) => s,
+            None => { reply_val(ctx.ep_cap, -ENOSPC); return; }
+        };
+
+        let pages = ((size + 0xFFF) & !0xFFF) / 0x1000;
+        let seg = &mut (*SHM_SEGMENTS.get())[slot];
+        seg.frame_count = 0;
+
+        for _ in 0..pages {
+            match sys::frame_alloc() {
+                Ok(f) => {
+                    seg.frames[seg.frame_count] = f;
+                    seg.frame_count += 1;
+                }
+                Err(_) => {
+                    // Free already-allocated frames
+                    for j in 0..seg.frame_count {
+                        let _ = sys::frame_free(seg.frames[j]);
+                    }
+                    seg.frame_count = 0;
+                    reply_val(ctx.ep_cap, -ENOMEM);
+                    return;
+                }
+            }
+        }
+
+        seg.active = true;
+        seg.key = key;
+        seg.size = size;
+        seg.mapped_addr = [0; 16];
+        reply_val(ctx.ep_cap, slot as i64);
+    }
+}
+
+/// SYS_SHMAT (30): attach a SysV SHM segment to the process address space.
+pub(crate) fn sys_shmat(ctx: &mut SyscallContext, msg: &IpcMsg) {
+    let shmid = msg.regs[0] as usize;
+    let shmaddr = msg.regs[1];
+    let _shmflg = msg.regs[2] as u32;
+
+    unsafe {
+        if shmid >= MAX_SHM_SEGMENTS || !(*SHM_SEGMENTS.get())[shmid].active {
+            reply_val(ctx.ep_cap, -EINVAL);
+            return;
+        }
+
+        let seg = &mut (*SHM_SEGMENTS.get())[shmid];
+
+        // Determine mapping address
+        let map_addr = if shmaddr != 0 {
+            shmaddr & !0xFFF
+        } else {
+            // Use mmap_next for automatic placement
+            let addr = *ctx.mmap_next;
+            *ctx.mmap_next += (seg.frame_count as u64) * 0x1000;
+            if ctx.pid > 0 && ctx.pid <= MAX_PROCS {
+                PROCESSES[ctx.pid - 1].mmap_next.store(*ctx.mmap_next, Ordering::Release);
+            }
+            addr
+        };
+
+        // Map the SHM frames into the process address space
+        for i in 0..seg.frame_count {
+            if ctx.guest_map(map_addr + (i as u64) * 0x1000, seg.frames[i], MAP_WRITABLE).is_err() {
+                reply_val(ctx.ep_cap, -ENOMEM);
+                return;
+            }
+        }
+
+        // Zero the pages on first attach
+        for i in 0..seg.frame_count {
+            ctx.guest_zero_page(map_addr + (i as u64) * 0x1000);
+        }
+
+        if ctx.pid < 16 {
+            seg.mapped_addr[ctx.pid] = map_addr;
+        }
+
+        reply_val(ctx.ep_cap, map_addr as i64);
+    }
+}
+
+/// SYS_SHMCTL (31): SysV SHM control operations.
+pub(crate) fn sys_shmctl(ctx: &mut SyscallContext, msg: &IpcMsg) {
+    let shmid = msg.regs[0] as usize;
+    let cmd = msg.regs[1] as u32;
+
+    unsafe {
+        if shmid >= MAX_SHM_SEGMENTS || !(*SHM_SEGMENTS.get())[shmid].active {
+            reply_val(ctx.ep_cap, -EINVAL);
+            return;
+        }
+
+        match cmd {
+            IPC_RMID => {
+                let seg = &mut (*SHM_SEGMENTS.get())[shmid];
+                // Free physical frames
+                for i in 0..seg.frame_count {
+                    let _ = sys::frame_free(seg.frames[i]);
+                }
+                seg.active = false;
+                seg.frame_count = 0;
+                reply_val(ctx.ep_cap, 0);
+            }
+            IPC_STAT => {
+                // Write a zeroed shmid_ds to userspace (88 bytes on x86_64)
+                let buf = msg.regs[2];
+                if buf != 0 {
+                    let seg = &(*SHM_SEGMENTS.get())[shmid];
+                    let mut ds = [0u8; 88];
+                    // shm_segsz at offset 48 (u64)
+                    ds[48..56].copy_from_slice(&seg.size.to_le_bytes());
+                    ctx.guest_write(buf, &ds);
+                }
+                reply_val(ctx.ep_cap, 0);
+            }
+            _ => reply_val(ctx.ep_cap, -EINVAL),
+        }
     }
 }
 

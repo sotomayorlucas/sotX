@@ -101,15 +101,13 @@ const CMD_TCP_STATUS: u64 = 11;
 const CMD_NET_MIRROR: u64 = 12;
 const CMD_UDP_HAS_DATA: u64 = 13;
 
-// IPC atomic command queue
+// IPC atomic state (ARG/TAG/RECV_TOTAL still used by process_ipc_cmd internals)
 static NET_MIRROR: AtomicU64 = AtomicU64::new(0);
-static IPC_CMD: AtomicU64 = AtomicU64::new(0);
 static IPC_RAW_TAG: AtomicU64 = AtomicU64::new(0);
 static IPC_ARG0: AtomicU64 = AtomicU64::new(0);
 static IPC_ARG1: AtomicU64 = AtomicU64::new(0);
 static IPC_ARG2: AtomicU64 = AtomicU64::new(0);
 static IPC_ARG3: AtomicU64 = AtomicU64::new(0);
-static IPC_RESULT: AtomicU64 = AtomicU64::new(0);
 /// Total bytes of last UDP recv (stored for multi-chunk reads).
 static IPC_UDP_RECV_TOTAL: AtomicU64 = AtomicU64::new(0);
 /// Total bytes of last TCP recv (stored for multi-chunk reads).
@@ -118,6 +116,90 @@ static mut IPC_DATA_BUF: [u8; 4096] = [0; 4096];
 static IPC_EP_CAP: AtomicU64 = AtomicU64::new(0);
 const IPC_HANDLER_STACK: u64 = 0xD01000;
 static NEXT_EPHEMERAL_PORT: AtomicU64 = AtomicU64::new(49152);
+
+// ============================================================================
+// KPN: Typed SPSC channels (replaces atomic command queue)
+// ============================================================================
+
+/// Command from IPC handler -> net poll task.
+#[derive(Clone, Copy)]
+struct NetCmd {
+    cmd: u64,
+    raw_tag: u64,
+    args: [u64; 4],
+    data: [u8; 64],
+    data_len: usize,
+}
+
+impl NetCmd {
+    const fn empty() -> Self {
+        Self { cmd: 0, raw_tag: 0, args: [0; 4], data: [0; 64], data_len: 0 }
+    }
+}
+
+/// Result from net poll task -> IPC handler.
+#[derive(Clone, Copy)]
+struct NetResult {
+    result: u64,
+    recv_total: u64,
+    data: [u8; 64],
+    data_len: usize,
+}
+
+impl NetResult {
+    const fn empty() -> Self {
+        Self { result: 0, recv_total: 0, data: [0; 64], data_len: 0 }
+    }
+}
+
+/// Single-slot SPSC channel (one command in flight at a time).
+struct SpscSlot<T: Copy> {
+    slot: core::cell::UnsafeCell<T>,
+    ready: AtomicU64,
+}
+
+unsafe impl<T: Copy> Sync for SpscSlot<T> {}
+
+impl<T: Copy> SpscSlot<T> {
+    const fn new(init: T) -> Self {
+        Self {
+            slot: core::cell::UnsafeCell::new(init),
+            ready: AtomicU64::new(0),
+        }
+    }
+
+    /// Producer: write item and signal ready.
+    fn send(&self, item: T) {
+        unsafe { *self.slot.get() = item; }
+        self.ready.store(1, Ordering::Release);
+    }
+
+    /// Consumer: try to read item (non-blocking).
+    fn try_recv(&self) -> Option<T> {
+        if self.ready.load(Ordering::Acquire) != 0 {
+            let item = unsafe { *self.slot.get() };
+            self.ready.store(0, Ordering::Release);
+            Some(item)
+        } else {
+            None
+        }
+    }
+
+    /// Consumer: block until item available.
+    fn recv(&self) -> T {
+        loop {
+            if let Some(item) = self.try_recv() {
+                return item;
+            }
+            sys::yield_now();
+        }
+    }
+}
+
+/// Command channel: IPC handler -> poll task.
+static CMD_CHAN: SpscSlot<NetCmd> = SpscSlot::new(NetCmd::empty());
+/// Result channel: poll task -> IPC handler.
+static RESULT_CHAN: SpscSlot<NetResult> = SpscSlot::new(NetResult::empty());
 
 // Socket handle tables
 const MAX_TCP: usize = 16;
@@ -800,9 +882,21 @@ async fn net_poll_task() {
             }
         }
 
-        // Process IPC commands (non-blocking)
-        let cmd = IPC_CMD.load(Ordering::Acquire);
-        if cmd != 0 {
+        // Process IPC commands via SPSC channel (non-blocking)
+        if let Some(nc) = CMD_CHAN.try_recv() {
+            // Restore atomics for process_ipc_cmd compatibility
+            IPC_ARG0.store(nc.args[0], Ordering::Release);
+            IPC_ARG1.store(nc.args[1], Ordering::Release);
+            IPC_ARG2.store(nc.args[2], Ordering::Release);
+            IPC_ARG3.store(nc.args[3], Ordering::Release);
+            IPC_RAW_TAG.store(nc.raw_tag, Ordering::Release);
+            if nc.data_len > 0 {
+                unsafe {
+                    let dst = core::ptr::addr_of_mut!(IPC_DATA_BUF) as *mut u8;
+                    core::ptr::copy_nonoverlapping(nc.data.as_ptr(), dst, nc.data_len);
+                }
+            }
+
             let NetState {
                 ref mut device,
                 ref mut iface,
@@ -810,15 +904,34 @@ async fn net_poll_task() {
                 ..
             } = *s;
             let result = process_ipc_cmd(
-                cmd,
+                nc.cmd,
                 iface,
                 device,
                 sockets,
                 dns_server,
                 icmp_handle,
             );
-            IPC_RESULT.store(result, Ordering::Release);
-            IPC_CMD.store(0, Ordering::Release);
+
+            // Build result and send back via channel
+            let mut nr = NetResult::empty();
+            nr.result = result;
+            // Carry recv totals for multi-chunk reads
+            if nc.cmd == CMD_TCP_RECV {
+                nr.recv_total = IPC_TCP_RECV_TOTAL.load(Ordering::Acquire);
+            } else if nc.cmd == CMD_UDP_RECV {
+                nr.recv_total = IPC_UDP_RECV_TOTAL.load(Ordering::Acquire);
+            }
+            // Copy IPC_DATA_BUF into result for recv commands
+            if (nc.cmd == CMD_TCP_RECV || nc.cmd == CMD_UDP_RECV) && result > 0 && result != 0xFFFE {
+                let offset = nc.args[2] as usize;
+                let n = (result as usize).min(64);
+                unsafe {
+                    let src = (core::ptr::addr_of!(IPC_DATA_BUF) as *const u8).add(offset);
+                    nr.data[..n].copy_from_slice(core::slice::from_raw_parts(src, n));
+                }
+                nr.data_len = n;
+            }
+            RESULT_CHAN.send(nr);
         }
 
         async_yield().await;
@@ -1367,7 +1480,7 @@ fn process_ipc_cmd(
 }
 
 // =============================================================================
-// IPC handler thread — blocks on recv, posts to atomic queue
+// IPC handler thread — blocks on recv, sends via SPSC channel
 // =============================================================================
 
 #[unsafe(no_mangle)]
@@ -1386,77 +1499,56 @@ pub extern "C" fn ipc_handler_thread() -> ! {
         let arg1 = msg.regs[1];
         let arg2 = msg.regs[2];
 
-        // Copy inline data from IPC regs to shared buffer
+        // Build typed command with inline data
+        let mut nc = NetCmd::empty();
+        nc.cmd = cmd;
+        nc.raw_tag = msg.tag;
+        nc.args = [arg0, arg1, arg2, msg.regs[3]];
+
+        // Copy inline data from IPC regs into NetCmd.data
         if cmd == CMD_DNS_QUERY {
             let avail = (arg1 as usize).min(48);
             unsafe {
                 let src = &msg.regs[2] as *const u64 as *const u8;
-                core::ptr::copy_nonoverlapping(
-                    src,
-                    core::ptr::addr_of_mut!(IPC_DATA_BUF) as *mut u8,
-                    avail,
-                );
+                core::ptr::copy_nonoverlapping(src, nc.data.as_mut_ptr(), avail);
             }
+            nc.data_len = avail;
         } else if cmd == CMD_TCP_SEND {
             let avail = (arg2 as usize).min(40);
             unsafe {
                 let src = &msg.regs[3] as *const u64 as *const u8;
-                core::ptr::copy_nonoverlapping(
-                    src,
-                    core::ptr::addr_of_mut!(IPC_DATA_BUF) as *mut u8,
-                    avail,
-                );
+                core::ptr::copy_nonoverlapping(src, nc.data.as_mut_ptr(), avail);
             }
+            nc.data_len = avail;
         } else if cmd == CMD_UDP_SENDTO {
-            // Packed: tag(32-bit) = CMD | (data_len<<16)
-            // regs[0] = dst_ip|dst_port|src_port, regs[1..7] = data (56 bytes max)
             let avail = (((msg.tag >> 16) & 0xFFFF) as usize).min(56);
             unsafe {
                 let src = &msg.regs[1] as *const u64 as *const u8;
-                core::ptr::copy_nonoverlapping(
-                    src,
-                    core::ptr::addr_of_mut!(IPC_DATA_BUF) as *mut u8,
-                    avail,
-                );
+                core::ptr::copy_nonoverlapping(src, nc.data.as_mut_ptr(), avail);
             }
+            nc.data_len = avail;
         }
 
-        // Post command
-        IPC_ARG0.store(arg0, Ordering::Release);
-        IPC_ARG1.store(arg1, Ordering::Release);
-        IPC_ARG2.store(arg2, Ordering::Release);
-        IPC_ARG3.store(msg.regs[3], Ordering::Release);
-        IPC_RAW_TAG.store(msg.tag, Ordering::Release);
-        IPC_RESULT.store(0, Ordering::Release);
-        IPC_CMD.store(cmd, Ordering::Release);
+        // Send command via SPSC channel and wait for result
+        CMD_CHAN.send(nc);
+        let nr = RESULT_CHAN.recv();
 
-        // Wait for main loop to process
-        loop {
-            if IPC_CMD.load(Ordering::Acquire) == 0 {
-                break;
-            }
-            sys::yield_now();
-        }
-
-        let result = IPC_RESULT.load(Ordering::Acquire);
+        let result = nr.result;
 
         // Build reply
         let mut reply = IpcMsg::empty();
         reply.regs[0] = result;
 
-        // TCP_RECV / UDP_RECV: copy data into reply regs
+        // TCP_RECV / UDP_RECV: copy data from NetResult into reply regs
         if (cmd == CMD_TCP_RECV || cmd == CMD_UDP_RECV) && result > 0 {
-            // Pass through EOF sentinel WITHOUT clamping or copying data
             if result == 0xFFFE {
                 reply.tag = 0xFFFE;
             } else {
-                let offset = if cmd == CMD_UDP_RECV || cmd == CMD_TCP_RECV { arg2 as usize } else { 0 };
-                let n = (result as usize).min(64);
+                let n = nr.data_len.min(64);
                 reply.tag = n as u64;
                 unsafe {
-                    let src = (core::ptr::addr_of!(IPC_DATA_BUF) as *const u8).add(offset);
                     let dst = &mut reply.regs[0] as *mut u64 as *mut u8;
-                    core::ptr::copy_nonoverlapping(src, dst, n);
+                    core::ptr::copy_nonoverlapping(nr.data.as_ptr(), dst, n);
                 }
             }
         }

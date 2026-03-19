@@ -15,6 +15,7 @@ USER_XHCI := "services/xhci/target/x86_64-unknown-none/debug/sotos-xhci-svc"
 USER_VMM := "services/vmm/target/x86_64-unknown-none/debug/sotos-vmm"
 USER_HELLO := "services/hello/target/x86_64-unknown-none/debug/sotos-hello"
 USER_HELLO_LINUX := "services/hello-linux/target/x86_64-unknown-none/debug/sotos-hello-linux"
+USER_DRM_TEST := "services/drm-test/target/x86_64-unknown-none/debug/sotos-drm-test"
 USER_HELLO_MUSL := "target/hello-musl-raw"
 USER_HELLO_DYNAMIC := "hello_dynamic"
 USER_NET_TEST := "services/net-test/target/x86_64-unknown-none/debug/sotos-net-test"
@@ -37,6 +38,7 @@ USER_HELLO_GNU := "hello_gnu"
 LIBGCC_S := "libgcc_s.so.1"
 LIBSTDCPP := "libstdc++.so.6"
 LIBZ := "libz.so.1"
+USER_COMPOSITOR := "services/compositor/target/x86_64-unknown-none/debug/sotos-compositor"
 USER_FASTFETCH := "fastfetch"
 USER_APK := "apk"
 USER_HTOP := "htop"
@@ -81,6 +83,14 @@ build-xhci:
 build-hello-linux:
     cd services/hello-linux && CARGO_ENCODED_RUSTFLAGS="$(printf '%s\x1f%s\x1f%s' '-Clink-arg=-Tlinker.ld' '-Crelocation-model=static' '-Zstack-protector=strong')" cargo build
 
+# Build drm-test (DRM dumb buffer pipeline test)
+build-drm-test:
+    cd services/drm-test && CARGO_ENCODED_RUSTFLAGS="$(printf '%s\x1f%s\x1f%s' '-Clink-arg=-Tlinker.ld' '-Crelocation-model=static' '-Zstack-protector=strong')" cargo build
+
+# Build Wayland compositor (separate process)
+build-compositor:
+    cd services/compositor && CARGO_ENCODED_RUSTFLAGS="$(printf '%s\x1f%s\x1f%s' '-Clink-arg=-Tlinker.ld' '-Crelocation-model=static' '-Zstack-protector=strong')" cargo build
+
 # Build net-test (network socket proxy test for LUCAS)
 build-net-test:
     cd services/net-test && CARGO_ENCODED_RUSTFLAGS="$(printf '%s\x1f%s\x1f%s' '-Clink-arg=-Tlinker.ld' '-Crelocation-model=static' '-Zstack-protector=strong')" cargo build
@@ -102,12 +112,12 @@ release:
     cargo build --package sotos-kernel --release
 
 # Create CPIO initrd from userspace binaries
-initrd: build-user build-shell build-kbd build-net build-nvme build-xhci build-vmm build-hello build-hello-linux build-net-test build-testlib
-    python scripts/mkinitrd.py --output {{INITRD}} --file init={{USER_INIT}} --file shell={{USER_SHELL}} --file kbd={{USER_KBD}} --file net={{USER_NET}} --file nvme={{USER_NVME}} --file xhci={{USER_XHCI}} --file vmm={{USER_VMM}} --file hello={{USER_HELLO}} --file hello-linux={{USER_HELLO_LINUX}} --file hello-musl={{USER_HELLO_MUSL}} --file hello_dynamic={{USER_HELLO_DYNAMIC}} --file ld-musl-x86_64.so.1={{MUSL_LD}} --file nano={{USER_NANO}} --file libncursesw.so.6={{LIBNCURSESW}} --file xterm={{TERMINFO_XTERM}} --file libtest.so={{TESTLIB}} --file net-test={{USER_NET_TEST}} --file busybox={{USER_BUSYBOX}} --file links={{USER_LINKS}} --file hello_glibc={{USER_HELLO_GLIBC}} --file ld-linux-x86-64.so.2={{GLIBC_LD}} --file libc.so.6={{GLIBC_LIBC}} --file toybox={{USER_TOYBOX}} --file jq={{USER_JQ}} --file bash-static={{USER_BASH}} --file grep_alpine={{USER_GREP}} --file sed_alpine={{USER_SED}} --file hello_gnu={{USER_HELLO_GNU}} --file libgcc_s.so.1={{LIBGCC_S}} --file libstdc++.so.6={{LIBSTDCPP}} --file libz.so.1={{LIBZ}} --file fastfetch={{USER_FASTFETCH}} --file apk={{USER_APK}} --file htop={{USER_HTOP}}
+initrd: build-user build-shell build-kbd build-net build-nvme build-xhci build-vmm build-hello build-hello-linux build-drm-test build-net-test build-testlib build-compositor
+    python scripts/mkinitrd.py --output {{INITRD}} --file init={{USER_INIT}} --file shell={{USER_SHELL}} --file kbd={{USER_KBD}} --file net={{USER_NET}} --file nvme={{USER_NVME}} --file xhci={{USER_XHCI}} --file vmm={{USER_VMM}} --file compositor={{USER_COMPOSITOR}} --file hello={{USER_HELLO}} --file hello-linux={{USER_HELLO_LINUX}} --file drm-test={{USER_DRM_TEST}} --file hello-musl={{USER_HELLO_MUSL}} --file hello_dynamic={{USER_HELLO_DYNAMIC}} --file ld-musl-x86_64.so.1={{MUSL_LD}} --file nano={{USER_NANO}} --file libncursesw.so.6={{LIBNCURSESW}} --file xterm={{TERMINFO_XTERM}} --file libtest.so={{TESTLIB}} --file net-test={{USER_NET_TEST}} --file busybox={{USER_BUSYBOX}} --file links={{USER_LINKS}} --file hello_glibc={{USER_HELLO_GLIBC}} --file ld-linux-x86-64.so.2={{GLIBC_LD}} --file libc.so.6={{GLIBC_LIBC}} --file toybox={{USER_TOYBOX}} --file jq={{USER_JQ}} --file bash-static={{USER_BASH}} --file grep_alpine={{USER_GREP}} --file sed_alpine={{USER_SED}} --file hello_gnu={{USER_HELLO_GNU}} --file libgcc_s.so.1={{LIBGCC_S}} --file libstdc++.so.6={{LIBSTDCPP}} --file libz.so.1={{LIBZ}} --file fastfetch={{USER_FASTFETCH}} --file apk={{USER_APK}} --file htop={{USER_HTOP}} --file weston=weston --file libweston-14.so.0=libweston-14.so.0 --file libexec_weston.so.0=libexec_weston.so.0 --file libdrm.so.2=libdrm.so.2 --file libpixman-1.so.0=libpixman-1.so.0 --file libwayland-server.so.0=libwayland-server.so.0 --file libwayland-client.so.0=libwayland-client.so.0 --file libxkbcommon.so.0=libxkbcommon.so.0 --file libinput.so.10=libinput.so.10 --file libevdev.so.2=libevdev.so.2 --file libgbm.so.1=libgbm.so.1 --file libseat.so.1=libseat.so.1 --file libudev.so.1=libudev.so.1 --file libva.so.2=libva.so.2 --file libva-drm.so.2=libva-drm.so.2 --file libdisplay-info.so.2=libdisplay-info.so.2 --file libglapi.so.0=libglapi.so.0 --file drm-backend.so=weston-drm-backend.so --file libgallium-24.2.8.so=libgallium-24.2.8.so --file libexpat.so.1=libexpat.so.1 --file libxcb-randr.so.0=libxcb-randr.so.0 --file libxcb.so.0=libxcb.so.0 --file libffi.so.8=libffi.so.8 --file libmtdev.so.1=libmtdev.so.1 --file libelogind.so.0=libelogind.so.0 --file libelogind-shared-252.so=libelogind-shared-252.so --file libcap.so.2=libcap.so.2 --file libLLVM.so.19.1=libLLVM.so.19.1 --file libzstd.so.1=libzstd.so.1 --file libxml2.so.2=libxml2.so.2 --file libelf.so.1=libelf.so.1 --file libdrm_amdgpu.so.1=libdrm_amdgpu.so.1 --file libdrm_intel.so.1=libdrm_intel.so.1 --file libdrm_radeon.so.1=libdrm_radeon.so.1 --file libzstd.so.1=libzstd.so.1 --file libxml2.so.2=libxml2.so.2 --file libelf.so.1=libelf.so.1 --file libxcb.so.1=libxcb.so.1 --file libxcb-sync.so.1=libxcb-sync.so.1 --file libxcb-randr.so.1=libxcb-randr.so.1 --file libxcb-dri2.so.0=libxcb-dri2.so.0 --file libxcb-dri3.so.0=libxcb-dri3.so.0 --file libxcb-present.so.0=libxcb-present.so.0 --file libxcb-shm.so.0=libxcb-shm.so.0 --file libxcb-xfixes.so.0=libxcb-xfixes.so.0 --file libxcb-render.so.0=libxcb-render.so.0 --file libxcb-glx.so.0=libxcb-glx.so.0 --file libX11-xcb.so.1=libX11-xcb.so.1 --file libxshmfence.so.1=libxshmfence.so.1 --file libX11.so.6=libX11.so.6 --file libXau.so.6=libXau.so.6 --file libXdmcp.so.6=libXdmcp.so.6 --file libpciaccess.so.0=libpciaccess.so.0 --file libbsd.so.0=libbsd.so.0 --file libmd.so.0=libmd.so.0 --file libXext.so.6=libXext.so.6 --file libXrender.so.1=libXrender.so.1 --file libpsx.so.2=libpsx.so.2 --file libdrm_nouveau.so.2=libdrm_nouveau.so.2 --file liblzma.so.5=liblzma.so.5 --file xkb_rules_evdev=xkb_rules_evdev --file xkb_keycodes_evdev=xkb_keycodes_evdev --file xkb_types_complete=xkb_types_complete --file xkb_types_basic=xkb_types_basic --file xkb_compat_complete=xkb_compat_complete --file xkb_compat_basic=xkb_compat_basic --file xkb_symbols_us=xkb_symbols_us --file xkb_symbols_pc=xkb_symbols_pc --file xkb_symbols_latin=xkb_symbols_latin --file xkb_symbols_inet=xkb_symbols_inet
 
 # Create the bootable disk image (BIOS + Limine)
 image: build initrd
-    python scripts/mkimage.py --kernel {{KERNEL}} --initrd {{INITRD}} --output {{IMAGE}} --size 128
+    python scripts/mkimage.py --kernel {{KERNEL}} --initrd {{INITRD}} --output {{IMAGE}} --size 512
 
 # Build and run in QEMU (serial output to terminal, single CPU)
 run: image
@@ -116,7 +126,7 @@ run: image
         -serial stdio \
         -display none \
         -no-reboot \
-        -m 1024M
+        -m 2048M
 
 # Run with SMP (4 CPUs — may hang due to scheduler race, use for testing only)
 run-smp: image
@@ -125,7 +135,7 @@ run-smp: image
         -serial stdio \
         -display none \
         -no-reboot \
-        -m 1024M \
+        -m 2048M \
         -smp 4
 
 # Run with QEMU display window (for framebuffer/keyboard testing)
@@ -136,7 +146,20 @@ run-gui: image create-test-disk
         -device virtio-blk-pci,drive=disk0,disable-modern=on \
         -serial stdio \
         -no-reboot \
-        -m 1024M \
+        -m 2048M \
+        -display sdl
+
+# Run with Wayland compositor (graphical display + virtio-blk + virtio-net)
+run-wayland: image create-test-disk
+    "{{QEMU}}" \
+        -drive format=raw,file={{IMAGE}} \
+        -drive if=none,format=raw,file=target/disk.img,id=disk0 \
+        -device virtio-blk-pci,drive=disk0,disable-modern=on \
+        -netdev user,id=net0,dns=8.8.8.8 \
+        -device virtio-net-pci,netdev=net0,disable-modern=on \
+        -serial stdio \
+        -no-reboot \
+        -m 2048M \
         -display sdl
 
 # Run with GDB server for debugging (connect with gdb -ex "target remote :1234")
@@ -146,7 +169,7 @@ debug: image
         -serial stdio \
         -display none \
         -no-reboot \
-        -m 1024M \
+        -m 2048M \
         -s -S
 
 # Create a 256 MiB ObjectStore v5 disk (or inject rootfs if present)
@@ -171,7 +194,7 @@ run-https: image create-test-disk
         -serial stdio \
         -display none \
         -no-reboot \
-        -m 1024M; \
+        -m 2048M; \
     kill %1 2>/dev/null || true
 
 # Run with virtio-net (and virtio-blk)
@@ -184,7 +207,7 @@ run-net: image create-test-disk
         -device virtio-net-pci,netdev=net0,disable-modern=on \
         -serial stdio \
         -no-reboot \
-        -m 1024M
+        -m 2048M
 
 # Run with virtio-net + Wireshark packet capture (pcap)
 run-net-pcap: image create-test-disk
@@ -197,7 +220,7 @@ run-net-pcap: image create-test-disk
         -object filter-dump,id=dump0,netdev=net0,file=target/net.pcap \
         -serial stdio \
         -no-reboot \
-        -m 1024M
+        -m 2048M
 
 # Run with virtio-blk test disk
 run-blk: image create-test-disk
@@ -207,7 +230,7 @@ run-blk: image create-test-disk
         -device virtio-blk-pci,drive=disk0,disable-modern=on \
         -serial stdio \
         -no-reboot \
-        -m 1024M
+        -m 2048M
 
 # Create a 64 MiB NVMe test disk
 create-nvme-disk:
@@ -223,7 +246,7 @@ run-nvme: image create-test-disk create-nvme-disk
         -device nvme,serial=sotOS-NVMe,drive=nvme0 \
         -serial stdio \
         -no-reboot \
-        -m 1024M
+        -m 2048M
 
 # Run with xHCI USB controller (and virtio-blk for ObjectStore)
 run-xhci: image create-test-disk
@@ -235,7 +258,7 @@ run-xhci: image create-test-disk
         -device usb-kbd,bus=xhci.0 \
         -serial stdio \
         -no-reboot \
-        -m 1024M
+        -m 2048M
 
 # Run with ALL devices (virtio-blk, virtio-net, NVMe, xHCI USB kbd+mouse, AC97 audio, AHCI SATA, display)
 run-full: image create-test-disk create-nvme-disk
@@ -254,7 +277,7 @@ run-full: image create-test-disk create-nvme-disk
         -device ahci,id=ahci0 \
         -serial stdio \
         -no-reboot \
-        -m 1024M
+        -m 2048M
 
 # Automated validation: build everything, boot with 90s timeout, verify no panics
 run-all: image create-test-disk
@@ -268,7 +291,7 @@ run-all: image create-test-disk
         -serial stdio \
         -display none \
         -no-reboot \
-        -m 1024M > target/test-output.log 2>&1; true
+        -m 2048M > target/test-output.log 2>&1; true
     @if grep -qiE "STACK.SMASH|PANIC" target/test-output.log; then \
         echo "FAIL: found panic/crash in output:"; \
         grep -iE "STACK.SMASH|PANIC" target/test-output.log; \
@@ -319,7 +342,7 @@ run-linux: image build-sysroot
         -device virtio-net-pci,netdev=net0,disable-modern=on \
         -serial stdio \
         -no-reboot \
-        -m 1024M
+        -m 2048M
 
 # Clean build artifacts
 clean:

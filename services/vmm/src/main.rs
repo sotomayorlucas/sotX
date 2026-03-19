@@ -18,6 +18,38 @@ const CAP_INIT_AS: usize = 1; // AddrSpace cap for init's CR3
 /// WRITABLE flag for map_into syscall (bit 1).
 const MAP_WRITABLE: u64 = 2;
 
+// ── ρ_fiss frame pool (pre-allocated frames for fast CoW path) ──────
+const POOL_SIZE: usize = 16;
+static mut FRAME_POOL: [u64; POOL_SIZE] = [0; POOL_SIZE];
+static mut FRAME_POOL_COUNT: usize = 0;
+
+/// Take a frame from the pool, falling back to sys::frame_alloc().
+fn pool_take() -> Result<u64, ()> {
+    unsafe {
+        if FRAME_POOL_COUNT > 0 {
+            FRAME_POOL_COUNT -= 1;
+            Ok(FRAME_POOL[FRAME_POOL_COUNT])
+        } else {
+            sys::frame_alloc().map_err(|_| ())
+        }
+    }
+}
+
+/// Refill the pool up to POOL_SIZE before blocking on notify_wait.
+fn pool_refill() {
+    unsafe {
+        while FRAME_POOL_COUNT < POOL_SIZE {
+            match sys::frame_alloc() {
+                Ok(f) => {
+                    FRAME_POOL[FRAME_POOL_COUNT] = f;
+                    FRAME_POOL_COUNT += 1;
+                }
+                Err(_) => break,
+            }
+        }
+    }
+}
+
 fn print(s: &[u8]) {
     for &b in s { sys::debug_print(b); }
 }
@@ -69,6 +101,7 @@ pub extern "C" fn _start() -> ! {
 
     // Fault handling loop.
     loop {
+        pool_refill(); // ρ_fiss: pre-allocate frames before blocking
         sys::notify_wait(notify_cap);
         loop {
             match sys::fault_recv() {
@@ -148,8 +181,8 @@ pub extern "C" fn _start() -> ! {
                     // Check for CoW fault: write (bit 1) to present (bit 0) page.
                     if code & 0x03 == 0x03 {
                         // CoW fault: page is present but read-only due to clone_cow.
-                        // 1. Allocate a new frame
-                        let new_frame = match sys::frame_alloc() {
+                        // 1. Allocate a new frame (from ρ_fiss pool or fallback)
+                        let new_frame = match pool_take() {
                             Ok(f) => f,
                             Err(_) => {
                                 print(b"VMM: OOM(CoW)\n");
@@ -184,6 +217,26 @@ pub extern "C" fn _start() -> ! {
                             print_hex16(fault.tid as u64);
                             print(b"\n");
                         }
+
+                        // 6. Speculative adjacent CoW resolution (ρ_fiss)
+                        //    Pre-resolve neighboring pages that are likely also CoW,
+                        //    avoiding future fault round-trips for sequential access.
+                        for &adj in &[vaddr_raw.wrapping_add(0x1000), vaddr_raw.wrapping_sub(0x1000)] {
+                            if adj == 0 || adj >= 0xFFFF_8000_0000_0000 { continue; }
+                            match sys::pte_read(target_as_cap, adj) {
+                                Ok((_, flags)) if flags & 0x03 == 0x01 => {
+                                    // Present but not writable — likely CoW
+                                    if let Ok(nf) = pool_take() {
+                                        if sys::frame_copy(nf, target_as_cap, adj).is_ok()
+                                            && sys::unmap_from(target_as_cap, adj).is_ok() {
+                                            let _ = sys::map_into(target_as_cap, adj, nf, MAP_WRITABLE);
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+
                         continue;
                     }
 
@@ -201,8 +254,8 @@ pub extern "C" fn _start() -> ! {
                         continue;
                     }
 
-                    // Demand paging: page not present — allocate new frame.
-                    let frame = match sys::frame_alloc() {
+                    // Demand paging: page not present — allocate new frame (from pool).
+                    let frame = match pool_take() {
                         Ok(f) => f,
                         Err(_) => {
                             print(b"VMM: OOM t=");

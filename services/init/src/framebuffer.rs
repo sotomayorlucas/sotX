@@ -1,5 +1,5 @@
 use sotos_common::sys;
-use sotos_common::{KB_RING_ADDR};
+use sotos_common::{KB_RING_ADDR, SyncUnsafeCell};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
@@ -7,13 +7,13 @@ use core::sync::atomic::{AtomicU64, Ordering};
 // ---------------------------------------------------------------------------
 
 /// Whether the framebuffer is active (set in fb_init).
-static mut FB_ACTIVE: bool = false;
+static FB_ACTIVE: SyncUnsafeCell<bool> = SyncUnsafeCell::new(false);
 
 pub(crate) fn print(s: &[u8]) {
     for &b in s {
         sys::debug_print(b);
     }
-    if unsafe { FB_ACTIVE } {
+    if unsafe { *FB_ACTIVE.get() } {
         for &b in s {
             unsafe { fb_putchar(b); }
         }
@@ -23,7 +23,7 @@ pub(crate) fn print(s: &[u8]) {
 pub(crate) fn print_u64(mut n: u64) {
     if n == 0 {
         sys::debug_print(b'0');
-        if unsafe { FB_ACTIVE } { unsafe { fb_putchar(b'0'); } }
+        if unsafe { *FB_ACTIVE.get() } { unsafe { fb_putchar(b'0'); } }
         return;
     }
     let mut buf = [0u8; 20];
@@ -36,14 +36,14 @@ pub(crate) fn print_u64(mut n: u64) {
     while i > 0 {
         i -= 1;
         sys::debug_print(buf[i]);
-        if unsafe { FB_ACTIVE } { unsafe { fb_putchar(buf[i]); } }
+        if unsafe { *FB_ACTIVE.get() } { unsafe { fb_putchar(buf[i]); } }
     }
 }
 
 pub(crate) fn print_hex64(mut n: u64) {
     if n == 0 {
         sys::debug_print(b'0');
-        if unsafe { FB_ACTIVE } { unsafe { fb_putchar(b'0'); } }
+        if unsafe { *FB_ACTIVE.get() } { unsafe { fb_putchar(b'0'); } }
         return;
     }
     let mut buf = [0u8; 16];
@@ -57,7 +57,7 @@ pub(crate) fn print_hex64(mut n: u64) {
     while i > 0 {
         i -= 1;
         sys::debug_print(buf[i]);
-        if unsafe { FB_ACTIVE } { unsafe { fb_putchar(buf[i]); } }
+        if unsafe { *FB_ACTIVE.get() } { unsafe { fb_putchar(buf[i]); } }
     }
 }
 
@@ -67,7 +67,7 @@ pub(crate) fn print_hex8(val: u8) {
     let lo = hex[(val & 0xF) as usize];
     sys::debug_print(hi);
     sys::debug_print(lo);
-    if unsafe { FB_ACTIVE } {
+    if unsafe { *FB_ACTIVE.get() } {
         unsafe { fb_putchar(hi); fb_putchar(lo); }
     }
 }
@@ -283,18 +283,18 @@ static VGA_FONT: [u8; 4096] = [
 ];
 
 /// Console state.
-static mut FB_PTR: u64 = 0;
-static mut FB_PITCH: u32 = 0;
-static mut FB_WIDTH: u32 = 0;
-static mut FB_HEIGHT: u32 = 0;
-static mut CON_COLS: u32 = 0;
-static mut CON_ROWS: u32 = 0;
-static mut CON_CUR_COL: u32 = 0;
-static mut CON_CUR_ROW: u32 = 0;
+static FB_PTR: SyncUnsafeCell<u64> = SyncUnsafeCell::new(0);
+static FB_PITCH: SyncUnsafeCell<u32> = SyncUnsafeCell::new(0);
+static FB_WIDTH: SyncUnsafeCell<u32> = SyncUnsafeCell::new(0);
+static FB_HEIGHT: SyncUnsafeCell<u32> = SyncUnsafeCell::new(0);
+static CON_COLS: SyncUnsafeCell<u32> = SyncUnsafeCell::new(0);
+static CON_ROWS: SyncUnsafeCell<u32> = SyncUnsafeCell::new(0);
+static CON_CUR_COL: SyncUnsafeCell<u32> = SyncUnsafeCell::new(0);
+static CON_CUR_ROW: SyncUnsafeCell<u32> = SyncUnsafeCell::new(0);
 
 /// Text area origin (full-screen text console).
-static mut TEXT_X: u32 = 0;
-static mut TEXT_Y: u32 = 0;
+static TEXT_X: SyncUnsafeCell<u32> = SyncUnsafeCell::new(0);
+static TEXT_Y: SyncUnsafeCell<u32> = SyncUnsafeCell::new(0);
 
 /// Terminal text color.
 const COL_TEXT: u32 = 0xFFA9B1D6;
@@ -302,27 +302,27 @@ const COL_TEXT: u32 = 0xFFA9B1D6;
 const COL_BG: u32 = 0xFF1A1B26;
 
 /// Keyboard state.
-static mut KB_SHIFT: bool = false;
-static mut KB_CTRL: bool = false;
+static KB_SHIFT: SyncUnsafeCell<bool> = SyncUnsafeCell::new(false);
+static KB_CTRL: SyncUnsafeCell<bool> = SyncUnsafeCell::new(false);
 
 /// Initialize framebuffer as a full-screen text console.
 pub(crate) unsafe fn fb_init(boot_info: &sotos_common::BootInfo) {
     if boot_info.fb_addr == 0 { return; }
-    FB_PTR = boot_info.fb_addr;
-    FB_PITCH = boot_info.fb_pitch;
-    FB_WIDTH = boot_info.fb_width;
-    FB_HEIGHT = boot_info.fb_height;
-    CON_COLS = FB_WIDTH / 8;
-    CON_ROWS = FB_HEIGHT / 16;
-    TEXT_X = 0;
-    TEXT_Y = 0;
-    CON_CUR_COL = 0;
-    CON_CUR_ROW = 0;
-    FB_ACTIVE = true;
+    *FB_PTR.get() = boot_info.fb_addr;
+    *FB_PITCH.get() = boot_info.fb_pitch;
+    *FB_WIDTH.get() = boot_info.fb_width;
+    *FB_HEIGHT.get() = boot_info.fb_height;
+    *CON_COLS.get() = *FB_WIDTH.get() / 8;
+    *CON_ROWS.get() = *FB_HEIGHT.get() / 16;
+    *TEXT_X.get() = 0;
+    *TEXT_Y.get() = 0;
+    *CON_CUR_COL.get() = 0;
+    *CON_CUR_ROW.get() = 0;
+    *FB_ACTIVE.get() = true;
 
     // Clear screen to background color
-    let fb = FB_PTR as *mut u32;
-    let total = (FB_PITCH / 4 * FB_HEIGHT) as usize;
+    let fb = *FB_PTR.get() as *mut u32;
+    let total = (*FB_PITCH.get() / 4 * *FB_HEIGHT.get()) as usize;
     for i in 0..total {
         *fb.add(i) = COL_BG;
     }
@@ -331,37 +331,37 @@ pub(crate) unsafe fn fb_init(boot_info: &sotos_common::BootInfo) {
 /// Initialize GUI desktop (Tokyo Night theme) on top of framebuffer.
 /// Positions the text console within the terminal window client area.
 pub(crate) unsafe fn fb_init_gui() {
-    if !FB_ACTIVE || FB_WIDTH < 640 || FB_HEIGHT < 480 { return; }
+    if !*FB_ACTIVE.get() || *FB_WIDTH.get() < 640 || *FB_HEIGHT.get() < 480 { return; }
     // Create a FramebufferDisplay over the raw framebuffer
     let mut display = sotos_gui::FramebufferDisplay::new(
-        FB_PTR as *mut u32,
-        FB_WIDTH,
-        FB_HEIGHT,
-        FB_PITCH / 4, // stride in pixels, not bytes
+        *FB_PTR.get() as *mut u32,
+        *FB_WIDTH.get(),
+        *FB_HEIGHT.get(),
+        *FB_PITCH.get() / 4, // stride in pixels, not bytes
     );
     // Draw the modern Tokyo Night desktop
     let layout = sotos_gui::draw_modern_desktop(&mut display, b"LUCAS Terminal");
     // Position text console within the terminal window's client area
-    TEXT_X = layout.text_x;
-    TEXT_Y = layout.text_y;
-    CON_COLS = layout.text_cols;
-    CON_ROWS = layout.text_rows;
-    CON_CUR_COL = 0;
-    CON_CUR_ROW = 0;
+    *TEXT_X.get() = layout.text_x;
+    *TEXT_Y.get() = layout.text_y;
+    *CON_COLS.get() = layout.text_cols;
+    *CON_ROWS.get() = layout.text_rows;
+    *CON_CUR_COL.get() = 0;
+    *CON_CUR_ROW.get() = 0;
 }
 
 /// Draw an 8x16 glyph at pixel position.
 unsafe fn fb_draw_glyph_at(px: u32, py: u32, ch: u8, fg: u32, bg: u32) {
     let glyph = &VGA_FONT[(ch as usize) * 16..(ch as usize) * 16 + 16];
-    let fb = FB_PTR as *mut u32;
-    let stride = FB_PITCH / 4;
+    let fb = *FB_PTR.get() as *mut u32;
+    let stride = *FB_PITCH.get() / 4;
     for gy in 0..16u32 {
         let row_byte = glyph[gy as usize];
         let y = py + gy;
-        if y >= FB_HEIGHT { break; }
+        if y >= *FB_HEIGHT.get() { break; }
         for gx in 0..8u32 {
             let x = px + gx;
-            if x >= FB_WIDTH { break; }
+            if x >= *FB_WIDTH.get() { break; }
             let is_fg = row_byte & (0x80 >> gx) != 0;
             if is_fg {
                 *fb.add((y * stride + x) as usize) = fg;
@@ -374,34 +374,34 @@ unsafe fn fb_draw_glyph_at(px: u32, py: u32, ch: u8, fg: u32, bg: u32) {
 
 /// Draw a character at (col, row) in the text console.
 unsafe fn fb_draw_char(col: u32, row: u32, ch: u8) {
-    let x = TEXT_X + col * 8;
-    let y = TEXT_Y + row * 16;
+    let x = *TEXT_X.get() + col * 8;
+    let y = *TEXT_Y.get() + row * 16;
     fb_draw_glyph_at(x, y, ch, COL_TEXT, COL_BG);
 }
 
 /// Scroll the text console up by one row.
 unsafe fn fb_scroll() {
-    let fb_u8 = FB_PTR as *mut u8;
-    let pitch = FB_PITCH as usize;
-    let fb32 = FB_PTR as *mut u32;
-    let stride = FB_PITCH / 4;
-    let text_width_bytes = (CON_COLS * 8 * 4) as usize;
-    let text_x_bytes = (TEXT_X * 4) as usize;
+    let fb_u8 = *FB_PTR.get() as *mut u8;
+    let pitch = *FB_PITCH.get() as usize;
+    let fb32 = *FB_PTR.get() as *mut u32;
+    let stride = *FB_PITCH.get() / 4;
+    let text_width_bytes = (*CON_COLS.get() * 8 * 4) as usize;
+    let text_x_bytes = (*TEXT_X.get() * 4) as usize;
 
-    for row in 0..(CON_ROWS - 1) {
+    for row in 0..(*CON_ROWS.get() - 1) {
         for py in 0..16u32 {
-            let src_y = (TEXT_Y + (row + 1) * 16 + py) as usize;
-            let dst_y = (TEXT_Y + row * 16 + py) as usize;
+            let src_y = (*TEXT_Y.get() + (row + 1) * 16 + py) as usize;
+            let dst_y = (*TEXT_Y.get() + row * 16 + py) as usize;
             let src = fb_u8.add(src_y * pitch + text_x_bytes);
             let dst = fb_u8.add(dst_y * pitch + text_x_bytes);
             core::ptr::copy(src, dst, text_width_bytes);
         }
     }
-    let last_row = CON_ROWS - 1;
+    let last_row = *CON_ROWS.get() - 1;
     for py in 0..16u32 {
-        let y = (TEXT_Y + last_row * 16 + py) as usize;
-        for col in 0..CON_COLS * 8 {
-            let x = TEXT_X as usize + col as usize;
+        let y = (*TEXT_Y.get() + last_row * 16 + py) as usize;
+        for col in 0..*CON_COLS.get() * 8 {
+            let x = *TEXT_X.get() as usize + col as usize;
             *fb32.add(y * stride as usize + x) = COL_BG;
         }
     }
@@ -410,20 +410,20 @@ unsafe fn fb_scroll() {
 // ---------------------------------------------------------------------------
 // ANSI escape sequence parser (vte crate)
 // ---------------------------------------------------------------------------
-static mut VTE_PARSER: Option<vte::Parser> = None;
-static mut ANSI_SAVED_COL: u32 = 0;
-static mut ANSI_SAVED_ROW: u32 = 0;
+static VTE_PARSER: SyncUnsafeCell<Option<vte::Parser>> = SyncUnsafeCell::new(None);
+static ANSI_SAVED_COL: SyncUnsafeCell<u32> = SyncUnsafeCell::new(0);
+static ANSI_SAVED_ROW: SyncUnsafeCell<u32> = SyncUnsafeCell::new(0);
 
 /// Clear a rectangular region of the text console.
 unsafe fn fb_clear_region(col_start: u32, col_end: u32, row_start: u32, row_end: u32) {
-    let fb32 = FB_PTR as *mut u32;
-    let stride = FB_PITCH / 4;
+    let fb32 = *FB_PTR.get() as *mut u32;
+    let stride = *FB_PITCH.get() / 4;
     for row in row_start..row_end {
         for py in 0..16u32 {
-            let y = TEXT_Y + row * 16 + py;
+            let y = *TEXT_Y.get() + row * 16 + py;
             for col in col_start..col_end {
                 for px in 0..8u32 {
-                    let x = TEXT_X + col * 8 + px;
+                    let x = *TEXT_X.get() + col * 8 + px;
                     *fb32.add(y as usize * stride as usize + x as usize) = COL_BG;
                 }
             }
@@ -437,13 +437,13 @@ impl vte::Perform for FbPerformer {
     fn print(&mut self, c: char) {
         unsafe {
             let ch = if (c as u32) <= 0xFF { c as u8 } else { b'?' };
-            fb_draw_char(CON_CUR_COL, CON_CUR_ROW, ch);
-            CON_CUR_COL += 1;
-            if CON_CUR_COL >= CON_COLS {
-                CON_CUR_COL = 0;
-                CON_CUR_ROW += 1;
-                if CON_CUR_ROW >= CON_ROWS {
-                    CON_CUR_ROW = CON_ROWS - 1;
+            fb_draw_char(*CON_CUR_COL.get(), *CON_CUR_ROW.get(), ch);
+            *CON_CUR_COL.get() += 1;
+            if *CON_CUR_COL.get() >= *CON_COLS.get() {
+                *CON_CUR_COL.get() = 0;
+                *CON_CUR_ROW.get() += 1;
+                if *CON_CUR_ROW.get() >= *CON_ROWS.get() {
+                    *CON_CUR_ROW.get() = *CON_ROWS.get() - 1;
                     fb_scroll();
                 }
             }
@@ -454,22 +454,22 @@ impl vte::Perform for FbPerformer {
         unsafe {
             match byte {
                 b'\n' => {
-                    CON_CUR_COL = 0;
-                    CON_CUR_ROW += 1;
-                    if CON_CUR_ROW >= CON_ROWS {
-                        CON_CUR_ROW = CON_ROWS - 1;
+                    *CON_CUR_COL.get() = 0;
+                    *CON_CUR_ROW.get() += 1;
+                    if *CON_CUR_ROW.get() >= *CON_ROWS.get() {
+                        *CON_CUR_ROW.get() = *CON_ROWS.get() - 1;
                         fb_scroll();
                     }
                 }
-                b'\r' => { CON_CUR_COL = 0; }
+                b'\r' => { *CON_CUR_COL.get() = 0; }
                 0x08 => {
-                    if CON_CUR_COL > 0 {
-                        CON_CUR_COL -= 1;
-                        fb_draw_char(CON_CUR_COL, CON_CUR_ROW, b' ');
+                    if *CON_CUR_COL.get() > 0 {
+                        *CON_CUR_COL.get() -= 1;
+                        fb_draw_char(*CON_CUR_COL.get(), *CON_CUR_ROW.get(), b' ');
                     }
                 }
                 b'\t' => {
-                    CON_CUR_COL = ((CON_CUR_COL + 8) & !7).min(CON_COLS - 1);
+                    *CON_CUR_COL.get() = ((*CON_CUR_COL.get() + 8) & !7).min(*CON_COLS.get() - 1);
                 }
                 _ => {}
             }
@@ -484,59 +484,59 @@ impl vte::Perform for FbPerformer {
             let nparams = params.len();
 
             match action as u8 {
-                b'A' => { let n = if p0 == 0 { 1 } else { p0 }; CON_CUR_ROW = CON_CUR_ROW.saturating_sub(n); }
-                b'B' => { let n = if p0 == 0 { 1 } else { p0 }; CON_CUR_ROW = (CON_CUR_ROW + n).min(CON_ROWS - 1); }
-                b'C' => { let n = if p0 == 0 { 1 } else { p0 }; CON_CUR_COL = (CON_CUR_COL + n).min(CON_COLS - 1); }
-                b'D' => { let n = if p0 == 0 { 1 } else { p0 }; CON_CUR_COL = CON_CUR_COL.saturating_sub(n); }
+                b'A' => { let n = if p0 == 0 { 1 } else { p0 }; *CON_CUR_ROW.get() = (*CON_CUR_ROW.get()).saturating_sub(n); }
+                b'B' => { let n = if p0 == 0 { 1 } else { p0 }; *CON_CUR_ROW.get() = (*CON_CUR_ROW.get() + n).min(*CON_ROWS.get() - 1); }
+                b'C' => { let n = if p0 == 0 { 1 } else { p0 }; *CON_CUR_COL.get() = (*CON_CUR_COL.get() + n).min(*CON_COLS.get() - 1); }
+                b'D' => { let n = if p0 == 0 { 1 } else { p0 }; *CON_CUR_COL.get() = (*CON_CUR_COL.get()).saturating_sub(n); }
                 b'H' | b'f' => {
                     let row = if p0 == 0 { 1 } else { p0 };
                     let col = if nparams >= 2 && p1 > 0 { p1 } else { 1 };
-                    CON_CUR_ROW = (row - 1).min(CON_ROWS - 1);
-                    CON_CUR_COL = (col - 1).min(CON_COLS - 1);
+                    *CON_CUR_ROW.get() = (row - 1).min(*CON_ROWS.get() - 1);
+                    *CON_CUR_COL.get() = (col - 1).min(*CON_COLS.get() - 1);
                 }
                 b'J' => match p0 {
                     0 => {
-                        fb_clear_region(CON_CUR_COL, CON_COLS, CON_CUR_ROW, CON_CUR_ROW + 1);
-                        if CON_CUR_ROW + 1 < CON_ROWS {
-                            fb_clear_region(0, CON_COLS, CON_CUR_ROW + 1, CON_ROWS);
+                        fb_clear_region(*CON_CUR_COL.get(), *CON_COLS.get(), *CON_CUR_ROW.get(), *CON_CUR_ROW.get() + 1);
+                        if *CON_CUR_ROW.get() + 1 < *CON_ROWS.get() {
+                            fb_clear_region(0, *CON_COLS.get(), *CON_CUR_ROW.get() + 1, *CON_ROWS.get());
                         }
                     }
                     1 => {
-                        if CON_CUR_ROW > 0 { fb_clear_region(0, CON_COLS, 0, CON_CUR_ROW); }
-                        fb_clear_region(0, CON_CUR_COL + 1, CON_CUR_ROW, CON_CUR_ROW + 1);
+                        if *CON_CUR_ROW.get() > 0 { fb_clear_region(0, *CON_COLS.get(), 0, *CON_CUR_ROW.get()); }
+                        fb_clear_region(0, *CON_CUR_COL.get() + 1, *CON_CUR_ROW.get(), *CON_CUR_ROW.get() + 1);
                     }
                     2 | 3 => {
-                        fb_clear_region(0, CON_COLS, 0, CON_ROWS);
-                        CON_CUR_COL = 0; CON_CUR_ROW = 0;
+                        fb_clear_region(0, *CON_COLS.get(), 0, *CON_ROWS.get());
+                        *CON_CUR_COL.get() = 0; *CON_CUR_ROW.get() = 0;
                     }
                     _ => {}
                 }
                 b'K' => match p0 {
-                    0 => fb_clear_region(CON_CUR_COL, CON_COLS, CON_CUR_ROW, CON_CUR_ROW + 1),
-                    1 => fb_clear_region(0, CON_CUR_COL + 1, CON_CUR_ROW, CON_CUR_ROW + 1),
-                    2 => fb_clear_region(0, CON_COLS, CON_CUR_ROW, CON_CUR_ROW + 1),
+                    0 => fb_clear_region(*CON_CUR_COL.get(), *CON_COLS.get(), *CON_CUR_ROW.get(), *CON_CUR_ROW.get() + 1),
+                    1 => fb_clear_region(0, *CON_CUR_COL.get() + 1, *CON_CUR_ROW.get(), *CON_CUR_ROW.get() + 1),
+                    2 => fb_clear_region(0, *CON_COLS.get(), *CON_CUR_ROW.get(), *CON_CUR_ROW.get() + 1),
                     _ => {}
                 }
                 b'm' | b'h' | b'l' | b'T' | b'n' | b'P' | b'L' | b'M' | b'r' => {}
                 b'S' => { let n = if p0 == 0 { 1 } else { p0 }; for _ in 0..n { fb_scroll(); } }
-                b's' => { ANSI_SAVED_COL = CON_CUR_COL; ANSI_SAVED_ROW = CON_CUR_ROW; }
-                b'u' => { CON_CUR_COL = ANSI_SAVED_COL; CON_CUR_ROW = ANSI_SAVED_ROW; }
+                b's' => { *ANSI_SAVED_COL.get() = *CON_CUR_COL.get(); *ANSI_SAVED_ROW.get() = *CON_CUR_ROW.get(); }
+                b'u' => { *CON_CUR_COL.get() = *ANSI_SAVED_COL.get(); *CON_CUR_ROW.get() = *ANSI_SAVED_ROW.get(); }
                 b'@' | b'X' => {
                     let n = if p0 == 0 { 1 } else { p0 };
-                    let end = (CON_CUR_COL + n).min(CON_COLS);
-                    fb_clear_region(CON_CUR_COL, end, CON_CUR_ROW, CON_CUR_ROW + 1);
+                    let end = (*CON_CUR_COL.get() + n).min(*CON_COLS.get());
+                    fb_clear_region(*CON_CUR_COL.get(), end, *CON_CUR_ROW.get(), *CON_CUR_ROW.get() + 1);
                 }
-                b'G' => { let col = if p0 == 0 { 1 } else { p0 }; CON_CUR_COL = (col - 1).min(CON_COLS - 1); }
-                b'd' => { let row = if p0 == 0 { 1 } else { p0 }; CON_CUR_ROW = (row - 1).min(CON_ROWS - 1); }
+                b'G' => { let col = if p0 == 0 { 1 } else { p0 }; *CON_CUR_COL.get() = (col - 1).min(*CON_COLS.get() - 1); }
+                b'd' => { let row = if p0 == 0 { 1 } else { p0 }; *CON_CUR_ROW.get() = (row - 1).min(*CON_ROWS.get() - 1); }
                 b'E' => {
                     let n = if p0 == 0 { 1 } else { p0 };
-                    CON_CUR_COL = 0;
-                    CON_CUR_ROW = (CON_CUR_ROW + n).min(CON_ROWS - 1);
+                    *CON_CUR_COL.get() = 0;
+                    *CON_CUR_ROW.get() = (*CON_CUR_ROW.get() + n).min(*CON_ROWS.get() - 1);
                 }
                 b'F' => {
                     let n = if p0 == 0 { 1 } else { p0 };
-                    CON_CUR_COL = 0;
-                    CON_CUR_ROW = CON_CUR_ROW.saturating_sub(n);
+                    *CON_CUR_COL.get() = 0;
+                    *CON_CUR_ROW.get() = (*CON_CUR_ROW.get()).saturating_sub(n);
                 }
                 _ => {}
             }
@@ -547,13 +547,13 @@ impl vte::Perform for FbPerformer {
         unsafe {
             if !intermediates.is_empty() { return; }
             match byte {
-                b'c' => { CON_CUR_COL = 0; CON_CUR_ROW = 0; fb_clear_region(0, CON_COLS, 0, CON_ROWS); }
-                b'7' => { ANSI_SAVED_COL = CON_CUR_COL; ANSI_SAVED_ROW = CON_CUR_ROW; }
-                b'8' => { CON_CUR_COL = ANSI_SAVED_COL; CON_CUR_ROW = ANSI_SAVED_ROW; }
-                b'M' => { if CON_CUR_ROW > 0 { CON_CUR_ROW -= 1; } }
+                b'c' => { *CON_CUR_COL.get() = 0; *CON_CUR_ROW.get() = 0; fb_clear_region(0, *CON_COLS.get(), 0, *CON_ROWS.get()); }
+                b'7' => { *ANSI_SAVED_COL.get() = *CON_CUR_COL.get(); *ANSI_SAVED_ROW.get() = *CON_CUR_ROW.get(); }
+                b'8' => { *CON_CUR_COL.get() = *ANSI_SAVED_COL.get(); *CON_CUR_ROW.get() = *ANSI_SAVED_ROW.get(); }
+                b'M' => { if *CON_CUR_ROW.get() > 0 { *CON_CUR_ROW.get() -= 1; } }
                 b'D' => {
-                    CON_CUR_ROW += 1;
-                    if CON_CUR_ROW >= CON_ROWS { CON_CUR_ROW = CON_ROWS - 1; fb_scroll(); }
+                    *CON_CUR_ROW.get() += 1;
+                    if *CON_CUR_ROW.get() >= *CON_ROWS.get() { *CON_CUR_ROW.get() = *CON_ROWS.get() - 1; fb_scroll(); }
                 }
                 _ => {}
             }
@@ -563,11 +563,11 @@ impl vte::Perform for FbPerformer {
 
 /// Write a single character to the framebuffer console.
 pub(crate) unsafe fn fb_putchar(ch: u8) {
-    if FB_PTR == 0 { return; }
-    if VTE_PARSER.is_none() {
-        VTE_PARSER = Some(vte::Parser::new());
+    if *FB_PTR.get() == 0 { return; }
+    if (*VTE_PARSER.get()).is_none() {
+        *VTE_PARSER.get() = Some(vte::Parser::new());
     }
-    VTE_PARSER.as_mut().unwrap().advance(&mut FbPerformer, ch);
+    (*VTE_PARSER.get()).as_mut().unwrap().advance(&mut FbPerformer, ch);
 }
 
 // ---------------------------------------------------------------------------
@@ -634,10 +634,10 @@ pub(crate) unsafe fn kb_read_char() -> Option<u8> {
         core::ptr::write_volatile(ring.add(1), new_read);
 
         match scancode {
-            0x2A | 0x36 => { KB_SHIFT = true; continue; }
-            0xAA | 0xB6 => { KB_SHIFT = false; continue; }
-            0x1D => { KB_CTRL = true; continue; }
-            0x9D => { KB_CTRL = false; continue; }
+            0x2A | 0x36 => { *KB_SHIFT.get() = true; continue; }
+            0xAA | 0xB6 => { *KB_SHIFT.get() = false; continue; }
+            0x1D => { *KB_CTRL.get() = true; continue; }
+            0x9D => { *KB_CTRL.get() = false; continue; }
             _ => {}
         }
 
@@ -645,7 +645,7 @@ pub(crate) unsafe fn kb_read_char() -> Option<u8> {
             continue;
         }
 
-        let ascii = if KB_SHIFT {
+        let ascii = if *KB_SHIFT.get() {
             SCANCODE_TO_ASCII_SHIFT[scancode as usize]
         } else {
             SCANCODE_TO_ASCII[scancode as usize]
@@ -653,7 +653,7 @@ pub(crate) unsafe fn kb_read_char() -> Option<u8> {
 
         if ascii == 0 { continue; }
 
-        if KB_CTRL {
+        if *KB_CTRL.get() {
             if ascii >= b'a' && ascii <= b'z' {
                 return Some(ascii - b'a' + 1);
             }

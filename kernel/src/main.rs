@@ -26,6 +26,7 @@ mod mm;
 mod panic;
 mod pool;
 mod sched;
+mod shm;
 mod svc_registry;
 mod sync;
 mod syscall;
@@ -356,15 +357,12 @@ unsafe extern "C" fn ap_entry(cpu: &limine::mp::Cpu) -> ! {
 }
 
 use sotos_common::{KB_RING_ADDR as KB_RING_PAGE, MOUSE_RING_ADDR as MOUSE_RING_PAGE};
+use sotos_common::{PROCESS_STACK_BASE, ASLR_JITTER_PAGES, BAR0_VIRT_BASE, FB_USER_BASE};
 
 // ---------------------------------------------------------------------------
 // Process loading helpers — shared by all load_*_process() functions
 // ---------------------------------------------------------------------------
 
-/// Address constants for process setup.
-const PROCESS_STACK_BASE: u64 = 0x900000;
-const ASLR_JITTER_PAGES: u64 = 16;
-const BAR0_VIRT_BASE: u64 = 0xC00000;
 const PCI_CONFIG_PORT: u16 = 0xCF8;
 const PCI_DATA_PORT: u16 = 0xCFC;
 
@@ -434,6 +432,86 @@ fn load_elf_into(data: &[u8], addr_space: &mm::paging::AddressSpace, name: &str)
             kdebug!("  {}: ELF load failed: {}", name, msg);
             None
         }
+    }
+}
+
+/// Map framebuffer into a user address space and fill BootInfo fb fields.
+fn map_framebuffer(addr_space: &mm::paging::AddressSpace, info: &mut sotos_common::BootInfo) {
+    use mm::paging::{PAGE_PRESENT, PAGE_USER, PAGE_WRITABLE, PAGE_CACHE_DISABLE, PAGE_WRITE_THROUGH};
+    let hhdm = mm::hhdm_offset();
+
+    if let Some(fb_response) = FRAMEBUFFER_REQUEST.get_response() {
+        if let Some(fb) = fb_response.framebuffers().next() {
+            let fb_virt = fb.addr() as u64;
+            let fb_phys = fb_virt - hhdm;
+            let width = fb.width() as u32;
+            let height = fb.height() as u32;
+            let pitch = fb.pitch() as u32;
+            let bpp = fb.bpp() as u32;
+            let fb_size = (pitch as u64) * (height as u64);
+            let fb_pages = (fb_size + 0xFFF) / 0x1000;
+
+            for i in 0..fb_pages {
+                addr_space.map_page(
+                    FB_USER_BASE + i * 0x1000,
+                    fb_phys + i * 0x1000,
+                    PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER
+                        | PAGE_CACHE_DISABLE | PAGE_WRITE_THROUGH,
+                );
+            }
+
+            info.fb_addr = FB_USER_BASE;
+            info.fb_width = width;
+            info.fb_height = height;
+            info.fb_pitch = pitch;
+            info.fb_bpp = bpp;
+            kdebug!("  fb: {}x{} bpp={} phys=0x{:x} ({} pages)", width, height, bpp, fb_phys, fb_pages);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Generic service process loader (WU-03)
+// ---------------------------------------------------------------------------
+
+/// A loaded but not-yet-spawned service process.
+struct LoadedProcess {
+    addr_space: mm::paging::AddressSpace,
+    cr3: u64,
+    entry: u64,
+    stack_top: u64,
+}
+
+/// Specification for loading a service process.
+struct ProcessSpec<'a> {
+    name: &'a str,
+    data: &'a [u8],
+    stack_pages: u64,
+}
+
+/// Create a new address space, load an ELF, and allocate a stack.
+/// Returns None if ELF loading fails.
+fn load_service(spec: &ProcessSpec) -> Option<LoadedProcess> {
+    let addr_space = mm::paging::AddressSpace::new_user();
+    let cr3 = addr_space.cr3();
+    let entry = load_elf_into(spec.data, &addr_space, spec.name)?;
+    let stack_top = allocate_user_stack(&addr_space, spec.stack_pages, spec.name);
+    Some(LoadedProcess { addr_space, cr3, entry, stack_top })
+}
+
+impl LoadedProcess {
+    /// Map a shared ring page from init's address space into this process.
+    fn map_shared_ring(&self, init_cr3: u64, ring_addr: u64) {
+        use mm::paging::{AddressSpace, PAGE_PRESENT, PAGE_USER, PAGE_WRITABLE};
+        let init_as = AddressSpace::from_cr3(init_cr3);
+        let phys = init_as.lookup_phys(ring_addr)
+            .unwrap_or_else(|| panic!("ring page {:#x} not mapped in init", ring_addr));
+        self.addr_space.map_page(ring_addr, phys, PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
+    }
+
+    /// Spawn the process thread.
+    fn spawn(&self) {
+        sched::spawn_user(self.entry, self.stack_top, self.cr3);
     }
 }
 
@@ -596,8 +674,12 @@ fn load_initrd(cr3: u64) {
     let initrd_phys = module.addr() as u64 - hhdm;
     initrd::set_initrd(initrd_phys, module.size());
 
-    // Find the "init" entry in the CPIO archive.
-    let elf_data = match initrd::find(module_data, "init") {
+    // Single-pass CPIO scan for all service binaries (matroid optimization).
+    let names = ["init", "shell", "vmm", "kbd", "net", "nvme", "xhci", "compositor"];
+    let found = initrd::find_all(module_data, &names);
+    // Indices: 0=init, 1=shell, 2=vmm, 3=kbd, 4=net, 5=nvme, 6=xhci, 7=compositor
+
+    let elf_data = match found[0] {
         Some(d) => d,
         None => {
             kdebug!("  initrd: 'init' not found in archive");
@@ -618,7 +700,7 @@ fn load_initrd(cr3: u64) {
     kdebug!("  initrd: entry = {:#x}", entry);
 
     // Find and load "shell" binary (LUCAS guest) if present.
-    if let Some(shell_data) = initrd::find(module_data, "shell") {
+    if let Some(shell_data) = found[1] {
         kdebug!("  initrd: found 'shell' ({} bytes)", shell_data.len());
         match elf::load(shell_data, &addr_space) {
             Ok(shell_entry) => {
@@ -641,38 +723,36 @@ fn load_initrd(cr3: u64) {
     // Write BootInfo page at 0xB00000 (read-only for userspace).
     write_boot_info(cr3, &addr_space, stack_top, init_as_cap.raw() as u64);
 
-    // --- Load "vmm" as a separate process BEFORE spawning init ---
+    // --- Load "vmm" BEFORE spawning init --- (PARALLEL-SPAWN-SAFE: independent)
     // VMM must be in the run queue first so it registers for faults
     // before init can page-fault.
-    if let Some(vmm_data) = initrd::find(module_data, "vmm") {
+    if let Some(vmm_data) = found[2] {
         kdebug!("  initrd: found 'vmm' ({} bytes)", vmm_data.len());
         load_vmm_process(vmm_data, cr3);
     }
 
     sched::spawn_user(entry, stack_top, cr3);
 
-    // --- Load "kbd" as a separate process (if present in initrd) ---
-    if let Some(kbd_data) = initrd::find(module_data, "kbd") {
+    // --- PARALLEL-SPAWN-SAFE: kbd, net, nvme, xhci, compositor are independent ---
+    if let Some(kbd_data) = found[3] {
         kdebug!("  initrd: found 'kbd' ({} bytes)", kbd_data.len());
         load_kbd_process(kbd_data, cr3);
     }
-
-    // --- Load "net" as a separate process (if present in initrd) ---
-    if let Some(net_data) = initrd::find(module_data, "net") {
+    if let Some(net_data) = found[4] {
         kdebug!("  initrd: found 'net' ({} bytes)", net_data.len());
         load_net_process(net_data);
     }
-
-    // --- Load "nvme" as a separate process (if present in initrd) ---
-    if let Some(nvme_data) = initrd::find(module_data, "nvme") {
+    if let Some(nvme_data) = found[5] {
         kdebug!("  initrd: found 'nvme' ({} bytes)", nvme_data.len());
         load_nvme_process(nvme_data);
     }
-
-    // --- Load "xhci" as a separate process (if present in initrd) ---
-    if let Some(xhci_data) = initrd::find(module_data, "xhci") {
+    if let Some(xhci_data) = found[6] {
         kdebug!("  initrd: found 'xhci' ({} bytes)", xhci_data.len());
         load_xhci_process(xhci_data, cr3);
+    }
+    if let Some(comp_data) = found[7] {
+        kdebug!("  initrd: found 'compositor' ({} bytes)", comp_data.len());
+        load_compositor_process(comp_data, cr3);
     }
 }
 
@@ -683,7 +763,6 @@ fn write_boot_info(
     stack_top: u64,
     self_as_cap: u64,
 ) {
-    use mm::paging::{PAGE_PRESENT, PAGE_WRITABLE, PAGE_USER, PAGE_CACHE_DISABLE, PAGE_WRITE_THROUGH};
     use sotos_common::{BOOT_INFO_ADDR, BOOT_INFO_MAGIC, BootInfo};
 
     let hhdm = mm::hhdm_offset();
@@ -706,35 +785,7 @@ fn write_boot_info(
     info.guest_entry = GUEST_ENTRY.load(Ordering::Acquire);
 
     // Map framebuffer into user address space if available.
-    const FB_USER_BASE: u64 = 0x4000000;
-    if let Some(fb_response) = FRAMEBUFFER_REQUEST.get_response() {
-        if let Some(fb) = fb_response.framebuffers().next() {
-            let fb_virt = fb.addr() as u64;
-            let fb_phys = fb_virt - hhdm;
-            let width = fb.width() as u32;
-            let height = fb.height() as u32;
-            let pitch = fb.pitch() as u32;
-            let bpp = fb.bpp() as u32;
-            let fb_size = (pitch as u64) * (height as u64);
-            let fb_pages = (fb_size + 0xFFF) / 0x1000;
-
-            for i in 0..fb_pages {
-                addr_space.map_page(
-                    FB_USER_BASE + i * 0x1000,
-                    fb_phys + i * 0x1000,
-                    PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER
-                        | PAGE_CACHE_DISABLE | PAGE_WRITE_THROUGH,
-                );
-            }
-
-            info.fb_addr = FB_USER_BASE;
-            info.fb_width = width;
-            info.fb_height = height;
-            info.fb_pitch = pitch;
-            info.fb_bpp = bpp;
-            kdebug!("  fb: {}x{} bpp={} phys=0x{:x} ({} pages)", width, height, bpp, fb_phys, fb_pages);
-        }
-    }
+    map_framebuffer(addr_space, &mut info);
 
     info.stack_top = stack_top;
     info.self_as_cap = self_as_cap;
@@ -743,25 +794,15 @@ fn write_boot_info(
     kdebug!("  bootinfo: {} caps at {:#x}", count, BOOT_INFO_ADDR);
 }
 
-/// Load the VMM as a fully pre-mapped separate process.
-///
-/// Creates a new address space, loads the ELF, maps stack,
-/// creates VMM-specific capabilities, and spawns the thread.
-/// Must be spawned BEFORE init so it registers for faults first.
+/// Load the VMM as a separate process. Must be spawned BEFORE init.
 fn load_vmm_process(vmm_data: &[u8], init_cr3: u64) {
-    let vmm_as = mm::paging::AddressSpace::new_user();
-    let vmm_cr3 = vmm_as.cr3();
-
-    let vmm_entry = match load_elf_into(vmm_data, &vmm_as, "vmm") {
-        Some(e) => e,
+    let proc = match load_service(&ProcessSpec { name: "vmm", data: vmm_data, stack_pages: 4 }) {
+        Some(p) => p,
         None => return,
     };
-
-    let stack_top = allocate_user_stack(&vmm_as, 4, "vmm");
-    write_vmm_boot_info(&vmm_as, init_cr3);
-
-    sched::spawn_user(vmm_entry, stack_top, vmm_cr3);
-    kdebug!("  vmm: separate process, cr3={:#x}", vmm_cr3);
+    write_vmm_boot_info(&proc.addr_space, init_cr3);
+    proc.spawn();
+    kdebug!("  vmm: separate process, cr3={:#x}", proc.cr3);
 }
 
 /// Write BootInfo for the VMM process.
@@ -798,37 +839,17 @@ fn write_vmm_boot_info(
     kdebug!("  vmm bootinfo: 2 caps at {:#x}", BOOT_INFO_ADDR);
 }
 
-/// Load the keyboard driver as a fully pre-mapped separate process.
-///
-/// Creates a new address space, loads the ELF, maps stack, shared KB ring page,
-/// creates kbd-specific capabilities, and spawns the thread.
+/// Load the keyboard driver as a separate process.
 fn load_kbd_process(kbd_data: &[u8], init_cr3: u64) {
-    use mm::paging::{AddressSpace, PAGE_PRESENT, PAGE_USER, PAGE_WRITABLE};
-
-    let kbd_as = AddressSpace::new_user();
-    let kbd_cr3 = kbd_as.cr3();
-
-    let kbd_entry = match load_elf_into(kbd_data, &kbd_as, "kbd") {
-        Some(e) => e,
+    let proc = match load_service(&ProcessSpec { name: "kbd", data: kbd_data, stack_pages: 4 }) {
+        Some(p) => p,
         None => return,
     };
-
-    let stack_top = allocate_user_stack(&kbd_as, 4, "kbd");
-
-    // Map shared KB + mouse ring pages from init's address space.
-    let init_as = AddressSpace::from_cr3(init_cr3);
-    let kb_ring_phys = init_as.lookup_phys(KB_RING_PAGE)
-        .expect("init's KB ring page not mapped");
-    kbd_as.map_page(KB_RING_PAGE, kb_ring_phys, PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
-
-    let mouse_ring_phys = init_as.lookup_phys(MOUSE_RING_PAGE)
-        .expect("init's mouse ring page not mapped");
-    kbd_as.map_page(MOUSE_RING_PAGE, mouse_ring_phys, PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
-
-    write_kbd_boot_info(kbd_cr3, &kbd_as);
-
-    sched::spawn_user(kbd_entry, stack_top, kbd_cr3);
-    kdebug!("  kbd: separate process, cr3={:#x}", kbd_cr3);
+    proc.map_shared_ring(init_cr3, KB_RING_PAGE);
+    proc.map_shared_ring(init_cr3, MOUSE_RING_PAGE);
+    write_kbd_boot_info(proc.cr3, &proc.addr_space);
+    proc.spawn();
+    kdebug!("  kbd: separate process, cr3={:#x}", proc.cr3);
 }
 
 /// Write BootInfo for the keyboard driver process.
@@ -877,25 +898,15 @@ fn write_kbd_boot_info(
     kdebug!("  kbd bootinfo: 4 caps at {:#x}", BOOT_INFO_ADDR);
 }
 
-/// Load the network driver as a fully pre-mapped separate process.
-///
-/// Creates a new address space, loads the ELF, maps stack,
-/// creates net-specific capabilities, and spawns the thread.
+/// Load the network driver as a separate process (16-page stack for DHCP+smoltcp).
 fn load_net_process(net_data: &[u8]) {
-    let net_as = mm::paging::AddressSpace::new_user();
-    let net_cr3 = net_as.cr3();
-
-    let net_entry = match load_elf_into(net_data, &net_as, "net") {
-        Some(e) => e,
+    let proc = match load_service(&ProcessSpec { name: "net", data: net_data, stack_pages: 16 }) {
+        Some(p) => p,
         None => return,
     };
-
-    // 16 pages (64 KiB) — VirtioNet::init + DHCP + main loop need significant stack in debug mode.
-    let stack_top = allocate_user_stack(&net_as, 16, "net");
-    write_net_boot_info(net_cr3, &net_as);
-
-    sched::spawn_user(net_entry, stack_top, net_cr3);
-    kdebug!("  net: separate process, cr3={:#x}", net_cr3);
+    write_net_boot_info(proc.cr3, &proc.addr_space);
+    proc.spawn();
+    kdebug!("  net: separate process, cr3={:#x}", proc.cr3);
 }
 
 /// Write BootInfo for the network driver process.
@@ -929,7 +940,7 @@ fn scan_pci_for_nvme() -> Option<(u64, u8)> {
     scan_pci_for_device(0x01, 0x08, None, "nvme")
 }
 
-/// Load the NVMe driver as a fully pre-mapped separate process.
+/// Load the NVMe driver as a separate process.
 fn load_nvme_process(nvme_data: &[u8]) {
     let (bar0_phys, _irq_line) = match scan_pci_for_nvme() {
         Some(r) => r,
@@ -938,21 +949,14 @@ fn load_nvme_process(nvme_data: &[u8]) {
             return;
         }
     };
-
-    let nvme_as = mm::paging::AddressSpace::new_user();
-    let nvme_cr3 = nvme_as.cr3();
-
-    let nvme_entry = match load_elf_into(nvme_data, &nvme_as, "nvme") {
-        Some(e) => e,
+    let proc = match load_service(&ProcessSpec { name: "nvme", data: nvme_data, stack_pages: 4 }) {
+        Some(p) => p,
         None => return,
     };
-
-    let stack_top = allocate_user_stack(&nvme_as, 4, "nvme");
-    map_bar0_mmio(&nvme_as, bar0_phys, 16, "nvme");
-    write_nvme_boot_info(&nvme_as);
-
-    sched::spawn_user(nvme_entry, stack_top, nvme_cr3);
-    kdebug!("  nvme: separate process, cr3={:#x}", nvme_cr3);
+    map_bar0_mmio(&proc.addr_space, bar0_phys, 16, "nvme");
+    write_nvme_boot_info(&proc.addr_space);
+    proc.spawn();
+    kdebug!("  nvme: separate process, cr3={:#x}", proc.cr3);
 }
 
 /// Write BootInfo for the NVMe driver process.
@@ -983,10 +987,8 @@ fn scan_pci_for_xhci() -> Option<(u64, u8)> {
     scan_pci_for_device(0x0C, 0x03, Some(0x30), "xhci")
 }
 
-/// Load the xHCI driver as a fully pre-mapped separate process.
+/// Load the xHCI driver as a separate process.
 fn load_xhci_process(xhci_data: &[u8], init_cr3: u64) {
-    use mm::paging::{AddressSpace, PAGE_PRESENT, PAGE_USER, PAGE_WRITABLE};
-
     let (bar0_phys, irq_line) = match scan_pci_for_xhci() {
         Some(r) => r,
         None => {
@@ -994,29 +996,15 @@ fn load_xhci_process(xhci_data: &[u8], init_cr3: u64) {
             return;
         }
     };
-
-    let xhci_as = AddressSpace::new_user();
-    let xhci_cr3 = xhci_as.cr3();
-
-    let xhci_entry = match load_elf_into(xhci_data, &xhci_as, "xhci") {
-        Some(e) => e,
+    let proc = match load_service(&ProcessSpec { name: "xhci", data: xhci_data, stack_pages: 4 }) {
+        Some(p) => p,
         None => return,
     };
-
-    let stack_top = allocate_user_stack(&xhci_as, 4, "xhci");
-    map_bar0_mmio(&xhci_as, bar0_phys, 32, "xhci");
-
-    // Map shared KB ring page from init's address space.
-    let init_as = AddressSpace::from_cr3(init_cr3);
-    let kb_ring_phys = init_as.lookup_phys(KB_RING_PAGE)
-        .expect("init's KB ring page not mapped");
-    xhci_as.map_page(KB_RING_PAGE, kb_ring_phys, PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
-    kdebug!("  xhci: KB ring page mapped at {:#x}", KB_RING_PAGE);
-
-    write_xhci_boot_info(&xhci_as, irq_line);
-
-    sched::spawn_user(xhci_entry, stack_top, xhci_cr3);
-    kdebug!("  xhci: separate process, cr3={:#x}", xhci_cr3);
+    map_bar0_mmio(&proc.addr_space, bar0_phys, 32, "xhci");
+    proc.map_shared_ring(init_cr3, KB_RING_PAGE);
+    write_xhci_boot_info(&proc.addr_space, irq_line);
+    proc.spawn();
+    kdebug!("  xhci: separate process, cr3={:#x}", proc.cr3);
 }
 
 /// Write BootInfo for the xHCI driver process.
@@ -1049,4 +1037,47 @@ fn write_xhci_boot_info(xhci_as: &mm::paging::AddressSpace, irq_line: u8) {
 
     write_bootinfo(phys, &info);
     kdebug!("  xhci bootinfo: 3 caps at {:#x}", BOOT_INFO_ADDR);
+}
+
+// ---------------------------------------------------------------------------
+// Wayland Compositor process
+// ---------------------------------------------------------------------------
+
+/// Load the Wayland compositor as a separate process.
+fn load_compositor_process(comp_data: &[u8], init_cr3: u64) {
+    let proc = match load_service(&ProcessSpec { name: "compositor", data: comp_data, stack_pages: 4 }) {
+        Some(p) => p,
+        None => return,
+    };
+    proc.map_shared_ring(init_cr3, KB_RING_PAGE);
+    proc.map_shared_ring(init_cr3, MOUSE_RING_PAGE);
+    write_compositor_boot_info(&proc.addr_space);
+    proc.spawn();
+    kdebug!("  compositor: separate process, cr3={:#x}", proc.cr3);
+}
+
+/// Write BootInfo for the compositor process.
+///
+/// Cap 0: IPC endpoint (for client connections). Also maps framebuffer if available.
+fn write_compositor_boot_info(comp_as: &mm::paging::AddressSpace) {
+    use sotos_common::{BOOT_INFO_ADDR, BOOT_INFO_MAGIC, BootInfo};
+
+    let phys = alloc_bootinfo_page(comp_as, "compositor");
+
+    let ep = ipc::endpoint::create().expect("failed to create compositor endpoint");
+    let ep_cap = cap::insert(
+        cap::CapObject::Endpoint { id: ep.0.raw() },
+        cap::Rights::ALL, None,
+    ).expect("failed to create compositor endpoint cap");
+    kdebug!("  compositor cap {}: endpoint (client connections)", ep_cap.raw());
+
+    let mut info = BootInfo::empty();
+    info.magic = BOOT_INFO_MAGIC;
+    info.cap_count = 1;
+    info.caps[0] = ep_cap.raw() as u64;
+
+    map_framebuffer(comp_as, &mut info);
+
+    write_bootinfo(phys, &info);
+    kdebug!("  compositor bootinfo: 1 cap at {:#x}", BOOT_INFO_ADDR);
 }

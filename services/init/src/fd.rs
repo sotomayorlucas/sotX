@@ -86,9 +86,8 @@ pub(crate) const EPOLLHUP: u32 = 0x010;
 // ---------------------------------------------------------------------------
 
 pub(crate) const MAX_FDS: usize = 256;
-pub(crate) const BRK_BASE: u64 = 0x2000000;
-pub(crate) const BRK_LIMIT: u64 = 0x100000; // 1 MiB max heap (BRK_BASE..BRK_BASE+BRK_LIMIT)
-pub(crate) const MMAP_BASE: u64 = 0x3000000;
+// BRK_BASE, BRK_LIMIT, MMAP_BASE centralized in sotos_common
+pub(crate) use sotos_common::{BRK_BASE, BRK_LIMIT, MMAP_BASE};
 
 // ---------------------------------------------------------------------------
 // alloc_fd
@@ -151,7 +150,7 @@ pub(crate) fn build_linux_stat(oid: u64, size: u64, is_dir: bool) -> [u8; 144] {
 // ---------------------------------------------------------------------------
 
 pub(crate) const GRP_MAX_FDS: usize = 128;
-pub(crate) const GRP_MAX_INITRD: usize = 32;
+pub(crate) const GRP_MAX_INITRD: usize = 64;
 pub(crate) const GRP_MAX_VFS: usize = 64;
 pub(crate) const GRP_CWD_MAX: usize = 128;
 pub(crate) const MAX_EVENTFDS: usize = 32;
@@ -671,6 +670,25 @@ pub(crate) fn fd_grp_lock(g: usize) {
 /// Unlock a FD group spinlock.
 pub(crate) fn fd_grp_unlock(g: usize) {
     GRP_FD_LOCK[g].store(0, Ordering::Release);
+}
+
+/// Lock two FD groups in ascending index order (ρ_repl deadlock prevention).
+/// Used by fork/clone that needs cross-group access.
+pub(crate) fn fd_grp_lock_pair(a: usize, b: usize) {
+    let (first, second) = if a <= b { (a, b) } else { (b, a) };
+    fd_grp_lock(first);
+    if first != second {
+        fd_grp_lock(second);
+    }
+}
+
+/// Unlock two FD groups.
+pub(crate) fn fd_grp_unlock_pair(a: usize, b: usize) {
+    let (first, second) = if a <= b { (a, b) } else { (b, a) };
+    if first != second {
+        fd_grp_unlock(second);
+    }
+    fd_grp_unlock(first);
 }
 
 /// Initialize a thread group with default stdin/stdout/stderr.

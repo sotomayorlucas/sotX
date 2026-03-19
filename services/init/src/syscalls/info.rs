@@ -254,6 +254,19 @@ pub(crate) fn sys_prctl(ctx: &mut SyscallContext, msg: &IpcMsg) {
             reply_val(ctx.ep_cap, 0);
         }
         38 => reply_val(ctx.ep_cap, 0), // PR_SET_NO_NEW_PRIVS
+        4  => reply_val(ctx.ep_cap, 0), // PR_SET_DUMPABLE
+        3  => reply_val(ctx.ep_cap, 1), // PR_GET_DUMPABLE → always dumpable
+        6  => reply_val(ctx.ep_cap, 0), // PR_SET_KEEPCAPS
+        8  => reply_val(ctx.ep_cap, 0), // PR_SET_TIMING
+        36 => reply_val(ctx.ep_cap, 0), // PR_SET_CHILD_SUBREAPER
+        37 => { // PR_GET_CHILD_SUBREAPER
+            let ptr = msg.regs[1];
+            if ptr != 0 {
+                ctx.guest_write(ptr, &0u32.to_le_bytes());
+            }
+            reply_val(ctx.ep_cap, 0);
+        }
+        22 => reply_val(ctx.ep_cap, 0), // PR_SET_SECUREBITS
         _ => reply_val(ctx.ep_cap, -EINVAL),
     }
 }

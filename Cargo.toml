@@ -6,7 +6,6 @@ members = [
     "libs/sotos-pci",
     "libs/sotos-virtio",
     "libs/sotos-objstore",
-    "libs/sotos-net",
     "libs/sotos-ld",
     "libs/sotos-nvme",
     "libs/sotos-xhci",
@@ -32,6 +31,8 @@ exclude = [
     "services/hello-musl",
     "services/net-test",
     "services/audio",
+    "services/compositor",
+    "services/drm-test",
     "libs/sotos-testlib",
 ]
 

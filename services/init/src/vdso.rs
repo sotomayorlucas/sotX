@@ -5,8 +5,8 @@
 //! Mapped into the init address space; AT_SYSINFO_EHDR points here.
 //! musl/glibc parse this ELF at startup for fast userspace time queries.
 
-/// Virtual address where the vDSO page is mapped.
-pub const VDSO_BASE: u64 = 0xB80000;
+/// Virtual address where the vDSO page is mapped (from sotos-common).
+pub use sotos_common::VDSO_BASE;
 
 // ---------------------------------------------------------------
 // Internal layout offsets within the 4096-byte vDSO page

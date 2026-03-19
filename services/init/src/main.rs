@@ -68,6 +68,14 @@ mod exec;
 mod syscall_log;
 mod vma;
 mod syscalls;
+mod fd_ops;
+mod fork;
+mod virtual_files;
+mod evdev;
+mod drm;
+mod xkb;
+mod seatd;
+mod udev;
 mod child_handler;
 mod lucas_handler;
 mod boot_tests;
@@ -168,8 +176,8 @@ pub(crate) unsafe fn shared_store() -> Option<&'static mut sotos_objstore::Objec
 // Userspace process spawning
 // ---------------------------------------------------------------------------
 
-/// Temporary buffer region for reading ELF data from initrd.
-const SPAWN_BUF_BASE: u64 = 0x5000000;
+/// Temporary buffer region for reading ELF data from initrd (from sotos-common).
+use sotos_common::SPAWN_BUF_BASE;
 /// Max ELF size we support for spawning (512 KiB = 128 pages).
 const SPAWN_BUF_PAGES: u64 = 128;
 
@@ -229,7 +237,6 @@ pub extern "C" fn _start() -> ! {
 
     let _thread_cap = sys::thread_create(producer as *const () as u64, PRODUCER_STACK_TOP)
         .unwrap_or_else(|_| panic_halt());
-
     let mut sum: u64 = 0;
     for _ in 0..MSG_COUNT {
         sum += spsc::recv(ring);
