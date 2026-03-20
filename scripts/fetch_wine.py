@@ -589,6 +589,7 @@ def main():
         'libwine': 'libwine',
         'libunwind8': 'libunwind8',
         'liblzma5': 'liblzma5',
+        'libc6': 'libc6',
     }
 
     deb_paths = {}
@@ -674,20 +675,38 @@ def main():
         ], SYSROOT)
         all_extracted.update(files)
 
-    # Copy existing glibc files from project root
+    # Fetch glibc from Debian Bookworm (2.36 — supports non-page-aligned PT_LOAD)
+    # Ubuntu 22.04's glibc 2.35 ld-linux rejects non-page-aligned segments in libc.so.6
+    if 'libc6' in deb_paths:
+        print("  Extracting glibc 2.36 (ld-linux + libc.so.6)...")
+        files = extract_files_from_deb(deb_paths['libc6'][1], [
+            ("lib/x86_64-linux-gnu/ld-linux-x86-64.so.2", "lib/ld-linux-x86-64.so.2"),
+            ("lib/x86_64-linux-gnu/libc.so.6", "lib/libc.so.6"),
+        ], SYSROOT)
+        all_extracted.update(files)
+    else:
+        # Fallback: copy from project root
+        import shutil
+        for fname, dest in [
+            ("ld-linux-x86-64.so.2", "lib/ld-linux-x86-64.so.2"),
+            ("libc.so.6", "lib/libc.so.6"),
+        ]:
+            src = os.path.join(".", fname)
+            if os.path.isfile(src):
+                dst = os.path.join(SYSROOT, dest)
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(src, dst)
+                all_extracted[dest] = os.path.getsize(src)
+                print(f"  Copied {fname} -> {dest} ({os.path.getsize(src):,} bytes)")
+    # libgcc_s from project root (if available)
     import shutil
-    for fname, dest in [
-        ("ld-linux-x86-64.so.2", "lib/ld-linux-x86-64.so.2"),
-        ("libc.so.6", "lib/libc.so.6"),
-        ("libgcc_s.so.1", "lib/libgcc_s.so.1"),
-    ]:
+    for fname, dest in [("libgcc_s.so.1", "lib/libgcc_s.so.1")]:
         src = os.path.join(".", fname)
         if os.path.isfile(src):
             dst = os.path.join(SYSROOT, dest)
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             shutil.copy2(src, dst)
             all_extracted[dest] = os.path.getsize(src)
-            print(f"  Copied {fname} -> {dest} ({os.path.getsize(src):,} bytes)")
 
     # Also ensure lib64 symlink equivalent
     lib64_dir = os.path.join(SYSROOT, "lib64")

@@ -40,7 +40,7 @@ class Session:
             [QEMU, "-drive", f"format=raw,file={IMAGE}",
              "-drive", f"if=none,format=raw,file={DISK},id=disk0",
              "-device", "virtio-blk-pci,drive=disk0,disable-modern=on",
-             "-serial", "stdio", "-display", "none", "-no-reboot", "-m", "2048M"],
+             "-serial", "stdio", "-display", "none", "-no-reboot", "-m", "4096M"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, bufsize=0)
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
