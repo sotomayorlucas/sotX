@@ -267,7 +267,7 @@ def main():
     full_output = s.get_output()
     s.stop()
 
-    with open(OUTPUT, 'w') as f:
+    with open(OUTPUT, 'w', encoding='utf-8', errors='replace') as f:
         f.write(full_output)
     line_count = full_output.count('\n')
     print(f"\nFull output saved to {OUTPUT} ({len(full_output)} bytes, {line_count} lines)", flush=True)

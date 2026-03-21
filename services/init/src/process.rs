@@ -61,6 +61,9 @@ pub(crate) struct ProcessState {
     pub sig_alt_sp: AtomicU64,          // ss_sp (stack base pointer)
     pub sig_alt_size: AtomicU64,        // ss_size (stack size in bytes)
     pub sig_alt_flags: AtomicU64,       // ss_flags (0=enabled, SS_ONSTACK=1, SS_DISABLE=2)
+    /// Set to 1 when SIGSEGV handler is active. If raise(SIGSEGV) fires
+    /// while this is set, force SIG_DFL (like Linux's force_sig_fault).
+    pub sig_in_handler: AtomicU64,
 
     // Robust futex list (set_robust_list/get_robust_list)
     pub robust_list_head: AtomicU64,    // pointer to robust_list_head struct
@@ -102,6 +105,7 @@ impl ProcessState {
             sig_alt_sp: AtomicU64::new(0),
             sig_alt_size: AtomicU64::new(0),
             sig_alt_flags: AtomicU64::new(2), // SS_DISABLE
+            sig_in_handler: AtomicU64::new(0),
             robust_list_head: AtomicU64::new(0),
             robust_list_len: AtomicU64::new(0),
             proc_name: [const { AtomicU64::new(0) }; 2],
@@ -290,6 +294,15 @@ pub(crate) fn signal_deliver(ep_cap: u64, pid: usize, sig: u64, child_tid: u64, 
     if sig == 0 || sig >= 32 || pid == 0 || pid > MAX_PROCS { return false; }
     let p = &PROCESSES[pid - 1];
 
+    // force_sig_fault: if SIGSEGV is re-raised while handler is active,
+    // the handler failed to fix the fault → force SIG_DFL (kill).
+    if sig == 11 && p.sig_in_handler.load(Ordering::Acquire) != 0 {
+        crate::framebuffer::print(b"SIGSEGV-FORCE-DFL P");
+        crate::framebuffer::print_u64(pid as u64);
+        crate::framebuffer::print(b" kill (handler re-raised SIGSEGV)\n");
+        return false; // fall through to default action (terminate)
+    }
+
     let handler = p.sig_handler[sig as usize].load(Ordering::Acquire);
     let restorer = p.sig_restorer[sig as usize].load(Ordering::Acquire);
     let sig_fl = p.sig_flags[sig as usize].load(Ordering::Acquire);
@@ -442,13 +455,12 @@ pub(crate) fn signal_deliver(ep_cap: u64, pid: usize, sig: u64, child_tid: u64, 
     // block the signal. Wine specifically needs SIGSEGV re-entrant delivery.
     // The old_mask is still saved in the SignalFrame for future use.
 
+    // Mark SIGSEGV as "in handler" so re-raised SIGSEGV triggers force_sig_fault.
+    if sig == 11 {
+        p.sig_in_handler.store(1, Ordering::Release);
+    }
+
     // ── SIG_REDIRECT_TAG reply ──
-    // regs[0] = handler (→ RCX/RIP)
-    // regs[1] = sig (→ RDI, arg0)
-    // regs[2] = &siginfo (→ RSI, arg1) — 0 if not SA_SIGINFO
-    // regs[3] = &ucontext (→ RDX, arg2) — 0 if not SA_SIGINFO
-    // regs[4] = entry_rsp (→ RSP)
-    // regs[5] = RAX (0 for signals)
     let reply = IpcMsg {
         tag: SIG_REDIRECT_TAG,
         regs: [

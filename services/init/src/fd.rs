@@ -319,6 +319,13 @@ pub(crate) static PIPE_READ_REFS: [AtomicU64; MAX_PIPES] = {
     const INIT: AtomicU64 = AtomicU64::new(0);
     [INIT; MAX_PIPES]
 };
+/// Per-pipe write spinlock: prevents concurrent writers from corrupting
+/// the ring buffer. Fork creates multiple producers for the same pipe
+/// (parent + child both inherit write fds), so SPSC is not guaranteed.
+pub(crate) static PIPE_WRITE_LOCK: [AtomicU64; MAX_PIPES] = {
+    const INIT: AtomicU64 = AtomicU64::new(0);
+    [INIT; MAX_PIPES]
+};
 /// Next pipe ID counter.
 pub(crate) static NEXT_PIPE_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -332,6 +339,7 @@ pub(crate) fn pipe_alloc() -> Option<usize> {
             PIPE_READ_CLOSED[i].store(0, Ordering::Release);
             PIPE_WRITE_REFS[i].store(1, Ordering::Release);
             PIPE_READ_REFS[i].store(1, Ordering::Release);
+            PIPE_WRITE_LOCK[i].store(0, Ordering::Release);
             return Some(i);
         }
     }
@@ -339,14 +347,23 @@ pub(crate) fn pipe_alloc() -> Option<usize> {
 }
 
 /// Write data to pipe buffer. Returns bytes written.
+/// Uses per-pipe spinlock to prevent concurrent writer corruption (fork
+/// creates multiple producers when child inherits parent's pipe fds).
 pub(crate) fn pipe_write(pipe_id: usize, data: &[u8]) -> usize {
     if pipe_id >= MAX_PIPES { return 0; }
+    // Acquire write lock
+    while PIPE_WRITE_LOCK[pipe_id].compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed).is_err() {
+        core::hint::spin_loop();
+    }
     let wp = PIPE_WRITE_POS[pipe_id].load(Ordering::Acquire);
     let rp = PIPE_READ_POS[pipe_id].load(Ordering::Acquire);
     let used = (wp - rp) as usize;
     let avail = PIPE_BUF_SIZE.saturating_sub(used);
     let n = data.len().min(avail);
-    if n == 0 { return 0; }
+    if n == 0 {
+        PIPE_WRITE_LOCK[pipe_id].store(0, Ordering::Release);
+        return 0;
+    }
     unsafe {
         for i in 0..n {
             let idx = ((wp as usize) + i) % PIPE_BUF_SIZE;
@@ -354,6 +371,8 @@ pub(crate) fn pipe_write(pipe_id: usize, data: &[u8]) -> usize {
         }
     }
     PIPE_WRITE_POS[pipe_id].store(wp + n as u64, Ordering::Release);
+    // Release write lock
+    PIPE_WRITE_LOCK[pipe_id].store(0, Ordering::Release);
     n
 }
 
