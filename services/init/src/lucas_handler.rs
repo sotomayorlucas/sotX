@@ -184,6 +184,21 @@ fn sysroot_init(store: &mut ObjectStore) {
             }
         }
     }
+    // Create /lib/x86_64-linux-gnu for Debian/Ubuntu glibc layout
+    // (Wine's ld-linux searches here for shared libraries)
+    if let Ok(lib_oid) = store.resolve_path(b"lib", ROOT_OID) {
+        if store.find_in(b"x86_64-linux-gnu", lib_oid).is_none() {
+            let _ = store.mkdir(b"x86_64-linux-gnu", lib_oid);
+        }
+    }
+    // Create /usr/lib/x86_64-linux-gnu
+    if let Ok(usr_oid) = store.resolve_path(b"usr", ROOT_OID) {
+        if let Some(usr_lib) = store.find_in(b"lib", usr_oid) {
+            if store.find_in(b"x86_64-linux-gnu", usr_lib).is_none() {
+                let _ = store.mkdir(b"x86_64-linux-gnu", usr_lib);
+            }
+        }
+    }
     print(b"LUCAS: sysroot dirs initialized\n");
 }
 
