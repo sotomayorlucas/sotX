@@ -139,6 +139,12 @@ pub(crate) fn get_personality(pid: usize) -> u8 {
     PROCESSES[pid - 1].personality.load(core::sync::atomic::Ordering::Acquire)
 }
 
+pub(crate) fn set_personality(pid: usize, val: u8) {
+    if pid > 0 && pid <= MAX_PROCS {
+        PROCESSES[pid - 1].personality.store(val, core::sync::atomic::Ordering::Release);
+    }
+}
+
 // Signal constants
 pub(crate) const _SA_NOCLDSTOP: u64 = 1;
 pub(crate) const _SA_NOCLDWAIT: u64 = 2;

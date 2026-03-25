@@ -692,12 +692,14 @@ pub(crate) extern "C" fn child_handler() -> ! {
                         // Record page info for cleanup on exit
                         if pid > 0 && pid <= MAX_PROCS {
                             use crate::exec::{LAST_EXEC_STACK_BASE, LAST_EXEC_STACK_PAGES,
-                                              LAST_EXEC_ELF_LO, LAST_EXEC_ELF_HI, LAST_EXEC_HAS_INTERP};
+                                              LAST_EXEC_ELF_LO, LAST_EXEC_ELF_HI, LAST_EXEC_HAS_INTERP,
+                                              LAST_EXEC_PERSONALITY};
                             PROCESSES[pid - 1].stack_base.store(LAST_EXEC_STACK_BASE.load(Ordering::Acquire), Ordering::Release);
                             PROCESSES[pid - 1].stack_pages.store(LAST_EXEC_STACK_PAGES.load(Ordering::Acquire), Ordering::Release);
                             PROCESSES[pid - 1].elf_lo.store(LAST_EXEC_ELF_LO.load(Ordering::Acquire), Ordering::Release);
                             PROCESSES[pid - 1].elf_hi.store(LAST_EXEC_ELF_HI.load(Ordering::Acquire), Ordering::Release);
                             PROCESSES[pid - 1].has_interp.store(LAST_EXEC_HAS_INTERP.load(Ordering::Acquire), Ordering::Release);
+                            crate::process::set_personality(pid, LAST_EXEC_PERSONALITY.load(core::sync::atomic::Ordering::Acquire));
                             // Seed VMAs for /proc/self/maps
                             {
                                 use crate::vma::{VMA_LISTS, VmaLabel};
@@ -1013,12 +1015,18 @@ pub(crate) extern "C" fn child_handler() -> ! {
                     print(b"FK4 P"); print_u64(pid as u64); print(b"\n");
 
                     let cidx = fork_cpid - 1;
+                    let pidx = pid - 1;
                     PROCESSES[cidx].parent.store(pid as u64, Ordering::Release);
                     proc_group_init(fork_cpid);
 
+                    // Inherit personality from parent
+                    PROCESSES[cidx].personality.store(
+                        PROCESSES[pidx].personality.load(core::sync::atomic::Ordering::Acquire),
+                        core::sync::atomic::Ordering::Release,
+                    );
+
                     // Inherit brk/mmap state from parent (CoW fork shares same VA layout)
                     {
-                        let pidx = pid - 1;
                         let pb = PROCESSES[pidx].brk_base.load(Ordering::Acquire);
                         let pc = PROCESSES[pidx].brk_current.load(Ordering::Acquire);
                         let pmb = PROCESSES[pidx].mmap_base.load(Ordering::Acquire);
@@ -1054,7 +1062,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
 
                     // Copy DIR_FD_PATHS from parent to child (inherited dir fds need paths for fchdir)
                     {
-                        let parent_base = (pid - 1) * 8;
+                        let parent_base = pidx * 8;
                         let child_base = cidx * 8;
                         for s in 0..8usize {
                             let ps = parent_base + s;
@@ -1410,13 +1418,19 @@ pub(crate) extern "C" fn child_handler() -> ! {
 
                 // Set up child process metadata
                 let cidx = fork_cpid - 1;
+                let pidx = pid - 1;
                 PROCESSES[cidx].parent.store(pid as u64, Ordering::Release);
                 PROCESSES[cidx].kernel_tid.store(0, Ordering::Release);
                 proc_group_init(fork_cpid);
 
+                // Inherit personality from parent
+                PROCESSES[cidx].personality.store(
+                    PROCESSES[pidx].personality.load(core::sync::atomic::Ordering::Acquire),
+                    core::sync::atomic::Ordering::Release,
+                );
+
                 // Inherit brk/mmap state from parent (CoW fork shares same VA layout)
                 {
-                    let pidx = pid - 1;
                     let pb = PROCESSES[pidx].brk_base.load(Ordering::Acquire);
                     let pc = PROCESSES[pidx].brk_current.load(Ordering::Acquire);
                     let pmb = PROCESSES[pidx].mmap_base.load(Ordering::Acquire);
@@ -1451,7 +1465,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
 
                 // Copy DIR_FD_PATHS from parent to child (inherited dir fds need paths for fchdir)
                 {
-                    let parent_base = (pid - 1) * 8;
+                    let parent_base = pidx * 8;
                     let child_base = cidx * 8;
                     for s in 0..8usize {
                         let ps = parent_base + s;

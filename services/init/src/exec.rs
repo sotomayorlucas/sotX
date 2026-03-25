@@ -72,6 +72,8 @@ pub(crate) static LAST_EXEC_ELF_LO: AtomicU64 = AtomicU64::new(0);
 pub(crate) static LAST_EXEC_ELF_HI: AtomicU64 = AtomicU64::new(0);
 /// Whether last exec used a dynamic interpreter.
 pub(crate) static LAST_EXEC_HAS_INTERP: AtomicU64 = AtomicU64::new(0);
+/// ABI personality detected from PT_INTERP (0=musl/default, 1=glibc).
+pub(crate) static LAST_EXEC_PERSONALITY: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
 // Address constants centralized in sotos_common
 pub(crate) use sotos_common::{EXEC_BUF_BASE, INTERP_BUF_BASE, INTERP_LOAD_BASE};
 pub(crate) const EXEC_BUF_PAGES: u64 = 16384; // 64 MiB (weston + pixman)
@@ -510,6 +512,9 @@ fn exec_loaded_elf(file_size: usize, bin_name: &[u8], argv: &[[u8; MAX_EXEC_ARG_
     let mut exec_entry = main_base + elf_info.entry;
     let mut interp_base: u64 = 0;
 
+    // Default personality: musl/static (overridden below if PT_INTERP is glibc)
+    LAST_EXEC_PERSONALITY.store(crate::process::PERS_DEFAULT, core::sync::atomic::Ordering::Release);
+
     if let Some(ref interp) = interp_info {
         let mut interp_name_buf = [0u8; 64];
         let interp_path = &elf_data[interp.offset..interp.offset + interp.len];
@@ -521,6 +526,13 @@ fn exec_loaded_elf(file_size: usize, bin_name: &[u8], argv: &[[u8; MAX_EXEC_ARG_
         let safe_len = interp_name_len.min(63);
         interp_name_buf[..safe_len].copy_from_slice(&interp_path[basename_start..basename_start + safe_len]);
         let interp_name = &interp_name_buf[..safe_len];
+
+        // Detect ABI personality from interpreter path
+        let is_glibc = interp_path.len() >= 8
+            && interp_path.windows(8).any(|w| w == b"ld-linux");
+        if is_glibc {
+            LAST_EXEC_PERSONALITY.store(crate::process::PERS_GLIBC, core::sync::atomic::Ordering::Release);
+        }
 
         if let Err(e) = map_temp_buf(INTERP_BUF_BASE, INTERP_BUF_PAGES) {
             unmap_temp_buf(EXEC_BUF_BASE, EXEC_BUF_PAGES);
