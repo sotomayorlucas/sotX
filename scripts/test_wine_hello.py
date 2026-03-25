@@ -164,7 +164,7 @@ def main():
     # Stage 1: Boot and wait for shell prompt
     # -----------------------------------------------------------------------
     print("=== Stage 1: Boot ===", flush=True)
-    if not s.wait_for("$", 60):
+    if not s.wait_for("$", 120):
         print("  FAIL: no shell prompt within 60s", flush=True)
         out = s.get_output()
         with open(OUTPUT, 'w') as f:

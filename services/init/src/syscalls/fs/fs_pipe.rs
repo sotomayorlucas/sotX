@@ -20,6 +20,26 @@ pub(crate) fn read_pipe(ctx: &mut SyscallContext, fd: usize, buf_ptr: u64, len: 
     let want = len.min(4096);
     let mut tmp = [0u8; 4096];
     let n = pipe_read(pipe_id, &mut tmp[..want]);
+    // Diagnostic: trace pipe reads for P7
+    if ctx.pid == 7 {
+        let wc = pipe_writer_closed(pipe_id);
+        print(b"PIRD P7 fd="); print_u64(fd as u64);
+        print(b" pipe="); print_u64(pipe_id as u64);
+        print(b" n="); print_u64(n as u64);
+        print(b" wc="); print_u64(wc as u64);
+        if n > 0 {
+            print(b" [");
+            for i in 0..n.min(16) {
+                let hi = tmp[i] >> 4;
+                let lo = tmp[i] & 0xF;
+                let hc = if hi < 10 { b'0' + hi } else { b'a' + hi - 10 };
+                let lc = if lo < 10 { b'0' + lo } else { b'a' + lo - 10 };
+                print(&[hc, lc]);
+            }
+            print(b"]");
+        }
+        print(b"\n");
+    }
     if n > 0 {
         crate::child_handler::clear_pipe_stall(ctx.pid);
         ctx.guest_write(buf_ptr, &tmp[..n]);
@@ -102,6 +122,20 @@ pub(crate) fn read_unix_socket(ctx: &mut SyscallContext, fd: usize, buf_ptr: u64
         let want = len.min(4096);
         let mut tmp = [0u8; 4096];
         let n = pipe_read(pipe_id, &mut tmp[..want]);
+        // Diagnostic: dump Unix socket read data for P7
+        if ctx.pid == 7 && n > 0 {
+            print(b"UXRD P7 fd="); print_u64(fd as u64);
+            print(b" n="); print_u64(n as u64);
+            print(b" [");
+            for i in 0..n.min(16) {
+                let hi = tmp[i] >> 4;
+                let lo = tmp[i] & 0xF;
+                let hc = if hi < 10 { b'0' + hi } else { b'a' + hi - 10 };
+                let lc = if lo < 10 { b'0' + lo } else { b'a' + lo - 10 };
+                print(&[hc, lc]);
+            }
+            print(b"]\n");
+        }
         if n > 0 {
             ctx.guest_write(buf_ptr, &tmp[..n]);
             reply_val(ctx.ep_cap, n as i64);
@@ -590,6 +624,14 @@ pub(crate) fn sys_pipe2(ctx: &mut SyscallContext, msg: &IpcMsg) {
                 buf[..4].copy_from_slice(&(r as i32).to_le_bytes());
                 buf[4..].copy_from_slice(&(w as i32).to_le_bytes());
                 ctx.guest_write(pipefd_ptr, &buf);
+            }
+            if ctx.pid >= 5 {
+                print(b"PIPE2 P"); print_u64(ctx.pid as u64); print(b" r="); print_u64(r as u64);
+                print(b"(k="); print_u64(ctx.child_fds[r] as u64);
+                print(b") w="); print_u64(w as u64);
+                print(b"(k="); print_u64(ctx.child_fds[w] as u64);
+                print(b") pipe="); print_u64(pipe_id as u64);
+                print(b"\n");
             }
             reply_val(ctx.ep_cap, 0);
         } else { reply_val(ctx.ep_cap, -EMFILE); }

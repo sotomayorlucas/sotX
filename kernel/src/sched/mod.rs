@@ -638,12 +638,28 @@ pub fn exit_current() -> ! {
         let idx = percpu.current_thread;
         if idx != usize::MAX {
             let sched = SCHEDULER.lock();
-            sched.threads.get_by_index(idx as u32)
-                .and_then(|t| t.redirect_ep)
+            let rep = sched.threads.get_by_index(idx as u32)
+                .and_then(|t| t.redirect_ep);
+            rep
         } else {
             None
         }
     };
+    // Diagnostic: log thread death (lock-free serial write)
+    {
+        use crate::arch::serial;
+        for b in b"EXIT-T " { serial::write_byte(*b); }
+        let percpu = percpu::current_percpu();
+        let idx = percpu.current_thread as u64;
+        // Write index as decimal
+        if idx >= 10 { serial::write_byte(b'0' + ((idx / 10) % 10) as u8); }
+        serial::write_byte(b'0' + (idx % 10) as u8);
+        if redirect_ep.is_some() {
+            for b in b" redir=Y\n" { serial::write_byte(*b); }
+        } else {
+            for b in b" redir=N\n" { serial::write_byte(*b); }
+        }
+    }
     // Send synthetic SYS_EXIT_GROUP to the handler so it can clean up
     // (pipe refs, memory, etc.) instead of blocking on recv forever.
     if let Some(ep_raw) = redirect_ep {

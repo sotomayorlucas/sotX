@@ -226,8 +226,9 @@ def extract_wine_tree_from_deb(deb_path, output_dir):
         # Unix-side drivers
         'ntdll.so', 'win32u.so', 'winebus.so',
         'libwine.so.1', 'libwine.so.1.0',
-        # PE-side core
-        'ntdll.dll', 'start.exe', 'conhost.exe',
+        # PE-side core + wineboot
+        'ntdll.dll', 'start.exe', 'conhost.exe', 'wineboot.exe',
+        'plugplay.exe', 'services.exe', 'winedevice.exe',
         'kernel32.dll', 'kernelbase.dll',
         'ucrtbase.dll', 'msvcrt.dll',
         'advapi32.dll', 'sechost.dll',

@@ -164,7 +164,7 @@ pub(crate) fn sys_mmap(ctx: &mut SyscallContext, msg: &IpcMsg) {
     // Suppress MMAP logging for NOREPLACE+PROT_NONE probes (Wine VA reservation
     // binary search generates thousands of these, flooding serial).
     let is_noreplace_probe = prot == 0 && (flags & MAP_FIXED_NOREPLACE_FLAG) != 0;
-    if !is_noreplace_probe && ctx.pid == 6 {
+    if !is_noreplace_probe && ctx.pid >= 6 {
         print(b"MMAP P"); crate::framebuffer::print_u64(ctx.pid as u64);
         print(b" addr="); crate::framebuffer::print_hex64(req_addr);
         print(b" fd="); crate::framebuffer::print_u64(fd as u64);
@@ -394,8 +394,9 @@ pub(crate) fn sys_mmap(ctx: &mut SyscallContext, msg: &IpcMsg) {
             wine_patch_shared_user_data(ctx, base);
             reply_val(ctx.ep_cap, base as i64);
         } else {
-            if ctx.pid == 3 {
-                print(b"MMAP-FAIL P3 -ENOMEM(file) pages="); crate::framebuffer::print_u64(pages);
+            if ctx.pid >= 3 {
+                print(b"MMAP-FAIL P"); crate::framebuffer::print_u64(ctx.pid as u64);
+                print(b" -ENOMEM(file) pages="); crate::framebuffer::print_u64(pages);
                 print(b"\n");
             }
             reply_val(ctx.ep_cap, -ENOMEM);
@@ -423,9 +424,10 @@ pub(crate) fn sys_mmap(ctx: &mut SyscallContext, msg: &IpcMsg) {
         wine_patch_shared_user_data(ctx, base);
         reply_val(ctx.ep_cap, base as i64);
     } else {
-        if ctx.pid == 3 {
+        if ctx.pid >= 3 {
             let free = sys::debug_free_frames();
-            print(b"MMAP-FAIL P3 -ENOMEM(anon) pg="); crate::framebuffer::print_u64(pages);
+            print(b"MMAP-FAIL P"); crate::framebuffer::print_u64(ctx.pid as u64);
+            print(b" -ENOMEM(anon) pg="); crate::framebuffer::print_u64(pages);
             print(b" base="); crate::framebuffer::print_hex64(base);
             print(b" free="); crate::framebuffer::print_u64(free);
             print(b"\n");

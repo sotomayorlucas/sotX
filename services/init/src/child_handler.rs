@@ -192,6 +192,17 @@ pub(crate) extern "C" fn child_handler() -> ! {
         }}
     }
 
+    // Activate LAPIC RIP profiler for P7+ (Wine grandchild processes).
+    // This lets the kernel sample the user-mode RIP via timer interrupt
+    // so we can see where P7 is stuck if it stops making syscalls.
+    if pid >= 7 && child_as_cap != 0 {
+        print(b"PROF-ENABLE P"); print_u64(pid as u64);
+        print(b" as_cap="); print_u64(child_as_cap);
+        print(b"\n");
+        // syscall 256 = SYS_DEBUG_PROFILE_CR3, arg = as_cap
+        let _ = sys::syscall1(256, child_as_cap);
+    }
+
     // All processes use the same generous timeout.
     // Short timeouts cause a race: recv_timeout expiry coincides with the
     // child's endpoint::call(), consuming the message and leaving the child
@@ -263,7 +274,17 @@ pub(crate) extern "C" fn child_handler() -> ! {
         if pid >= 6 {
             print(b"AS-SYS P"); print_u64(pid as u64);
             print(b" #"); print_u64(syscall_nr);
-            print(b" ep="); print_u64(ep_cap);
+            // Show fd for read/write/close on P7
+            if pid == 7 && (syscall_nr == 0 || syscall_nr == 1 || syscall_nr == 3) {
+                print(b" fd="); print_u64(msg.regs[0]);
+            }
+            print(b"\n");
+        }
+        // Log P5 (wineserver) key syscalls
+        if pid == 5 && (syscall_nr == 0 || syscall_nr == 1 || syscall_nr == 20
+           || syscall_nr == 47 || syscall_nr == 46 || syscall_nr == 232) {
+            print(b"WS5 #"); print_u64(syscall_nr);
+            print(b" fd="); print_u64(msg.regs[0]);
             print(b"\n");
         }
 
@@ -1592,9 +1613,11 @@ pub(crate) extern "C" fn child_handler() -> ! {
 
             // SYS_openat — /dev files + initrd files + VFS files
             SYS_OPENAT => {
-                print(b"CH-OA P"); crate::framebuffer::print_u64(pid as u64);
-                print(b" ptr="); crate::framebuffer::print_hex64(msg.regs[1]);
-                print(b"\n");
+                if pid >= 6 {
+                    print(b"CH-OA P"); crate::framebuffer::print_u64(pid as u64);
+                    print(b" ptr="); crate::framebuffer::print_hex64(msg.regs[1]);
+                    print(b"\n");
+                }
                 let mut ctx = make_ctx!();
                 syscalls_fs::sys_openat(&mut ctx, &msg);
             }

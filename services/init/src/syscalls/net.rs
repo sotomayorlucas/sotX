@@ -1075,6 +1075,31 @@ pub(crate) fn sys_recvmsg(ctx: &mut SyscallContext, msg: &IpcMsg) {
             let want = if msg_len > 0 { iov_len.min(msg_len).min(4096) } else { iov_len.min(4096) };
             let mut tmp = [0u8; 4096];
             let n = pipe_read(pipe_id, &mut tmp[..want]);
+            // Diagnostic: dump recvmsg for AF_UNIX on P5 (wineserver receives SCM fds)
+            if ctx.pid == 5 && (ctx.child_fds[fd] == 27 || ctx.child_fds[fd] == 28) {
+                print(b"RCVM-UX P5 fd="); print_u64(fd as u64);
+                print(b" conn="); print_u64(conn as u64);
+                print(b" pipe="); print_u64(pipe_id as u64);
+                print(b" n="); print_u64(n as u64);
+                print(b" ml="); print_u64(msg_len as u64);
+                print(b" ctl="); print_u64(msg_controllen as u64);
+                print(b"\n");
+            }
+            // Diagnostic: dump recvmsg data for P7 (Wine client ↔ wineserver)
+            if ctx.pid == 7 && n > 0 {
+                print(b"RCVM P7 fd="); print_u64(fd as u64);
+                print(b" n="); print_u64(n as u64);
+                print(b" [");
+                // Print first 16 bytes as hex
+                for i in 0..n.min(16) {
+                    let hi = tmp[i] >> 4;
+                    let lo = tmp[i] & 0xF;
+                    let hc = if hi < 10 { b'0' + hi } else { b'a' + hi - 10 };
+                    let lc = if lo < 10 { b'0' + lo } else { b'a' + lo - 10 };
+                    crate::framebuffer::print(&[hc, lc]);
+                }
+                print(b"]\n");
+            }
             if n > 0 {
                 // Pop the boundary marker and get per-message SCM count
                 let msg_scm_limit = if msg_len > 0 && n >= msg_len {

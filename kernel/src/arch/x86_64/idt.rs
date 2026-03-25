@@ -889,10 +889,18 @@ extern "C" fn lapic_timer_user_handler(gprs: *mut u64, iframe: *mut u64) {
                 let user_r10 = unsafe { *gprs.add(9) };
                 let user_rax = unsafe { *gprs };
 
-                if n < 3 {
-                    unsafe {
-                        crate::kprintln!("ZZZZ {} rsi={:#x} rbx={:#x} r9={:#x} r10={:#x}",
-                            n, *gprs.add(4), *gprs.add(1), *gprs.add(8), *gprs.add(9));
+                if user_rip == last {
+                    let rep = PROF_REPEAT.fetch_add(1, Ordering::Relaxed);
+                    if rep < 3 || rep % 200 == 0 {
+                        crate::kprintln!("PROF-SPIN n={} rip={:#x} rsp={:#x} rax={:#x} rep={}",
+                            n, user_rip, user_rsp, user_rax, rep);
+                    }
+                } else {
+                    PROF_REPEAT.store(0, Ordering::Relaxed);
+                    PROF_LAST.store(user_rip, Ordering::Relaxed);
+                    if n < 10 || n % 100 == 0 {
+                        crate::kprintln!("PROF n={} rip={:#x} rsp={:#x} rax={:#x} rsi={:#x}",
+                            n, user_rip, user_rsp, user_rax, user_rsi);
                     }
                 }
             }

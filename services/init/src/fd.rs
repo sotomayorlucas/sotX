@@ -279,8 +279,8 @@ pub(crate) static FORK_SOCK_READY: AtomicU64 = AtomicU64::new(0);
 // ---------------------------------------------------------------------------
 // Shared pipe buffers (inter-handler communication)
 // ---------------------------------------------------------------------------
-pub(crate) const MAX_PIPES: usize = 16;
-pub(crate) const PIPE_BUF_SIZE: usize = 262144; // 256KB per pipe (Wine IPC needs large buffers)
+pub(crate) const MAX_PIPES: usize = 64;
+pub(crate) const PIPE_BUF_SIZE: usize = 65536; // 64KB per pipe (Wine protocol msgs are small)
 
 /// Pipe data buffer (ring buffer).
 pub(crate) static mut PIPE_BUF: [[u8; PIPE_BUF_SIZE]; MAX_PIPES] = [[0; PIPE_BUF_SIZE]; MAX_PIPES];
@@ -330,8 +330,14 @@ pub(crate) static PIPE_WRITE_LOCK: [AtomicU64; MAX_PIPES] = {
 pub(crate) static NEXT_PIPE_ID: AtomicU64 = AtomicU64::new(0);
 
 /// Allocate a new pipe, returns pipe index or None.
+///
+/// Uses a monotonically increasing counter to avoid reusing recently-freed
+/// pipe IDs. This prevents stale fd references in one process from reading
+/// another process's pipe data after the old pipe is freed and the ID reused.
 pub(crate) fn pipe_alloc() -> Option<usize> {
-    for i in 0..MAX_PIPES {
+    let start = NEXT_PIPE_ID.fetch_add(1, Ordering::AcqRel) as usize % MAX_PIPES;
+    for offset in 0..MAX_PIPES {
+        let i = (start + offset) % MAX_PIPES;
         if PIPE_ACTIVE[i].compare_exchange(0, 1, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
             PIPE_WRITE_POS[i].store(0, Ordering::Release);
             PIPE_READ_POS[i].store(0, Ordering::Release);
@@ -487,7 +493,7 @@ pub(crate) static UNIX_LISTEN_ACTIVE: [AtomicU64; MAX_UNIX_LISTENERS] = {
 };
 
 /// Max AF_UNIX connections (each uses 2 pipes: A=client→server, B=server→client).
-pub(crate) const MAX_UNIX_CONNS: usize = 8;
+pub(crate) const MAX_UNIX_CONNS: usize = 32;
 /// Pipe ID for client→server direction (0xFFFF = unused).
 pub(crate) static mut UNIX_CONN_PIPE_A: [u16; MAX_UNIX_CONNS] = [0xFFFF; MAX_UNIX_CONNS];
 /// Pipe ID for server→client direction (0xFFFF = unused).
@@ -522,6 +528,22 @@ pub(crate) fn unix_conn_alloc() -> Option<(usize, usize, usize)> {
             unsafe {
                 UNIX_CONN_PIPE_A[i] = pipe_a as u16;
                 UNIX_CONN_PIPE_B[i] = pipe_b as u16;
+                // Clear stale message queue + SCM state from previous use of this slot
+                for d in 0..2usize {
+                    MSG_QUEUE_HEAD[i][d] = 0;
+                    MSG_QUEUE_COUNT[i][d] = 0;
+                    SCM_FDS_COUNT[i][d] = 0;
+                    for s in 0..MSG_QUEUE_CAP {
+                        MSG_QUEUE[i][d][s] = 0;
+                        MSG_SCM_COUNT[i][d][s] = 0;
+                    }
+                    for s in 0..MAX_SCM_FDS {
+                        SCM_FDS_KIND[i][d][s] = 0;
+                        SCM_FDS_CONN[i][d][s] = 0;
+                        SCM_FDS_OID[i][d][s] = 0;
+                        SCM_FDS_SIZE[i][d][s] = 0;
+                    }
+                }
             }
             UNIX_CONN_REFS[i].store(1, Ordering::Release); // connect() side; accept() adds 1
             return Some((i, pipe_a, pipe_b));
