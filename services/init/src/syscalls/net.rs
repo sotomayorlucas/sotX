@@ -138,7 +138,8 @@ pub(crate) fn sys_poll(ctx: &mut SyscallContext, msg: &IpcMsg) {
                 }
             }
         }
-        // Not yet timed out — retry
+        // Not yet timed out — yield then retry
+        for _ in 0..4 { sys::yield_now(); }
         mark_pipe_retry_on(ctx.pid, 0xFF);
         let reply = sotos_common::IpcMsg {
             tag: sotos_common::PIPE_RETRY_TAG,
@@ -146,7 +147,8 @@ pub(crate) fn sys_poll(ctx: &mut SyscallContext, msg: &IpcMsg) {
         };
         let _ = sys::send(ep_cap, &reply);
     } else {
-        // timeout == -1: infinite wait, retry forever
+        // timeout == -1: infinite wait, yield then retry
+        for _ in 0..4 { sys::yield_now(); }
         mark_pipe_retry_on(ctx.pid, 0xFF);
         let reply = sotos_common::IpcMsg {
             tag: sotos_common::PIPE_RETRY_TAG,
@@ -219,6 +221,7 @@ pub(crate) fn sys_ppoll(ctx: &mut SyscallContext, msg: &IpcMsg) {
                 }
             }
         }
+        for _ in 0..4 { sys::yield_now(); }
         mark_pipe_retry_on(ctx.pid, 0xFF);
         let reply = sotos_common::IpcMsg {
             tag: sotos_common::PIPE_RETRY_TAG,
@@ -227,6 +230,7 @@ pub(crate) fn sys_ppoll(ctx: &mut SyscallContext, msg: &IpcMsg) {
         let _ = sys::send(ep_cap, &reply);
     } else {
         // timeout_ms == -1: infinite wait
+        for _ in 0..4 { sys::yield_now(); }
         mark_pipe_retry_on(ctx.pid, 0xFF);
         let reply = sotos_common::IpcMsg {
             tag: sotos_common::PIPE_RETRY_TAG,
@@ -1562,7 +1566,8 @@ pub(crate) fn sys_select(ctx: &mut SyscallContext, msg: &IpcMsg, syscall_nr: u64
         if writefds_ptr != 0 { ctx.guest_write(writefds_ptr, &wfds_out.to_le_bytes()); }
         reply_val(ep_cap, ready as i64);
     } else {
-        // No fds ready — use PIPE_RETRY_TAG for kernel-side retry
+        // No fds ready — yield then use PIPE_RETRY_TAG for kernel-side retry
+        for _ in 0..4 { sys::yield_now(); }
         mark_pipe_retry_on(ctx.pid, 0xFF);
         let reply = sotos_common::IpcMsg {
             tag: sotos_common::PIPE_RETRY_TAG,
@@ -1765,26 +1770,21 @@ pub(crate) fn sys_epoll_wait(ctx: &mut SyscallContext, msg: &IpcMsg) {
                 if rfd < GRP_MAX_FDS {
                     let kind = ctx.child_fds[rfd];
                     let mut rev = 0u32;
-                    if wanted & 1 != 0 && kind == 1 && unsafe { kb_has_char() } { rev |= 1; }
-                    if wanted & 1 != 0 && kind == 22 {
-                        if let Some(s) = ctx.eventfd_slot_fd.iter().position(|&x| x == rfd) {
-                            if ctx.eventfd_counter[s] > 0 { rev |= 1; }
+                    // Use the same poll_fd_readable() as Phase 1 for ALL fd kinds.
+                    // Previously only a subset of kinds were checked here, causing
+                    // epoll_wait to miss events on pipes, sockets, and other fds.
+                    if wanted & 1 != 0 {
+                        if kind == 0 {
+                            rev |= 0x10; // EPOLLHUP on closed fd
+                        } else if poll_fd_readable(ctx, rfd) {
+                            rev |= 1;
                         }
                     }
-                    if wanted & 1 != 0 && kind == 23 {
-                        if let Some(s) = ctx.timerfd_slot_fd.iter().position(|&x| x == rfd) {
-                            if ctx.timerfd_expiry_tsc[s] != 0 && rdtsc() >= ctx.timerfd_expiry_tsc[s] { rev |= 1; }
+                    if wanted & 4 != 0 {
+                        if kind == 2 || kind == 8 || kind == 11 || kind == 16 || kind == 17
+                            || kind == 22 || kind == 27 || kind == 28 || kind == 30 {
+                            rev |= 4; // EPOLLOUT
                         }
-                    }
-                    if wanted & 1 != 0 && kind == 10 {
-                        if poll_fd_readable(ctx, rfd) { rev |= 1; }
-                    }
-                    if wanted & 1 != 0 && (kind == 26 || kind == 27 || kind == 28) {
-                        if poll_fd_readable(ctx, rfd) { rev |= 1; }
-                    }
-                    if wanted & 1 != 0 && kind == 33 {
-                        let slot = ctx.sock_conn_id[rfd] as usize;
-                        if crate::seatd::seatd_poll_readable(slot) { rev |= 1; }
                     }
                     if rev != 0 {
                         let ep = events_ptr + (ready_count as u64) * 12;
