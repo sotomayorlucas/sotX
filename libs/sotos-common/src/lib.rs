@@ -10,6 +10,7 @@ pub mod elf;
 pub mod linux_abi;
 pub mod spsc;
 pub mod typed_channel;
+pub mod trace;
 
 // ---------------------------------------------------------------
 // SyncUnsafeCell — Rust 2024-safe replacement for `static mut`
