@@ -61,9 +61,11 @@ pub(crate) fn syscall_log_dump(max_entries: usize) {
         let e = unsafe { &SYSCALL_LOG[idx] };
         print(b"  pid=");
         print_u64(e.pid as u64);
-        print(b" nr=");
+        print(b" ");
+        print(sotos_common::trace::syscall_name(e.syscall_nr as u64));
+        print(b"(");
         print_u64(e.syscall_nr as u64);
-        print(b" arg0=0x");
+        print(b") arg0=0x");
         print_hex64(e.arg0);
         print(b" ret=");
         if e.retval < 0 {
@@ -93,7 +95,7 @@ pub(crate) fn format_syslog_into(buf: &mut [u8], max_entries: usize) -> usize {
     buf[..n].copy_from_slice(&hdr[..n]);
     let mut pos = n;
     for i in 0..count {
-        if pos + 80 > buf.len() { break; }
+        if pos + 100 > buf.len() { break; }
         let idx = (head + SYSCALL_LOG_SIZE - count + i) % SYSCALL_LOG_SIZE;
         let e = unsafe { &SYSCALL_LOG[idx] };
         // "  pid=N nr=N arg0=0xH ret=N\n"
@@ -101,10 +103,14 @@ pub(crate) fn format_syslog_into(buf: &mut [u8], max_entries: usize) -> usize {
         buf[pos..pos + prefix.len()].copy_from_slice(prefix);
         pos += prefix.len();
         pos += format_u64_into(&mut buf[pos..], e.pid as u64);
-        let nr_s = b" nr=";
-        buf[pos..pos + nr_s.len()].copy_from_slice(nr_s);
-        pos += nr_s.len();
+        if pos < buf.len() { buf[pos] = b' '; pos += 1; }
+        let sname = sotos_common::trace::syscall_name(e.syscall_nr as u64);
+        let sn_len = sname.len().min(buf.len() - pos);
+        buf[pos..pos + sn_len].copy_from_slice(&sname[..sn_len]);
+        pos += sn_len;
+        if pos < buf.len() { buf[pos] = b'('; pos += 1; }
         pos += format_u64_into(&mut buf[pos..], e.syscall_nr as u64);
+        if pos < buf.len() { buf[pos] = b')'; pos += 1; }
         let arg_s = b" arg0=0x";
         buf[pos..pos + arg_s.len()].copy_from_slice(arg_s);
         pos += arg_s.len();

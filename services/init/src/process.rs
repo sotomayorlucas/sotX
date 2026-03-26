@@ -9,6 +9,8 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use crate::exec::BufWriter;
 use ufmt::uwrite;
 use crate::fd::fd_grp_init;
+use crate::framebuffer::{print, print_u64};
+use crate::trace::trace;
 
 // ---------------------------------------------------------------------------
 // Process table constants
@@ -264,6 +266,7 @@ pub(crate) fn sig_dispatch(pid: usize, sig: u64) -> u8 {
     if sig == linux_abi::SIGKILL as u64 {
         p.exit_code.store(128 + sig, Ordering::Release);
         p.state.store(2, Ordering::Release);
+        trace!(Info, PROCESS, { print(b"P"); print_u64(pid as u64); print(b" state -> Zombie (SIGKILL)"); });
         return 1;
     }
 
@@ -275,6 +278,7 @@ pub(crate) fn sig_dispatch(pid: usize, sig: u64) -> u8 {
                 0 => {
                     p.exit_code.store(128 + sig, Ordering::Release);
                     p.state.store(2, Ordering::Release);
+                    trace!(Info, PROCESS, { print(b"P"); print_u64(pid as u64); print(b" state -> Zombie (sig="); print_u64(sig); print(b")"); });
                     1
                 }
                 1 => 0,
@@ -503,6 +507,7 @@ pub(crate) fn signal_deliver(ep_cap: u64, pid: usize, sig: u64, child_tid: u64, 
 
 /// Initialize process group state for a new process (leader).
 pub(crate) fn proc_group_init(pid: usize) {
+    trace!(Info, PROCESS, { print(b"P"); print_u64(pid as u64); print(b" group_init"); });
     let idx = pid - 1;
     let p = &PROCESSES[idx];
     p.tgid.store(pid as u64, Ordering::Release);
@@ -519,6 +524,7 @@ pub(crate) fn proc_group_init(pid: usize) {
 /// Initialize process group state for a thread (CLONE_THREAD).
 /// Shares parent's groups based on clone flags.
 pub(crate) fn proc_thread_init(child_pid: usize, parent_pid: usize, flags: u64) {
+    trace!(Debug, PROCESS, { print(b"thread_init P"); print_u64(child_pid as u64); print(b" parent="); print_u64(parent_pid as u64); });
     let cidx = child_pid - 1;
     let pidx = parent_pid - 1;
     let child = &PROCESSES[cidx];

@@ -17,6 +17,10 @@ rand_chacha = { version = "0.3", default-features = false }
 vte = { version = "0.13", default-features = false, features = ["no_std"] }
 ufmt = { version = "0.2", default-features = false }
 
+[features]
+default = ["trace"]
+trace = []
+
 [profile.dev]
 panic = "abort"
 

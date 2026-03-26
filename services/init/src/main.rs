@@ -57,6 +57,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 mod vdso;
 #[allow(dead_code)]
 mod framebuffer;
+mod trace;
 #[allow(dead_code)]
 mod process;
 #[allow(dead_code)]
