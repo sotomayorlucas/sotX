@@ -1776,6 +1776,9 @@ pub(crate) fn sys_epoll_wait(ctx: &mut SyscallContext, msg: &IpcMsg) {
                             if ctx.timerfd_expiry_tsc[s] != 0 && rdtsc() >= ctx.timerfd_expiry_tsc[s] { rev |= 1; }
                         }
                     }
+                    if wanted & 1 != 0 && kind == 10 {
+                        if poll_fd_readable(ctx, rfd) { rev |= 1; }
+                    }
                     if wanted & 1 != 0 && (kind == 26 || kind == 27 || kind == 28) {
                         if poll_fd_readable(ctx, rfd) { rev |= 1; }
                     }
