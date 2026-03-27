@@ -25,6 +25,7 @@ use crate::syscalls::net as syscalls_net;
 use crate::syscalls::signal as syscalls_signal;
 use crate::syscalls::info as syscalls_info;
 use crate::syscalls::task as syscalls_task;
+use crate::LKL_EP_CAP;
 
 // Re-export from submodules so external `use crate::child_handler::X` still works.
 pub(crate) use crate::fork::clone_child_trampoline;
@@ -63,6 +64,42 @@ pub(crate) fn fmt_u64(val: u64, buf: &mut [u8]) -> usize {
     while v > 0 { tmp[n] = b'0' + (v % 10) as u8; n += 1; v /= 10; }
     for j in 0..n { buf[j] = tmp[n - 1 - j]; }
     n
+}
+
+/// Forward a syscall to the LKL server via IPC and relay the result back.
+///
+/// The forwarded message packs the Linux syscall number in `tag` and the six
+/// syscall arguments in `regs[0..6]`. `regs[6]` carries the child pid and
+/// `regs[7]` carries the child address-space capability so LKL can perform
+/// vm_read/vm_write on the child's memory (e.g. for path buffers, stat structs).
+///
+/// The LKL server's reply `regs[0]` is treated as the Linux return value and
+/// sent back to the blocked child process.
+fn forward_to_lkl(ep_cap: u64, lkl_ep: u64, syscall_nr: u64,
+                  msg: &sotos_common::IpcMsg, pid: usize, child_as_cap: u64)
+{
+    let fwd = sotos_common::IpcMsg {
+        tag: syscall_nr,
+        regs: [
+            msg.regs[0],        // arg1 (rdi)
+            msg.regs[1],        // arg2 (rsi)
+            msg.regs[2],        // arg3 (rdx)
+            msg.regs[3],        // arg4 (r10)
+            msg.regs[4],        // arg5 (r8)
+            msg.regs[5],        // arg6 (r9)
+            pid as u64,         // child pid
+            child_as_cap,       // child AS cap for vm_read/vm_write
+        ],
+    };
+
+    match sys::call(lkl_ep, &fwd) {
+        Ok(reply) => {
+            reply_val(ep_cap, reply.regs[0] as i64);
+        }
+        Err(_) => {
+            reply_val(ep_cap, -EIO);
+        }
+    }
 }
 
 /// Child process handler — full-featured handler for child processes.
@@ -297,6 +334,34 @@ pub(crate) extern "C" fn child_handler() -> ! {
            || syscall_nr == 47 || syscall_nr == 46 || syscall_nr == 232) {
             trace!(Debug, SYSCALL, { print(b"WS5 "); print(sotos_common::trace::syscall_name(syscall_nr));
                 print(b"("); print_u64(syscall_nr); print(b") fd="); print_u64(msg.regs[0]); });
+        }
+
+        // --- LKL forwarding: if lkl-server is registered, forward selected
+        //     syscalls via IPC instead of using the built-in LUCAS emulation.
+        //     Placed BEFORE make_ctx!() to avoid acquiring the FD-group lock
+        //     for syscalls that will be handled entirely by LKL.
+        let lkl_ep = LKL_EP_CAP.load(Ordering::Acquire);
+        if lkl_ep != 0 {
+            match syscall_nr {
+                // Filesystem syscalls
+                SYS_OPEN | SYS_OPENAT | SYS_READ | SYS_WRITE | SYS_CLOSE |
+                SYS_STAT | SYS_FSTAT | SYS_LSTAT | SYS_LSEEK |
+                SYS_GETDENTS64 | SYS_MKDIR | SYS_UNLINK | SYS_RENAME |
+                SYS_READV | SYS_WRITEV | SYS_PREAD64 | SYS_PWRITE64 |
+                SYS_FSTATAT | SYS_FACCESSAT | SYS_ACCESS | SYS_DUP | SYS_DUP2 |
+                SYS_FCNTL | SYS_IOCTL | SYS_READLINKAT |
+                // Network syscalls
+                SYS_SOCKET | SYS_CONNECT | SYS_BIND | SYS_LISTEN | SYS_ACCEPT |
+                SYS_SENDTO | SYS_RECVFROM | SYS_SENDMSG | SYS_RECVMSG |
+                SYS_SETSOCKOPT | SYS_GETSOCKOPT | SYS_SHUTDOWN |
+                SYS_POLL | SYS_EPOLL_CREATE | SYS_EPOLL_CTL | SYS_EPOLL_WAIT |
+                // System info
+                SYS_UNAME => {
+                    forward_to_lkl(ep_cap, lkl_ep, syscall_nr, &msg, pid, child_as_cap);
+                    continue; // Skip the existing LUCAS handler
+                }
+                _ => {} // Fall through to existing LUCAS emulation
+            }
         }
 
         match syscall_nr {
