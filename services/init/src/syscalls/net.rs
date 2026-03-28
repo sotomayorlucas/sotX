@@ -1642,9 +1642,10 @@ pub(crate) fn sys_epoll_wait(ctx: &mut SyscallContext, msg: &IpcMsg) {
     let max_events = (msg.regs[2] as usize).min(32);
     let timeout = msg.regs[3] as i32;
 
-    // Debug: first 3 epoll_wait calls per-process, dump registered fds
+    // Debug: show epoll_wait details for wineserver (pid 5) periodically
     static mut EPOLL_DBG_COUNT: [u32; 16] = [0; 16];
-    let show_dbg = ctx.pid < 16 && unsafe { EPOLL_DBG_COUNT[ctx.pid] } < 3;
+    let dbg_n = if ctx.pid < 16 { unsafe { EPOLL_DBG_COUNT[ctx.pid] } } else { 999 };
+    let show_dbg = ctx.pid == 5 && (dbg_n < 5 || dbg_n % 50 == 0);
     if show_dbg {
         unsafe { EPOLL_DBG_COUNT[ctx.pid] += 1; }
         trace!(Trace, NET, {
@@ -1799,6 +1800,27 @@ pub(crate) fn sys_epoll_wait(ctx: &mut SyscallContext, msg: &IpcMsg) {
                 }
             }
             if found || rdtsc() >= deadline { break; }
+            // Trace stall: if wineserver (pid 5) has been in epoll_wait for many
+            // iterations without finding events, dump registered fd states.
+            static mut EPOLL_STALL_ITER: [u32; 16] = [0; 16];
+            if ctx.pid < 16 {
+                let iter = unsafe { &mut EPOLL_STALL_ITER[ctx.pid] };
+                *iter += 1;
+                if ctx.pid == 5 && *iter == 500 {
+                    print(b"EPOLL-STALL P5 500 iters, fds:");
+                    for i in 0..MAX_EPOLL_ENTRIES {
+                        if ctx.epoll_reg_fd[i] >= 0 {
+                            let rfd = ctx.epoll_reg_fd[i] as usize;
+                            let kind = if rfd < GRP_MAX_FDS { ctx.child_fds[rfd] } else { 0 };
+                            print(b" fd="); print_u64(rfd as u64);
+                            print(b"(k="); print_u64(kind as u64);
+                            print(b",r="); print_u64(if rfd < GRP_MAX_FDS { poll_fd_readable(ctx, rfd) as u64 } else { 0 });
+                            print(b")");
+                        }
+                    }
+                    print(b"\n");
+                }
+            }
             sys::yield_now();
         }
         reply_val(ep_cap, ready_count as i64);
