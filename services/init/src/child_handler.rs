@@ -112,8 +112,9 @@ pub(crate) extern "C" fn child_handler() -> ! {
     }
     let mut ep_cap = CHILD_SETUP_EP.load(Ordering::Acquire);
     let pid = CHILD_SETUP_PID.load(Ordering::Acquire) as usize;
-    trace!(Info, PROCESS, { print(b"CHILD-HANDLER pid="); print_u64(pid as u64);
-        print(b" ep="); print_u64(ep_cap); });
+    print(b"CHILD-HANDLER pid="); print_u64(pid as u64);
+    print(b" ep="); print_u64(ep_cap);
+    print(b"\n");
     let clone_flags = CHILD_SETUP_FLAGS.load(Ordering::Acquire);
     let mut child_as_cap = CHILD_SETUP_AS_CAP.load(Ordering::Acquire);
     // Signal that we consumed the setup
@@ -267,15 +268,6 @@ pub(crate) extern "C" fn child_handler() -> ! {
             },
         };
 
-        // SIGKILL check: if another process killed us, exit the handler loop.
-        // Without this, a killed process keeps issuing syscalls (read→0 spin).
-        if PROCESSES[pid - 1].state.load(Ordering::Acquire) == 2 {
-            trace!(Info, PROCESS, {
-                print(b"ZOMBIE-EXIT P"); print_u64(pid as u64);
-            });
-            break;
-        }
-
         // Cache the kernel thread ID for async signal injection
         let kernel_tid = msg.regs[6];
         if kernel_tid != 0 {
@@ -300,69 +292,53 @@ pub(crate) extern "C" fn child_handler() -> ! {
                 static mut PWC_FIRED: bool = false;
                 if !unsafe { PWC_FIRED } {
                     unsafe { PWC_FIRED = true; }
-                    trace!(Error, SYSCALL, { print(b"PWC-ANOM P"); print_u64(pid as u64);
-                        print(b" S"); print_u64(syscall_nr);
-                        print(b" pwc1="); print_u64(pwc1);
-                        print(b" wref1="); print_u64(wref1); });
+                    print(b"!! PWC-ANOM P"); print_u64(pid as u64);
+                    print(b" S"); print_u64(syscall_nr);
+                    print(b" pwc1="); print_u64(pwc1);
+                    print(b" wref1="); print_u64(wref1);
+                    print(b"\n");
                 }
             }
         }
 
         // Phase 5: Syscall shadow logging (record every child syscall)
         syscall_log_record(pid as u16, syscall_nr as u16, msg.regs[0], 0);
-        trace_syscall!(pid, syscall_nr, msg.regs[0], 0);
         // Clear retry state before dispatch. If the handler sends
         // PIPE_RETRY_TAG it will re-increment via mark_pipe_retry().
         clear_pipe_retry(pid);
         // Detect symlink/symlinkat calls from ANY process (Wine dosdevices debug)
         if syscall_nr == 88 || syscall_nr == 266 {
-            trace!(Warn, SYSCALL, { print(b"SYMLINK-CALL P"); print_u64(pid as u64);
-                print(b" nr="); print_u64(syscall_nr); });
+            print(b"!! SYMLINK-CALL P"); print_u64(pid as u64);
+            print(b" nr="); print_u64(syscall_nr);
+            print(b"\n");
         }
 
         // Trace syscalls for separate-AS child processes (P6+)
         if pid >= 6 {
-            trace!(Debug, SYSCALL, { print(b"AS-SYS P"); print_u64(pid as u64);
-                print(b" "); print(sotos_common::trace::syscall_name(syscall_nr));
-                print(b"("); print_u64(syscall_nr); print(b")");
-                if pid == 7 && (syscall_nr == 0 || syscall_nr == 1 || syscall_nr == 3) {
-                    print(b" fd="); print_u64(msg.regs[0]);
-                } });
+            print(b"AS-SYS P"); print_u64(pid as u64);
+            print(b" #"); print_u64(syscall_nr);
+            // Show fd for read/write/close on P7
+            if pid == 7 && (syscall_nr == 0 || syscall_nr == 1 || syscall_nr == 3) {
+                print(b" fd="); print_u64(msg.regs[0]);
+            }
+            print(b"\n");
         }
         // Log P5 (wineserver) key syscalls
         if pid == 5 && (syscall_nr == 0 || syscall_nr == 1 || syscall_nr == 20
            || syscall_nr == 47 || syscall_nr == 46 || syscall_nr == 232) {
-            trace!(Debug, SYSCALL, { print(b"WS5 "); print(sotos_common::trace::syscall_name(syscall_nr));
-                print(b"("); print_u64(syscall_nr); print(b") fd="); print_u64(msg.regs[0]); });
+            print(b"WS5 #"); print_u64(syscall_nr);
+            print(b" fd="); print_u64(msg.regs[0]);
+            print(b"\n");
         }
 
-        // --- LKL forwarding: if lkl-server is registered, forward selected
-        //     syscalls via IPC instead of using the built-in LUCAS emulation.
-        //     Placed BEFORE make_ctx!() to avoid acquiring the FD-group lock
-        //     for syscalls that will be handled entirely by LKL.
-        let lkl_ep = LKL_EP_CAP.load(Ordering::Acquire);
-        if lkl_ep != 0 {
-            match syscall_nr {
-                // Filesystem syscalls
-                SYS_OPEN | SYS_OPENAT | SYS_READ | SYS_WRITE | SYS_CLOSE |
-                SYS_STAT | SYS_FSTAT | SYS_LSTAT | SYS_LSEEK |
-                SYS_GETDENTS64 | SYS_MKDIR | SYS_UNLINK | SYS_RENAME |
-                SYS_READV | SYS_WRITEV | SYS_PREAD64 | SYS_PWRITE64 |
-                SYS_FSTATAT | SYS_FACCESSAT | SYS_ACCESS | SYS_DUP | SYS_DUP2 |
-                SYS_FCNTL | SYS_IOCTL | SYS_READLINKAT |
-                // Network syscalls
-                SYS_SOCKET | SYS_CONNECT | SYS_BIND | SYS_LISTEN | SYS_ACCEPT |
-                SYS_SENDTO | SYS_RECVFROM | SYS_SENDMSG | SYS_RECVMSG |
-                SYS_SETSOCKOPT | SYS_GETSOCKOPT | SYS_SHUTDOWN |
-                SYS_POLL | SYS_EPOLL_CREATE | SYS_EPOLL_CTL | SYS_EPOLL_WAIT |
-                // System info
-                SYS_UNAME => {
-                    forward_to_lkl(ep_cap, lkl_ep, syscall_nr, &msg, pid, child_as_cap);
-                    continue; // Skip the existing LUCAS handler
-                }
-                _ => {} // Fall through to existing LUCAS emulation
-            }
-        }
+        // --- LKL forwarding (Phase 1): LKL kernel v6.6.0 boots and runs
+        //     inside lkl-server, but forwarding is disabled for now because:
+        //     (1) File I/O needs sotOS's VFS, not LKL's empty tmpfs
+        //     (2) Guest memory bridge needs AS cap sharing (not yet implemented)
+        //     Phase 2: mount sotOS disk in LKL, share AS caps, forward complex
+        //     syscalls (epoll, signals, networking).
+        //     LKL proof-of-concept: lkl_syscall(uname) returns "Linux 6.6.0+".
+        let _lkl_ep = LKL_EP_CAP.load(Ordering::Acquire);
 
         match syscall_nr {
             // SYS_read(fd, buf, len)
@@ -385,8 +361,9 @@ pub(crate) extern "C" fn child_handler() -> ! {
 
             // SYS_open(path, flags, mode) — used by musl dynamic linker + busybox
             SYS_OPEN => {
-                trace!(Debug, FS, { print(b"CH-OPEN P"); print_u64(pid as u64);
-                    print(b" ptr=0x"); crate::framebuffer::print_hex64(msg.regs[0]); });
+                print(b"CH-OPEN P"); crate::framebuffer::print_u64(pid as u64);
+                print(b" ptr="); crate::framebuffer::print_hex64(msg.regs[0]);
+                print(b"\n");
                 let mut ctx = make_ctx!();
                 syscalls_fs::sys_open(&mut ctx, &msg);
             }
@@ -513,7 +490,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
 
             // SYS_execve(path, argv, envp) — generic: loads any ELF from initrd
             SYS_EXECVE => {
-                trace!(Info, PROCESS, { print(b"EXEC P"); print_u64(pid as u64); });
+                print(b"EXEC P"); print_u64(pid as u64); print(b"\n");
                 let path_ptr = msg.regs[0];
                 let argv_ptr = msg.regs[1];
                 let envp_ptr = msg.regs[2];
@@ -550,8 +527,9 @@ pub(crate) extern "C" fn child_handler() -> ! {
                     match sys::vm_read(child_as_cap, path_ptr, tmp.as_mut_ptr() as u64, 48) {
                         Ok(()) => {}
                         Err(e) => {
-                            trace!(Error, PROCESS, { print(b"EXECVE-VM-READ-FAIL path_ptr="); print_u64(path_ptr);
-                                print(b" err="); print_u64((-e) as u64); });
+                            print(b"EXECVE-VM-READ-FAIL path_ptr="); print_u64(path_ptr);
+                            print(b" err="); print_u64((-e) as u64);
+                            print(b"\n");
                         }
                     }
                     let slen = tmp.iter().position(|&b| b == 0).unwrap_or(47);
@@ -749,40 +727,6 @@ pub(crate) extern "C" fn child_handler() -> ! {
                         }
                     }
                 };
-                // PERS_GLIBC fallback: if VFS failed, try /sysroot/debian + path
-                let result = match result {
-                    Ok(r) => Ok(r),
-                    Err(e) => {
-                        let parent_pers = get_personality(pid);
-                        if parent_pers == PERS_GLIBC && !bin_name.is_empty() && bin_name[0] == b'/' {
-                            let pfx = b"/sysroot/debian";
-                            let mut sr_path = [0u8; 128];
-                            let total = pfx.len() + bin_name.len();
-                            if total <= 127 {
-                                sr_path[..pfx.len()].copy_from_slice(pfx);
-                                sr_path[pfx.len()..total].copy_from_slice(bin_name);
-                                let sr = &sr_path[..total];
-                                trace!(Debug, PROCESS, {
-                                    print(b"EXEC-SYSROOT P"); print_u64(pid as u64);
-                                    print(b" trying /sysroot/debian/...");
-                                });
-                                if exec_target_as != 0 {
-                                    if exec_argc > 0 || exec_envc > 0 {
-                                        crate::exec::exec_from_vfs_argv_into(sr, &exec_argv[..exec_argc], envp_slice, exec_target_as)
-                                    } else {
-                                        crate::exec::exec_from_vfs_into(sr, exec_target_as)
-                                    }
-                                } else {
-                                    if exec_argc > 0 || exec_envc > 0 {
-                                        crate::exec::exec_from_vfs_argv(sr, &exec_argv[..exec_argc], envp_slice)
-                                    } else {
-                                        crate::exec::exec_from_vfs(sr)
-                                    }
-                                }
-                            } else { Err(e) }
-                        } else { Err(e) }
-                    }
-                };
                 match result {
                     Ok((new_ep, _tc)) => {
                         // Close all fds marked close-on-exec
@@ -869,9 +813,10 @@ pub(crate) extern "C" fn child_handler() -> ! {
                             }
                         }
                         EXEC_LOCK.store(0, Ordering::Release);
-                        trace!(Info, PROCESS, { print(b"EXEC-OK P"); print_u64(pid as u64);
-                            print(b" new_ep="); print_u64(new_ep);
-                            print(b" as="); print_u64(exec_target_as); });
+                        print(b"EXEC-OK P"); print_u64(pid as u64);
+                        print(b" new_ep="); print_u64(new_ep);
+                        print(b" as="); print_u64(exec_target_as);
+                        print(b"\n");
                         // Reply to old thread → it resumes in child_exec_main,
                         // calls linux_exit(1), which terminates the process cleanly.
                         reply_val(ep_cap, 0);
@@ -942,9 +887,10 @@ pub(crate) extern "C" fn child_handler() -> ! {
 
                     // Diagnostic: show fork context for Wine child processes
                     if fork_cpid >= 6 {
-                        trace!(Debug, PROCESS, { print(b"FK-CTX cpid="); print_u64(fork_cpid as u64);
-                            print(b" rip=0x"); crate::framebuffer::print_hex64(fork_rip);
-                            print(b" fs=0x"); crate::framebuffer::print_hex64(fork_fsbase); });
+                        print(b"FK-CTX cpid="); print_u64(fork_cpid as u64);
+                        print(b" rip="); crate::framebuffer::print_hex64(fork_rip);
+                        print(b" fs="); crate::framebuffer::print_hex64(fork_fsbase);
+                        print(b"\n");
                     }
                     let frame_rsp = fork_rsp - 56;
                     // Write fork frame (callee-saved regs) to stack.
@@ -979,12 +925,12 @@ pub(crate) extern "C" fn child_handler() -> ! {
                         vdso::write_fork_tls_trampoline(fork_fsbase, fork_gsbase);
                     }
 
-                    trace!(Debug, PROCESS, { print(b"FK1 P"); print_u64(pid as u64); });
+                    print(b"FK1 P"); print_u64(pid as u64); print(b"\n");
                     let child_as_cap = match sys::addr_space_clone(clone_source) {
                         Ok(cap) => cap,
                         Err(_) => { reply_val(ep_cap, -ENOMEM); continue; }
                     };
-                    trace!(Debug, PROCESS, { print(b"FK2 P"); print_u64(pid as u64); });
+                    print(b"FK2 P"); print_u64(pid as u64); print(b"\n");
 
                     // For separate AS: write TLS trampoline to the CHILD's private
                     // vDSO page (CoW-safe: allocates new frame, copies, writes).
@@ -1046,7 +992,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                         frame_data[40..48].copy_from_slice(&fork_r15.to_le_bytes());
                         frame_data[48..56].copy_from_slice(&fork_rip.to_le_bytes());
                         if sys::vm_write(child_as_cap, frame_rsp, frame_data.as_ptr() as u64, 56).is_err() {
-                            trace!(Error, PROCESS, { print(b"FORK-FATAL: vm_write failed"); });
+                            print(b"FORK-FATAL: vm_write failed\n");
                             reply_val(ep_cap, -ENOMEM);
                             continue;
                         }
@@ -1068,7 +1014,8 @@ pub(crate) extern "C" fn child_handler() -> ! {
                                     &tid_val as *const u32 as u64, 4);
                                 let _ = sys::vm_write(child_as_cap, fork_fsbase + 0x2E0,
                                     &one as *const u32 as u64, 4);
-                                trace!(Debug, PROCESS, { print(b"TLS-PATCHED cpid="); print_u64(fork_cpid as u64); });
+                                print(b"TLS-PATCHED cpid="); print_u64(fork_cpid as u64);
+                                print(b"\n");
                             }
                         }
                         // Also copy TLS+0x1000 (second page of TLS block)
@@ -1080,7 +1027,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                             }
                         }
                     }
-                    trace!(Debug, PROCESS, { print(b"FK3 P"); print_u64(pid as u64); });
+                    print(b"FK3 P"); print_u64(pid as u64); print(b"\n");
 
                     let child_ep = match sys::endpoint_create() {
                         Ok(e) => e,
@@ -1121,7 +1068,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                         }
                     }
 
-                    trace!(Debug, PROCESS, { print(b"FK4 P"); print_u64(pid as u64); });
+                    print(b"FK4 P"); print_u64(pid as u64); print(b"\n");
 
                     let cidx = fork_cpid - 1;
                     let pidx = pid - 1;
@@ -1200,15 +1147,16 @@ pub(crate) extern "C" fn child_handler() -> ! {
                         FORK_SOCK_UDP_RPORT = THREAD_GROUPS[fdg].sock_udp_remote_port;
                     }
 
-                    trace!(Debug, PROCESS, { print(b"FK5 P"); print_u64(pid as u64);
-                        print(b" NCS=0x"); crate::framebuffer::print_hex64(NEXT_CHILD_STACK.load(Ordering::Relaxed)); });
+                    print(b"FK5 P"); print_u64(pid as u64);
+                    print(b" NCS="); crate::framebuffer::print_hex64(NEXT_CHILD_STACK.load(Ordering::Relaxed));
+                    print(b"\n");
                     let handler_stack_base = NEXT_CHILD_STACK.fetch_add(0x20000, Ordering::SeqCst);
                     for hp in 0..32u64 {
                         if let Ok(f) = sys::frame_alloc() {
                             let _ = sys::map(handler_stack_base + hp * 0x1000, f, MAP_WRITABLE);
                         }
                     }
-                    trace!(Debug, PROCESS, { print(b"FK6 P"); print_u64(pid as u64); });
+                    print(b"FK6 P"); print_u64(pid as u64); print(b"\n");
 
                     while CHILD_SETUP_READY.load(Ordering::Acquire) != 0 { sys::yield_now(); }
                     CHILD_SETUP_EP.store(child_ep, Ordering::Release);
@@ -1217,22 +1165,23 @@ pub(crate) extern "C" fn child_handler() -> ! {
                     CHILD_SETUP_AS_CAP.store(child_as_cap, Ordering::Release);
                     FORK_SOCK_READY.store(1, Ordering::Release);
                     CHILD_SETUP_READY.store(1, Ordering::Release);
-                    trace!(Debug, PROCESS, { print(b"FK7 P"); print_u64(pid as u64); });
+                    print(b"FK7 P"); print_u64(pid as u64); print(b"\n");
 
                     let _ = sys::thread_create(
                         child_handler as *const () as u64,
                         handler_stack_base + 0x20000,
                     );
-                    trace!(Debug, PROCESS, { print(b"FK8 P"); print_u64(pid as u64); });
+                    print(b"FK8 P"); print_u64(pid as u64); print(b"\n");
 
                     while CHILD_SETUP_READY.load(Ordering::Acquire) != 0 { sys::yield_now(); }
-                    trace!(Debug, PROCESS, { print(b"FK9 P"); print_u64(pid as u64); });
+                    print(b"FK9 P"); print_u64(pid as u64); print(b"\n");
 
                     PROCESSES[cidx].state.store(1, Ordering::Release);
 
-                    trace!(Debug, PROCESS, { print(b"FORK-REPLY P"); print_u64(pid as u64);
-                        print(b" tid="); print_u64(parent_tid);
-                        print(b" cpid="); print_u64(fork_cpid as u64); });
+                    print(b"FORK-REPLY P"); print_u64(pid as u64);
+                    print(b" tid="); print_u64(parent_tid);
+                    print(b" cpid="); print_u64(fork_cpid as u64);
+                    print(b"\n");
                     reply_val(ep_cap, fork_cpid as i64);
                     continue;
                 }
@@ -1489,7 +1438,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                                 &tid_val as *const u32 as u64, 4);
                             let _ = sys::vm_write(child_as_cap, fork_fsbase + 0x2E0,
                                 &one as *const u32 as u64, 4);
-                            trace!(Debug, PROCESS, { print(b"TLS-FIX2 cpid="); print_u64(fork_cpid as u64); });
+                            print(b"TLS-FIX2 cpid="); print_u64(fork_cpid as u64); print(b"\n");
                         }
                     }
                     let tls_vaddr2 = (fork_fsbase & !0xFFF) + 0x1000;
@@ -2391,9 +2340,11 @@ pub(crate) extern "C" fn child_handler() -> ! {
                     if pipe_id < MAX_PIPES {
                         let prev = PIPE_WRITE_REFS[pipe_id].fetch_sub(1, Ordering::AcqRel);
                         if prev <= 1 {
-                            trace!(Debug, FS, { print(b"PWC-SET ch-exit pipe=");
-                                print_u64(pipe_id as u64);
-                                print(b" wrefs="); print_u64(prev); });
+                            crate::framebuffer::print(b"PWC-SET ch-exit pipe=");
+                            crate::framebuffer::print_u64(pipe_id as u64);
+                            crate::framebuffer::print(b" wrefs=");
+                            crate::framebuffer::print_u64(prev);
+                            crate::framebuffer::print(b"\n");
                             PIPE_WRITE_CLOSED[pipe_id].store(1, Ordering::Release);
                             if PIPE_READ_CLOSED[pipe_id].load(Ordering::Acquire) != 0 {
                                 pipe_free(pipe_id);

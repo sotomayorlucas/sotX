@@ -5,7 +5,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LKL_REPO="https://github.com/lkl/linux.git"
-LKL_TAG="lkl-4.19-rc3"
 LKL_SRC="$SCRIPT_DIR/linux"
 OUTPUT_DIR="$SCRIPT_DIR/output"
 
@@ -14,11 +13,10 @@ OUTPUT_DIR="$SCRIPT_DIR/output"
 # ---------------------------------------------------------------------------
 MISSING=()
 for cmd in gcc make flex bison bc; do
-    if ! command -v "$cmd" &>/dev/null; then
+    if ! command -v "$cmd" >/dev/null 2>&1; then
         MISSING+=("$cmd")
     fi
 done
-# libelf-dev is detected via pkg-config or header presence
 if ! pkg-config --exists libelf 2>/dev/null && [ ! -f /usr/include/libelf.h ]; then
     MISSING+=("libelf-dev")
 fi
@@ -33,8 +31,8 @@ fi
 # 2. Clone LKL source (once)
 # ---------------------------------------------------------------------------
 if [ ! -d "$LKL_SRC" ]; then
-    echo "Cloning LKL at tag $LKL_TAG ..."
-    git clone --depth 1 --branch "$LKL_TAG" "$LKL_REPO" "$LKL_SRC"
+    echo "Cloning LKL master branch ..."
+    git clone --depth 1 "$LKL_REPO" "$LKL_SRC"
 else
     echo "LKL source already present at $LKL_SRC"
 fi
