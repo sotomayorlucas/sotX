@@ -33,6 +33,7 @@ exclude = [
     "services/audio",
     "services/compositor",
     "services/drm-test",
+    "services/sched-demo",
     "libs/sotos-testlib",
 ]
 
