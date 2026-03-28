@@ -58,47 +58,59 @@ pub(crate) fn read_pipe(ctx: &mut SyscallContext, fd: usize, buf_ptr: u64, len: 
         }
     } else {
         // No data, writer alive — ask kernel to retry after yielding.
-        // Deadlock detection: if both this process AND another are
-        // stalled on pipe reads, they're deadlocked. Reply EOF (0)
-        // directly so the kernel stops retrying and the process
-        // can proceed with its cleanup/exit path.
+        // Deadlock detection: only trigger on REAL cycles where two
+        // processes each hold the write end of the other's pipe.
+        // Two processes waiting for a third (e.g., wineserver) is NOT
+        // a deadlock — just a temporary stall.
         let stall = unsafe { crate::child_handler::PIPE_STALL[ctx.pid] };
-        if stall > 1000 {
-            // Only trigger if another process is ALSO stuck on a pipe
-            // read for a long time — suggests a real deadlock cycle.
-            // Note: two processes waiting for a third (e.g. during exec)
-            // is NOT a deadlock — just a temporary stall.
+        if stall > 50000 {
+            // Find another process also stalled for a long time
             let mut other_pid = 0usize;
             for p in 1..16usize {
-                if p != ctx.pid && unsafe { crate::child_handler::PIPE_STALL[p] } > 1000 {
+                if p != ctx.pid && unsafe { crate::child_handler::PIPE_STALL[p] } > 50000 {
                     other_pid = p;
                     break;
                 }
             }
             if other_pid != 0 {
-                // Resolve deadlock: close write ends for BOTH pipes
-                // so both processes get natural EOF simultaneously.
                 let other_pipe = unsafe { crate::child_handler::PIPE_STALL_ID[other_pid] } as usize;
-                trace!(Error, FS, {
-                    print(b"PIPE-DEADLOCK pid="); print_u64(ctx.pid as u64);
-                    print(b" pipe="); print_u64(pipe_id as u64);
-                    print(b" other="); print_u64(other_pid as u64);
-                    print(b" other_pipe="); print_u64(other_pipe as u64);
-                });
-                crate::fd::pipe_close_all_writers(pipe_id);
-                if other_pipe < crate::fd::MAX_PIPES && other_pipe != pipe_id {
-                    crate::fd::pipe_close_all_writers(other_pipe);
+                // Verify REAL cycle: the writer of MY pipe must be other_pid,
+                // AND the writer of THEIR pipe must be me. If either pipe's
+                // writer is a third process, this is NOT a deadlock cycle.
+                let my_writer = crate::fd::pipe_write_owner(pipe_id);
+                let their_writer = if other_pipe < crate::fd::MAX_PIPES {
+                    crate::fd::pipe_write_owner(other_pipe)
+                } else { 0 };
+                let is_cycle = my_writer == other_pid && their_writer == ctx.pid;
+                if is_cycle {
+                    trace!(Error, FS, {
+                        print(b"PIPE-DEADLOCK pid="); print_u64(ctx.pid as u64);
+                        print(b" pipe="); print_u64(pipe_id as u64);
+                        print(b" other="); print_u64(other_pid as u64);
+                        print(b" other_pipe="); print_u64(other_pipe as u64);
+                    });
+                    crate::fd::pipe_close_all_writers(pipe_id);
+                    if other_pipe < crate::fd::MAX_PIPES && other_pipe != pipe_id {
+                        crate::fd::pipe_close_all_writers(other_pipe);
+                    }
+                    crate::child_handler::clear_pipe_stall(ctx.pid);
+                    crate::child_handler::clear_pipe_stall(other_pid);
+                    unsafe {
+                        crate::child_handler::DEADLOCK_EOF[ctx.pid] = true;
+                        crate::child_handler::DEADLOCK_EOF[other_pid] = true;
+                    }
+                } else {
+                    // Not a real cycle — just two processes waiting for a
+                    // third (e.g., wineserver). Log but don't kill pipes.
+                    if stall % 10000 == 0 {
+                        trace!(Warn, FS, {
+                            print(b"PIPE-STALL pid="); print_u64(ctx.pid as u64);
+                            print(b" pipe="); print_u64(pipe_id as u64);
+                            print(b" writer="); print_u64(my_writer as u64);
+                            print(b" stall="); print_u64(stall);
+                        });
+                    }
                 }
-                crate::child_handler::clear_pipe_stall(ctx.pid);
-                crate::child_handler::clear_pipe_stall(other_pid);
-                // Mark both processes as deadlock-EOF recipients so their
-                // exit codes get overridden to 0 (clean exit).
-                unsafe {
-                    crate::child_handler::DEADLOCK_EOF[ctx.pid] = true;
-                    crate::child_handler::DEADLOCK_EOF[other_pid] = true;
-                }
-                // Don't reply — let retry continue. Next iteration
-                // pipe_writer_closed() returns true -> normal EOF.
             }
         }
         // Yield before retry to avoid starving other processes

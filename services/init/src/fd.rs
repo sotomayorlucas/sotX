@@ -442,6 +442,29 @@ pub(crate) fn pipe_writer_closed(pipe_id: usize) -> bool {
     true
 }
 
+/// Returns the PID (1-based) of a running process that holds the write end
+/// of the given pipe, or 0 if no such process exists.
+/// Used by the deadlock detector to verify real cycles.
+pub(crate) fn pipe_write_owner(pipe_id: usize) -> usize {
+    if pipe_id >= MAX_PIPES { return 0; }
+    for p in 0..MAX_PROCS {
+        let state = crate::process::PROCESSES[p].state.load(Ordering::Acquire);
+        if state != 1 { continue; } // not running
+        let fdg = crate::process::PROCESSES[p].fd_group.load(Ordering::Acquire) as usize;
+        if fdg >= MAX_PROCS { continue; }
+        unsafe {
+            for f in 0..GRP_MAX_FDS {
+                if THREAD_GROUPS[fdg].fds[f] == 11
+                    && (THREAD_GROUPS[fdg].sock_conn_id[f] as usize) == pipe_id
+                {
+                    return p + 1; // 1-based pid
+                }
+            }
+        }
+    }
+    0
+}
+
 /// Close all write-end FDs for a pipe across all processes.
 /// Used by the deadlock detector to give readers a natural EOF.
 /// This decrements PIPE_WRITE_REFS for each closed FD and sets
