@@ -400,6 +400,21 @@ pub(crate) extern "C" fn child_handler() -> ! {
 
             // SYS_mprotect — delegated to syscalls::mm
             SYS_MPROTECT => {
+                // Trace mprotect for Wine debug
+                if pid == 2 {
+                    static mut MP_COUNT: u32 = 0;
+                    let c = unsafe { &mut MP_COUNT };
+                    if *c < 5 || *c % 100 == 0 {
+                        print(b"MPROT P2 addr=");
+                        crate::framebuffer::print_hex64(msg.regs[0]);
+                        print(b" len=");
+                        print_u64(msg.regs[1]);
+                        print(b" prot=");
+                        print_u64(msg.regs[2]);
+                        print(b"\n");
+                    }
+                    *c += 1;
+                }
                 let mut ctx = make_ctx!();
                 syscalls_mm::sys_mprotect(&mut ctx, &msg);
             }
