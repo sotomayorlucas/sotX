@@ -240,17 +240,27 @@ pub extern "C" fn _start() -> ! {
                         continue;
                     }
 
-                    // Guard: instruction fetch on actual NULL page (page 0) → SIGSEGV.
-                    // Wine maps pages 1+ (0x1000+) for NT compatibility, so only
-                    // reject execution from page 0 (NULL function pointer calls).
-                    if code & 0x10 != 0 && vaddr_raw == 0 {
-                        print(b"VMM: SEGV-NULL t=");
-                        print_hex16(fault.tid as u64);
-                        print(b" a=");
-                        print_hex64(fault.addr);
-                        print(b"\n");
-                        let _ = sys::signal_inject(fault.tid as u64, 11); // SIGSEGV
-                        let _ = sys::thread_resume(fault.tid as u64);
+                    // NULL page access: map a zeroed read-only page.
+                    // Wine's loader reads from address 0 to probe for Windows PEB/TEB
+                    // before signal handlers are installed. If we inject SIGSEGV here,
+                    // the process dies (no handler). Instead, map a zero page read-only:
+                    // reads succeed (return 0 → Wine skips Windows path), writes still
+                    // fault (→ SIGSEGV once handlers are installed for exception dispatch).
+                    if vaddr_raw == 0 {
+                        let frame = match pool_take() {
+                            Ok(f) => f,
+                            Err(_) => { let _ = sys::thread_resume(fault.tid as u64); continue; }
+                        };
+                        let is_write = fault.code & 2 != 0;
+                        if is_write {
+                            // Write to NULL page → SIGSEGV (for Wine exception dispatch)
+                            let _ = sys::signal_inject(fault.tid as u64, 11);
+                            let _ = sys::thread_resume(fault.tid as u64);
+                        } else {
+                            // Read from NULL page → map zeroed read-only frame
+                            let _ = sys::map_into(target_as_cap, 0, frame, 0); // RO, no write
+                            let _ = sys::thread_resume(fault.tid as u64);
+                        }
                         continue;
                     }
 

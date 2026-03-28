@@ -2362,6 +2362,22 @@ pub(crate) extern "C" fn child_handler() -> ! {
                             }
                         }
                     }
+                } else if kind == 27 || kind == 28 {
+                    // AF_UNIX socket: mark connection as dead so the other
+                    // end's epoll sees EPOLLHUP. Also close the underlying pipes.
+                    let conn = tg.sock_conn_id[f] as usize;
+                    if conn < crate::fd::MAX_UNIX_CONNS {
+                        crate::fd::UNIX_CONN_ACTIVE[conn].store(0, Ordering::Release);
+                        // Close the pipes backing this connection
+                        let pipe_a = crate::fd::UNIX_CONN_PIPE_A[conn] as usize;
+                        let pipe_b = crate::fd::UNIX_CONN_PIPE_B[conn] as usize;
+                        if pipe_a < MAX_PIPES {
+                            PIPE_WRITE_CLOSED[pipe_a].store(1, Ordering::Release);
+                        }
+                        if pipe_b < MAX_PIPES {
+                            PIPE_WRITE_CLOSED[pipe_b].store(1, Ordering::Release);
+                        }
+                    }
                 }
                 tg.fds[f] = 0;
             }

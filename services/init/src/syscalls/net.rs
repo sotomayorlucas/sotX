@@ -46,21 +46,27 @@ fn poll_fd_readable(ctx: &SyscallContext, fd: usize) -> bool {
             unix_listener_has_pending(listener)
         }
         27 => {
-            // AF_UNIX client: readable if pipe_b has data OR msg_queue has pending
+            // AF_UNIX client: readable if pipe_b has data, writer closed, OR conn dead
             let conn = ctx.sock_conn_id[fd] as usize;
             if conn < MAX_UNIX_CONNS {
-                let pipe_b = unsafe { UNIX_CONN_PIPE_B[conn] as usize };
-                pipe_has_data(pipe_b) || pipe_writer_closed(pipe_b)
-                    || crate::fd::msg_queue_has_pending(conn, 1) // server→client msgs
+                let dead = crate::fd::UNIX_CONN_ACTIVE[conn].load(Ordering::Acquire) == 0;
+                if dead { true } else {
+                    let pipe_b = unsafe { UNIX_CONN_PIPE_B[conn] as usize };
+                    pipe_has_data(pipe_b) || pipe_writer_closed(pipe_b)
+                        || crate::fd::msg_queue_has_pending(conn, 1)
+                }
             } else { false }
         }
         28 => {
-            // AF_UNIX server: readable if pipe_a has data OR msg_queue has pending
+            // AF_UNIX server: readable if pipe_a has data, writer closed, OR conn dead
             let conn = ctx.sock_conn_id[fd] as usize;
             if conn < MAX_UNIX_CONNS {
-                let pipe_a = unsafe { UNIX_CONN_PIPE_A[conn] as usize };
-                pipe_has_data(pipe_a) || pipe_writer_closed(pipe_a)
-                    || crate::fd::msg_queue_has_pending(conn, 0) // client→server msgs
+                let dead = crate::fd::UNIX_CONN_ACTIVE[conn].load(Ordering::Acquire) == 0;
+                if dead { true } else {
+                    let pipe_a = unsafe { UNIX_CONN_PIPE_A[conn] as usize };
+                    pipe_has_data(pipe_a) || pipe_writer_closed(pipe_a)
+                        || crate::fd::msg_queue_has_pending(conn, 0)
+                }
             } else { false }
         }
         17 => true, // UDP: report readable — recvfrom does the real waiting via CMD_UDP_RECV
@@ -1689,6 +1695,14 @@ pub(crate) fn sys_epoll_wait(ctx: &mut SyscallContext, msg: &IpcMsg) {
             let kind = ctx.child_fds[rfd];
             if kind == 0 {
                 revents |= 0x10; // EPOLLHUP
+            } else if (kind == 27 || kind == 28) && rfd < GRP_MAX_FDS {
+                // AF_UNIX: check if the connection is dead → EPOLLHUP
+                let conn = ctx.sock_conn_id[rfd] as usize;
+                if conn < MAX_UNIX_CONNS
+                    && crate::fd::UNIX_CONN_ACTIVE[conn].load(Ordering::Acquire) == 0
+                {
+                    revents |= 0x10 | 0x08; // EPOLLHUP | EPOLLERR
+                }
             } else {
                 if wanted & 1 != 0 {
                     if kind == 1 {
