@@ -292,6 +292,50 @@ impl ObjectStore {
         Ok(oid)
     }
 
+    /// Create a hardlink: new directory entry sharing the same sector data as `src_oid`.
+    /// The new entry has a new OID but points to the same on-disk sectors.
+    /// Refcounts are incremented for shared sectors.
+    pub fn link_into(&mut self, name: &[u8], src_oid: u64, new_parent: u64) -> Result<u64, &'static str> {
+        if name.is_empty() || name.len() >= MAX_NAME_LEN {
+            return Err("invalid name");
+        }
+        if self.find_in(name, new_parent).is_some() {
+            return Err("exists");
+        }
+        let src_slot = self.find_slot(src_oid).ok_or("src not found")?;
+        let src = self.dir[src_slot];
+        let slot = self.dir.iter().position(|e| e.is_free()).ok_or("dir full")?;
+
+        let oid = self.sb.next_oid;
+        self.dir[slot] = DirEntry::zeroed();
+        self.dir[slot].oid = oid;
+        let n = name.len().min(MAX_NAME_LEN - 1);
+        self.dir[slot].name[..n].copy_from_slice(&name[..n]);
+        self.dir[slot].size = src.size;
+        self.dir[slot].sector_start = src.sector_start;
+        self.dir[slot].sector_count = src.sector_count;
+        self.dir[slot].flags = src.flags;
+        self.dir[slot].parent_oid = new_parent;
+        self.dir[slot].permissions = src.permissions;
+        self.dir[slot].created_time = src.created_time;
+        self.dir[slot].modified_time = src.modified_time;
+        self.dir[slot].accessed_time = src.accessed_time;
+
+        // Increment refcounts for shared sectors
+        for s in 0..src.sector_count {
+            let idx = (src.sector_start + s) as usize;
+            if idx < self.refcount.len() && self.refcount[idx] < 255 {
+                self.refcount[idx] += 1;
+            }
+        }
+
+        self.sb.next_oid += 1;
+        self.sb.obj_count += 1;
+        // Don't flush per-entry — caller should flush_dir() + flush_superblock() after batch.
+
+        Ok(oid)
+    }
+
     /// Read an object by OID into `buf`. Returns bytes read.
     pub fn read_obj(&mut self, oid: u64, buf: &mut [u8]) -> Result<usize, &'static str> {
         let slot = self.find_slot(oid).ok_or("object not found")?;
@@ -1069,7 +1113,7 @@ impl ObjectStore {
     }
 
     /// Flush superblock to disk (non-WAL, for format).
-    fn flush_superblock(&mut self) -> Result<(), &'static str> {
+    pub fn flush_superblock(&mut self) -> Result<(), &'static str> {
         write_sector_struct(&mut self.blk, SECTOR_SUPERBLOCK as u64, &self.sb)
     }
 
@@ -1118,7 +1162,7 @@ impl ObjectStore {
     }
 
     /// Flush refcount table to disk (8 sectors).
-    fn flush_refcount(&mut self) -> Result<(), &'static str> {
+    pub fn flush_refcount(&mut self) -> Result<(), &'static str> {
         flush_sectors(&mut self.blk, &self.refcount, SECTOR_REFCOUNT, REFCOUNT_SECTORS)
     }
 

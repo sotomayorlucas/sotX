@@ -220,7 +220,76 @@ fn sysroot_init(store: &mut ObjectStore) {
             }
         }
     }
+    // ── Wine DLL pre-population ──
+    // Wine's wineboot needs DLLs from x86_64-windows/ to run, but wineboot
+    // creates c:\windows\system32\ which holds symlinks to those DLLs.
+    // Chicken-and-egg: create system32 with hardlinks BEFORE wineboot runs.
+    wine_prepopulate_system32(store);
+
     trace!(Info, FS, { print(b"sysroot dirs initialized (alpine+debian)"); });
+}
+
+/// Pre-create Wine prefix with DLL hardlinks so wineboot can find them.
+fn wine_prepopulate_system32(store: &mut ObjectStore) {
+    use sotos_objstore::layout::{DirEntry, ROOT_OID};
+
+    // Find the Wine DLL source directory on disk:
+    // /sysroot/debian/x86_64-linux-gnu/wine/x86_64-windows/
+    let src_oid = {
+        let sr = match store.resolve_path(b"sysroot", ROOT_OID) { Ok(o) => o, Err(_) => return };
+        let deb = match store.find_in(b"debian", sr) { Some(o) => o, None => return };
+        let x86 = match store.find_in(b"x86_64-linux-gnu", deb) { Some(o) => o, None => return };
+        let wine = match store.find_in(b"wine", x86) { Some(o) => o, None => return };
+        match store.find_in(b"x86_64-windows", wine) { Some(o) => o, None => return }
+    };
+
+    // Create Wine prefix: /root/.wine/dosdevices/c:/windows/system32/
+    let root_oid = match store.resolve_path(b"root", ROOT_OID) { Ok(o) => o, Err(_) => return };
+    let wine_oid = match store.find_in(b".wine", root_oid) {
+        Some(o) => o,
+        None => match store.mkdir(b".wine", root_oid) { Ok(o) => o, Err(_) => return },
+    };
+    let dd_oid = match store.find_in(b"dosdevices", wine_oid) {
+        Some(o) => o,
+        None => match store.mkdir(b"dosdevices", wine_oid) { Ok(o) => o, Err(_) => return },
+    };
+    let c_oid = match store.find_in(b"c:", dd_oid) {
+        Some(o) => o,
+        None => match store.mkdir(b"c:", dd_oid) { Ok(o) => o, Err(_) => return },
+    };
+    let win_oid = match store.find_in(b"windows", c_oid) {
+        Some(o) => o,
+        None => match store.mkdir(b"windows", c_oid) { Ok(o) => o, Err(_) => return },
+    };
+    let sys32_oid = match store.find_in(b"system32", win_oid) {
+        Some(o) => o,
+        None => match store.mkdir(b"system32", win_oid) { Ok(o) => o, Err(_) => return },
+    };
+
+    // List all DLLs in x86_64-windows/ and hardlink them into system32/
+    let mut dll_entries = [DirEntry::zeroed(); 64];
+    let count = store.list_dir(src_oid, &mut dll_entries);
+    let mut linked = 0u32;
+    for i in 0..count.min(64) {
+        let e = &dll_entries[i];
+        if e.is_dir() || e.size == 0 { continue; }
+        let name = e.name_as_str();
+        if name.is_empty() { continue; }
+        match store.link_into(name, e.oid, sys32_oid) {
+            Ok(_) => { linked += 1; }
+            Err(_) => {} // might already exist
+        }
+    }
+
+    if linked > 0 {
+        // Flush all changes at once
+        let _ = store.flush_dir();
+        let _ = store.flush_superblock();
+        let _ = store.flush_refcount();
+        print(b"WINE: pre-populated system32 with ");
+        print_u64(linked as u64);
+        print(b" DLLs\n");
+    }
 }
 
 /// LUCAS handler — PID 1 syscall loop.
