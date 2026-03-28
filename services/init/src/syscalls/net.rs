@@ -1100,24 +1100,15 @@ pub(crate) fn sys_recvmsg(ctx: &mut SyscallContext, msg: &IpcMsg) {
             let want = if msg_len > 0 { iov_len.min(msg_len).min(4096) } else { iov_len.min(4096) };
             let mut tmp = [0u8; 4096];
             let n = pipe_read(pipe_id, &mut tmp[..want]);
-            // Diagnostic: dump recvmsg for AF_UNIX on P5 (wineserver receives SCM fds)
-            if ctx.pid == 5 && (ctx.child_fds[fd] == 27 || ctx.child_fds[fd] == 28) {
-                trace!(Trace, NET, {
-                    print(b"RCVM-UX P5 fd="); print_u64(fd as u64);
-                    print(b" conn="); print_u64(conn as u64);
-                    print(b" pipe="); print_u64(pipe_id as u64);
-                    print(b" n="); print_u64(n as u64);
-                    print(b" ml="); print_u64(msg_len as u64);
-                    print(b" ctl="); print_u64(msg_controllen as u64)
-                });
-            }
-            // Diagnostic: dump recvmsg data for P7 (Wine client ↔ wineserver)
-            if ctx.pid == 7 && n > 0 {
-                trace!(Trace, NET, {
-                    print(b"RCVM P7 fd="); print_u64(fd as u64);
-                    print(b" n="); print_u64(n as u64);
+            // Diagnostic: dump recvmsg for AF_UNIX on wineserver (P4/P5)
+            if (ctx.pid == 4 || ctx.pid == 5) && (ctx.child_fds[fd] == 27 || ctx.child_fds[fd] == 28) {
+                print(b"RCVM-UX P"); print_u64(ctx.pid as u64); print(b" fd="); print_u64(fd as u64);
+                print(b" pipe="); print_u64(pipe_id as u64);
+                print(b" n="); print_u64(n as u64);
+                print(b" ml="); print_u64(msg_len as u64);
+                print(b" ctl="); print_u64(msg_controllen as u64);
+                if n > 0 {
                     print(b" [");
-                    // Print first 16 bytes as hex
                     for i in 0..n.min(16) {
                         let hi = tmp[i] >> 4;
                         let lo = tmp[i] & 0xF;
@@ -1125,8 +1116,9 @@ pub(crate) fn sys_recvmsg(ctx: &mut SyscallContext, msg: &IpcMsg) {
                         let lc = if lo < 10 { b'0' + lo } else { b'a' + lo - 10 };
                         crate::framebuffer::print(&[hc, lc]);
                     }
-                    print(b"]")
-                });
+                    print(b"]");
+                }
+                print(b"\n");
             }
             if n > 0 {
                 // Pop the boundary marker and get per-message SCM count
@@ -1771,10 +1763,9 @@ pub(crate) fn sys_epoll_wait(ctx: &mut SyscallContext, msg: &IpcMsg) {
         }
         reply_val(ep_cap, ready_count as i64);
     } else {
-        // Scale timeout by 100x for QEMU TCG: wineserver's 16ms timeout
-        // is way too short in emulation. Without this, wineserver exits
-        // before P6 (hello.exe) finishes library loading.
-        let scale = if ctx.pid >= 3 && ctx.pid <= 5 { 100u64 } else { 1u64 };
+        // Scale timeout for QEMU: wineserver's short timeouts expire too
+        // fast in TCG emulation. 10x is enough for WHPX, 100x for TCG.
+        let scale = if ctx.pid >= 3 && ctx.pid <= 6 { 10u64 } else { 1u64 };
         let deadline = rdtsc() + (timeout as u64).min(30000) * 2_000_000 * scale;
         loop {
             let mut found = false;
@@ -1813,15 +1804,30 @@ pub(crate) fn sys_epoll_wait(ctx: &mut SyscallContext, msg: &IpcMsg) {
                     }
                 }
             }
-            if found || rdtsc() >= deadline { break; }
+            if found { break; }
+            if rdtsc() >= deadline {
+                // Timeout: trace for wineserver
+                if ctx.pid == 4 || ctx.pid == 5 {
+                    static mut EP_TIMEOUT_N: [u32; 16] = [0; 16];
+                    let tn = unsafe { &mut EP_TIMEOUT_N[ctx.pid] };
+                    *tn += 1;
+                    if *tn <= 3 || *tn % 20 == 0 {
+                        print(b"EP-TIMEOUT P"); print_u64(ctx.pid as u64);
+                        print(b" n="); print_u64(*tn as u64);
+                        print(b" ms="); print_u64(timeout as u64);
+                        print(b"\n");
+                    }
+                }
+                break;
+            }
             // Trace stall: if wineserver (pid 5) has been in epoll_wait for many
             // iterations without finding events, dump registered fd states.
             static mut EPOLL_STALL_ITER: [u32; 16] = [0; 16];
             if ctx.pid < 16 {
                 let iter = unsafe { &mut EPOLL_STALL_ITER[ctx.pid] };
                 *iter += 1;
-                if ctx.pid == 5 && *iter == 500 {
-                    print(b"EPOLL-STALL P5 500 iters, fds:");
+                if (ctx.pid == 4 || ctx.pid == 5) && *iter == 500 {
+                    print(b"EPOLL-STALL P"); print_u64(ctx.pid as u64); print(b" 500 iters, fds:");
                     for i in 0..MAX_EPOLL_ENTRIES {
                         if ctx.epoll_reg_fd[i] >= 0 {
                             let rfd = ctx.epoll_reg_fd[i] as usize;

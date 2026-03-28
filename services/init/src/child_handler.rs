@@ -353,6 +353,20 @@ pub(crate) extern "C" fn child_handler() -> ! {
 
             // SYS_write(fd, buf, len)
             SYS_WRITE => {
+                // Trace P4 writes to pipe fds (wineserver reply pipe)
+                if pid == 4 && (msg.regs[0] as usize) < 128 {
+                    let wfd = msg.regs[0] as usize;
+                    let wlen = msg.regs[2];
+                    unsafe {
+                        let k = THREAD_GROUPS[fdg].fds[wfd];
+                        if k == 11 { // pipe write
+                            print(b"WS4-WRITE fd="); print_u64(wfd as u64);
+                            print(b" len="); print_u64(wlen);
+                            print(b" pipe="); print_u64(THREAD_GROUPS[fdg].sock_conn_id[wfd] as u64);
+                            print(b"\n");
+                        }
+                    }
+                }
                 let mut ctx = make_ctx!();
                 syscalls_fs::sys_write(&mut ctx, &msg);
             }
