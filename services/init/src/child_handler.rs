@@ -334,23 +334,15 @@ pub(crate) extern "C" fn child_handler() -> ! {
         // Linux 6.6 kernel instead of emulating them manually. Keep process
         // management (fork/exec/exit/wait), memory (brk/mmap), and signals
         // local — LKL can't manage sotOS address spaces or capabilities.
-        // ── LKL forwarding (Phase 1: sync/time/uname only) ──
-        // Forward syscalls where LKL adds real value over LUCAS emulation.
-        // File I/O stays in LUCAS (LKL has empty tmpfs — no sotOS disk mounted).
-        // Networking stays in LUCAS (routed through net service via IPC).
-        // Phase 2: mount sotOS disk in LKL, then forward FS + sockets too.
+        // ── LKL forwarding (hybrid: sync/time/uname via LKL, FS via LUCAS) ──
+        // Full FS forwarding requires disk_backend in lkl-server (Phase 2b).
+        // For now, forward only syscalls without FS dependencies.
         let lkl_ep = LKL_EP_CAP.load(Ordering::Acquire);
         if lkl_ep != 0 {
             let forwarded = match syscall_nr {
-                // System info — LKL returns real Linux uname/sysinfo
-                SYS_UNAME | SYS_SYSINFO |
-                // Time — LKL has proper clock sources
-                SYS_GETTIMEOFDAY | SYS_CLOCK_GETTIME | SYS_CLOCK_GETRES |
-                SYS_NANOSLEEP | SYS_CLOCK_NANOSLEEP |
-                // Sync primitives — LKL has real futex implementation
-                SYS_FUTEX |
-                // Random — LKL has /dev/urandom backed by real entropy
-                SYS_GETRANDOM
+                // Only syscalls where lkl-server has guest memory bridge (uname)
+                // or no pointer args. getrandom/sysinfo need bridge too.
+                SYS_UNAME
                 => {
                     forward_to_lkl(ep_cap, lkl_ep, syscall_nr, &msg, pid, child_as_cap);
                     true

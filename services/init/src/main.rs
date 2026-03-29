@@ -272,11 +272,8 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
-    // --- Phase 5b: Spawn LKL server (if present in initrd) ---
-    // lkl-server is a 12MB binary — spawning takes ~2min on single-CPU TCG.
-    // It registers as service "lkl" when ready.
+    // --- Phase 5b: Spawn LKL server (needs 4GB+ RAM: 13MB buffer + 128MB arena) ---
     spawn_process(b"lkl-server");
-    // Give it time to boot Linux 6.6 kernel and register service
     for _ in 0..500 { sys::yield_now(); }
 
     let lkl_name = b"lkl";
