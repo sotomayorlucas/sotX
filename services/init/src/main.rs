@@ -82,6 +82,8 @@ mod child_handler;
 mod lucas_handler;
 mod lkl;
 mod boot_tests;
+mod sot_types;
+mod sot_bridge;
 
 use framebuffer::{print, print_u64, print_hex64, print_hex, fb_init};
 use exec::MAP_WRITABLE;
