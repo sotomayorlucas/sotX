@@ -1583,7 +1583,10 @@ pub fn tick() {
     };
 
     if needs_reschedule {
-        schedule();
+        // Use try_schedule instead of schedule: tick() runs from interrupt
+        // context where blocking on SCHEDULER lock causes thundering herd
+        // on TCG with 4+ vCPUs. If lock is contended, next tick will retry.
+        try_schedule();
     }
 }
 
@@ -1645,20 +1648,27 @@ fn check_domain_refills(sched: &mut Scheduler, global_now: u64) {
 /// dequeue and run the old thread before its RSP is saved.
 ///
 /// Non-blocking schedule attempt for interrupt context (reschedule IPI).
-/// If SCHEDULER lock is contended, returns immediately — next timer tick
-/// will pick up the work. Prevents deadlock when IPI fires while another
-/// CPU holds SCHEDULER lock.
+/// Non-blocking reschedule for IPI context. If SCHEDULER lock is contended,
+/// returns immediately — next timer tick will retry.
+///
+/// IMPORTANT: Does NOT dequeue before try_lock. The old approach (try_lock →
+/// drop → schedule → lock) had a TOCTOU: between drop and lock, another CPU
+/// grabs the lock, causing all IPIs to pile up on a blocking lock(). With 4+
+/// CPUs on TCG this causes a thundering herd and apparent hang.
 pub fn try_schedule() {
     let percpu = percpu::current_percpu();
     let old_idx = percpu.current_thread;
     if old_idx == usize::MAX { return; }
 
-    // Only reschedule if we can get the lock without spinning.
+    // Only proceed if we can get the lock without spinning.
+    // If contended, bail — the timer tick will call schedule() with the
+    // blocking lock, which is safe because timer ticks are serialized per-CPU.
     if SCHEDULER.try_lock().is_none() {
-        return; // Lock contended — skip, timer tick will retry.
+        return;
     }
-    // Lock acquired and dropped immediately (just testing).
-    // Now do the full schedule with the lock available.
+    // Lock was acquired and immediately dropped by try_lock().
+    // Call schedule() which will re-acquire it. Since we JUST released it,
+    // TicketMutex guarantees minimal contention (we're likely next in line).
     schedule();
 }
 

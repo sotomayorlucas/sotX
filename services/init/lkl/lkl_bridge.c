@@ -15,6 +15,7 @@
 #include "guest_mem.h"
 #include "libc_stubs.h"
 #include "syscall_xlat.h"
+#include "disk_backend.h"
 
 #ifdef HAS_LKL
 #include <lkl.h>
@@ -35,6 +36,51 @@ static volatile int bridge_lock = 0;
 
 #ifdef HAS_LKL
 static struct lkl_host_operations g_host_ops;
+
+/* ── LKL block device callbacks (disk_backend.c provides the actual I/O) ── */
+
+static int sotos_blk_get_capacity(struct lkl_disk disk, unsigned long long *res)
+{
+    (void)disk;
+    uint64_t cap = disk_capacity();
+    if (cap == 0) return -1;
+    *res = (unsigned long long)cap;
+    return 0;
+}
+
+static int sotos_blk_request(struct lkl_disk disk, struct lkl_blk_req *req)
+{
+    (void)disk;
+
+    if (req->type == LKL_DEV_BLK_TYPE_FLUSH ||
+        req->type == LKL_DEV_BLK_TYPE_FLUSH_OUT) {
+        /* Nothing to flush for IPC-based backend — data is already committed
+         * by the blk service after each write. */
+        return LKL_DEV_BLK_STATUS_OK;
+    }
+
+    unsigned long long sector = req->sector;
+
+    for (int i = 0; i < req->count; i++) {
+        void  *data = req->buf[i].iov_base;
+        size_t len  = req->buf[i].iov_len;
+
+        if (req->type == LKL_DEV_BLK_TYPE_READ) {
+            int ret = disk_read(data, sector * 512, len);
+            if (ret < 0) return LKL_DEV_BLK_STATUS_IOERR;
+        } else if (req->type == LKL_DEV_BLK_TYPE_WRITE) {
+            int ret = disk_write(data, sector * 512, len);
+            if (ret < 0) return LKL_DEV_BLK_STATUS_IOERR;
+        } else {
+            return LKL_DEV_BLK_STATUS_UNSUP;
+        }
+
+        /* Advance sector position for the next scatter-gather element. */
+        sector += (len + 511) / 512;
+    }
+
+    return LKL_DEV_BLK_STATUS_OK;
+}
 
 /* Boot thread: runs lkl_start_kernel on a separate sotOS thread so init
  * can continue to the shell while the Linux kernel boots in background. */
@@ -102,6 +148,63 @@ static void lkl_boot_thread_fn(void *arg)
     #undef LKL_WRITE_FILE
 
     serial_puts("[lkl-boot] rootfs ready\n");
+
+    /* ── Mount real ext4 disk via virtio-blk IPC ── */
+    if (disk_init() == 0) {
+        serial_puts("[lkl-boot] registering disk with LKL...\n");
+        static struct lkl_dev_blk_ops sotos_blk_ops;
+        sotos_blk_ops.get_capacity = sotos_blk_get_capacity;
+        sotos_blk_ops.request      = sotos_blk_request;
+
+        struct lkl_disk disk;
+        memset(&disk, 0, sizeof(disk));
+        disk.ops = &sotos_blk_ops;
+
+        int disk_id = lkl_disk_add(&disk);
+        if (disk_id < 0) {
+            serial_puts("[lkl-boot] lkl_disk_add failed: ");
+            serial_put_dec((uint64_t)(-(long)disk_id));
+            serial_puts("\n");
+        } else {
+            serial_puts("[lkl-boot] disk_id=");
+            serial_put_dec((uint64_t)disk_id);
+            serial_puts(", mounting ext4...\n");
+
+            char mnt_str[64];
+            memset(mnt_str, 0, sizeof(mnt_str));
+            long mrc = lkl_mount_dev((unsigned int)disk_id, 0, "ext4",
+                                     0, NULL, mnt_str, sizeof(mnt_str));
+            if (mrc == 0) {
+                serial_puts("[lkl-boot] ext4 mounted at: ");
+                serial_puts(mnt_str);
+                serial_puts("\n");
+
+                /* Bind-mount or symlink /mnt -> mount point for easy access */
+                long mp[6] = {-100 /* AT_FDCWD */, (long)"/mnt", 0755, 0, 0, 0};
+                lkl_syscall(34 /* mkdirat */, mp);
+                /* mount --bind mnt_str /mnt */
+                long bp[6] = {(long)mnt_str, (long)"/mnt", 0, 0x1000 /* MS_BIND */, 0, 0};
+                long brc = lkl_syscall(40 /* mount */, bp);
+                if (brc == 0)
+                    serial_puts("[lkl-boot] bind-mounted at /mnt\n");
+            } else {
+                serial_puts("[lkl-boot] ext4 mount failed (");
+                serial_put_dec((uint64_t)(-(long)mrc));
+                serial_puts("), trying ext2...\n");
+
+                memset(mnt_str, 0, sizeof(mnt_str));
+                mrc = lkl_mount_dev((unsigned int)disk_id, 0, "ext2",
+                                    0, NULL, mnt_str, sizeof(mnt_str));
+                if (mrc == 0) {
+                    serial_puts("[lkl-boot] ext2 mounted at: ");
+                    serial_puts(mnt_str);
+                    serial_puts("\n");
+                } else {
+                    serial_puts("[lkl-boot] disk mount failed, continuing without\n");
+                }
+            }
+        }
+    }
 
     lkl_ready = 1;
     serial_puts("[lkl-boot] ready — forwarding enabled\n");
@@ -685,6 +788,158 @@ int64_t lkl_bridge_syscall(uint64_t x86_nr, const uint64_t *args,
         result = lkl_syscall(lkl_nr, p);
         if (result > 0 && as_cap)
             guest_write(as_cap, args[1], kevs, (size_t)result * 12);
+        break;
+    }
+
+    /* ── sendmsg(fd, msghdr*, flags) — flatten nested pointers ── */
+    case 46: {
+        /* struct msghdr { name, namelen, iov, iovlen, control, controllen, flags }
+         * We only handle the iovec data, ignoring control messages and name. */
+        char mhdr[56]; memset(mhdr, 0, 56);
+        if (as_cap) guest_read(as_cap, args[1], mhdr, 56);
+        uint64_t iov_ptr = *(uint64_t *)(mhdr + 16);  /* msg_iov */
+        uint64_t iov_len = *(uint64_t *)(mhdr + 24);  /* msg_iovlen */
+        if (iov_len > 8) iov_len = 8;
+        /* Read iovec array from guest */
+        struct { uint64_t base; uint64_t len; } giov[8];
+        memset(giov, 0, sizeof(giov));
+        if (as_cap && iov_ptr) guest_read(as_cap, iov_ptr, giov, iov_len * 16);
+        /* Flatten all iovecs into g_data_buf */
+        size_t total = 0;
+        for (uint64_t i = 0; i < iov_len && total < 4096; i++) {
+            size_t c = (size_t)giov[i].len;
+            if (c > 4096 - total) c = 4096 - total;
+            if (as_cap && giov[i].base)
+                guest_read(as_cap, giov[i].base, g_data_buf + total, c);
+            total += c;
+        }
+        /* Build kernel iovec pointing to contiguous buffer */
+        struct { void *base; uint64_t len; } kiov;
+        kiov.base = g_data_buf; kiov.len = total;
+        /* Build kernel msghdr */
+        char kmhdr[56]; memset(kmhdr, 0, 56);
+        /* Copy name if present */
+        uint64_t name_ptr = *(uint64_t *)(mhdr + 0);
+        uint32_t name_len = *(uint32_t *)(mhdr + 8);
+        if (name_ptr && name_len > 0 && name_len <= 128) {
+            memset(g_sockaddr_buf, 0, 128);
+            if (as_cap) guest_read(as_cap, name_ptr, g_sockaddr_buf, name_len);
+            *(uint64_t *)(kmhdr + 0) = (uint64_t)g_sockaddr_buf;
+            *(uint32_t *)(kmhdr + 8) = name_len;
+        }
+        *(uint64_t *)(kmhdr + 16) = (uint64_t)&kiov;
+        *(uint64_t *)(kmhdr + 24) = 1;
+        long p[6] = {(long)args[0], (long)kmhdr, (long)args[2], 0, 0, 0};
+        result = lkl_syscall(lkl_nr, p);
+        break;
+    }
+
+    /* ── recvmsg(fd, msghdr*, flags) ── */
+    case 47: {
+        char mhdr[56]; memset(mhdr, 0, 56);
+        if (as_cap) guest_read(as_cap, args[1], mhdr, 56);
+        uint64_t iov_ptr = *(uint64_t *)(mhdr + 16);
+        uint64_t iov_len = *(uint64_t *)(mhdr + 24);
+        if (iov_len > 8) iov_len = 8;
+        struct { uint64_t base; uint64_t len; } giov[8];
+        memset(giov, 0, sizeof(giov));
+        if (as_cap && iov_ptr) guest_read(as_cap, iov_ptr, giov, iov_len * 16);
+        /* Single kernel iovec for receive */
+        struct { void *base; uint64_t len; } kiov;
+        size_t total_cap = 0;
+        for (uint64_t i = 0; i < iov_len; i++) total_cap += giov[i].len;
+        if (total_cap > 4096) total_cap = 4096;
+        kiov.base = g_data_buf; kiov.len = total_cap;
+        /* Kernel msghdr */
+        char kmhdr[56]; memset(kmhdr, 0, 56);
+        memset(g_sockaddr_buf, 0, 128);
+        *(uint64_t *)(kmhdr + 0) = (uint64_t)g_sockaddr_buf;
+        *(uint32_t *)(kmhdr + 8) = 128;
+        *(uint64_t *)(kmhdr + 16) = (uint64_t)&kiov;
+        *(uint64_t *)(kmhdr + 24) = 1;
+        long p[6] = {(long)args[0], (long)kmhdr, (long)args[2], 0, 0, 0};
+        result = lkl_syscall(lkl_nr, p);
+        /* Scatter received data back into guest iovecs */
+        if (result > 0 && as_cap) {
+            size_t off = 0;
+            for (uint64_t i = 0; i < iov_len && off < (size_t)result; i++) {
+                size_t c = (size_t)giov[i].len;
+                if (c > (size_t)result - off) c = (size_t)result - off;
+                guest_write(as_cap, giov[i].base, g_data_buf + off, c);
+                off += c;
+            }
+            /* Write back msg_name and msg_namelen */
+            uint64_t guest_name = *(uint64_t *)(mhdr + 0);
+            uint32_t ret_namelen = *(uint32_t *)(kmhdr + 8);
+            if (guest_name && ret_namelen > 0) {
+                if (ret_namelen > 128) ret_namelen = 128;
+                guest_write(as_cap, guest_name, g_sockaddr_buf, ret_namelen);
+            }
+            /* Write back msg_namelen + msg_flags to guest msghdr */
+            *(uint32_t *)(mhdr + 8) = ret_namelen;
+            *(uint32_t *)(mhdr + 48) = *(uint32_t *)(kmhdr + 48);
+            guest_write(as_cap, args[1], mhdr, 56);
+        }
+        break;
+    }
+
+    /* ── select(nfds, readfds, writefds, exceptfds, timeout) ── */
+    case 23: {
+        int nfds = (int)args[0]; if (nfds > 1024) nfds = 1024;
+        size_t fdset_bytes = ((size_t)nfds + 63) / 64 * 8;
+        if (fdset_bytes > 128) fdset_bytes = 128;
+        char kr[128], kw[128], ke[128];
+        memset(kr, 0, 128); memset(kw, 0, 128); memset(ke, 0, 128);
+        if (as_cap && args[1]) guest_read(as_cap, args[1], kr, fdset_bytes);
+        if (as_cap && args[2]) guest_read(as_cap, args[2], kw, fdset_bytes);
+        if (as_cap && args[3]) guest_read(as_cap, args[3], ke, fdset_bytes);
+        char tv[16]; memset(tv, 0, 16);
+        if (as_cap && args[4]) guest_read(as_cap, args[4], tv, 16);
+        long p[6] = {(long)nfds, args[1] ? (long)kr : 0, args[2] ? (long)kw : 0,
+                     args[3] ? (long)ke : 0, args[4] ? (long)tv : 0, 0};
+        result = lkl_syscall(lkl_nr, p);
+        if (result >= 0 && as_cap) {
+            if (args[1]) guest_write(as_cap, args[1], kr, fdset_bytes);
+            if (args[2]) guest_write(as_cap, args[2], kw, fdset_bytes);
+            if (args[3]) guest_write(as_cap, args[3], ke, fdset_bytes);
+        }
+        break;
+    }
+
+    /* ── pselect6(nfds, readfds, writefds, exceptfds, timeout, sigmask) ── */
+    case 270: {
+        int nfds = (int)args[0]; if (nfds > 1024) nfds = 1024;
+        size_t fdset_bytes = ((size_t)nfds + 63) / 64 * 8;
+        if (fdset_bytes > 128) fdset_bytes = 128;
+        char kr[128], kw[128], ke[128];
+        memset(kr, 0, 128); memset(kw, 0, 128); memset(ke, 0, 128);
+        if (as_cap && args[1]) guest_read(as_cap, args[1], kr, fdset_bytes);
+        if (as_cap && args[2]) guest_read(as_cap, args[2], kw, fdset_bytes);
+        if (as_cap && args[3]) guest_read(as_cap, args[3], ke, fdset_bytes);
+        char ts[16]; memset(ts, 0, 16);
+        if (as_cap && args[4]) guest_read(as_cap, args[4], ts, 16);
+        long p[6] = {(long)nfds, args[1] ? (long)kr : 0, args[2] ? (long)kw : 0,
+                     args[3] ? (long)ke : 0, args[4] ? (long)ts : 0, 0};
+        result = lkl_syscall(lkl_nr, p);
+        if (result >= 0 && as_cap) {
+            if (args[1]) guest_write(as_cap, args[1], kr, fdset_bytes);
+            if (args[2]) guest_write(as_cap, args[2], kw, fdset_bytes);
+            if (args[3]) guest_write(as_cap, args[3], ke, fdset_bytes);
+        }
+        break;
+    }
+
+    /* ── ppoll(fds, nfds, timeout_ts, sigmask, sigsetsize) ── */
+    case 271: {
+        int nfds = (int)args[1]; if (nfds > 64) nfds = 64;
+        char kpoll[512]; memset(kpoll, 0, 512);
+        if (as_cap) guest_read(as_cap, args[0], kpoll, nfds * 8);
+        char ts[16]; memset(ts, 0, 16);
+        if (as_cap && args[2]) guest_read(as_cap, args[2], ts, 16);
+        long p[6] = {(long)kpoll, (long)nfds,
+                     args[2] ? (long)ts : 0, 0, 8, 0};
+        result = lkl_syscall(lkl_nr, p);
+        if (result >= 0 && as_cap) guest_write(as_cap, args[0], kpoll, nfds * 8);
         break;
     }
 
