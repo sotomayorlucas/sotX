@@ -209,6 +209,28 @@ pub enum Syscall {
     DebugPrint = 255,
     /// Non-blocking serial read (returns byte or u64::MAX if none).
     DebugRead = 253,
+    /// Create a new SOT object.
+    SoCreate = 300,
+    /// Invoke a method on a SOT object.
+    SoInvoke = 301,
+    /// Grant a SOT capability to another domain.
+    SoGrant = 302,
+    /// Revoke a SOT capability.
+    SoRevoke = 303,
+    /// Observe a SOT object (read-only inspection).
+    SoObserve = 304,
+    /// Create a new SOT scheduling/isolation domain.
+    SotDomainCreate = 305,
+    /// Enter (switch to) a SOT domain.
+    SotDomainEnter = 306,
+    /// Create a new SOT typed channel.
+    SotChannelCreate = 307,
+    /// Begin a transaction.
+    TxBegin = 308,
+    /// Commit current transaction.
+    TxCommit = 309,
+    /// Abort current transaction, rollback changes.
+    TxAbort = 310,
 }
 
 /// Error codes returned by syscalls.
