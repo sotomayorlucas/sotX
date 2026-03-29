@@ -136,6 +136,11 @@ static FOCUSED_CLIENT: SyncUnsafeCell<usize> = SyncUnsafeCell::new(MAX_CLIENTS);
 /// Index of the focused toplevel (for keyboard routing), or MAX_TOPLEVELS if none.
 static FOCUSED_TOPLEVEL: SyncUnsafeCell<usize> = SyncUnsafeCell::new(MAX_TOPLEVELS);
 
+/// Drag state: if dragging a window, (toplevel_idx, offset_x, offset_y).
+static DRAG_TL: SyncUnsafeCell<usize> = SyncUnsafeCell::new(MAX_TOPLEVELS);
+static DRAG_OFS_X: SyncUnsafeCell<i32> = SyncUnsafeCell::new(0);
+static DRAG_OFS_Y: SyncUnsafeCell<i32> = SyncUnsafeCell::new(0);
+
 /// TSC of last composed frame (SDF: fixed token production rate).
 static LAST_FRAME_TSC: SyncUnsafeCell<u64> = SyncUnsafeCell::new(0);
 /// Damage flag: set when any visual state changes.
@@ -761,13 +766,90 @@ fn handle_mouse(packet: input::MousePacket) {
         }
     }
 
-    // Update focus if a toplevel was clicked (any button pressed).
-    if hit_tl_idx < MAX_TOPLEVELS && packet.buttons != 0 {
+    // ── Drag handling ──
+    unsafe {
+        let drag_tl = &mut *DRAG_TL.get();
+
+        // If left button released, stop dragging.
+        if packet.buttons & 0x01 == 0 && *drag_tl < MAX_TOPLEVELS {
+            *drag_tl = MAX_TOPLEVELS;
+        }
+
+        // If currently dragging, move the toplevel.
+        if *drag_tl < MAX_TOPLEVELS {
+            let toplevels_mut = &mut *TOPLEVELS.get();
+            let tl = &mut toplevels_mut[*drag_tl];
+            tl.x = cursor_x - *DRAG_OFS_X.get();
+            tl.y = cursor_y - *DRAG_OFS_Y.get();
+            mark_damage();
+        }
+    }
+
+    // ── Click handling: focus, z-order, drag start, close ──
+    static PREV_BUTTONS: SyncUnsafeCell<u8> = SyncUnsafeCell::new(0);
+    let prev_btn = unsafe { *PREV_BUTTONS.get() };
+    let left_pressed = (packet.buttons & 0x01 != 0) && (prev_btn & 0x01 == 0);
+
+    if hit_tl_idx < MAX_TOPLEVELS && left_pressed {
         let tl = &toplevels[hit_tl_idx];
+
+        // Check if click is on the close button (top-right 16x16 of title bar).
+        let close_x0 = tl.x + tl.width as i32 - 20;
+        let close_y0 = tl.y - TITLE_BAR_HEIGHT as i32 + 4;
+        if cursor_x >= close_x0 && cursor_x < close_x0 + 16
+            && cursor_y >= close_y0 && cursor_y < close_y0 + 16
+        {
+            // Close the toplevel.
+            unsafe {
+                let toplevels_mut = &mut *TOPLEVELS.get();
+                toplevels_mut[hit_tl_idx].active = false;
+                // Clear focus if this was focused.
+                if *FOCUSED_TOPLEVEL.get() == hit_tl_idx {
+                    *FOCUSED_TOPLEVEL.get() = MAX_TOPLEVELS;
+                }
+            }
+            mark_damage();
+            unsafe { *PREV_BUTTONS.get() = packet.buttons; }
+            return;
+        }
+
+        // Check if click is on the title bar (above tl.y) → start drag.
+        if cursor_y < tl.y {
+            unsafe {
+                *DRAG_TL.get() = hit_tl_idx;
+                *DRAG_OFS_X.get() = cursor_x - tl.x;
+                *DRAG_OFS_Y.get() = cursor_y - tl.y;
+            }
+        }
+
+        // Z-order: bring to front by swapping with the last active slot.
+        if hit_tl_idx < MAX_TOPLEVELS {
+            unsafe {
+                let toplevels_mut = &mut *TOPLEVELS.get();
+                // Find the highest active index.
+                let mut last_active = hit_tl_idx;
+                for j in (hit_tl_idx + 1)..MAX_TOPLEVELS {
+                    if toplevels_mut[j].active { last_active = j; }
+                }
+                if last_active != hit_tl_idx {
+                    // Swap so clicked window is at higher index (rendered later = on top).
+                    let a = core::ptr::addr_of_mut!(toplevels_mut[hit_tl_idx]);
+                    let b = core::ptr::addr_of_mut!(toplevels_mut[last_active]);
+                    core::ptr::swap(a, b);
+                    // Update focused_tl to track the moved window.
+                    *FOCUSED_TOPLEVEL.get() = last_active;
+                    hit_tl_idx = last_active;
+                } else {
+                    *FOCUSED_TOPLEVEL.get() = hit_tl_idx;
+                }
+            }
+        }
+
+        // Update focus to this window's client.
         unsafe {
             *FOCUSED_TOPLEVEL.get() = hit_tl_idx;
-            // Find the client that owns this toplevel via its surface.
             let surfaces = &*SURFACES.get();
+            let tl = &(*TOPLEVELS.get())[hit_tl_idx];
             for si in 0..MAX_SURFACES {
                 if surfaces[si].active && surfaces[si].surface_id == tl.wl_surface_id {
                     *FOCUSED_CLIENT.get() = surfaces[si].client_idx;
@@ -775,7 +857,10 @@ fn handle_mouse(packet: input::MousePacket) {
                 }
             }
         }
+        mark_damage();
     }
+
+    unsafe { *PREV_BUTTONS.get() = packet.buttons; }
 
     // Send pointer events to the client that owns the hit toplevel.
     if hit_tl_idx < MAX_TOPLEVELS {
@@ -817,8 +902,7 @@ fn handle_mouse(packet: input::MousePacket) {
 
                 // Check for button events (PS/2: bit0=left, bit1=right, bit2=middle).
                 // We track previous button state to detect press/release edges.
-                static PREV_BUTTONS: SyncUnsafeCell<u8> = SyncUnsafeCell::new(0);
-                let prev = unsafe { *PREV_BUTTONS.get() };
+                let prev = prev_btn;
                 let cur = packet.buttons;
 
                 // Wayland button codes: left=0x110 (BTN_LEFT), right=0x111, middle=0x112.
@@ -863,8 +947,6 @@ fn handle_mouse(packet: input::MousePacket) {
                     events_buf[ev_count] = frame_ev;
                     ev_count += 1;
                 }
-
-                unsafe { *PREV_BUTTONS.get() = cur; }
 
                 // Send all pointer events packed into one IPC message.
                 let mut packed_events: [wayland::WlEvent; wayland::MAX_EVENTS] =
