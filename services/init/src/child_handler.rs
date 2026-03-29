@@ -334,46 +334,23 @@ pub(crate) extern "C" fn child_handler() -> ! {
         // Linux 6.6 kernel instead of emulating them manually. Keep process
         // management (fork/exec/exit/wait), memory (brk/mmap), and signals
         // local — LKL can't manage sotOS address spaces or capabilities.
-        // ── LKL forwarding ──
-        // When lkl-server is running, forward FS/net/time/sync syscalls to
-        // the real Linux 6.6 kernel. Keep process mgmt (fork/exec/exit/wait),
-        // memory (brk/mmap), and signals local.
+        // ── LKL forwarding (Phase 1: sync/time/uname only) ──
+        // Forward syscalls where LKL adds real value over LUCAS emulation.
+        // File I/O stays in LUCAS (LKL has empty tmpfs — no sotOS disk mounted).
+        // Networking stays in LUCAS (routed through net service via IPC).
+        // Phase 2: mount sotOS disk in LKL, then forward FS + sockets too.
         let lkl_ep = LKL_EP_CAP.load(Ordering::Acquire);
         if lkl_ep != 0 {
             let forwarded = match syscall_nr {
-                // File I/O
-                SYS_READ | SYS_WRITE | SYS_OPEN | SYS_CLOSE |
-                SYS_STAT | SYS_FSTAT | SYS_LSTAT | SYS_LSEEK |
-                SYS_READV | SYS_WRITEV | SYS_PREAD64 | SYS_PWRITE64 |
-                SYS_ACCESS | SYS_PIPE | SYS_PIPE2 |
-                SYS_DUP | SYS_DUP2 | SYS_DUP3 | SYS_FCNTL | SYS_IOCTL |
-                SYS_GETCWD | SYS_CHDIR |
-                SYS_MKDIR | SYS_RMDIR | SYS_UNLINK | SYS_RENAME |
-                SYS_OPENAT | SYS_FSTATAT | SYS_READLINKAT |
-                SYS_FACCESSAT | SYS_MKDIRAT | SYS_UNLINKAT |
-                SYS_RENAMEAT | SYS_RENAMEAT2 | SYS_GETDENTS64 |
-                SYS_FSYNC | SYS_FDATASYNC | SYS_FTRUNCATE | SYS_CHMOD |
-                // Poll/select/epoll
-                SYS_POLL | SYS_PPOLL | SYS_SELECT | SYS_PSELECT6 |
-                SYS_EPOLL_CREATE | SYS_EPOLL_CREATE1 | SYS_EPOLL_CTL |
-                SYS_EPOLL_WAIT | SYS_EPOLL_PWAIT |
-                // Networking
-                SYS_SOCKET | SYS_CONNECT | SYS_BIND | SYS_LISTEN |
-                SYS_ACCEPT | SYS_ACCEPT4 |
-                SYS_SENDTO | SYS_SENDMSG | SYS_RECVFROM | SYS_RECVMSG |
-                SYS_GETSOCKOPT | SYS_SETSOCKOPT |
-                SYS_GETSOCKNAME | SYS_GETPEERNAME | SYS_SHUTDOWN |
-                SYS_SOCKETPAIR |
-                // Special FDs
-                SYS_EVENTFD | SYS_EVENTFD2 |
-                SYS_TIMERFD_CREATE | SYS_TIMERFD_SETTIME | SYS_TIMERFD_GETTIME |
-                SYS_MEMFD_CREATE |
-                SYS_INOTIFY_INIT1 | SYS_INOTIFY_ADD_WATCH | SYS_INOTIFY_RM_WATCH |
-                // System info + time
+                // System info — LKL returns real Linux uname/sysinfo
                 SYS_UNAME | SYS_SYSINFO |
+                // Time — LKL has proper clock sources
                 SYS_GETTIMEOFDAY | SYS_CLOCK_GETTIME | SYS_CLOCK_GETRES |
                 SYS_NANOSLEEP | SYS_CLOCK_NANOSLEEP |
-                SYS_GETRANDOM | SYS_FUTEX
+                // Sync primitives — LKL has real futex implementation
+                SYS_FUTEX |
+                // Random — LKL has /dev/urandom backed by real entropy
+                SYS_GETRANDOM
                 => {
                     forward_to_lkl(ep_cap, lkl_ep, syscall_nr, &msg, pid, child_as_cap);
                     true

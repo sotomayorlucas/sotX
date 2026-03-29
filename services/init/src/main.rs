@@ -184,7 +184,7 @@ pub(crate) unsafe fn shared_store() -> Option<&'static mut sotos_objstore::Objec
 /// Temporary buffer region for reading ELF data from initrd (from sotos-common).
 use sotos_common::SPAWN_BUF_BASE;
 /// Max ELF size we support for spawning (512 KiB = 128 pages).
-const SPAWN_BUF_PAGES: u64 = 128;
+const SPAWN_BUF_PAGES: u64 = 3328; // 13MB — enough for lkl-server (12MB)
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
@@ -272,7 +272,13 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
-    // --- Phase 5b: Look up LKL server endpoint ---
+    // --- Phase 5b: Spawn LKL server (if present in initrd) ---
+    // lkl-server is a 12MB binary — spawning takes ~2min on single-CPU TCG.
+    // It registers as service "lkl" when ready.
+    spawn_process(b"lkl-server");
+    // Give it time to boot Linux 6.6 kernel and register service
+    for _ in 0..500 { sys::yield_now(); }
+
     let lkl_name = b"lkl";
     match sys::svc_lookup(lkl_name.as_ptr() as u64, lkl_name.len() as u64) {
         Ok(cap) => {
@@ -320,7 +326,8 @@ fn spawn_process(name: &[u8]) {
     print(name);
     print(b"' from initrd...\n");
 
-    let mut buf_frames = [0u64; SPAWN_BUF_PAGES as usize];
+    static mut SPAWN_FRAMES: [u64; SPAWN_BUF_PAGES as usize] = [0u64; SPAWN_BUF_PAGES as usize];
+    let buf_frames = unsafe { &mut SPAWN_FRAMES };
     for i in 0..SPAWN_BUF_PAGES {
         let frame_cap = match sys::frame_alloc() {
             Ok(f) => f,
