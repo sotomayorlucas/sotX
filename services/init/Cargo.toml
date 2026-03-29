@@ -20,6 +20,7 @@ ufmt = { version = "0.2", default-features = false }
 [features]
 default = ["trace"]
 trace = []
+https-proxy = []
 
 [profile.dev]
 panic = "abort"

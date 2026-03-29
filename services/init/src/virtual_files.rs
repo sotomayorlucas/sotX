@@ -98,6 +98,17 @@ pub(crate) fn open_virtual_file(name: &[u8], dir_buf: &mut [u8]) -> Option<usize
                || name == b"/lib/apk/db/scripts.tar"
                || name == b"/lib/apk/db/lock" {
             gen_len = 0; // empty apk db files (bootstrap)
+        } else if name == b"/etc/ssl/certs/ca-certificates.crt"
+               || name == b"/etc/ssl/cert.pem"
+               || name == b"/etc/pki/tls/certs/ca-bundle.crt"
+               || name == b"/etc/ssl/certs/ca-bundle.crt" {
+            // TLS CA certificate bundle placeholder.
+            // When using the HTTPS proxy (just run-https), TLS is handled
+            // by the host proxy so the guest doesn't need real certificates.
+            // Return an empty file so programs don't fail with "no CA certs".
+            // For direct TLS (without proxy), real CA certs would be needed
+            // on the sysroot disk image.
+            gen_len = 0;
         } else if name == b"/etc/gai.conf" || name == b"/etc/host.conf"
                || name == b"/etc/services" || name == b"/etc/protocols"
                || name == b"/etc/shells" || name == b"/etc/inputrc"

@@ -725,7 +725,18 @@ fn exec_loaded_elf(file_size: usize, bin_name: &[u8], argv: &[[u8; MAX_EXEC_ARG_
     let phdr_vaddr = elf_base + elf_info.phoff as u64;
 
     // Environment: user envp first (overrides defaults), then defaults for non-overridden keys
-    let defaults: [&[u8]; 9] = [
+    //
+    // When built with --features https-proxy, inject http_proxy/https_proxy/
+    // GIT_SSL_NO_VERIFY/SSL_CERT_FILE so child processes (git, wget, curl)
+    // route HTTPS through the host-side HTTPS proxy (10.0.2.2:8080).
+    // The proxy handles TLS on behalf of the guest.
+    #[cfg(not(feature = "https-proxy"))]
+    const NUM_DEFAULTS: usize = 9;
+    #[cfg(feature = "https-proxy")]
+    const NUM_DEFAULTS: usize = 14;
+
+    #[cfg(not(feature = "https-proxy"))]
+    let defaults: [&[u8]; NUM_DEFAULTS] = [
         b"TERM=xterm\0", b"HOME=/root\0",
         b"TERMINFO=/usr/share/terminfo\0", b"PATH=/usr/bin:/bin:/usr/sbin:/sbin\0",
         b"XDG_RUNTIME_DIR=/tmp\0",
@@ -734,8 +745,30 @@ fn exec_loaded_elf(file_size: usize, bin_name: &[u8], argv: &[[u8; MAX_EXEC_ARG_
         b"LIBSEAT_BACKEND=seatd\0",
         b"WESTON_RENDERER=pixman\0",
     ];
-    let default_keys: [&[u8]; 9] = [b"TERM", b"HOME", b"TERMINFO", b"PATH", b"XDG_RUNTIME_DIR", b"XKB_CONFIG_ROOT", b"XKB_DEFAULT_RULES", b"LIBSEAT_BACKEND", b"WESTON_RENDERER"];
-    let mut env_addrs = [0u64; MAX_EXEC_ENVS + 9];
+    #[cfg(feature = "https-proxy")]
+    let defaults: [&[u8]; NUM_DEFAULTS] = [
+        b"TERM=xterm\0", b"HOME=/root\0",
+        b"TERMINFO=/usr/share/terminfo\0", b"PATH=/usr/bin:/bin:/usr/sbin:/sbin\0",
+        b"XDG_RUNTIME_DIR=/tmp\0",
+        b"XKB_CONFIG_ROOT=/usr/share/X11/xkb\0",
+        b"XKB_DEFAULT_RULES=evdev\0",
+        b"LIBSEAT_BACKEND=seatd\0",
+        b"WESTON_RENDERER=pixman\0",
+        // HTTPS proxy: route all HTTP/HTTPS through host proxy (TLS offloaded)
+        b"http_proxy=http://10.0.2.2:8080\0",
+        b"https_proxy=http://10.0.2.2:8080\0",
+        b"HTTP_PROXY=http://10.0.2.2:8080\0",
+        b"HTTPS_PROXY=http://10.0.2.2:8080\0",
+        b"GIT_SSL_NO_VERIFY=1\0",
+    ];
+
+    #[cfg(not(feature = "https-proxy"))]
+    let default_keys: [&[u8]; NUM_DEFAULTS] = [b"TERM", b"HOME", b"TERMINFO", b"PATH", b"XDG_RUNTIME_DIR", b"XKB_CONFIG_ROOT", b"XKB_DEFAULT_RULES", b"LIBSEAT_BACKEND", b"WESTON_RENDERER"];
+    #[cfg(feature = "https-proxy")]
+    let default_keys: [&[u8]; NUM_DEFAULTS] = [b"TERM", b"HOME", b"TERMINFO", b"PATH", b"XDG_RUNTIME_DIR", b"XKB_CONFIG_ROOT", b"XKB_DEFAULT_RULES", b"LIBSEAT_BACKEND", b"WESTON_RENDERER",
+        b"http_proxy", b"https_proxy", b"HTTP_PROXY", b"HTTPS_PROXY", b"GIT_SSL_NO_VERIFY"];
+
+    let mut env_addrs = [0u64; MAX_EXEC_ENVS + NUM_DEFAULTS];
     let mut env_count: usize = 0;
 
     // User env vars first (they take priority — libc uses first occurrence)
@@ -754,7 +787,7 @@ fn exec_loaded_elf(file_size: usize, bin_name: &[u8], argv: &[[u8; MAX_EXEC_ARG_
     }
 
     // Defaults only if key not already provided by user
-    for d in 0..9 {
+    for d in 0..NUM_DEFAULTS {
         let mut overridden = false;
         for e in 0..envp.len() {
             if env_key_eq(&envp[e], default_keys[d]) { overridden = true; break; }

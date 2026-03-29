@@ -1,16 +1,22 @@
 #!/usr/bin/env python3
 """Validation: git clone over HTTPS on sotOS.
 
-Boots sotOS with a git+SSL sysroot disk, then attempts
-`git clone https://github.com/octocat/Hello-World.git /tmp/test`.
-QEMU SLIRP provides internet access via 10.0.2.x gateway,
-DNS resolver at 10.0.2.3.
+Two modes:
+  1. Proxy mode (default): Uses host-side HTTPS proxy.
+     Build with: just build-user-https && just image
+     Run:        python scripts/test_git_clone_https.py --proxy
 
-Requires disk built with git + SSL dependencies:
-  python scripts/fetch_rootfs.py --apk git --apk pcre2 --apk curl \
-    --apk nghttp2 --apk libcurl --apk ca-certificates --apk brotli-libs \
-    --apk c-ares --apk libidn2 --apk libunistring --apk zstd-libs \
-    --apk openssl --apk libssl3 --apk libcrypto3 --disk
+  2. Native TLS mode: Guest handles TLS directly.
+     Requires disk built with git + SSL dependencies:
+       python scripts/fetch_rootfs.py --apk git --apk pcre2 --apk curl \
+         --apk nghttp2 --apk libcurl --apk ca-certificates --apk brotli-libs \
+         --apk c-ares --apk libidn2 --apk libunistring --apk zstd-libs \
+         --apk openssl --apk libssl3 --apk libcrypto3 --disk
+     Run:        python scripts/test_git_clone_https.py --native
+
+The proxy mode auto-starts scripts/https_proxy.py on the host.
+Guest processes have http_proxy/https_proxy env vars set (when built
+with --features https-proxy) so git/wget/curl route through the proxy.
 """
 
 import sys, os, time, subprocess, threading, random
