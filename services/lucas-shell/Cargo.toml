@@ -6,11 +6,6 @@ edition = "2021"
 [dependencies]
 sotos-common = { path = "../../libs/sotos-common" }
 sotos-lua = { path = "../../libs/sotos-lua" }
-sotos-common = { path = "../../libs/sotos-common" }
-
-[features]
-default = ["trace"]
-trace = []
 
 [features]
 default = ["trace"]

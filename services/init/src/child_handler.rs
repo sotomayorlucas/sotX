@@ -75,42 +75,6 @@ pub(crate) fn fmt_u64(val: u64, buf: &mut [u8]) -> usize {
     n
 }
 
-/// Forward a syscall to the LKL server via IPC and relay the result back.
-///
-/// The forwarded message packs the Linux syscall number in `tag` and the six
-/// syscall arguments in `regs[0..6]`. `regs[6]` carries the child pid and
-/// `regs[7]` carries the child address-space capability so LKL can perform
-/// vm_read/vm_write on the child's memory (e.g. for path buffers, stat structs).
-///
-/// The LKL server's reply `regs[0]` is treated as the Linux return value and
-/// sent back to the blocked child process.
-fn forward_to_lkl(ep_cap: u64, lkl_ep: u64, syscall_nr: u64,
-                  msg: &sotos_common::IpcMsg, pid: usize, child_as_cap: u64)
-{
-    let fwd = sotos_common::IpcMsg {
-        tag: syscall_nr,
-        regs: [
-            msg.regs[0],        // arg1 (rdi)
-            msg.regs[1],        // arg2 (rsi)
-            msg.regs[2],        // arg3 (rdx)
-            msg.regs[3],        // arg4 (r10)
-            msg.regs[4],        // arg5 (r8)
-            msg.regs[5],        // arg6 (r9)
-            pid as u64,         // child pid
-            child_as_cap,       // child AS cap for vm_read/vm_write
-        ],
-    };
-
-    match sys::call(lkl_ep, &fwd) {
-        Ok(reply) => {
-            reply_val(ep_cap, reply.regs[0] as i64);
-        }
-        Err(_) => {
-            reply_val(ep_cap, -EIO);
-        }
-    }
-}
-
 /// Child process handler — full-featured handler for child processes.
 /// Supports brk, mmap, munmap, FD table (shared via GRP_ tables),
 /// file I/O, all musl-libc init syscalls, execve, clone(CLONE_THREAD), and futex.
