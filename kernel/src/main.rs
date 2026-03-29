@@ -29,6 +29,7 @@ mod sched;
 mod shm;
 mod sot;
 mod svc_registry;
+mod sot;
 mod sync;
 mod syscall;
 pub mod trace;

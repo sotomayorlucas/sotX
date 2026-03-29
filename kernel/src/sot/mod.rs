@@ -4,6 +4,7 @@
 //! transactions (Tier 0/1/2), provenance ring buffers, and domains.
 
 pub mod cap_epoch;
+pub mod provenance;
 pub mod so;
 pub mod tx;
 pub mod tx_wal;
