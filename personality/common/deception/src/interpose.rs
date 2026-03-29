@@ -1,171 +1,164 @@
-//! Capability interposition engine.
+//! Capability interposition engine for deception environments.
 //!
-//! Every service-object access in sotOS goes through capabilities. The
-//! interposition engine sits between a domain's capability invocations and
-//! the real service objects, applying one of four policies per capability.
+//! When a domain is migrated into deception, its capabilities are
+//! "interposed" — the original capability is replaced by a wrapper
+//! that routes operations through the deception profile, returning
+//! fake data or silently logging the access.
 
-use crate::{DeceptionError, InterceptResult, MAX_INTERPOSITIONS};
+/// Maximum interposition rules that can be active at once.
+pub const MAX_RULES: usize = 128;
 
-/// Policy applied when an interposed capability is invoked.
+/// What to do when an interposed capability is invoked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InterpositionPolicy {
-    /// Forward to real SO, log only (~50 cycle overhead).
-    Passthrough,
-    /// Full IPC to proxy domain -- proxy decides what to do.
-    Inspect,
-    /// Always route to an alternative service object.
-    Redirect,
-    /// Proxy generates a synthetic response; real SO is never contacted.
-    Fabricate,
+pub enum InterpositionAction {
+    /// Return fake data defined by the deception profile.
+    FakeResponse,
+    /// Allow the operation but log it for forensics.
+    PassthroughAndLog,
+    /// Deny the operation with an error code.
+    Deny { error_code: u32 },
+    /// Delay the operation (simulate slow I/O to waste attacker time).
+    Delay { ticks: u64 },
+    /// Return success with empty/zeroed data.
+    EmptySuccess,
 }
 
-/// A single interposition rule binding a capability to a policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A single interposition rule mapping a capability to a deception action.
+#[derive(Clone, Copy)]
 pub struct InterpositionRule {
-    /// The original capability being interposed.
-    pub original_cap: u64,
-    /// Domain ID of the proxy that handles Inspect/Redirect/Fabricate.
-    pub proxy_domain: u32,
-    /// Which policy to apply.
-    pub policy: InterpositionPolicy,
-    /// If true, the engine caches proxy decisions to avoid repeated IPC.
-    pub cache_decisions: bool,
+    /// The original capability ID being interposed.
+    pub cap_id: u32,
+    /// Domain this rule applies to.
+    pub domain_id: u32,
+    /// What to do when this cap is used.
+    pub action: InterpositionAction,
+    /// Whether this rule is currently active.
+    pub active: bool,
+    /// Snapshot ID for rollback (links to migration).
+    pub snapshot_id: u64,
+    /// Number of times this rule has been triggered.
+    pub hit_count: u64,
 }
 
-/// The interposition engine manages all active rules for a domain.
-///
-/// Fixed-size, no heap allocation for the rule table itself.
+impl InterpositionRule {
+    pub const fn empty() -> Self {
+        Self {
+            cap_id: 0,
+            domain_id: 0,
+            action: InterpositionAction::EmptySuccess,
+            active: false,
+            snapshot_id: 0,
+            hit_count: 0,
+        }
+    }
+}
+
+/// Manages the set of active interposition rules.
 pub struct InterpositionEngine {
-    rules: [Option<InterpositionRule>; MAX_INTERPOSITIONS],
+    rules: [InterpositionRule; MAX_RULES],
     count: usize,
 }
 
 impl InterpositionEngine {
-    /// Create a new engine with no active rules.
     pub const fn new() -> Self {
         Self {
-            rules: [None; MAX_INTERPOSITIONS],
+            rules: [InterpositionRule::empty(); MAX_RULES],
             count: 0,
         }
     }
 
-    /// Number of active interposition rules.
-    pub fn active_count(&self) -> usize {
-        self.count
+    /// Add an interposition rule. Returns the rule index, or `None` if full.
+    pub fn add_rule(
+        &mut self,
+        cap_id: u32,
+        domain_id: u32,
+        action: InterpositionAction,
+        snapshot_id: u64,
+    ) -> Option<usize> {
+        if self.count >= MAX_RULES {
+            return None;
+        }
+        let idx = self.count;
+        self.rules[idx] = InterpositionRule {
+            cap_id,
+            domain_id,
+            action,
+            active: true,
+            snapshot_id,
+            hit_count: 0,
+        };
+        self.count += 1;
+        Some(idx)
     }
 
-    /// Add an interposition rule. Returns the slot index on success.
-    pub fn add_rule(&mut self, rule: InterpositionRule) -> Result<usize, DeceptionError> {
-        for slot in self.rules.iter().flatten() {
-            if slot.original_cap == rule.original_cap {
-                return Err(DeceptionError::Duplicate);
+    /// Look up the interposition action for a (domain, cap) pair.
+    /// Returns `None` if no active rule matches.
+    pub fn lookup(&self, domain_id: u32, cap_id: u32) -> Option<&InterpositionRule> {
+        for i in 0..self.count {
+            let r = &self.rules[i];
+            if r.active && r.domain_id == domain_id && r.cap_id == cap_id {
+                return Some(r);
             }
         }
-        for (i, slot) in self.rules.iter_mut().enumerate() {
-            if slot.is_none() {
-                *slot = Some(rule);
-                self.count += 1;
-                return Ok(i);
+        None
+    }
+
+    /// Record a hit on a rule (capability was invoked while interposed).
+    pub fn record_hit(&mut self, domain_id: u32, cap_id: u32) {
+        for i in 0..self.count {
+            let r = &mut self.rules[i];
+            if r.active && r.domain_id == domain_id && r.cap_id == cap_id {
+                r.hit_count += 1;
+                return;
             }
         }
-        Err(DeceptionError::TableFull)
     }
 
-    /// Remove the rule at `index`. Returns the removed rule on success.
-    pub fn remove_rule(&mut self, index: usize) -> Result<InterpositionRule, DeceptionError> {
-        if index >= MAX_INTERPOSITIONS {
-            return Err(DeceptionError::NotFound);
-        }
-        match self.rules[index].take() {
-            Some(rule) => {
-                self.count -= 1;
-                Ok(rule)
-            }
-            None => Err(DeceptionError::NotFound),
-        }
-    }
-
-    /// Remove the rule for `cap`. Returns the removed rule on success.
-    pub fn remove_rule_for_cap(&mut self, cap: u64) -> Result<InterpositionRule, DeceptionError> {
-        for slot in self.rules.iter_mut() {
-            if let Some(rule) = slot {
-                if rule.original_cap == cap {
-                    let removed = *rule;
-                    *slot = None;
-                    self.count -= 1;
-                    return Ok(removed);
-                }
+    /// Lookup and record a hit in a single pass. Returns the action if found.
+    pub fn lookup_and_hit(&mut self, domain_id: u32, cap_id: u32) -> Option<InterpositionAction> {
+        for i in 0..self.count {
+            let r = &mut self.rules[i];
+            if r.active && r.domain_id == domain_id && r.cap_id == cap_id {
+                r.hit_count += 1;
+                return Some(r.action);
             }
         }
-        Err(DeceptionError::NotFound)
+        None
     }
 
-    /// Check whether `cap` has an interposition rule.
-    pub fn is_interposed(&self, cap: u64) -> bool {
-        self.rules
-            .iter()
-            .flatten()
-            .any(|r| r.original_cap == cap)
-    }
-
-    /// Look up the rule for `cap` and return the appropriate action.
-    ///
-    /// `_operation` and `_args` are provided for future use by Inspect
-    /// policies that may filter on specific operation types.
-    pub fn intercept(
-        &self,
-        cap: u64,
-        _operation: u32,
-        _args: &[u64],
-    ) -> InterceptResult {
-        for (i, slot) in self.rules.iter().enumerate() {
-            if let Some(rule) = slot {
-                if rule.original_cap == cap {
-                    return match rule.policy {
-                        InterpositionPolicy::Passthrough => {
-                            InterceptResult::Passthrough { rule_index: i }
-                        }
-                        InterpositionPolicy::Inspect => InterceptResult::Inspect {
-                            rule_index: i,
-                            proxy_domain: rule.proxy_domain,
-                        },
-                        InterpositionPolicy::Redirect => InterceptResult::Redirect {
-                            rule_index: i,
-                            proxy_domain: rule.proxy_domain,
-                        },
-                        InterpositionPolicy::Fabricate => InterceptResult::Fabricate {
-                            rule_index: i,
-                            proxy_domain: rule.proxy_domain,
-                        },
-                    };
-                }
+    /// Remove all rules for a domain (used during rollback).
+    /// Returns the number of rules removed.
+    pub fn remove_domain_rules(&mut self, domain_id: u32) -> u32 {
+        let mut removed = 0u32;
+        for i in 0..self.count {
+            if self.rules[i].domain_id == domain_id && self.rules[i].active {
+                self.rules[i].active = false;
+                removed += 1;
             }
         }
-        InterceptResult::NotInterposed
+        removed
     }
 
-    /// Get a reference to the rule at `index`, if occupied.
-    pub fn get_rule(&self, index: usize) -> Option<&InterpositionRule> {
-        if index < MAX_INTERPOSITIONS {
-            self.rules[index].as_ref()
-        } else {
-            None
+    /// Count active rules for a domain.
+    pub fn active_rules_for(&self, domain_id: u32) -> u32 {
+        let mut n = 0u32;
+        for i in 0..self.count {
+            if self.rules[i].active && self.rules[i].domain_id == domain_id {
+                n += 1;
+            }
         }
+        n
     }
 
-    /// Iterate over all active rules with their indices.
-    pub fn iter_rules(&self) -> impl Iterator<Item = (usize, &InterpositionRule)> {
-        self.rules
-            .iter()
-            .enumerate()
-            .filter_map(|(i, slot)| slot.as_ref().map(|r| (i, r)))
-    }
-
-    /// Set all active rules to a given policy (used during migration).
-    pub fn set_all_policy(&mut self, policy: InterpositionPolicy) {
-        for slot in self.rules.iter_mut().flatten() {
-            slot.policy = policy;
+    /// Total number of hits across all rules for a domain.
+    pub fn total_hits_for(&self, domain_id: u32) -> u64 {
+        let mut total = 0u64;
+        for i in 0..self.count {
+            if self.rules[i].domain_id == domain_id {
+                total += self.rules[i].hit_count;
+            }
         }
+        total
     }
 }
 
@@ -174,57 +167,46 @@ mod tests {
     use super::*;
 
     #[test]
-    fn add_and_intercept() {
+    fn add_and_lookup() {
         let mut engine = InterpositionEngine::new();
-        let rule = InterpositionRule {
-            original_cap: 42,
-            proxy_domain: 1,
-            policy: InterpositionPolicy::Fabricate,
-            cache_decisions: false,
-        };
-        let idx = engine.add_rule(rule).unwrap();
-        assert!(engine.is_interposed(42));
-        assert!(!engine.is_interposed(99));
-
-        match engine.intercept(42, 0, &[]) {
-            InterceptResult::Fabricate {
-                rule_index,
-                proxy_domain,
-            } => {
-                assert_eq!(rule_index, idx);
-                assert_eq!(proxy_domain, 1);
-            }
-            other => panic!("expected Fabricate, got {:?}", other),
-        }
-        assert_eq!(engine.intercept(99, 0, &[]), InterceptResult::NotInterposed);
+        engine
+            .add_rule(42, 1, InterpositionAction::FakeResponse, 100)
+            .unwrap();
+        let rule = engine.lookup(1, 42).unwrap();
+        assert_eq!(rule.cap_id, 42);
+        assert_eq!(rule.action, InterpositionAction::FakeResponse);
+        assert!(engine.lookup(1, 99).is_none());
+        assert!(engine.lookup(2, 42).is_none());
     }
 
     #[test]
-    fn remove_rule() {
+    fn remove_domain_rules() {
         let mut engine = InterpositionEngine::new();
-        let rule = InterpositionRule {
-            original_cap: 10,
-            proxy_domain: 2,
-            policy: InterpositionPolicy::Passthrough,
-            cache_decisions: true,
-        };
-        let idx = engine.add_rule(rule).unwrap();
-        assert_eq!(engine.active_count(), 1);
-        engine.remove_rule(idx).unwrap();
-        assert_eq!(engine.active_count(), 0);
-        assert!(!engine.is_interposed(10));
+        engine
+            .add_rule(1, 10, InterpositionAction::FakeResponse, 0)
+            .unwrap();
+        engine
+            .add_rule(2, 10, InterpositionAction::PassthroughAndLog, 0)
+            .unwrap();
+        engine
+            .add_rule(3, 20, InterpositionAction::FakeResponse, 0)
+            .unwrap();
+
+        let removed = engine.remove_domain_rules(10);
+        assert_eq!(removed, 2);
+        assert_eq!(engine.active_rules_for(10), 0);
+        assert_eq!(engine.active_rules_for(20), 1);
     }
 
     #[test]
-    fn duplicate_rejected() {
+    fn hit_counting() {
         let mut engine = InterpositionEngine::new();
-        let rule = InterpositionRule {
-            original_cap: 7,
-            proxy_domain: 1,
-            policy: InterpositionPolicy::Inspect,
-            cache_decisions: false,
-        };
-        engine.add_rule(rule).unwrap();
-        assert_eq!(engine.add_rule(rule), Err(DeceptionError::Duplicate));
+        engine
+            .add_rule(5, 1, InterpositionAction::EmptySuccess, 0)
+            .unwrap();
+        engine.record_hit(1, 5);
+        engine.record_hit(1, 5);
+        engine.record_hit(1, 5);
+        assert_eq!(engine.total_hits_for(1), 3);
     }
 }
