@@ -3,10 +3,24 @@
 //! A `DeceptionProfile` bundles filesystem overlays, fake processes, network
 //! deception, and system spoofing into a coherent identity that an attacker
 //! will perceive as real.
+//!
+//! Use `ProfileRegistry::with_builtins()` to get a registry pre-loaded with
+//! all built-in profiles, or construct an empty one and register custom profiles.
 
 use crate::fake_fs::FsOverlay;
 use crate::fake_net::{HoneypotHandler, NetworkDeception, Protocol};
 use crate::fake_proc::FakeProcessList;
+use crate::profiles;
+
+/// Paths that must be hidden from every deception profile to prevent
+/// an attacker from discovering the real sotOS identity.
+pub static COMMON_HIDDEN_PATHS: &[&[u8]] = &[
+    b"/sot",
+    b"/etc/sot",
+    b"/etc/sotos",
+    b"/boot/limine",
+    b"/boot/limine.conf",
+];
 
 /// System-level spoofing configuration (uname, cpuinfo, memory).
 pub struct SystemSpoofConfig {
@@ -99,133 +113,79 @@ impl DeceptionProfile {
 }
 
 // ---------------------------------------------------------------------------
-// Built-in profile: Ubuntu 22.04 Webserver
+// ProfileRegistry -- stores and retrieves profiles by name
 // ---------------------------------------------------------------------------
 
-/// /etc/os-release content for Ubuntu 22.04.
-const UBUNTU_OS_RELEASE: &[u8] = b"\
-PRETTY_NAME=\"Ubuntu 22.04.3 LTS\"\n\
-NAME=\"Ubuntu\"\n\
-VERSION_ID=\"22.04\"\n\
-VERSION=\"22.04.3 LTS (Jammy Jellyfish)\"\n\
-VERSION_CODENAME=jammy\n\
-ID=ubuntu\n\
-ID_LIKE=debian\n\
-HOME_URL=\"https://www.ubuntu.com/\"\n\
-SUPPORT_URL=\"https://help.ubuntu.com/\"\n\
-BUG_REPORT_URL=\"https://bugs.launchpad.net/ubuntu/\"\n\
-PRIVACY_POLICY_URL=\"https://www.ubuntu.com/legal/terms-and-policies/privacy-policy\"\n\
-UBUNTU_CODENAME=jammy\n";
+/// Maximum number of profiles the registry can hold.
+const MAX_PROFILES: usize = 16;
 
-const UBUNTU_HOSTNAME: &[u8] = b"webserver01\n";
-
-const UBUNTU_PASSWD_EXCERPT: &[u8] = b"\
-root:x:0:0:root:/root:/bin/bash\n\
-www-data:x:33:33:www-data:/var/www:/usr/sbin/nologin\n\
-mysql:x:27:27:MySQL Server:/var/lib/mysql:/bin/false\n\
-sshd:x:74:74:Privilege-separated SSH:/var/empty/sshd:/usr/sbin/nologin\n\
-ubuntu:x:1000:1000:Ubuntu:/home/ubuntu:/bin/bash\n";
-
-const UBUNTU_ISSUE: &[u8] = b"Ubuntu 22.04.3 LTS \\n \\l\n\n";
-
-/// Static filesystem overlays for the Ubuntu webserver profile.
-static UBUNTU_FS_OVERLAYS: &[(&[u8], &[u8], bool)] = &[
-    (b"/etc/os-release", UBUNTU_OS_RELEASE, false),
-    (b"/etc/hostname", UBUNTU_HOSTNAME, false),
-    (b"/etc/passwd", UBUNTU_PASSWD_EXCERPT, false),
-    (b"/etc/issue", UBUNTU_ISSUE, false),
-    (b"/etc/debian_version", b"bookworm/sid\n", false),
-    (
-        b"/etc/lsb-release",
-        b"DISTRIB_ID=Ubuntu\nDISTRIB_RELEASE=22.04\nDISTRIB_CODENAME=jammy\nDISTRIB_DESCRIPTION=\"Ubuntu 22.04.3 LTS\"\n",
-        false,
-    ),
-];
-
-/// Paths hidden from the deception domain.
-static UBUNTU_HIDDEN_PATHS: &[&[u8]] = &[
-    b"/sot",
-    b"/etc/sot",
-    b"/etc/sotos",
-    b"/boot/limine",
-    b"/boot/limine.conf",
-];
-
-/// Fake process list for a typical Ubuntu webserver.
-static UBUNTU_FAKE_PROCS: &[(u32, u32, &[u8], &[u8], u32, u32, u8)] = &[
-    (1, 0, b"systemd", b"root", 12_000, 170_000, b'S'),
-    (402, 1, b"systemd-journald", b"root", 48_000, 50_000, b'S'),
-    (428, 1, b"systemd-udevd", b"root", 5_000, 22_000, b'S'),
-    (620, 1, b"cron", b"root", 2_500, 8_000, b'S'),
-    (625, 1, b"sshd", b"root", 6_000, 15_000, b'S'),
-    (710, 1, b"apache2", b"root", 10_000, 320_000, b'S'),
-    (720, 710, b"apache2", b"www-data", 45_000, 320_000, b'S'),
-    (721, 710, b"apache2", b"www-data", 43_000, 320_000, b'S'),
-    (722, 710, b"apache2", b"www-data", 42_000, 320_000, b'S'),
-    (850, 1, b"mysqld", b"mysql", 180_000, 1_200_000, b'S'),
-    (900, 1, b"rsyslogd", b"syslog", 3_500, 25_000, b'S'),
-];
-
-/// Fake network interfaces.
-static UBUNTU_NET_IFACES: &[StaticInterface] = &[
-    StaticInterface {
-        name: b"eth0",
-        ipv4: [10, 0, 1, 50],
-        netmask: [255, 255, 255, 0],
-        mac: [0x02, 0x42, 0xAC, 0x11, 0x00, 0x02],
-    },
-    StaticInterface {
-        name: b"lo",
-        ipv4: [127, 0, 0, 1],
-        netmask: [255, 0, 0, 0],
-        mac: [0x00; 6],
-    },
-];
-
-/// Fake open ports with service banners.
-static UBUNTU_NET_PORTS: &[StaticPort] = &[
-    StaticPort {
-        port: 22,
-        protocol: Protocol::Tcp,
-        banner: b"SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.4\r\n",
-        handler: HoneypotHandler::BannerOnly,
-    },
-    StaticPort {
-        port: 80,
-        protocol: Protocol::Tcp,
-        banner: b"HTTP/1.1 200 OK\r\nServer: Apache/2.4.52 (Ubuntu)\r\nContent-Length: 0\r\n\r\n",
-        handler: HoneypotHandler::BasicResponse,
-    },
-    StaticPort {
-        port: 3306,
-        protocol: Protocol::Tcp,
-        banner: b"5.7.42-0ubuntu0.22.04.1",
-        handler: HoneypotHandler::BannerOnly,
-    },
-];
-
-/// Built-in deception profile: Ubuntu 22.04 LTS Webserver.
+/// Registry of deception profiles, indexed by name.
 ///
-/// Presents the system as a typical cloud Ubuntu VM running Apache + MySQL + SSH.
-pub static UBUNTU_WEBSERVER: DeceptionProfile = DeceptionProfile {
-    name: "ubuntu-22.04-webserver",
-    fs_overlays: UBUNTU_FS_OVERLAYS,
-    hidden_paths: UBUNTU_HIDDEN_PATHS,
-    fake_processes: UBUNTU_FAKE_PROCS,
-    network: NetworkDeceptionConfig {
-        hostname: b"webserver01",
-        interfaces: UBUNTU_NET_IFACES,
-        ports: UBUNTU_NET_PORTS,
-    },
-    system: SystemSpoofConfig {
-        sysname: b"Linux",
-        release: b"5.15.0-88-generic",
-        version: b"#98-Ubuntu SMP Mon Oct  2 15:18:56 UTC 2023",
-        machine: b"x86_64",
-        nodename: Some(b"webserver01"),
-        cpu_model: b"Intel(R) Xeon(R) CPU E5-2686 v4 @ 2.30GHz",
-    },
-};
+/// Pre-load all built-in profiles with `with_builtins()`, or start empty
+/// and register custom profiles with `register()`.
+pub struct ProfileRegistry {
+    profiles: [Option<&'static DeceptionProfile>; MAX_PROFILES],
+    count: usize,
+}
+
+impl ProfileRegistry {
+    /// Create an empty registry.
+    pub const fn new() -> Self {
+        Self {
+            profiles: [None; MAX_PROFILES],
+            count: 0,
+        }
+    }
+
+    /// Create a registry pre-loaded with all built-in profiles.
+    pub fn with_builtins() -> Self {
+        let mut reg = Self::new();
+        // Infallible: 4 profiles, 16 slots.
+        let _ = reg.register(&profiles::ubuntu_webserver::PROFILE);
+        let _ = reg.register(&profiles::centos_database::PROFILE);
+        let _ = reg.register(&profiles::windows_workstation::PROFILE);
+        let _ = reg.register(&profiles::iot_device::PROFILE);
+        reg
+    }
+
+    /// Register a profile. Returns `true` if added, `false` if full.
+    pub fn register(&mut self, profile: &'static DeceptionProfile) -> bool {
+        for slot in self.profiles.iter_mut() {
+            if slot.is_none() {
+                *slot = Some(profile);
+                self.count += 1;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Look up a profile by name (byte-string comparison).
+    pub fn get(&self, name: &[u8]) -> Option<&'static DeceptionProfile> {
+        for slot in self.profiles.iter().flatten() {
+            if slot.name.as_bytes() == name {
+                return Some(slot);
+            }
+        }
+        None
+    }
+
+    /// Number of registered profiles.
+    pub fn count(&self) -> usize {
+        self.count
+    }
+
+    /// Iterate over all registered profiles.
+    pub fn iter(&self) -> impl Iterator<Item = &'static DeceptionProfile> + '_ {
+        self.profiles.iter().flatten().copied()
+    }
+}
+
+/// Backward-compatible alias for the Ubuntu webserver profile.
+///
+/// Prefer `profiles::ubuntu_webserver::PROFILE` or
+/// `ProfileRegistry::with_builtins()` for new code.
+pub use crate::profiles::ubuntu_webserver::PROFILE as UBUNTU_WEBSERVER;
 
 #[cfg(test)]
 mod tests {
@@ -251,5 +211,94 @@ mod tests {
         // Net: SSH banner on port 22.
         let ssh = net.lookup_port(22, Protocol::Tcp).unwrap();
         assert!(ssh.banner().starts_with(b"SSH-2.0-OpenSSH_8.9p1"));
+    }
+
+    #[test]
+    fn registry_with_builtins() {
+        let reg = ProfileRegistry::with_builtins();
+        assert_eq!(reg.count(), 4);
+
+        // Look up each profile by name.
+        assert!(reg.get(b"ubuntu-22.04-webserver").is_some());
+        assert!(reg.get(b"centos-8-database").is_some());
+        assert!(reg.get(b"windows-10-workstation").is_some());
+        assert!(reg.get(b"iot-ipcamera").is_some());
+
+        // Unknown name returns None.
+        assert!(reg.get(b"nonexistent").is_none());
+    }
+
+    #[test]
+    fn registry_iteration() {
+        let reg = ProfileRegistry::with_builtins();
+        let names: alloc::vec::Vec<&str> = reg.iter().map(|p| p.name).collect();
+        assert_eq!(names.len(), 4);
+        assert!(names.contains(&"ubuntu-22.04-webserver"));
+        assert!(names.contains(&"centos-8-database"));
+        assert!(names.contains(&"windows-10-workstation"));
+        assert!(names.contains(&"iot-ipcamera"));
+    }
+
+    #[test]
+    fn apply_centos_profile() {
+        let mut fs = FsOverlay::new();
+        let mut procs = FakeProcessList::new();
+        let mut net = NetworkDeception::new();
+
+        profiles::centos_database::PROFILE
+            .apply(&mut fs, &mut procs, &mut net)
+            .unwrap();
+
+        assert!(fs.lookup(b"/etc/centos-release").is_some());
+        assert!(procs.find_by_pid(800).is_some()); // postgres main
+        assert_eq!(procs.find_by_pid(800).unwrap().name(), b"postgres");
+        let pg = net.lookup_port(5432, Protocol::Tcp).unwrap();
+        assert_eq!(pg.handler, HoneypotHandler::BasicResponse);
+    }
+
+    #[test]
+    fn apply_windows_profile() {
+        let mut fs = FsOverlay::new();
+        let mut procs = FakeProcessList::new();
+        let mut net = NetworkDeception::new();
+
+        profiles::windows_workstation::PROFILE
+            .apply(&mut fs, &mut procs, &mut net)
+            .unwrap();
+
+        // Windows-style paths.
+        assert!(fs.lookup(b"/systeminfo.txt").is_some());
+        assert!(procs.find_by_pid(2100).is_some()); // explorer.exe
+        assert_eq!(procs.find_by_pid(2100).unwrap().name(), b"explorer.exe");
+
+        // RDP port.
+        assert!(net.lookup_port(3389, Protocol::Tcp).is_some());
+        // IIS banner.
+        let http = net.lookup_port(80, Protocol::Tcp).unwrap();
+        assert!(http.banner().starts_with(b"HTTP/1.1 200 OK\r\nServer: Microsoft-IIS"));
+    }
+
+    #[test]
+    fn apply_iot_profile() {
+        let mut fs = FsOverlay::new();
+        let mut procs = FakeProcessList::new();
+        let mut net = NetworkDeception::new();
+
+        profiles::iot_device::PROFILE
+            .apply(&mut fs, &mut procs, &mut net)
+            .unwrap();
+
+        // BusyBox filesystem.
+        assert!(fs.lookup(b"/www/login.htm").is_some());
+        assert!(procs.find_by_pid(85).is_some()); // telnetd
+        assert_eq!(procs.find_by_pid(85).unwrap().name(), b"telnetd");
+
+        // Telnet and HTTP ports.
+        assert!(net.lookup_port(23, Protocol::Tcp).is_some());
+        let http = net.lookup_port(80, Protocol::Tcp).unwrap();
+        assert!(http.banner().starts_with(b"HTTP/1.0 200 OK\r\nServer: GoAhead-Webs"));
+        // RTSP.
+        let rtsp = net.lookup_port(554, Protocol::Tcp).unwrap();
+        assert!(rtsp.banner().starts_with(b"RTSP/1.0"));
     }
 }

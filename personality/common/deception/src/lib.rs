@@ -19,6 +19,7 @@ pub mod fake_proc;
 pub mod interpose;
 pub mod migration;
 pub mod profile;
+pub mod profiles;
 
 /// Maximum interposition rules per engine instance.
 pub const MAX_INTERPOSITIONS: usize = 64;
