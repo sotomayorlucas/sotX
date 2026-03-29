@@ -35,6 +35,11 @@ exclude = [
     "services/drm-test",
     "services/hello-gui",
     "libs/sotos-testlib",
+    "tools/sotctl",
+    "tools/capctl",
+    "tools/txlog",
+    "tools/provenance-viewer",
+    "tools/deception-config",
 ]
 
 [profile.dev]
