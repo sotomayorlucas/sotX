@@ -1,0 +1,9 @@
+[package]
+name = "sot-lkl"
+version = "0.1.0"
+edition = "2021"
+description = "LKL domain wrapper: forwards unsupported Linux syscalls to an isolated Linux Kernel Library instance"
+
+[workspace]
+
+[dependencies]
