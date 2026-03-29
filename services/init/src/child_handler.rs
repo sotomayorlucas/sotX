@@ -25,46 +25,21 @@ use crate::syscalls::net as syscalls_net;
 use crate::syscalls::signal as syscalls_signal;
 use crate::syscalls::info as syscalls_info;
 use crate::syscalls::task as syscalls_task;
-use crate::LKL_EP_CAP;
+use crate::lkl;
 
 // Re-export from submodules so external `use crate::child_handler::X` still works.
 pub(crate) use crate::fork::clone_child_trampoline;
 pub(crate) use crate::virtual_files::{open_virtual_file, fill_random};
 
 const MAP_WRITABLE: u64 = 2;
-const EIO: i64 = 5;
-
-/// Forward a syscall to the LKL server via IPC and relay the result back.
-///
-/// The forwarded message packs the Linux syscall number in `tag` and the six
-/// syscall arguments in `regs[0..6]`. `regs[6]` carries the child pid and
-/// `regs[7]` carries the child address-space capability so LKL can perform
-/// vm_read/vm_write on the child's memory (e.g. for path buffers, stat structs).
-fn forward_to_lkl(ep_cap: u64, lkl_ep: u64, syscall_nr: u64,
+/// Forward a syscall directly to LKL (in-process, no IPC).
+fn forward_to_lkl(ep_cap: u64, syscall_nr: u64,
                   msg: &sotos_common::IpcMsg, pid: usize, child_as_cap: u64)
 {
-    let fwd = sotos_common::IpcMsg {
-        tag: syscall_nr,
-        regs: [
-            msg.regs[0],        // arg1 (rdi)
-            msg.regs[1],        // arg2 (rsi)
-            msg.regs[2],        // arg3 (rdx)
-            msg.regs[3],        // arg4 (r10)
-            msg.regs[4],        // arg5 (r8)
-            msg.regs[5],        // arg6 (r9)
-            pid as u64,         // child pid
-            child_as_cap,       // child AS cap for vm_read/vm_write
-        ],
-    };
-
-    match sys::call(lkl_ep, &fwd) {
-        Ok(reply) => {
-            reply_val(ep_cap, reply.regs[0] as i64);
-        }
-        Err(_) => {
-            reply_val(ep_cap, -EIO);
-        }
-    }
+    let args = [msg.regs[0], msg.regs[1], msg.regs[2],
+                msg.regs[3], msg.regs[4], msg.regs[5]];
+    let ret = lkl::syscall(syscall_nr, &args, child_as_cap, pid);
+    reply_val(ep_cap, ret);
 }
 
 /// Per-pid retry counters to suppress repeated pipe-retry log lines.
@@ -334,17 +309,45 @@ pub(crate) extern "C" fn child_handler() -> ! {
         // Linux 6.6 kernel instead of emulating them manually. Keep process
         // management (fork/exec/exit/wait), memory (brk/mmap), and signals
         // local — LKL can't manage sotOS address spaces or capabilities.
-        // ── LKL forwarding (hybrid: sync/time/uname via LKL, FS via LUCAS) ──
-        // Full FS forwarding requires disk_backend in lkl-server (Phase 2b).
-        // For now, forward only syscalls without FS dependencies.
-        let lkl_ep = LKL_EP_CAP.load(Ordering::Acquire);
-        if lkl_ep != 0 {
+        // ── LKL forwarding (direct in-process call, no IPC) ──
+        // LKL handles: FS, time, sync, uname, random.
+        // LUCAS keeps: process mgmt, memory, signals, thread mgmt.
+        if lkl::LKL_READY.load(Ordering::Acquire) {
             let forwarded = match syscall_nr {
-                // Only syscalls where lkl-server has guest memory bridge (uname)
-                // or no pointer args. getrandom/sysinfo need bridge too.
-                SYS_UNAME
+                // File I/O
+                SYS_READ | SYS_WRITE | SYS_OPEN | SYS_CLOSE |
+                SYS_STAT | SYS_FSTAT | SYS_LSTAT | SYS_LSEEK |
+                SYS_ACCESS | SYS_OPENAT | SYS_FSTATAT | SYS_READLINKAT |
+                SYS_FACCESSAT | SYS_MKDIRAT | SYS_UNLINKAT |
+                SYS_GETCWD | SYS_CHDIR |
+                SYS_MKDIR | SYS_RMDIR | SYS_UNLINK | SYS_RENAME |
+                SYS_GETDENTS64 | SYS_FTRUNCATE |
+                SYS_FSYNC | SYS_FDATASYNC | SYS_CHMOD |
+                SYS_PIPE | SYS_PIPE2 | SYS_DUP | SYS_DUP2 | SYS_DUP3 |
+                SYS_FCNTL | SYS_IOCTL |
+                SYS_PREAD64 | SYS_PWRITE64 | SYS_READV | SYS_WRITEV |
+                // Networking
+                SYS_SOCKET | SYS_CONNECT | SYS_BIND | SYS_LISTEN |
+                SYS_ACCEPT | SYS_ACCEPT4 | SYS_SOCKETPAIR |
+                SYS_SENDTO | SYS_SENDMSG | SYS_RECVFROM | SYS_RECVMSG |
+                SYS_GETSOCKOPT | SYS_SETSOCKOPT |
+                SYS_GETSOCKNAME | SYS_GETPEERNAME | SYS_SHUTDOWN |
+                // Poll/epoll
+                SYS_POLL | SYS_PPOLL | SYS_SELECT | SYS_PSELECT6 |
+                SYS_EPOLL_CREATE | SYS_EPOLL_CREATE1 | SYS_EPOLL_CTL |
+                SYS_EPOLL_WAIT | SYS_EPOLL_PWAIT |
+                // Special FDs
+                SYS_EVENTFD | SYS_EVENTFD2 |
+                SYS_TIMERFD_CREATE | SYS_TIMERFD_SETTIME | SYS_TIMERFD_GETTIME |
+                SYS_MEMFD_CREATE |
+                SYS_INOTIFY_INIT1 | SYS_INOTIFY_ADD_WATCH | SYS_INOTIFY_RM_WATCH |
+                // Sync + time + info
+                SYS_FUTEX |
+                SYS_UNAME | SYS_SYSINFO | SYS_GETRANDOM |
+                SYS_GETTIMEOFDAY | SYS_CLOCK_GETTIME | SYS_CLOCK_GETRES |
+                SYS_NANOSLEEP | SYS_CLOCK_NANOSLEEP
                 => {
-                    forward_to_lkl(ep_cap, lkl_ep, syscall_nr, &msg, pid, child_as_cap);
+                    forward_to_lkl(ep_cap, syscall_nr, &msg, pid, child_as_cap);
                     true
                 }
                 _ => false,

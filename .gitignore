@@ -4,3 +4,4 @@
 limine/
 **/*.o
 **/*.d
+services/init/lkl/liblkl_fused.a

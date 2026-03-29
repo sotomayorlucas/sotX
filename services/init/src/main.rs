@@ -78,6 +78,7 @@ mod seatd;
 mod udev;
 mod child_handler;
 mod lucas_handler;
+mod lkl;
 mod boot_tests;
 
 use framebuffer::{print, print_u64, print_hex64, print_hex, fb_init};
@@ -272,22 +273,8 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
-    // --- Phase 5b: Spawn LKL server (needs 4GB+ RAM: 13MB buffer + 128MB arena) ---
-    spawn_process(b"lkl-server");
-    for _ in 0..500 { sys::yield_now(); }
-
-    let lkl_name = b"lkl";
-    match sys::svc_lookup(lkl_name.as_ptr() as u64, lkl_name.len() as u64) {
-        Ok(cap) => {
-            LKL_EP_CAP.store(cap, Ordering::Release);
-            print(b"INIT: LKL endpoint found (cap=");
-            print_u64(cap);
-            print(b"), forwarding enabled\n");
-        }
-        Err(_) => {
-            print(b"INIT: LKL not found, using LUCAS emulation\n");
-        }
-    }
+    // --- Phase 5b: Initialize LKL (Linux 6.6 kernel as in-process backend) ---
+    lkl::init();
 
     // --- Phase 6: Userspace process spawning ---
     spawn_process(b"hello");
@@ -313,6 +300,131 @@ pub extern "C" fn _start() -> ! {
     start_lucas(blk);
 
     sys::thread_exit();
+}
+
+// ---------------------------------------------------------------------------
+// Block device IPC service (for lkl-server disk I/O)
+// ---------------------------------------------------------------------------
+
+/// BLK service endpoint cap — stored globally so handler thread can use it.
+static BLK_EP_CAP: AtomicU64 = AtomicU64::new(0);
+/// VirtioBlk stored at this address for the blk handler thread.
+const BLK_HANDLER_STORE: u64 = 0xE80000; // 1 page, after LUCAS_BLK_STORE
+
+/// BLK IPC protocol:
+/// CMD=1 (READ):  regs[0]=sector, regs[1]=count, regs[2]=dest_vaddr, regs[3]=caller_as_cap
+/// CMD=2 (WRITE): regs[0]=sector, regs[1]=count, regs[2]=src_vaddr,  regs[3]=caller_as_cap
+/// CMD=3 (CAPACITY): no args → reply regs[0]=total_sectors
+const BLK_CMD_READ: u64 = 1;
+const BLK_CMD_WRITE: u64 = 2;
+const BLK_CMD_CAPACITY: u64 = 3;
+
+fn start_blk_service(blk: &mut Option<sotos_virtio::blk::VirtioBlk>) {
+    let blk_dev = match blk.take() {
+        Some(b) => b,
+        None => {
+            print(b"BLK-SVC: no block device, skipping\n");
+            return;
+        }
+    };
+
+    // Store VirtioBlk at BLK_HANDLER_STORE for the handler thread
+    let frame = match sys::frame_alloc() {
+        Ok(f) => f,
+        Err(_) => { print(b"BLK-SVC: frame_alloc failed\n"); return; }
+    };
+    let _ = sys::map(BLK_HANDLER_STORE, frame, 2); // MAP_WRITABLE
+    unsafe {
+        core::ptr::write(BLK_HANDLER_STORE as *mut sotos_virtio::blk::VirtioBlk, blk_dev);
+    }
+
+    // Create endpoint and register as "blk"
+    let ep = match sys::endpoint_create() {
+        Ok(e) => e,
+        Err(_) => { print(b"BLK-SVC: endpoint_create failed\n"); return; }
+    };
+    BLK_EP_CAP.store(ep, Ordering::Release);
+
+    let name = b"blk";
+    let _ = sys::svc_register(name.as_ptr() as u64, name.len() as u64, ep);
+
+    // Spawn handler thread (4 pages stack)
+    const BLK_HANDLER_STACK: u64 = 0xE90000;
+    const BLK_HANDLER_STACK_PAGES: u64 = 4;
+    for i in 0..BLK_HANDLER_STACK_PAGES {
+        let f = match sys::frame_alloc() { Ok(f) => f, Err(_) => return };
+        let _ = sys::map(BLK_HANDLER_STACK + i * 0x1000, f, 2);
+    }
+
+    let _ = sys::thread_create(
+        blk_handler as *const () as u64,
+        BLK_HANDLER_STACK + BLK_HANDLER_STACK_PAGES * 0x1000,
+    );
+    print(b"BLK-SVC: registered, handler started\n");
+}
+
+extern "C" fn blk_handler() -> ! {
+    let ep = BLK_EP_CAP.load(Ordering::Acquire);
+    let blk = unsafe { &mut *(BLK_HANDLER_STORE as *mut sotos_virtio::blk::VirtioBlk) };
+
+    // DATA_VADDR is where VirtioBlk reads sectors (defined in blk.rs)
+    const DATA_VADDR: u64 = 0xC02000;
+
+    loop {
+        let msg = match sys::recv(ep) {
+            Ok(m) => m,
+            Err(_) => { sys::yield_now(); continue; }
+        };
+
+        let cmd = msg.tag;
+        let mut reply = sotos_common::IpcMsg { tag: 0, regs: [0; 8] };
+
+        match cmd {
+            BLK_CMD_READ => {
+                let sector = msg.regs[0];
+                let count = msg.regs[1].min(8) as u32; // max 8 sectors = 4KB
+                let dest_vaddr = msg.regs[2];
+                let caller_as = msg.regs[3];
+
+                match blk.read_sectors_multi(sector, count) {
+                    Ok(()) => {
+                        let bytes = count as usize * 512;
+                        // Write data to caller's address space
+                        if caller_as != 0 {
+                            let _ = sys::vm_write(caller_as, dest_vaddr, DATA_VADDR, bytes as u64);
+                        }
+                        reply.regs[0] = bytes as u64;
+                    }
+                    Err(_) => {
+                        reply.regs[0] = (-5i64) as u64; // -EIO
+                    }
+                }
+            }
+            BLK_CMD_WRITE => {
+                let sector = msg.regs[0];
+                let count = msg.regs[1].min(8) as u32;
+                let src_vaddr = msg.regs[2];
+                let caller_as = msg.regs[3];
+
+                let bytes = count as usize * 512;
+                if caller_as != 0 {
+                    let _ = sys::vm_read(caller_as, src_vaddr, DATA_VADDR, bytes as u64);
+                }
+                match blk.write_sector(sector) {
+                    Ok(()) => { reply.regs[0] = bytes as u64; }
+                    Err(_) => { reply.regs[0] = (-5i64) as u64; }
+                }
+            }
+            BLK_CMD_CAPACITY => {
+                reply.regs[0] = blk.capacity;
+            }
+            _ => {
+                reply.regs[0] = (-38i64) as u64; // -ENOSYS
+            }
+        }
+
+        let _ = sys::send(ep, &reply);
+    }
 }
 
 /// Spawn a new process from an initrd binary by name.
