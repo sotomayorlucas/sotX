@@ -1681,27 +1681,35 @@ pub fn schedule() {
             return;
         }
 
-        // Validate candidate against domain/compute constraints.
+        // Validate candidate against state + domain/compute constraints.
+        // SMP fix: between Phase 1 (dequeue without SCHEDULER lock) and Phase 2
+        // (here, with lock), another CPU may have changed the thread's state
+        // (e.g., Blocked via notify_wait). Re-enqueue if no longer Ready.
         let new_idx = if let Some(idx) = candidate {
-            // Validate: check compute target + domain status.
             let valid = {
-                let ct = sched.threads.get_by_index(idx as u32).map(|t| t.compute_target);
-                if ct != Some(ComputeTarget::Cpu) && ct.is_some() {
-                    false // GPU/NPU thread — re-enqueue
-                } else {
-                    let dom_idx = sched.threads.get_by_index(idx as u32).and_then(|t| t.domain_idx);
-                    match dom_idx {
-                        None => true, // No domain — always runnable
-                        Some(di) => {
-                            let is_active = sched.domains.get_by_index(di)
-                                .map_or(true, |d| d.state == DomainState::Active);
-                            if !is_active {
-                                // Park in domain's suspended list.
-                                if let Some(dom) = sched.domains.get_mut_by_index(di) {
-                                    dom.suspended.push(idx);
+                match sched.threads.get_by_index(idx as u32) {
+                    None => false, // Thread gone
+                    Some(t) => {
+                        // SMP race guard: reject threads that became Blocked/Dead
+                        // between Phase 1 dequeue and Phase 2 lock acquisition.
+                        if t.state == ThreadState::Blocked || t.state == ThreadState::Dead {
+                            false
+                        } else if t.compute_target != ComputeTarget::Cpu {
+                            false // GPU/NPU thread — re-enqueue
+                        } else {
+                            match t.domain_idx {
+                                None => true,
+                                Some(di) => {
+                                    let is_active = sched.domains.get_by_index(di)
+                                        .map_or(true, |d| d.state == DomainState::Active);
+                                    if !is_active {
+                                        if let Some(dom) = sched.domains.get_mut_by_index(di) {
+                                            dom.suspended.push(idx);
+                                        }
+                                    }
+                                    is_active
                                 }
                             }
-                            is_active
                         }
                     }
                 }
