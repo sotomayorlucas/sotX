@@ -40,6 +40,10 @@ exclude = [
     "tools/txlog",
     "tools/provenance-viewer",
     "tools/deception-config",
+    "tests/integration",
+    "tests/security",
+    "tests/posix",
+    "tests/deception",
 ]
 
 [profile.dev]
