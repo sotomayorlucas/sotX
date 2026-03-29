@@ -973,13 +973,15 @@ extern "C" fn lapic_timer_kernel_handler() {
 }
 
 /// Reschedule IPI handler (vector 49). Triggers a schedule on receiving CPU.
+/// SMP fix: use try_schedule() to avoid blocking spin inside interrupt handler.
+/// If SCHEDULER lock is contended, skip — next timer tick will reschedule.
 extern "x86-interrupt" fn reschedule_ipi_handler(frame: InterruptStackFrame) {
     let from_user = frame.code_segment.0 & 3 != 0;
     if from_user {
         unsafe { core::arch::asm!("swapgs", options(nomem, nostack, preserves_flags)); }
     }
     lapic::eoi();
-    crate::sched::schedule();
+    crate::sched::try_schedule();
     if from_user {
         unsafe { core::arch::asm!("swapgs", options(nomem, nostack, preserves_flags)); }
     }

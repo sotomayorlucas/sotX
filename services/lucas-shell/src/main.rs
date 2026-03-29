@@ -44,12 +44,16 @@ pub extern "C" fn __stack_chk_fail() -> ! {
 // ---------------------------------------------------------------------------
 
 pub fn shell_loop() {
-    let mut line_buf = [0u8; 256];
+    let mut line_buf = [0u8; 512];
 
     // Set default env vars.
     env_set(b"SHELL", b"lucas");
     env_set(b"OS", b"sotOS");
     env_set(b"VERSION", b"0.1.0");
+    env_set(b"PATH", b"/bin:/usr/bin:/sbin:/usr/sbin");
+    env_set(b"HOME", b"/root");
+    env_set(b"TERM", b"xterm");
+    env_set(b"USER", b"root");
 
     loop {
         // Reap finished background jobs
@@ -62,7 +66,7 @@ pub fn shell_loop() {
         let pos = read_line(&mut line_buf);
 
         // Copy raw line into its own buffer to avoid borrow conflicts
-        let mut raw_copy = [0u8; 256];
+        let mut raw_copy = [0u8; 512];
         let raw_trimmed = trim(&line_buf[..pos]);
         if raw_trimmed.is_empty() {
             continue;
@@ -80,11 +84,44 @@ pub fn shell_loop() {
             continue;
         }
 
+        // --- Control structures: detect BEFORE variable expansion ---
+        // while/until/for need raw (unexpanded) text so loop bodies
+        // can re-expand $VAR on each iteration.
+        if starts_with(raw_line, b"while ") || starts_with(raw_line, b"until ")
+            || starts_with(raw_line, b"for ") || starts_with(raw_line, b"if ")
+        {
+            let mut block_buf = [0u8; 2048];
+            let block_len = accumulate_block(raw_line, &mut line_buf, &mut block_buf);
+            let block = trim(&block_buf[..block_len]);
+            if !block.is_empty() {
+                if starts_with(block, b"if ") {
+                    // if blocks: expand once (condition + body are one-shot)
+                    let mut exp = [0u8; 2048];
+                    let elen = expand_vars(block, &mut exp);
+                    let eblock = trim(&exp[..elen]);
+                    execute_if_block(eblock, &mut line_buf);
+                } else if starts_with(block, b"for ") {
+                    execute_for_block(block, &mut line_buf);
+                } else if starts_with(block, b"while ") {
+                    execute_while_block(block, &mut line_buf);
+                } else if starts_with(block, b"until ") {
+                    execute_until_block(block, &mut line_buf);
+                }
+            }
+            continue;
+        }
+
         // Expand environment variables ($VAR).
-        let mut expanded = [0u8; 256];
+        let mut expanded = [0u8; 512];
         let exp_len = expand_vars(raw_line, &mut expanded);
         let line = trim(&expanded[..exp_len]);
         if line.is_empty() {
+            continue;
+        }
+
+        // Semicolon command separator: cmd1; cmd2; cmd3
+        if find_semicolon_unquoted(line).is_some() {
+            execute_semicolon_list(line);
             continue;
         }
 
@@ -96,6 +133,12 @@ pub fn shell_loop() {
                 execute_heredoc(cmd_part, delim, &mut line_buf);
                 continue;
             }
+        }
+
+        // Check for && / || conditional operators (lower precedence than pipes).
+        if find_logical_op_unquoted(line).is_some() {
+            execute_logical_chain(line);
+            continue;
         }
 
         // Check for pipe operator (respects quotes).
@@ -129,18 +172,6 @@ pub fn shell_loop() {
             continue;
         }
 
-        // --- Shell scripting: if/then/fi ---
-        if starts_with(line, b"if ") {
-            execute_if_block(line, &mut line_buf);
-            continue;
-        }
-
-        // --- Shell scripting: for/do/done ---
-        if starts_with(line, b"for ") {
-            execute_for_block(line, &mut line_buf);
-            continue;
-        }
-
         // Parse and handle redirects, then dispatch
         dispatch_with_redirects(line);
     }
@@ -152,7 +183,7 @@ pub fn shell_loop() {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
-    print(b"sotOS LUCAS shell v0.2\n");
+    print(b"sotOS LUCAS shell v0.3\n");
     shell_loop();
     linux_exit(0);
 }

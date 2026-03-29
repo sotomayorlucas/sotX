@@ -49,7 +49,7 @@ fn write_stderr(buf: &[u8]) {
 
 #[cfg(feature = "trace")]
 pub fn write_prefix(level: sotos_common::trace::TraceLevel, cat: u16) {
-    let label = level.as_byte();
+    let label = level.label();
     write_stderr(b"[");
     write_stderr(core::slice::from_ref(&label));
     write_stderr(b" ");

@@ -160,14 +160,14 @@ pub fn uniq_data(data: &[u8], buf: &mut [u8]) -> usize {
             if has_prev {
                 let prev = &data[prev_start..prev_end];
                 if !eq(line, prev) {
-                    // Different from previous — output it
+                    // Different from previous -output it
                     let l = line.len().min(buf.len() - out_pos - 1);
                     buf[out_pos..out_pos + l].copy_from_slice(&line[..l]);
                     out_pos += l;
                     if out_pos < buf.len() { buf[out_pos] = b'\n'; out_pos += 1; }
                 }
             } else if !line.is_empty() {
-                // First line — always output
+                // First line -always output
                 let l = line.len().min(buf.len() - out_pos - 1);
                 buf[out_pos..out_pos + l].copy_from_slice(&line[..l]);
                 out_pos += l;
@@ -395,7 +395,7 @@ pub fn cmd_grep(args: &[u8]) {
 
 // --- top ---
 
-/// top — list threads with CPU usage.
+/// top -list threads with CPU usage.
 pub fn cmd_top() {
     // Use custom syscall 142 to get thread count, 140 to get thread info.
     print(b"  TID  STATE   PRI  CPU_TICKS  MEM  TYPE\n");
@@ -825,6 +825,182 @@ pub fn cmd_unlink(name: &[u8]) {
     cmd_rm(name);
 }
 
+// ---------------------------------------------------------------------------
+// Service-aware builtins: services, threads, meminfo, bench, caps
+// ---------------------------------------------------------------------------
+
+/// Issue a sotOS kernel syscall with zero arguments (syscall number > 127).
+/// Separate from the Linux-ABI wrappers in syscall.rs because these bypass
+/// the child_handler Linux translation layer.
+#[inline(always)]
+fn kernel_syscall0(nr: u64) -> i64 {
+    let ret: i64;
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            inlateout("rax") nr => ret,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+/// Issue a sotOS kernel syscall with two arguments.
+#[inline(always)]
+fn kernel_syscall2(nr: u64, a1: u64, a2: u64) -> i64 {
+    let ret: i64;
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            inlateout("rax") nr => ret,
+            in("rdi") a1,
+            in("rsi") a2,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+/// Issue a sotOS kernel syscall with three arguments.
+#[inline(always)]
+fn kernel_syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
+    let ret: i64;
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            inlateout("rax") nr => ret,
+            in("rdi") a1,
+            in("rsi") a2,
+            in("rdx") a3,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+/// Read the CPU timestamp counter.
+#[inline(always)]
+fn rdtsc() -> u64 {
+    let lo: u32;
+    let hi: u32;
+    unsafe {
+        core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi, options(nostack, nomem));
+    }
+    ((hi as u64) << 32) | (lo as u64)
+}
+
+/// Print benchmark results: "<label> x<iters>: <total> cycles total, <avg> cycles/call avg\n"
+fn print_bench_result(label: &[u8], iters: u64, total_cycles: u64) {
+    print(label);
+    print(b" x");
+    print_u64(iters);
+    print(b": ");
+    print_u64(total_cycles);
+    print(b" cycles total, ");
+    print_u64(total_cycles / iters);
+    print(b" cycles/call avg\n");
+}
+
+// --- services ---
+
+/// List registered kernel services by probing svc_lookup for known names.
+pub fn cmd_services() {
+    print(b"Registered services:\n");
+    const NAMES: &[&[u8]] = &[
+        b"net", b"blk", b"lkl", b"kbd", b"nvme", b"xhci", b"compositor",
+    ];
+    let mut found: u64 = 0;
+    for &name in NAMES.iter() {
+        let ret = kernel_syscall2(131, name.as_ptr() as u64, name.len() as u64);
+        if ret > 0 {
+            print(b"  [+] ");
+            print(name);
+            print(b"  (cap ");
+            print_u64(ret as u64);
+            print(b")\n");
+            found += 1;
+        } else {
+            print(b"  [-] ");
+            print(name);
+            print(b"  (not found)\n");
+        }
+    }
+    print_u64(found);
+    print(b" of ");
+    print_u64(NAMES.len() as u64);
+    print(b" services registered\n");
+}
+
+// --- threads ---
+
+/// Show total kernel thread count (syscall 142 = ThreadCount).
+pub fn cmd_threads() {
+    let count = kernel_syscall0(142) as u64;
+    print(b"Total threads: ");
+    print_u64(count);
+    print(b"\n");
+}
+
+// --- meminfo ---
+
+/// Show free physical memory (syscall 252 = DebugFreeFrames).
+pub fn cmd_meminfo() {
+    let frames = kernel_syscall0(252) as u64;
+    let bytes = frames * 4096;
+    let mb = bytes / (1024 * 1024);
+    print(b"Free frames: ");
+    print_u64(frames);
+    print(b"\nFree memory: ");
+    print_u64(mb);
+    print(b" MiB (");
+    print_u64(bytes / 1024);
+    print(b" KiB)\n");
+}
+
+// --- bench ---
+
+/// Quick IPC round-trip benchmark using RDTSC.
+pub fn cmd_bench() {
+    const ITERS: u64 = 100;
+    print(b"IPC benchmark: ");
+    print_u64(ITERS);
+    print(b" round-trips...\n");
+
+    // Try creating an IPC endpoint (syscall 10 = EndpointCreate).
+    let ep = kernel_syscall0(10);
+    if ep <= 0 {
+        print(b"bench: endpoint_create failed, falling back to syscall-only timing\n");
+        let start = rdtsc();
+        for _ in 0..ITERS {
+            crate::syscall::syscall0(39); // getpid
+        }
+        let elapsed = rdtsc().wrapping_sub(start);
+        print_bench_result(b"Syscall overhead (getpid)", ITERS, elapsed);
+        return;
+    }
+
+    // Measure IPC send (syscall 1) which returns immediately with no receiver.
+    let start = rdtsc();
+    for _ in 0..ITERS {
+        kernel_syscall3(1, ep as u64, 0, 0);
+    }
+    let elapsed = rdtsc().wrapping_sub(start);
+    print_bench_result(b"IPC send", ITERS, elapsed);
+}
+
+// --- caps ---
+
+/// Placeholder for capability audit (Unit 6).
+pub fn cmd_caps() {
+    print(b"Capability audit not yet implemented\n");
+}
+
 // --- trace ---
 
 pub fn cmd_trace(args: &[u8]) {
@@ -1128,4 +1304,730 @@ pub fn capture_command(cmd: &[u8], buf: &mut [u8]) -> usize {
         return total;
     }
     0
+}
+
+// ---------------------------------------------------------------------------
+// pkg -package management
+// ---------------------------------------------------------------------------
+
+/// pkg list | info <name> | which <name> | count
+pub fn cmd_pkg(args: &[u8]) {
+    if args.is_empty() || eq(args, b"help") {
+        print(b"usage: pkg list           -list available executables\n");
+        print(b"       pkg info <name>    -show binary info\n");
+        print(b"       pkg which <name>   -show full path\n");
+        print(b"       pkg count          -count executables\n");
+        return;
+    }
+
+    if eq(args, b"list") {
+        pkg_list();
+    } else if eq(args, b"count") {
+        pkg_count();
+    } else if starts_with(args, b"info ") {
+        let name = trim(&args[5..]);
+        if !name.is_empty() { pkg_info(name); }
+        else { print(b"usage: pkg info <name>\n"); }
+    } else if starts_with(args, b"which ") {
+        let name = trim(&args[6..]);
+        if !name.is_empty() { pkg_which(name); }
+        else { print(b"usage: pkg which <name>\n"); }
+    } else {
+        print(b"pkg: unknown subcommand. Try 'pkg help'\n");
+        crate::parse::set_exit_status(1);
+    }
+}
+
+fn pkg_list() {
+    // List /bin/ contents
+    print(b"--- /bin/ ---\n");
+    pkg_list_dir(b"/bin");
+    // List /usr/bin/ contents
+    print(b"--- /usr/bin/ ---\n");
+    pkg_list_dir(b"/usr/bin");
+}
+
+fn pkg_list_dir(dir: &[u8]) {
+    let mut path_buf = [0u8; 64];
+    let path = null_terminate(dir, &mut path_buf);
+    let fd = linux_open(path, 0); // O_RDONLY
+    if fd < 0 {
+        print(b"  (empty)\n");
+        return;
+    }
+    let mut listing = [0u8; 4096];
+    let total = read_all(fd as u64, &mut listing);
+    linux_close(fd as u64);
+
+    if total == 0 {
+        print(b"  (empty)\n");
+        return;
+    }
+
+    // Parse listing: one entry per line
+    let mut count = 0u64;
+    let mut line_start = 0;
+    let mut i = 0;
+    while i <= total {
+        if i == total || listing[i] == b'\n' {
+            let entry = trim(&listing[line_start..i]);
+            if !entry.is_empty() {
+                // Extract just the name (before any whitespace metadata)
+                let name_end = find_space(entry).unwrap_or(entry.len());
+                let name = &entry[..name_end];
+                if !name.is_empty() {
+                    print(b"  ");
+                    print(name);
+                    print(b"\n");
+                    count += 1;
+                }
+            }
+            line_start = i + 1;
+        }
+        i += 1;
+    }
+    if count == 0 { print(b"  (empty)\n"); }
+}
+
+fn pkg_count() {
+    let mut total = 0u64;
+    for dir in &[b"/bin" as &[u8], b"/usr/bin"] {
+        let mut path_buf = [0u8; 64];
+        let path = null_terminate(dir, &mut path_buf);
+        let fd = linux_open(path, 0);
+        if fd < 0 { continue; }
+        let mut listing = [0u8; 4096];
+        let n = read_all(fd as u64, &mut listing);
+        linux_close(fd as u64);
+        for j in 0..n {
+            if listing[j] == b'\n' { total += 1; }
+        }
+    }
+    print_u64(total);
+    print(b" executables available\n");
+}
+
+fn pkg_info(name: &[u8]) {
+    // Try to stat the binary
+    let mut resolved = [0u8; 128];
+    let len = crate::exec::resolve_command(name, &mut resolved);
+    if len == 0 {
+        print(name);
+        print(b": not found\n");
+        crate::parse::set_exit_status(1);
+        return;
+    }
+
+    let path = &resolved[..len];
+    print(b"Name:    ");
+    print(name);
+    print(b"\n");
+    print(b"Path:    ");
+    print(path);
+    print(b"\n");
+
+    // Stat for size
+    let mut stat_buf_nul = [0u8; 130];
+    stat_buf_nul[..len].copy_from_slice(path);
+    stat_buf_nul[len] = 0;
+    let mut stat_buf = [0u8; 144];
+    if linux_stat(stat_buf_nul.as_ptr(), stat_buf.as_mut_ptr()) >= 0 {
+        let size = u64::from_le_bytes([stat_buf[48], stat_buf[49], stat_buf[50], stat_buf[51],
+                                       stat_buf[52], stat_buf[53], stat_buf[54], stat_buf[55]]);
+        print(b"Size:    ");
+        print_u64(size);
+        print(b" bytes\n");
+
+        let mode = u32::from_le_bytes([stat_buf[24], stat_buf[25], stat_buf[26], stat_buf[27]]);
+        print(b"Mode:    0o");
+        // Print octal
+        let mut oct_buf = [0u8; 8];
+        let mut oct_len = 0;
+        let mut m = mode & 0o7777;
+        if m == 0 { oct_buf[0] = b'0'; oct_len = 1; }
+        else {
+            while m > 0 { oct_buf[oct_len] = b'0' + (m & 7) as u8; m >>= 3; oct_len += 1; }
+        }
+        let mut j = oct_len;
+        while j > 0 { j -= 1; linux_write(1, &oct_buf[j] as *const u8, 1); }
+        print(b"\n");
+    }
+
+    // Try to read ELF header to detect type
+    let fd = linux_open(stat_buf_nul.as_ptr(), 0);
+    if fd >= 0 {
+        let mut hdr = [0u8; 64];
+        let n = linux_read(fd as u64, hdr.as_mut_ptr(), 64);
+        linux_close(fd as u64);
+        if n >= 20 && hdr[0] == 0x7F && hdr[1] == b'E' && hdr[2] == b'L' && hdr[3] == b'F' {
+            print(b"Type:    ELF ");
+            // e_type at offset 16 (2 bytes LE)
+            let etype = u16::from_le_bytes([hdr[16], hdr[17]]);
+            match etype {
+                2 => print(b"executable (ET_EXEC)"),
+                3 => print(b"shared object/PIE (ET_DYN)"),
+                _ => { print(b"type="); print_u64(etype as u64); }
+            }
+            print(b"\n");
+            // Check for PT_INTERP to detect static vs dynamic
+            if n >= 64 {
+                let phoff = u64::from_le_bytes([hdr[32], hdr[33], hdr[34], hdr[35], hdr[36], hdr[37], hdr[38], hdr[39]]);
+                let phnum = u16::from_le_bytes([hdr[56], hdr[57]]);
+                if phoff > 0 && phnum > 0 {
+                    print(b"Linking: ");
+                    // We can't easily check PT_INTERP without reading more, so just report phnum
+                    if phnum > 4 {
+                        print(b"dynamic (");
+                    } else {
+                        print(b"static (");
+                    }
+                    print_u64(phnum as u64);
+                    print(b" program headers)\n");
+                }
+            }
+        } else {
+            print(b"Type:    script/data\n");
+        }
+    }
+}
+
+fn pkg_which(name: &[u8]) {
+    let mut resolved = [0u8; 128];
+    let len = crate::exec::resolve_command(name, &mut resolved);
+    if len > 0 {
+        print(&resolved[..len]);
+        print(b"\n");
+    } else {
+        print(name);
+        print(b": not found\n");
+        crate::parse::set_exit_status(1);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// sleep -pause for N seconds
+// ---------------------------------------------------------------------------
+
+pub fn cmd_sleep(args: &[u8]) {
+    let secs = parse_u64_simple(args);
+    if secs == 0 { return; }
+    // Build a timespec struct: { tv_sec: u64, tv_nsec: u64 }
+    let mut timespec = [0u8; 16];
+    let sec_bytes = secs.to_le_bytes();
+    timespec[..8].copy_from_slice(&sec_bytes);
+    // tv_nsec = 0 (already zero)
+    linux_nanosleep(timespec.as_ptr());
+}
+
+// ---------------------------------------------------------------------------
+// type -identify command type
+// ---------------------------------------------------------------------------
+
+pub fn cmd_type(name: &[u8]) {
+    if name.is_empty() { return; }
+    // Check builtins
+    static BUILTINS: &[&[u8]] = &[
+        b"help", b"echo", b"uname", b"uptime", b"caps", b"ls", b"cat", b"write",
+        b"rm", b"stat", b"hexdump", b"head", b"tail", b"grep", b"mkdir", b"rmdir",
+        b"cd", b"pwd", b"snap", b"fork", b"getpid", b"exec", b"ps", b"top", b"kill",
+        b"resolve", b"ping", b"traceroute", b"wget", b"export", b"env", b"unset",
+        b"exit", b"jobs", b"fg", b"bg", b"history", b"wc", b"sort", b"uniq", b"diff",
+        b"function", b"syslog", b"netmirror", b"snapshot", b"lua",
+        b"services", b"threads", b"meminfo", b"bench", b"read", b"source", b"sleep",
+        b"true", b"false", b"type", b"break", b"continue", b"trace",
+    ];
+    for &b in BUILTINS.iter() {
+        if eq(name, b) {
+            print(name);
+            print(b" is a shell builtin\n");
+            return;
+        }
+    }
+    // Check functions
+    if crate::functions::func_find(name).is_some() {
+        print(name);
+        print(b" is a shell function\n");
+        return;
+    }
+    // Check external (would resolve to /bin/<name>)
+    let mut path_buf = [0u8; 70];
+    path_buf[..5].copy_from_slice(b"/bin/");
+    let nl = name.len().min(64);
+    path_buf[5..5 + nl].copy_from_slice(&name[..nl]);
+    path_buf[5 + nl] = 0;
+    let mut stat_buf = [0u8; 144];
+    if linux_stat(path_buf.as_ptr(), stat_buf.as_mut_ptr()) >= 0 {
+        print(name);
+        print(b" is /bin/");
+        print(name);
+        print(b"\n");
+        return;
+    }
+    print(b"type: ");
+    print(name);
+    print(b" not found\n");
+    crate::parse::set_exit_status(1);
+}
+
+// ---------------------------------------------------------------------------
+// source / . -execute script file
+// ---------------------------------------------------------------------------
+
+/// source <filename> -execute commands from a file in the current shell context.
+pub fn cmd_source(filename: &[u8]) {
+    use crate::functions::expand_vars;
+    use crate::parse::{dispatch_with_redirects, execute_if_block,
+                       execute_for_block, execute_while_block, execute_until_block};
+
+    let mut data = [0u8; 4096];
+    let total = slurp_file(filename, &mut data);
+    if total < 0 {
+        print(b"source: cannot read file: ");
+        print(filename);
+        print(b"\n");
+        crate::parse::set_exit_status(1);
+        return;
+    }
+    let total = total as usize;
+
+    // Process each line
+    let mut line_start = 0;
+    let mut i = 0;
+    let mut accum_buf = [0u8; 2048];
+    let mut line_buf = [0u8; 512];
+
+    while i <= total {
+        if i == total || data[i] == b'\n' {
+            let raw_line = trim(&data[line_start..i]);
+            if !raw_line.is_empty() && raw_line[0] != b'#' {
+                // Expand variables
+                let mut expanded = [0u8; 512];
+                let exp_len = expand_vars(raw_line, &mut expanded);
+                let line = trim(&expanded[..exp_len]);
+
+                if !line.is_empty() {
+                    // Handle control structures
+                    if starts_with(line, b"if ") || starts_with(line, b"for ")
+                        || starts_with(line, b"while ") || starts_with(line, b"until ")
+                    {
+                        // For scripts, accumulate remaining lines manually if block is incomplete
+                        let block_kw_end = if starts_with(line, b"if ") { b"fi" as &[u8] }
+                            else { b"done" as &[u8] };
+                        // Check if this line alone is complete
+                        let is_complete = find_substr(line, block_kw_end).is_some();
+                        if is_complete {
+                            let acc_len = line.len().min(accum_buf.len() - 1);
+                            accum_buf[..acc_len].copy_from_slice(&line[..acc_len]);
+                            let block = trim(&accum_buf[..acc_len]);
+                            if starts_with(block, b"if ") { execute_if_block(block, &mut line_buf); }
+                            else if starts_with(block, b"for ") { execute_for_block(block, &mut line_buf); }
+                            else if starts_with(block, b"while ") { execute_while_block(block, &mut line_buf); }
+                            else if starts_with(block, b"until ") { execute_until_block(block, &mut line_buf); }
+                        } else {
+                            // Accumulate lines from the script data until block is complete
+                            let mut acc_len = line.len().min(accum_buf.len() - 1);
+                            accum_buf[..acc_len].copy_from_slice(&line[..acc_len]);
+                            i += 1; // move past newline
+                            line_start = i;
+                            while i <= total {
+                                if i == total || data[i] == b'\n' {
+                                    let next_line = trim(&data[line_start..i]);
+                                    if !next_line.is_empty() && acc_len + 2 + next_line.len() < accum_buf.len() {
+                                        accum_buf[acc_len] = b';';
+                                        accum_buf[acc_len + 1] = b' ';
+                                        acc_len += 2;
+                                        accum_buf[acc_len..acc_len + next_line.len()].copy_from_slice(next_line);
+                                        acc_len += next_line.len();
+                                    }
+                                    if find_substr(&accum_buf[..acc_len], block_kw_end).is_some() {
+                                        break;
+                                    }
+                                    line_start = i + 1;
+                                }
+                                i += 1;
+                            }
+                            let block = trim(&accum_buf[..acc_len]);
+                            if starts_with(block, b"if ") { execute_if_block(block, &mut line_buf); }
+                            else if starts_with(block, b"for ") { execute_for_block(block, &mut line_buf); }
+                            else if starts_with(block, b"while ") { execute_while_block(block, &mut line_buf); }
+                            else if starts_with(block, b"until ") { execute_until_block(block, &mut line_buf); }
+                        }
+                    } else {
+                        dispatch_with_redirects(line);
+                    }
+                }
+            }
+            line_start = i + 1;
+        }
+        i += 1;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// read builtin
+// ---------------------------------------------------------------------------
+
+/// read [-p "prompt"] VAR1 [VAR2 ...] -read a line from stdin into variables.
+/// If multiple vars, splits on spaces: first=VAR1, second=VAR2, rest=last var.
+/// If no var name given, stores in REPLY.
+pub fn cmd_read(args: &[u8]) {
+    let mut prompt: &[u8] = b"";
+    let mut rest = args;
+
+    // Parse -p "prompt"
+    if starts_with(rest, b"-p ") {
+        rest = trim(&rest[3..]);
+        // Extract prompt string (may be quoted)
+        if !rest.is_empty() && (rest[0] == b'"' || rest[0] == b'\'') {
+            let quote = rest[0];
+            let start = 1;
+            let mut end = start;
+            while end < rest.len() && rest[end] != quote { end += 1; }
+            prompt = &rest[start..end];
+            rest = if end + 1 < rest.len() { trim(&rest[end + 1..]) } else { b"" };
+        } else {
+            // Unquoted prompt: take first word
+            let end = find_space(rest).unwrap_or(rest.len());
+            prompt = &rest[..end];
+            rest = if end < rest.len() { trim(&rest[end..]) } else { b"" };
+        }
+    }
+
+    // Print prompt if given
+    if !prompt.is_empty() {
+        print(prompt);
+    }
+
+    // Read a line from stdin
+    let mut input = [0u8; 256];
+    let input_len = read_simple_line(&mut input);
+    let input_data = trim(&input[..input_len]);
+
+    // Parse variable names
+    let mut var_names: [&[u8]; 8] = [b""; 8];
+    let mut var_count = 0;
+    let mut pos = 0;
+    while pos < rest.len() && var_count < 8 {
+        while pos < rest.len() && rest[pos] == b' ' { pos += 1; }
+        let start = pos;
+        while pos < rest.len() && rest[pos] != b' ' { pos += 1; }
+        if start < pos {
+            var_names[var_count] = &rest[start..pos];
+            var_count += 1;
+        }
+    }
+
+    if var_count == 0 {
+        // No variable name -store in REPLY
+        env_set(b"REPLY", input_data);
+        return;
+    }
+
+    // Split input on spaces and assign to variables
+    let mut ipos = 0;
+    for vi in 0..var_count {
+        while ipos < input_data.len() && input_data[ipos] == b' ' { ipos += 1; }
+        if vi == var_count - 1 {
+            // Last variable gets the rest of the line
+            env_set(var_names[vi], &input_data[ipos..]);
+        } else {
+            let start = ipos;
+            while ipos < input_data.len() && input_data[ipos] != b' ' { ipos += 1; }
+            env_set(var_names[vi], &input_data[start..ipos]);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// apt -sotOS package manager
+// ---------------------------------------------------------------------------
+
+/// Package registry: tracks up to 64 packages (name, installed flag)
+static mut APT_PKG_NAMES: [[u8; 32]; 64] = [[0u8; 32]; 64];
+static mut APT_PKG_LENS: [u8; 64] = [0u8; 64];
+static mut APT_PKG_INSTALLED: [bool; 64] = [false; 64];
+static mut APT_PKG_COUNT: usize = 0;
+static mut APT_INITIALIZED: bool = false;
+
+/// Scan /bin/ and /pkg/ to discover available packages.
+fn apt_init() {
+    unsafe {
+        if APT_INITIALIZED { return; }
+        APT_INITIALIZED = true;
+        APT_PKG_COUNT = 0;
+    }
+    apt_scan_dir(b"/bin", true);
+    apt_scan_dir(b"/pkg", false);
+}
+
+fn apt_scan_dir(dir: &[u8], mark_installed: bool) {
+    let mut path_buf = [0u8; 64];
+    let path = null_terminate(dir, &mut path_buf);
+    let fd = linux_open(path, 0);
+    if fd < 0 { return; }
+    let mut listing = [0u8; 4096];
+    let total = read_all(fd as u64, &mut listing);
+    linux_close(fd as u64);
+
+    let mut line_start = 0;
+    let mut i = 0;
+    while i <= total {
+        if i == total || listing[i] == b'\n' {
+            let entry = trim(&listing[line_start..i]);
+            let name_end = find_space(entry).unwrap_or(entry.len());
+            let name = &entry[..name_end];
+            if !name.is_empty() && name[0] != b'.' {
+                apt_register(name, mark_installed);
+            }
+            line_start = i + 1;
+        }
+        i += 1;
+    }
+}
+
+fn apt_register(name: &[u8], installed: bool) {
+    unsafe {
+        for j in 0..APT_PKG_COUNT {
+            let plen = APT_PKG_LENS[j] as usize;
+            if plen == name.len() && APT_PKG_NAMES[j][..plen] == *name {
+                if installed { APT_PKG_INSTALLED[j] = true; }
+                return;
+            }
+        }
+        if APT_PKG_COUNT >= 64 { return; }
+        let idx = APT_PKG_COUNT;
+        let nl = name.len().min(31);
+        APT_PKG_NAMES[idx][..nl].copy_from_slice(&name[..nl]);
+        APT_PKG_LENS[idx] = nl as u8;
+        APT_PKG_INSTALLED[idx] = installed;
+        APT_PKG_COUNT += 1;
+    }
+}
+
+pub fn cmd_apt(args: &[u8]) {
+    apt_init();
+
+    if args.is_empty() || eq(args, b"help") || eq(args, b"--help") {
+        print(b"sotOS package manager\n");
+        print(b"usage: apt install <pkg>    install package from /pkg/ to /bin/\n");
+        print(b"       apt remove <pkg>     remove package from /bin/\n");
+        print(b"       apt list             list all packages\n");
+        print(b"       apt list --installed list installed packages\n");
+        print(b"       apt search <term>    search packages by name\n");
+        print(b"       apt update           rescan package directories\n");
+        print(b"       apt fetch <url>      download package via HTTP\n");
+        return;
+    }
+
+    if eq(args, b"update") {
+        unsafe { APT_INITIALIZED = false; }
+        apt_init();
+        unsafe {
+            print_u64(APT_PKG_COUNT as u64);
+        }
+        print(b" packages scanned\n");
+    } else if eq(args, b"list") {
+        apt_list(false);
+    } else if eq(args, b"list --installed") {
+        apt_list(true);
+    } else if starts_with(args, b"install ") {
+        let name = trim(&args[8..]);
+        if !name.is_empty() { apt_install(name); }
+        else { print(b"usage: apt install <pkg>\n"); }
+    } else if starts_with(args, b"remove ") {
+        let name = trim(&args[7..]);
+        if !name.is_empty() { apt_remove(name); }
+        else { print(b"usage: apt remove <pkg>\n"); }
+    } else if starts_with(args, b"search ") {
+        let term = trim(&args[7..]);
+        if !term.is_empty() { apt_search(term); }
+        else { print(b"usage: apt search <term>\n"); }
+    } else if starts_with(args, b"fetch ") {
+        let url = trim(&args[6..]);
+        if !url.is_empty() { apt_fetch(url); }
+        else { print(b"usage: apt fetch <url>\n"); }
+    } else {
+        print(b"apt: unknown command. Try 'apt help'\n");
+        crate::parse::set_exit_status(1);
+    }
+}
+
+fn apt_list(installed_only: bool) {
+    unsafe {
+        let mut count = 0u64;
+        for i in 0..APT_PKG_COUNT {
+            if installed_only && !APT_PKG_INSTALLED[i] { continue; }
+            let plen = APT_PKG_LENS[i] as usize;
+            print(&APT_PKG_NAMES[i][..plen]);
+            if APT_PKG_INSTALLED[i] {
+                print(b" [installed]");
+            } else {
+                print(b" [available]");
+            }
+            print(b"\n");
+            count += 1;
+        }
+        if count == 0 { print(b"No packages found\n"); }
+    }
+}
+
+fn apt_search(term: &[u8]) {
+    unsafe {
+        let mut found = false;
+        for i in 0..APT_PKG_COUNT {
+            let plen = APT_PKG_LENS[i] as usize;
+            let name = &APT_PKG_NAMES[i][..plen];
+            if contains(name, term) {
+                print(name);
+                if APT_PKG_INSTALLED[i] { print(b" [installed]"); }
+                else { print(b" [available]"); }
+                print(b"\n");
+                found = true;
+            }
+        }
+        if !found {
+            print(b"No packages matching '");
+            print(term);
+            print(b"'\n");
+        }
+    }
+}
+
+fn apt_install(name: &[u8]) {
+    // Check if already in /bin/
+    let mut bin_path = [0u8; 70];
+    bin_path[..5].copy_from_slice(b"/bin/");
+    let nl = name.len().min(63);
+    bin_path[5..5 + nl].copy_from_slice(&name[..nl]);
+    bin_path[5 + nl] = 0;
+    let mut stat_buf = [0u8; 144];
+    if linux_stat(bin_path.as_ptr(), stat_buf.as_mut_ptr()) >= 0 {
+        print(name);
+        print(b" is already installed\n");
+        return;
+    }
+
+    // Try /pkg/<name>
+    let mut pkg_path = [0u8; 70];
+    pkg_path[..5].copy_from_slice(b"/pkg/");
+    pkg_path[5..5 + nl].copy_from_slice(&name[..nl]);
+    pkg_path[5 + nl] = 0;
+
+    if linux_stat(pkg_path.as_ptr(), stat_buf.as_mut_ptr()) < 0 {
+        print(b"E: Unable to locate package ");
+        print(name);
+        print(b"\n");
+        print(b"   Put packages in /pkg/ or use: apt fetch <url>\n");
+        crate::parse::set_exit_status(100);
+        return;
+    }
+
+    // Copy /pkg/<name> -> /bin/<name>
+    let src_fd = linux_open(pkg_path.as_ptr(), 0);
+    if src_fd < 0 {
+        print(b"E: Failed to read /pkg/");
+        print(name);
+        print(b"\n");
+        crate::parse::set_exit_status(1);
+        return;
+    }
+    let mut data = [0u8; 4096];
+    let mut total = 0usize;
+    loop {
+        let n = linux_read(src_fd as u64, data[total..].as_mut_ptr(), data.len() - total);
+        if n <= 0 { break; }
+        total += n as usize;
+        if total >= data.len() { break; }
+    }
+    linux_close(src_fd as u64);
+
+    let dst_fd = linux_open(bin_path.as_ptr(), 0x41); // O_WRONLY | O_CREAT
+    if dst_fd < 0 {
+        print(b"E: Failed to write /bin/");
+        print(name);
+        print(b"\n");
+        crate::parse::set_exit_status(1);
+        return;
+    }
+    if total > 0 {
+        linux_write(dst_fd as u64, data.as_ptr(), total);
+    }
+    linux_close(dst_fd as u64);
+
+    apt_register(name, true);
+    print(b"Installing ");
+    print(name);
+    print(b" ... done (");
+    print_u64(total as u64);
+    print(b" bytes)\n");
+}
+
+fn apt_remove(name: &[u8]) {
+    let mut bin_path = [0u8; 70];
+    bin_path[..5].copy_from_slice(b"/bin/");
+    let nl = name.len().min(63);
+    bin_path[5..5 + nl].copy_from_slice(&name[..nl]);
+    bin_path[5 + nl] = 0;
+
+    let ret = linux_unlink(bin_path.as_ptr());
+    if ret < 0 {
+        print(b"E: ");
+        print(name);
+        print(b" is not installed\n");
+        crate::parse::set_exit_status(1);
+        return;
+    }
+
+    unsafe {
+        for i in 0..APT_PKG_COUNT {
+            let plen = APT_PKG_LENS[i] as usize;
+            if plen == name.len() && APT_PKG_NAMES[i][..plen] == *name {
+                APT_PKG_INSTALLED[i] = false;
+            }
+        }
+    }
+    print(b"Removing ");
+    print(name);
+    print(b" ... done\n");
+}
+
+fn apt_fetch(url: &[u8]) {
+    let mut last_slash = 0;
+    for i in 0..url.len() {
+        if url[i] == b'/' { last_slash = i; }
+    }
+    if last_slash == 0 || last_slash + 1 >= url.len() {
+        print(b"E: Cannot determine filename from URL\n");
+        crate::parse::set_exit_status(1);
+        return;
+    }
+    let filename = &url[last_slash + 1..];
+
+    print(b"Fetching ");
+    print(filename);
+    print(b" ...\n");
+
+    // Build wget command: wget -O /pkg/<filename> <url>
+    let mut cmd = [0u8; 512];
+    let mut pos = 0;
+    let prefix = b"wget -O /pkg/";
+    cmd[..prefix.len()].copy_from_slice(prefix);
+    pos += prefix.len();
+    let fl = filename.len().min(64);
+    cmd[pos..pos + fl].copy_from_slice(&filename[..fl]);
+    pos += fl;
+    cmd[pos] = b' ';
+    pos += 1;
+    let ul = url.len().min(400);
+    cmd[pos..pos + ul].copy_from_slice(&url[..ul]);
+    pos += ul;
+
+    crate::parse::dispatch_command(trim(&cmd[..pos]));
+
+    if crate::parse::get_exit_status() == 0 {
+        apt_register(filename, false);
+        print(b"Done. Run: apt install ");
+        print(filename);
+        print(b"\n");
+    }
 }

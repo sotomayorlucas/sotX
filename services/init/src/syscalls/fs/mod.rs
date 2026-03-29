@@ -80,7 +80,10 @@ pub(crate) fn sys_read(ctx: &mut SyscallContext, msg: &IpcMsg) {
         1  => fs_stdio::read_stdin(ctx, buf_ptr, len),
         9  => fs_special::read_dev_zero(ctx, buf_ptr, len),
         20 => fs_special::read_dev_urandom(ctx, buf_ptr, len),
-        8  => reply_val(ctx.ep_cap, 0), // /dev/null: EOF
+        8  => { // /dev/null: block on read (like real Linux), don't return 0 in a spin
+            sotos_common::sys::notify_wait(0); // yield instead of busy-loop
+            reply_val(ctx.ep_cap, 0);
+        }
         22 => fs_special::read_eventfd(ctx, fd, buf_ptr, len),
         23 => fs_special::read_timerfd(ctx, fd, buf_ptr, len),
         25 => fs_special::read_memfd(ctx, fd, buf_ptr, len),

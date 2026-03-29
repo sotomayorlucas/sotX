@@ -128,6 +128,11 @@ pub(crate) fn read_pipe(ctx: &mut SyscallContext, fd: usize, buf_ptr: u64, len: 
 pub(crate) fn read_unix_socket(ctx: &mut SyscallContext, fd: usize, buf_ptr: u64, len: usize) {
     let conn = ctx.sock_conn_id[fd] as usize;
     if conn < crate::fd::MAX_UNIX_CONNS {
+        // Guard: check if connection is still alive
+        if crate::fd::UNIX_CONN_ACTIVE[conn].load(core::sync::atomic::Ordering::Acquire) == 0 {
+            reply_val(ctx.ep_cap, 0); // EOF — peer disconnected
+            return;
+        }
         let pipe_id = if ctx.child_fds[fd] == 27 {
             unsafe { crate::fd::UNIX_CONN_PIPE_B[conn] as usize }
         } else {
@@ -218,6 +223,11 @@ pub(crate) fn write_pipe(ctx: &mut SyscallContext, fd: usize, buf_ptr: u64, len:
 pub(crate) fn write_unix_socket(ctx: &mut SyscallContext, fd: usize, buf_ptr: u64, len: usize) {
     let conn = ctx.sock_conn_id[fd] as usize;
     if conn < crate::fd::MAX_UNIX_CONNS {
+        // Guard: check if connection is still alive
+        if crate::fd::UNIX_CONN_ACTIVE[conn].load(core::sync::atomic::Ordering::Acquire) == 0 {
+            reply_val(ctx.ep_cap, -32i64); // -EPIPE — peer disconnected
+            return;
+        }
         let pipe_id = if ctx.child_fds[fd] == 27 {
             unsafe { crate::fd::UNIX_CONN_PIPE_A[conn] as usize }
         } else {

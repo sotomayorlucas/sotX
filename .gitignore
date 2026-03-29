@@ -4,8 +4,4 @@
 limine/
 **/*.o
 **/*.d
-# LKL build artifacts (built via WSL2)
-lkl/linux/
-lkl/output/
-services/lkl-server/*.o
-services/lkl-server/lkl-server
+services/init/lkl/liblkl_fused.a

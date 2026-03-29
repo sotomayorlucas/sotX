@@ -25,13 +25,22 @@ use crate::syscalls::net as syscalls_net;
 use crate::syscalls::signal as syscalls_signal;
 use crate::syscalls::info as syscalls_info;
 use crate::syscalls::task as syscalls_task;
-use crate::LKL_EP_CAP;
+use crate::lkl;
 
 // Re-export from submodules so external `use crate::child_handler::X` still works.
 pub(crate) use crate::fork::clone_child_trampoline;
 pub(crate) use crate::virtual_files::{open_virtual_file, fill_random};
 
 const MAP_WRITABLE: u64 = 2;
+/// Forward a syscall directly to LKL (in-process, no IPC).
+fn forward_to_lkl(ep_cap: u64, syscall_nr: u64,
+                  msg: &sotos_common::IpcMsg, pid: usize, child_as_cap: u64)
+{
+    let args = [msg.regs[0], msg.regs[1], msg.regs[2],
+                msg.regs[3], msg.regs[4], msg.regs[5]];
+    let ret = lkl::syscall(syscall_nr, &args, child_as_cap, pid);
+    reply_val(ep_cap, ret);
+}
 
 /// Per-pid retry counters to suppress repeated pipe-retry log lines.
 /// Index by pid (0..MAX_PROCS). Incremented when PIPE_RETRY_TAG sent,
@@ -335,14 +344,56 @@ pub(crate) extern "C" fn child_handler() -> ! {
             print(b"\n");
         }
 
-        // --- LKL forwarding (Phase 1): LKL kernel v6.6.0 boots and runs
-        //     inside lkl-server, but forwarding is disabled for now because:
-        //     (1) File I/O needs sotOS's VFS, not LKL's empty tmpfs
-        //     (2) Guest memory bridge needs AS cap sharing (not yet implemented)
-        //     Phase 2: mount sotOS disk in LKL, share AS caps, forward complex
-        //     syscalls (epoll, signals, networking).
-        //     LKL proof-of-concept: lkl_syscall(uname) returns "Linux 6.6.0+".
-        let _lkl_ep = LKL_EP_CAP.load(Ordering::Acquire);
+        // ── LKL forwarding ──
+        // When lkl-server is running, forward complex syscalls to the real
+        // Linux 6.6 kernel instead of emulating them manually. Keep process
+        // management (fork/exec/exit/wait), memory (brk/mmap), and signals
+        // local — LKL can't manage sotOS address spaces or capabilities.
+        // ── LKL forwarding (direct in-process call, no IPC) ──
+        // LKL handles: FS, time, sync, uname, random.
+        // LUCAS keeps: process mgmt, memory, signals, thread mgmt.
+        if lkl::LKL_READY.load(Ordering::Acquire) {
+            let forwarded = match syscall_nr {
+                // File I/O
+                SYS_READ | SYS_WRITE | SYS_OPEN | SYS_CLOSE |
+                SYS_STAT | SYS_FSTAT | SYS_LSTAT | SYS_LSEEK |
+                SYS_ACCESS | SYS_OPENAT | SYS_FSTATAT | SYS_READLINKAT |
+                SYS_FACCESSAT | SYS_MKDIRAT | SYS_UNLINKAT |
+                SYS_GETCWD | SYS_CHDIR |
+                SYS_MKDIR | SYS_RMDIR | SYS_UNLINK | SYS_RENAME |
+                SYS_GETDENTS64 | SYS_FTRUNCATE |
+                SYS_FSYNC | SYS_FDATASYNC | SYS_CHMOD |
+                SYS_PIPE | SYS_PIPE2 | SYS_DUP | SYS_DUP2 | SYS_DUP3 |
+                SYS_FCNTL | SYS_IOCTL |
+                SYS_PREAD64 | SYS_PWRITE64 | SYS_READV | SYS_WRITEV |
+                // Networking
+                SYS_SOCKET | SYS_CONNECT | SYS_BIND | SYS_LISTEN |
+                SYS_ACCEPT | SYS_ACCEPT4 | SYS_SOCKETPAIR |
+                SYS_SENDTO | SYS_SENDMSG | SYS_RECVFROM | SYS_RECVMSG |
+                SYS_GETSOCKOPT | SYS_SETSOCKOPT |
+                SYS_GETSOCKNAME | SYS_GETPEERNAME | SYS_SHUTDOWN |
+                // Poll/epoll
+                SYS_POLL | SYS_PPOLL | SYS_SELECT | SYS_PSELECT6 |
+                SYS_EPOLL_CREATE | SYS_EPOLL_CREATE1 | SYS_EPOLL_CTL |
+                SYS_EPOLL_WAIT | SYS_EPOLL_PWAIT |
+                // Special FDs
+                SYS_EVENTFD | SYS_EVENTFD2 |
+                SYS_TIMERFD_CREATE | SYS_TIMERFD_SETTIME | SYS_TIMERFD_GETTIME |
+                SYS_MEMFD_CREATE |
+                SYS_INOTIFY_INIT1 | SYS_INOTIFY_ADD_WATCH | SYS_INOTIFY_RM_WATCH |
+                // Sync + time + info
+                SYS_FUTEX |
+                SYS_UNAME | SYS_SYSINFO | SYS_GETRANDOM |
+                SYS_GETTIMEOFDAY | SYS_CLOCK_GETTIME | SYS_CLOCK_GETRES |
+                SYS_NANOSLEEP | SYS_CLOCK_NANOSLEEP
+                => {
+                    forward_to_lkl(ep_cap, syscall_nr, &msg, pid, child_as_cap);
+                    true
+                }
+                _ => false,
+            };
+            if forwarded { continue; }
+        }
 
         match syscall_nr {
             // SYS_read(fd, buf, len)
@@ -843,6 +894,18 @@ pub(crate) extern "C" fn child_handler() -> ! {
                         {
                             if let Ok(f) = sys::frame_alloc() {
                                 let _ = sys::map_into(exec_target_as, 0x10000, f, 0);
+                            }
+                        }
+                        // For Wine (glibc) children: set CWD to drive_c so Wine
+                        // can find DOS drive mapping (fixes "could not find DOS drive" stall)
+                        if crate::exec::LAST_EXEC_PERSONALITY.load(Ordering::Acquire)
+                            == crate::process::PERS_GLIBC
+                        {
+                            let drive_c = b"/root/.wine/drive_c";
+                            unsafe {
+                                let grp = &mut crate::fd::THREAD_GROUPS[fdg];
+                                grp.cwd[..drive_c.len()].copy_from_slice(drive_c);
+                                grp.cwd[drive_c.len()] = 0;
                             }
                         }
                         EXEC_LOCK.store(0, Ordering::Release);

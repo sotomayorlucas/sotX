@@ -57,63 +57,155 @@ struct boot_info {
  * Returns the result in a reply message.
  * --------------------------------------------------------------- */
 
+/* Scratch buffers for guest memory bridge (static to avoid stack overflow). */
+static char path_buf[4096];
+static char data_buf[4096];
+static char stat_buf[256];
+
 static void handle_syscall(uint64_t ep_cap, struct ipc_msg *msg)
 {
     uint64_t nr      = msg->tag;
     uint64_t as_cap  = msg->regs[7];
     struct ipc_msg reply;
-
     memset(&reply, 0, sizeof(reply));
 
 #ifdef HAS_LKL
-    /* Translate x86_64 syscall number to LKL generic number. */
     long lkl_nr = xlat_syscall_x86_to_lkl((long)nr);
     if (lkl_nr < 0) {
-        reply.regs[0] = (uint64_t)(int64_t)(-38); /* -ENOSYS */
-    } else {
-        /* Per-syscall guest memory bridge:
-         * Buffer syscalls need data copied between child AS and lkl-server. */
-        long result;
-        switch ((int)nr) {
-        case 63: { /* SYS_UNAME: uname(struct utsname *buf) */
-            /* struct utsname = 6 * 65 = 390 bytes */
-            char local_buf[390];
-            memset(local_buf, 0, sizeof(local_buf));
-            long p[6] = {(long)local_buf, 0, 0, 0, 0, 0};
-            result = lkl_syscall(lkl_nr, p);
-            if (result == 0 && as_cap != 0) {
-                /* Copy result to child's address space. */
-                guest_write(as_cap, msg->regs[0], local_buf, 390);
-            }
-            break;
-        }
-        default: {
-            /* Generic: pass args directly (no buffer handling).
-             * Only works for syscalls without pointer arguments. */
-            long p[6] = {
-                (long)msg->regs[0], (long)msg->regs[1],
-                (long)msg->regs[2], (long)msg->regs[3],
-                (long)msg->regs[4], (long)msg->regs[5]
-            };
-            result = lkl_syscall(lkl_nr, p);
-            break;
-        }
-        }
-        reply.regs[0] = (uint64_t)result;
+        reply.regs[0] = (uint64_t)(int64_t)(-38);
+        goto send;
     }
+    long result;
+    switch ((int)nr) {
+    case 63: { /* uname(buf) */
+        char ub[390]; memset(ub, 0, 390);
+        long p[6] = {(long)ub,0,0,0,0,0};
+        result = lkl_syscall(lkl_nr, p);
+        if (result == 0 && as_cap) guest_write(as_cap, msg->regs[0], ub, 390);
+        break;
+    }
+    case 2: { /* open(path,flags,mode) -> openat(AT_FDCWD,...) */
+        guest_read_str(as_cap, msg->regs[0], path_buf, 4096);
+        long p[6]={-100,(long)path_buf,(long)msg->regs[1],(long)msg->regs[2],0,0};
+        result = lkl_syscall(lkl_nr, p); break;
+    }
+    case 257: { /* openat(dirfd,path,flags,mode) */
+        guest_read_str(as_cap, msg->regs[1], path_buf, 4096);
+        long p[6]={(long)msg->regs[0],(long)path_buf,(long)msg->regs[2],(long)msg->regs[3],0,0};
+        result = lkl_syscall(lkl_nr, p); break;
+    }
+    case 0: { /* read(fd,buf,count) */
+        size_t c = (size_t)msg->regs[2]; if(c>4096) c=4096;
+        long p[6]={(long)msg->regs[0],(long)data_buf,(long)c,0,0,0};
+        result = lkl_syscall(lkl_nr, p);
+        if(result>0 && as_cap) guest_write(as_cap, msg->regs[1], data_buf, (size_t)result);
+        break;
+    }
+    case 1: { /* write(fd,buf,count) */
+        size_t c = (size_t)msg->regs[2]; if(c>4096) c=4096;
+        if(as_cap) guest_read(as_cap, msg->regs[1], data_buf, c);
+        long p[6]={(long)msg->regs[0],(long)data_buf,(long)c,0,0,0};
+        result = lkl_syscall(lkl_nr, p); break;
+    }
+    case 3: { /* close(fd) */
+        long p[6]={(long)msg->regs[0],0,0,0,0,0};
+        result = lkl_syscall(lkl_nr, p); break;
+    }
+    case 4: case 6: { /* stat/lstat(path,statbuf) -> fstatat */
+        guest_read_str(as_cap, msg->regs[0], path_buf, 4096);
+        memset(stat_buf,0,256);
+        int fl = (nr==6) ? 0x100 : 0;
+        long p[6]={-100,(long)path_buf,(long)stat_buf,(long)fl,0,0};
+        result = lkl_syscall(lkl_nr, p);
+        if(result==0 && as_cap) guest_write(as_cap, msg->regs[1], stat_buf, 144);
+        break;
+    }
+    case 5: { /* fstat(fd,statbuf) */
+        memset(stat_buf,0,256);
+        long p[6]={(long)msg->regs[0],(long)stat_buf,0,0,0,0};
+        result = lkl_syscall(lkl_nr, p);
+        if(result==0 && as_cap) guest_write(as_cap, msg->regs[1], stat_buf, 144);
+        break;
+    }
+    case 262: { /* fstatat(dirfd,path,statbuf,flags) */
+        guest_read_str(as_cap, msg->regs[1], path_buf, 4096);
+        memset(stat_buf,0,256);
+        long p[6]={(long)msg->regs[0],(long)path_buf,(long)stat_buf,(long)msg->regs[3],0,0};
+        result = lkl_syscall(lkl_nr, p);
+        if(result==0 && as_cap) guest_write(as_cap, msg->regs[2], stat_buf, 144);
+        break;
+    }
+    case 8: { /* lseek(fd,off,whence) */
+        long p[6]={(long)msg->regs[0],(long)msg->regs[1],(long)msg->regs[2],0,0,0};
+        result = lkl_syscall(lkl_nr, p); break;
+    }
+    case 79: { /* getcwd(buf,size) */
+        memset(path_buf,0,4096);
+        size_t sz=(size_t)msg->regs[1]; if(sz>4096) sz=4096;
+        long p[6]={(long)path_buf,(long)sz,0,0,0,0};
+        result = lkl_syscall(lkl_nr, p);
+        if(result>=0 && as_cap){size_t l=0;while(l<sz&&path_buf[l])l++;guest_write(as_cap,msg->regs[0],path_buf,l+1);}
+        break;
+    }
+    case 80: { /* chdir(path) */
+        guest_read_str(as_cap, msg->regs[0], path_buf, 4096);
+        long p[6]={(long)path_buf,0,0,0,0,0};
+        result = lkl_syscall(lkl_nr, p); break;
+    }
+    case 21: { /* access(path,mode) -> faccessat */
+        guest_read_str(as_cap, msg->regs[0], path_buf, 4096);
+        long p[6]={-100,(long)path_buf,(long)msg->regs[1],0,0,0};
+        result = lkl_syscall(lkl_nr, p); break;
+    }
+    case 83: { /* mkdir(path,mode) -> mkdirat */
+        guest_read_str(as_cap, msg->regs[0], path_buf, 4096);
+        long p[6]={-100,(long)path_buf,(long)msg->regs[1],0,0,0};
+        result = lkl_syscall(lkl_nr, p); break;
+    }
+    case 87: { /* unlink(path) -> unlinkat */
+        guest_read_str(as_cap, msg->regs[0], path_buf, 4096);
+        long p[6]={-100,(long)path_buf,0,0,0,0};
+        result = lkl_syscall(lkl_nr, p); break;
+    }
+    case 267: { /* readlinkat(dirfd,path,buf,bufsiz) */
+        guest_read_str(as_cap, msg->regs[1], path_buf, 4096);
+        size_t bsz=(size_t)msg->regs[3]; if(bsz>4096) bsz=4096;
+        long p[6]={(long)msg->regs[0],(long)path_buf,(long)data_buf,(long)bsz,0,0};
+        result = lkl_syscall(lkl_nr, p);
+        if(result>0 && as_cap) guest_write(as_cap, msg->regs[2], data_buf, (size_t)result);
+        break;
+    }
+    case 217: { /* getdents64(fd,dirp,count) */
+        size_t c=(size_t)msg->regs[2]; if(c>4096) c=4096;
+        long p[6]={(long)msg->regs[0],(long)data_buf,(long)c,0,0,0};
+        result = lkl_syscall(lkl_nr, p);
+        if(result>0 && as_cap) guest_write(as_cap, msg->regs[1], data_buf, (size_t)result);
+        break;
+    }
+    case 318: { /* getrandom(buf,count,flags) */
+        size_t c=(size_t)msg->regs[1]; if(c>4096) c=4096;
+        long p[6]={(long)data_buf,(long)c,(long)msg->regs[2],0,0,0};
+        result = lkl_syscall(lkl_nr, p);
+        if(result>0 && as_cap) guest_write(as_cap, msg->regs[0], data_buf, (size_t)result);
+        break;
+    }
+    default: { /* No-pointer syscalls: generic passthrough */
+        long p[6]={(long)msg->regs[0],(long)msg->regs[1],(long)msg->regs[2],
+                   (long)msg->regs[3],(long)msg->regs[4],(long)msg->regs[5]};
+        result = lkl_syscall(lkl_nr, p); break;
+    }
+    }
+    reply.regs[0] = (uint64_t)result;
     reply.tag = 0;
+send:
 #else
-    /* Stub mode: return -ENOSYS for all syscalls. */
     (void)as_cap;
-    reply.tag     = 0;
-    reply.regs[0] = (uint64_t)(int64_t)(-38);  /* -ENOSYS */
-
-    /* Log the first few unknown syscalls for debugging. */
+    reply.tag = 0;
+    reply.regs[0] = (uint64_t)(int64_t)(-38);
     serial_puts("[lkl] stub syscall ");
     serial_put_dec(nr);
     serial_puts(" -> -ENOSYS\n");
 #endif
-
     sys_send(ep_cap, &reply);
 }
 

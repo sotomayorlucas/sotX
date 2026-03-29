@@ -669,6 +669,11 @@ pub(crate) fn sys_sendmsg(ctx: &mut SyscallContext, msg: &IpcMsg) {
             ctx.guest_read(msg_iov, &mut iov_raw[..iov_bytes]);
         }
         if conn < crate::fd::MAX_UNIX_CONNS {
+            // Guard: check if connection is still alive
+            if crate::fd::UNIX_CONN_ACTIVE[conn].load(core::sync::atomic::Ordering::Acquire) == 0 {
+                reply_val(ep_cap, -32i64); // -EPIPE
+                return;
+            }
             let pipe_id = if ctx.child_fds[fd] == 27 {
                 unsafe { crate::fd::UNIX_CONN_PIPE_A[conn] as usize }
             } else {
@@ -1089,6 +1094,11 @@ pub(crate) fn sys_recvmsg(ctx: &mut SyscallContext, msg: &IpcMsg) {
         let iov_base = u64::from_le_bytes([iov_buf[0], iov_buf[1], iov_buf[2], iov_buf[3], iov_buf[4], iov_buf[5], iov_buf[6], iov_buf[7]]);
         let iov_len = u64::from_le_bytes([iov_buf[8], iov_buf[9], iov_buf[10], iov_buf[11], iov_buf[12], iov_buf[13], iov_buf[14], iov_buf[15]]) as usize;
         if conn < crate::fd::MAX_UNIX_CONNS {
+            // Guard: check if connection is still alive
+            if crate::fd::UNIX_CONN_ACTIVE[conn].load(core::sync::atomic::Ordering::Acquire) == 0 {
+                reply_val(ep_cap, 0); // EOF — peer disconnected
+                return;
+            }
             let pipe_id = if ctx.child_fds[fd] == 27 {
                 unsafe { crate::fd::UNIX_CONN_PIPE_B[conn] as usize }
             } else {
@@ -1714,7 +1724,12 @@ pub(crate) fn sys_epoll_wait(ctx: &mut SyscallContext, msg: &IpcMsg) {
                         revents |= 1;
                     } else if kind == 16 {
                         revents |= 1;
-                    } else if kind == 26 || kind == 27 || kind == 28 {
+                    } else if kind == 27 || kind == 28 {
+                        let conn = ctx.sock_conn_id[rfd] as usize;
+                        if conn < crate::fd::MAX_UNIX_CONNS && crate::fd::UNIX_CONN_ACTIVE[conn].load(core::sync::atomic::Ordering::Acquire) == 0 {
+                            revents |= 0x10 | 0x08; // EPOLLHUP | EPOLLERR
+                        } else if poll_fd_readable(ctx, rfd) { revents |= 1; }
+                    } else if kind == 26 {
                         if poll_fd_readable(ctx, rfd) { revents |= 1; }
                     } else if kind == 31 || kind == 32 {
                         // evdev: check if input events available
@@ -1791,6 +1806,19 @@ pub(crate) fn sys_epoll_wait(ctx: &mut SyscallContext, msg: &IpcMsg) {
                             || kind == 22 || kind == 27 || kind == 28 || kind == 30 {
                             rev |= 4; // EPOLLOUT
                         }
+                    }
+                    if wanted & 1 != 0 && kind == 26 {
+                        if poll_fd_readable(ctx, rfd) { rev |= 1; }
+                    }
+                    if wanted & 1 != 0 && (kind == 27 || kind == 28) {
+                        let conn = ctx.sock_conn_id[rfd] as usize;
+                        if conn < crate::fd::MAX_UNIX_CONNS && crate::fd::UNIX_CONN_ACTIVE[conn].load(core::sync::atomic::Ordering::Acquire) == 0 {
+                            rev |= 0x10 | 0x08; // EPOLLHUP | EPOLLERR
+                        } else if poll_fd_readable(ctx, rfd) { rev |= 1; }
+                    }
+                    if wanted & 1 != 0 && kind == 33 {
+                        let slot = ctx.sock_conn_id[rfd] as usize;
+                        if crate::seatd::seatd_poll_readable(slot) { rev |= 1; }
                     }
                     if rev != 0 {
                         let ep = events_ptr + (ready_count as u64) * 12;

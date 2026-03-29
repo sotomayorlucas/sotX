@@ -62,8 +62,9 @@ pub(crate) struct ProcessState {
     pub sig_alt_sp: AtomicU64,          // ss_sp (stack base pointer)
     pub sig_alt_size: AtomicU64,        // ss_size (stack size in bytes)
     pub sig_alt_flags: AtomicU64,       // ss_flags (0=enabled, SS_ONSTACK=1, SS_DISABLE=2)
-    /// Set to 1 when SIGSEGV handler is active. If raise(SIGSEGV) fires
-    /// while this is set, force SIG_DFL (like Linux's force_sig_fault).
+    /// Counter of consecutive SIGSEGVs while handler is active.
+    /// Wine chains multiple SIGSEGVs for exception dispatch (typically 2-5).
+    /// Only force-kill when counter exceeds threshold (32).
     pub sig_in_handler: AtomicU64,
 
     // Robust futex list (set_robust_list/get_robust_list)
@@ -318,21 +319,18 @@ pub(crate) fn signal_deliver(ep_cap: u64, pid: usize, sig: u64, child_tid: u64, 
     if sig == 0 || sig >= 32 || pid == 0 || pid > MAX_PROCS { return false; }
     let p = &PROCESSES[pid - 1];
 
-    // Wine chains multiple SIGSEGVs for Windows exception dispatch (modify
-    // ucontext → rt_sigreturn → new fault at different address). Allow up to
-    // 32 consecutive SIGSEGVs before force-killing. Counter is cleared when
-    // the child runs successfully (timer interrupt with no pending signal).
+    // force_sig_fault: Wine chains multiple SIGSEGVs for exception dispatch
+    // (modifying ucontext, calling rt_sigreturn, faulting at new address).
+    // Only force-kill after 32 consecutive faults (true infinite loop).
     if sig == 11 {
-        let count = p.sig_in_handler.fetch_add(1, Ordering::AcqRel) + 1;
-        if count > 32 {
+        let count = p.sig_in_handler.fetch_add(1, Ordering::AcqRel);
+        if count >= 32 {
             crate::framebuffer::print(b"SIGSEGV-FORCE-DFL P");
             crate::framebuffer::print_u64(pid as u64);
-            crate::framebuffer::print(b" kill (32+ consecutive SIGSEGVs)\n");
-            return false;
+            crate::framebuffer::print(b" kill (32+ consecutive SIGSEGV)\n");
+            p.sig_in_handler.store(0, Ordering::Release);
+            return false; // fall through to default action (terminate)
         }
-    } else {
-        // Non-SIGSEGV signal: clear the counter
-        p.sig_in_handler.store(0, Ordering::Release);
     }
 
     let handler = p.sig_handler[sig as usize].load(Ordering::Acquire);
@@ -489,11 +487,8 @@ pub(crate) fn signal_deliver(ep_cap: u64, pid: usize, sig: u64, child_tid: u64, 
     // block the signal. Wine specifically needs SIGSEGV re-entrant delivery.
     // The old_mask is still saved in the SignalFrame for future use.
 
-    // sig_in_handler now serves as a consecutive SIGSEGV counter.
-    // The counter was incremented in sig_deliver, no need to set it here.
-    if sig == 11 {
-        // already incremented above
-    }
+    // SIGSEGV counter is already incremented in the check above.
+    // For non-SIGSEGV signals entering handler, nothing to do.
 
     // ── SIG_REDIRECT_TAG reply ──
     let reply = IpcMsg {

@@ -11,6 +11,15 @@ use crate::history::cmd_history;
 use crate::shell_trace;
 
 // ---------------------------------------------------------------------------
+// Last exit status ($?)
+// ---------------------------------------------------------------------------
+
+pub static mut LAST_EXIT_STATUS: i64 = 0;
+
+pub fn set_exit_status(s: i64) { unsafe { LAST_EXIT_STATUS = s; } }
+pub fn get_exit_status() -> i64 { unsafe { LAST_EXIT_STATUS } }
+
+// ---------------------------------------------------------------------------
 // Redirect parsing and execution
 // ---------------------------------------------------------------------------
 
@@ -219,10 +228,124 @@ fn capture_command_with_stdin(cmd: &[u8], stdin_data: &[u8], buf: &mut [u8]) -> 
 }
 
 // ---------------------------------------------------------------------------
+// Semicolon command list: cmd1; cmd2; cmd3
+// ---------------------------------------------------------------------------
+
+/// Execute a semicolon-separated list of commands.
+/// Each command goes through the full dispatch pipeline (&&/||, pipes, redirects).
+pub fn execute_semicolon_list(line: &[u8]) {
+    let mut remaining = line;
+    while !remaining.is_empty() {
+        let segment = match find_semicolon_unquoted(remaining) {
+            Some(pos) => {
+                let seg = trim(&remaining[..pos]);
+                remaining = trim(&remaining[pos + 1..]);
+                seg
+            }
+            None => {
+                let seg = trim(remaining);
+                remaining = b"";
+                seg
+            }
+        };
+        if segment.is_empty() { continue; }
+
+        // Each segment gets full processing: &&/||, pipes, redirects
+        if find_logical_op_unquoted(segment).is_some() {
+            execute_logical_chain(segment);
+        } else {
+            dispatch_single_command(segment);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Logical operators: && and ||
+// ---------------------------------------------------------------------------
+
+/// Execute a chain of commands connected by && and ||.
+/// Left-to-right with equal precedence (standard shell behavior).
+pub fn execute_logical_chain(line: &[u8]) {
+    // Split into segments and operators: seg1 OP seg2 OP seg3 ...
+    const MAX_SEGS: usize = 16;
+    let mut seg_start: [usize; MAX_SEGS] = [0; MAX_SEGS];
+    let mut seg_end: [usize; MAX_SEGS] = [0; MAX_SEGS];
+    let mut seg_op_is_and: [bool; MAX_SEGS] = [false; MAX_SEGS]; // operator BEFORE this segment
+    let mut seg_count: usize = 0;
+    let mut remaining = line;
+
+    // First segment has no preceding operator
+    loop {
+        match find_logical_op_unquoted(remaining) {
+            Some((pos, is_and)) => {
+                if seg_count < MAX_SEGS {
+                    let base = remaining.as_ptr() as usize - line.as_ptr() as usize;
+                    seg_start[seg_count] = base;
+                    seg_end[seg_count] = base + pos;
+                    seg_count += 1;
+                    // The next segment's preceding operator
+                    if seg_count < MAX_SEGS {
+                        seg_op_is_and[seg_count] = is_and;
+                    }
+                }
+                remaining = &remaining[pos + 2..];
+            }
+            None => {
+                if seg_count < MAX_SEGS {
+                    let base = remaining.as_ptr() as usize - line.as_ptr() as usize;
+                    seg_start[seg_count] = base;
+                    seg_end[seg_count] = base + remaining.len();
+                    seg_count += 1;
+                }
+                break;
+            }
+        }
+    }
+
+    // Execute segments left-to-right
+    for i in 0..seg_count {
+        let seg = trim(&line[seg_start[i]..seg_end[i]]);
+        if seg.is_empty() { continue; }
+
+        if i == 0 {
+            // Always execute first segment
+            dispatch_single_command(seg);
+        } else {
+            let status = get_exit_status();
+            if seg_op_is_and[i] {
+                // && — only execute if previous succeeded
+                if status == 0 {
+                    dispatch_single_command(seg);
+                }
+            } else {
+                // || — only execute if previous failed
+                if status != 0 {
+                    dispatch_single_command(seg);
+                }
+            }
+        }
+    }
+}
+
+/// Dispatch a single command segment (may contain pipes, redirects, etc.)
+fn dispatch_single_command(segment: &[u8]) {
+    // Check for pipes within this segment
+    if let Some(pipe_pos) = find_pipe_unquoted(segment) {
+        let left = trim(&segment[..pipe_pos]);
+        let right = trim(&segment[pipe_pos + 1..]);
+        if !left.is_empty() && !right.is_empty() {
+            execute_pipe(left, right);
+            return;
+        }
+    }
+    dispatch_with_redirects(segment);
+}
+
+// ---------------------------------------------------------------------------
 // Here-document support
 // ---------------------------------------------------------------------------
 
-pub fn execute_heredoc(cmd: &[u8], delim: &[u8], line_buf: &mut [u8; 256]) {
+pub fn execute_heredoc(cmd: &[u8], delim: &[u8], line_buf: &mut [u8; 512]) {
     let mut heredoc_data = [0u8; 4096];
     let mut heredoc_len: usize = 0;
 
@@ -391,12 +514,62 @@ pub fn execute_pipe(left: &[u8], right: &[u8]) {
 }
 
 // ---------------------------------------------------------------------------
+// Multi-line block accumulation
+// ---------------------------------------------------------------------------
+
+/// Check if a control block is complete (has its closing keyword).
+fn block_is_complete(line: &[u8]) -> bool {
+    if starts_with(line, b"if ") {
+        return find_substr(line, b"fi").is_some();
+    }
+    if starts_with(line, b"for ") || starts_with(line, b"while ") || starts_with(line, b"until ") {
+        return find_substr(line, b"done").is_some();
+    }
+    true
+}
+
+/// If the line starts a control block but is incomplete, accumulate additional lines
+/// from stdin until the closing keyword is found. Returns the complete block in buf.
+/// Lines are joined with "; " separators to match the single-line parser format.
+pub fn accumulate_block(first_line: &[u8], line_buf: &mut [u8; 512], buf: &mut [u8; 2048]) -> usize {
+    let mut pos = first_line.len().min(buf.len() - 1);
+    buf[..pos].copy_from_slice(&first_line[..pos]);
+
+    if block_is_complete(&buf[..pos]) {
+        return pos;
+    }
+
+    // Need more lines
+    loop {
+        print(b"> ");
+        let n = read_simple_line(line_buf);
+        let input_line = trim(&line_buf[..n]);
+        if input_line.is_empty() { continue; }
+
+        // Append "; " separator and the new line
+        if pos + 2 + input_line.len() < buf.len() {
+            buf[pos] = b';';
+            buf[pos + 1] = b' ';
+            pos += 2;
+            buf[pos..pos + input_line.len()].copy_from_slice(input_line);
+            pos += input_line.len();
+        }
+
+        // Check if block is now complete
+        if block_is_complete(&buf[..pos]) {
+            break;
+        }
+    }
+    pos
+}
+
+// ---------------------------------------------------------------------------
 // Shell scripting: if/then/fi and for/do/done
 // ---------------------------------------------------------------------------
 
 /// Basic if/then/fi scripting.
 /// Format: if CONDITION; then COMMAND; fi
-pub fn execute_if_block(line: &[u8], _line_buf: &mut [u8; 256]) {
+pub fn execute_if_block(line: &[u8], _line_buf: &mut [u8; 512]) {
     let after_if = trim(&line[3..]);
     let then_pos = find_substr(after_if, b"; then ");
     if then_pos.is_none() { print(b"syntax error: expected '; then'\n"); return; }
@@ -415,13 +588,17 @@ pub fn execute_if_block(line: &[u8], _line_buf: &mut [u8; 256]) {
 
 /// Basic for loop.
 /// Format: for VAR in A B C; do CMD; done
-pub fn execute_for_block(line: &[u8], _line_buf: &mut [u8; 256]) {
+pub fn execute_for_block(line: &[u8], _line_buf: &mut [u8; 512]) {
     let after_for = trim(&line[4..]);
     if let Some(in_pos) = find_substr(after_for, b" in ") {
         let var_name = trim(&after_for[..in_pos]);
         let after_in = &after_for[in_pos + 4..];
         if let Some(do_pos) = find_substr(after_in, b"; do ") {
-            let items_str = trim(&after_in[..do_pos]);
+            let raw_items = trim(&after_in[..do_pos]);
+            // Expand the items list once (for things like: for x in $LIST)
+            let mut items_exp = [0u8; 512];
+            let items_len = expand_vars(raw_items, &mut items_exp);
+            let items_str = trim(&items_exp[..items_len]);
             let after_do = &after_in[do_pos + 5..];
             if let Some(done_pos) = find_substr(after_do, b"; done") {
                 let command_template = trim(&after_do[..done_pos]);
@@ -433,9 +610,11 @@ pub fn execute_for_block(line: &[u8], _line_buf: &mut [u8; 256]) {
                     if start < pos {
                         let item = &items_str[start..pos];
                         env_set(var_name, item);
-                        let mut cmd_buf = [0u8; 256];
+                        let mut cmd_buf = [0u8; 512];
                         let cmd_len = expand_vars(command_template, &mut cmd_buf);
-                        dispatch_command(trim(&cmd_buf[..cmd_len]));
+                        execute_body_commands(trim(&cmd_buf[..cmd_len]));
+                        if get_loop_break() { set_loop_break(false); return; }
+                        if get_loop_continue() { set_loop_continue(false); }
                     }
                 }
                 return;
@@ -445,18 +624,147 @@ pub fn execute_for_block(line: &[u8], _line_buf: &mut [u8; 256]) {
     print(b"syntax error: for VAR in ITEMS; do CMD; done\n");
 }
 
+// ---------------------------------------------------------------------------
+// Loop control: break / continue
+// ---------------------------------------------------------------------------
+
+pub static mut LOOP_BREAK: bool = false;
+pub static mut LOOP_CONTINUE: bool = false;
+
+pub fn get_loop_break() -> bool { unsafe { LOOP_BREAK } }
+pub fn set_loop_break(v: bool) { unsafe { LOOP_BREAK = v; } }
+pub fn get_loop_continue() -> bool { unsafe { LOOP_CONTINUE } }
+pub fn set_loop_continue(v: bool) { unsafe { LOOP_CONTINUE = v; } }
+
+/// while CONDITION; do CMD1; CMD2; ...; done
+pub fn execute_while_block(line: &[u8], _line_buf: &mut [u8; 512]) {
+    execute_while_inner(line, false);
+}
+
+/// until CONDITION; do CMD1; CMD2; ...; done
+pub fn execute_until_block(line: &[u8], _line_buf: &mut [u8; 512]) {
+    execute_while_inner(line, true);
+}
+
+fn execute_while_inner(line: &[u8], invert: bool) {
+    // Parse: "while COND; do BODY; done" or "until COND; do BODY; done"
+    let keyword_len = if invert { 6 } else { 6 }; // "while " or "until " = 6
+    let after_kw = trim(&line[keyword_len..]);
+
+    let do_pos = match find_substr(after_kw, b"; do ") {
+        Some(p) => p,
+        None => {
+            // Also try "; do\n" or just "; do;" pattern
+            match find_substr(after_kw, b";do ") {
+                Some(p) => p,
+                None => { print(b"syntax error: expected '; do'\n"); return; }
+            }
+        }
+    };
+    let condition = trim(&after_kw[..do_pos]);
+    let after_do = &after_kw[do_pos + 4..]; // skip "; do "
+
+    let done_pos = match find_substr(after_do, b"; done") {
+        Some(p) => p,
+        None => {
+            match find_substr(after_do, b";done") {
+                Some(p) => p,
+                None => { print(b"syntax error: expected '; done'\n"); return; }
+            }
+        }
+    };
+    let body = trim(&after_do[..done_pos]);
+
+    // Copy condition and body templates (unexpanded) for re-expansion each iteration
+    let mut cond_template = [0u8; 256];
+    let cl = condition.len().min(255);
+    cond_template[..cl].copy_from_slice(&condition[..cl]);
+    let mut body_template = [0u8; 1024];
+    let bl = body.len().min(1023);
+    body_template[..bl].copy_from_slice(&body[..bl]);
+
+    // Execute loop
+    let mut iterations: usize = 0;
+    const MAX_ITERATIONS: usize = 10000;
+
+    loop {
+        if iterations >= MAX_ITERATIONS {
+            print(b"while: max iterations reached\n");
+            break;
+        }
+        iterations += 1;
+
+        // Re-expand condition variables each iteration
+        let mut cond_exp = [0u8; 256];
+        let cond_len = expand_vars(&cond_template[..cl], &mut cond_exp);
+        let cond_result = evaluate_condition(trim(&cond_exp[..cond_len]));
+        let should_run = if invert { !cond_result } else { cond_result };
+        if !should_run { break; }
+
+        // Re-expand body variables each iteration
+        let mut body_exp = [0u8; 1024];
+        let body_len = expand_vars(&body_template[..bl], &mut body_exp);
+        execute_body_commands(trim(&body_exp[..body_len]));
+
+        if get_loop_break() {
+            set_loop_break(false);
+            break;
+        }
+        if get_loop_continue() {
+            set_loop_continue(false);
+        }
+    }
+}
+
+/// Execute a semicolon-separated list of commands (loop/function body).
+fn execute_body_commands(body: &[u8]) {
+    let mut pos: usize = 0;
+    while pos < body.len() {
+        // Find next "; " separator
+        let start = pos;
+        while pos < body.len() {
+            if body[pos] == b';' && pos + 1 < body.len() && body[pos + 1] == b' ' {
+                break;
+            }
+            pos += 1;
+        }
+        let cmd = trim(&body[start..pos]);
+        if !cmd.is_empty() {
+            dispatch_or_call_func(cmd);
+            if get_loop_break() || get_loop_continue() { return; }
+        }
+        if pos < body.len() { pos += 2; } // skip "; "
+    }
+}
+
 fn evaluate_condition(cond: &[u8]) -> bool {
-    // "test -f FILE" — file exists
-    if starts_with(cond, b"test -f ") {
-        let name = trim(&cond[8..]);
+    // Support [ ... ] as alias for test ...
+    let test_expr = if cond.len() >= 2 && cond[0] == b'[' && cond[cond.len() - 1] == b']' {
+        trim(&cond[1..cond.len() - 1])
+    } else if starts_with(cond, b"test ") {
+        trim(&cond[5..])
+    } else {
+        return false;
+    };
+
+    // Negation: ! EXPR
+    if starts_with(test_expr, b"! ") {
+        return !evaluate_test_expr(trim(&test_expr[2..]));
+    }
+    evaluate_test_expr(test_expr)
+}
+
+fn evaluate_test_expr(expr: &[u8]) -> bool {
+    // Unary file tests
+    if starts_with(expr, b"-f ") {
+        let name = trim(&expr[3..]);
         let mut path_buf = [0u8; 64];
         let path = null_terminate(name, &mut path_buf);
         let mut stat_buf = [0u8; 144];
         return linux_stat(path, stat_buf.as_mut_ptr()) >= 0;
     }
-    // "test -d FILE" — directory exists
-    if starts_with(cond, b"test -d ") {
-        let name = trim(&cond[8..]);
+    if starts_with(expr, b"-d ") {
+        let name = trim(&expr[3..]);
         let mut path_buf = [0u8; 64];
         let path = null_terminate(name, &mut path_buf);
         let mut stat_buf = [0u8; 144];
@@ -464,16 +772,74 @@ fn evaluate_condition(cond: &[u8]) -> bool {
         let mode = u32::from_le_bytes([stat_buf[24], stat_buf[25], stat_buf[26], stat_buf[27]]);
         return mode & 0o170000 == 0o40000;
     }
-    // "test STR = STR" — string equality
-    if starts_with(cond, b"test ") {
-        let rest = trim(&cond[5..]);
-        if let Some(eq_pos) = find_substr(rest, b" = ") {
-            let left = trim(&rest[..eq_pos]);
-            let right = trim(&rest[eq_pos + 3..]);
-            return eq(left, right);
-        }
+    if starts_with(expr, b"-e ") {
+        let name = trim(&expr[3..]);
+        let mut path_buf = [0u8; 64];
+        let path = null_terminate(name, &mut path_buf);
+        let mut stat_buf = [0u8; 144];
+        return linux_stat(path, stat_buf.as_mut_ptr()) >= 0;
     }
-    false
+    // -n STR — string is non-empty
+    if starts_with(expr, b"-n ") {
+        return !trim(&expr[3..]).is_empty();
+    }
+    // -z STR — string is empty
+    if starts_with(expr, b"-z ") {
+        return trim(&expr[3..]).is_empty();
+    }
+    // Binary operators: find the operator
+    // String: = !=
+    if let Some(pos) = find_substr(expr, b" != ") {
+        let left = trim(&expr[..pos]);
+        let right = trim(&expr[pos + 4..]);
+        return !eq(left, right);
+    }
+    if let Some(pos) = find_substr(expr, b" = ") {
+        let left = trim(&expr[..pos]);
+        let right = trim(&expr[pos + 3..]);
+        return eq(left, right);
+    }
+    // Integer: -eq -ne -gt -lt -ge -le
+    if let Some(pos) = find_substr(expr, b" -eq ") {
+        let a = parse_i64(trim(&expr[..pos]));
+        let b = parse_i64(trim(&expr[pos + 5..]));
+        return a == b;
+    }
+    if let Some(pos) = find_substr(expr, b" -ne ") {
+        let a = parse_i64(trim(&expr[..pos]));
+        let b = parse_i64(trim(&expr[pos + 5..]));
+        return a != b;
+    }
+    if let Some(pos) = find_substr(expr, b" -gt ") {
+        let a = parse_i64(trim(&expr[..pos]));
+        let b = parse_i64(trim(&expr[pos + 5..]));
+        return a > b;
+    }
+    if let Some(pos) = find_substr(expr, b" -lt ") {
+        let a = parse_i64(trim(&expr[..pos]));
+        let b = parse_i64(trim(&expr[pos + 5..]));
+        return a < b;
+    }
+    if let Some(pos) = find_substr(expr, b" -ge ") {
+        let a = parse_i64(trim(&expr[..pos]));
+        let b = parse_i64(trim(&expr[pos + 5..]));
+        return a >= b;
+    }
+    if let Some(pos) = find_substr(expr, b" -le ") {
+        let a = parse_i64(trim(&expr[..pos]));
+        let b = parse_i64(trim(&expr[pos + 5..]));
+        return a <= b;
+    }
+    // Bare string — true if non-empty
+    !expr.is_empty()
+}
+
+/// Parse an i64 from byte slice (handles negative numbers).
+fn parse_i64(s: &[u8]) -> i64 {
+    if s.is_empty() { return 0; }
+    let (neg, start) = if s[0] == b'-' { (true, 1) } else { (false, 0) };
+    let val = parse_u64_simple(&s[start..]) as i64;
+    if neg { -val } else { val }
 }
 
 // ---------------------------------------------------------------------------
@@ -509,20 +875,27 @@ pub fn dispatch_command(line: &[u8]) {
             crate::trace::trace_write(line);
         });
 
+        // Default: command succeeds. Builtins that fail override this.
+        set_exit_status(0);
+
         // --- Command dispatch ---
         if eq(line, b"help") {
             print(b"commands: help, echo, uname, uptime, caps, ls, cat, write, rm,\n");
             print(b"  stat, hexdump, head, tail, grep, mkdir, rmdir, cd, pwd, snap,\n");
-            print(b"  fork, getpid, exec, ps, top, kill, resolve, ping, traceroute,\n");
-            print(b"  wget [-O file] [-q] <url>, export, env, unset, exit,\n");
-            print(b"  jobs, fg, bg, history, wc, sort, uniq, diff\n");
-            print(b"operators: cmd > file, cmd >> file, cmd < file, cmd1 | cmd2, cmd &\n");
-            print(b"scripting: if COND; then CMD; fi, for VAR in A B C; do CMD; done\n");
+            print(b"  fork, getpid, exec, ps, top, kill, export, env, unset, exit,\n");
+            print(b"  jobs, fg, bg, history, wc, sort, uniq, diff, read, source,\n");
+            print(b"  true, false, sleep, type, services, threads, meminfo, bench\n");
+            print(b"operators: cmd1 && cmd2, cmd1 || cmd2, cmd1 | cmd2\n");
+            print(b"  cmd > file, cmd >> file, cmd < file, cmd &\n");
+            print(b"scripting: if COND; then CMD; fi\n");
+            print(b"  for VAR in A B C; do CMD; done\n");
+            print(b"  while COND; do CMD; done, until COND; do CMD; done\n");
             print(b"  function NAME() { body; }, <<EOF heredocs\n");
-            print(b"network: resolve <host>, ping <host>, traceroute <host>\n");
-            print(b"  wget <url>                  -- fetch and display\n");
-            print(b"  wget -O <file> <url>        -- download to file\n");
-            print(b"  wget -q <url>               -- quiet mode\n");
+            print(b"  break, continue, source <file>, . <file>\n");
+            print(b"variables: $VAR, $?, $$, $#, $@, $0, $1-$8\n");
+            print(b"expansion: $(cmd), `cmd`, $((expr))\n");
+            print(b"test: -f, -d, -e, -n, -z, =, !=, -eq, -ne, -gt, -lt, -ge, -le\n");
+            print(b"network: resolve, ping, traceroute, wget [-O file] [-q] <url>\n");
         } else if eq(line, b"uname") {
             print(b"sotOS 0.1.0 x86_64 LUCAS\n");
         } else if eq(line, b"uptime") {
@@ -537,7 +910,15 @@ pub fn dispatch_command(line: &[u8]) {
                 cmd_kill(args);
             }
         } else if eq(line, b"caps") {
-            print(b"capability system active (query via sotOS ABI)\n");
+            cmd_caps();
+        } else if eq(line, b"services") {
+            cmd_services();
+        } else if eq(line, b"threads") {
+            cmd_threads();
+        } else if eq(line, b"meminfo") {
+            cmd_meminfo();
+        } else if eq(line, b"bench") {
+            cmd_bench();
         } else if starts_with(line, b"echo ") {
             let rest = &line[5..];
             print(rest);
@@ -756,6 +1137,45 @@ pub fn dispatch_command(line: &[u8]) {
             cmd_lua(code);
         } else if eq(line, b"lua") {
             print(b"usage: lua <code>\nexample: lua print(1+2)\n");
+        } else if starts_with(line, b"apt ") {
+            let args = trim(&line[4..]);
+            cmd_apt(args);
+        } else if eq(line, b"apt") {
+            cmd_apt(b"help");
+        } else if starts_with(line, b"pkg ") {
+            let args = trim(&line[4..]);
+            cmd_pkg(args);
+        } else if eq(line, b"pkg") {
+            cmd_pkg(b"help");
+        } else if starts_with(line, b"source ") {
+            let name = trim(&line[7..]);
+            if name.is_empty() { print(b"usage: source <file>\n"); }
+            else { cmd_source(name); }
+        } else if starts_with(line, b". ") {
+            let name = trim(&line[2..]);
+            if name.is_empty() { print(b"usage: . <file>\n"); }
+            else { cmd_source(name); }
+        } else if starts_with(line, b"read ") {
+            let args = trim(&line[5..]);
+            cmd_read(args);
+        } else if eq(line, b"read") {
+            cmd_read(b"");
+        } else if eq(line, b"true") {
+            set_exit_status(0);
+        } else if eq(line, b"false") {
+            set_exit_status(1);
+        } else if starts_with(line, b"sleep ") {
+            let arg = trim(&line[6..]);
+            cmd_sleep(arg);
+        } else if eq(line, b"sleep") {
+            print(b"usage: sleep <seconds>\n");
+        } else if starts_with(line, b"type ") {
+            let name = trim(&line[5..]);
+            cmd_type(name);
+        } else if eq(line, b"break") {
+            set_loop_break(true);
+        } else if eq(line, b"continue") {
+            set_loop_continue(true);
         } else if eq(line, b"exit") {
             print(b"bye!\n");
             linux_exit(0);

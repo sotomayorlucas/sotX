@@ -20,22 +20,22 @@ else
 endif
 
 CFLAGS := -ffreestanding -nostdlib -nostartfiles -fno-stack-protector \
-          -fno-builtin -mno-red-zone \
+          -fno-builtin -mno-red-zone -mcmodel=large \
           -Wall -Wextra -Werror=implicit-function-declaration \
           -O2 -g
 
 LDFLAGS := -T linker.ld -nostdlib -static
 
-# Check for LKL kernel object (lkl.o — the kernel proper, NO POSIX deps)
+# Check for LKL library
 LKL_DIR  := ../../lkl/output
-LKL_OBJ  := $(LKL_DIR)/lkl.o
+LKL_LIB  := $(LKL_DIR)/liblkl.a
 
-ifneq ($(wildcard $(LKL_OBJ)),)
+ifneq ($(wildcard $(LKL_LIB)),)
   CFLAGS  += -DHAS_LKL -I$(LKL_DIR)/include
-  LDLIBS  += $(LKL_OBJ)
-  $(info LKL kernel object found at $(LKL_OBJ))
+  LDLIBS  += $(LKL_LIB)
+  $(info LKL library found at $(LKL_LIB))
 else
-  $(info LKL kernel object not found -- building in stub mode)
+  $(info LKL library not found -- building in stub mode)
 endif
 
 # Source files
