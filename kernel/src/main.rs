@@ -27,6 +27,7 @@ mod panic;
 mod pool;
 mod sched;
 mod shm;
+mod sot;
 mod svc_registry;
 mod sync;
 mod syscall;
