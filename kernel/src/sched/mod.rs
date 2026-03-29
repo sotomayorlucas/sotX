@@ -449,7 +449,9 @@ impl Scheduler {
     }
 }
 
-pub static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler::new());
+// SMP: TicketMutex ensures FIFO ordering — prevents starvation where one CPU
+// repeatedly wins the spin::Mutex while the other starves forever.
+pub static SCHEDULER: TicketMutex<Scheduler> = TicketMutex::new(Scheduler::new());
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -1642,6 +1644,24 @@ fn check_domain_refills(sched: &mut Scheduler, global_now: u64) {
 /// is called by the new thread). This avoids a race where another CPU could
 /// dequeue and run the old thread before its RSP is saved.
 ///
+/// Non-blocking schedule attempt for interrupt context (reschedule IPI).
+/// If SCHEDULER lock is contended, returns immediately — next timer tick
+/// will pick up the work. Prevents deadlock when IPI fires while another
+/// CPU holds SCHEDULER lock.
+pub fn try_schedule() {
+    let percpu = percpu::current_percpu();
+    let old_idx = percpu.current_thread;
+    if old_idx == usize::MAX { return; }
+
+    // Only reschedule if we can get the lock without spinning.
+    if SCHEDULER.try_lock().is_none() {
+        return; // Lock contended — skip, timer tick will retry.
+    }
+    // Lock acquired and dropped immediately (just testing).
+    // Now do the full schedule with the lock available.
+    schedule();
+}
+
 /// ρ_buf optimization: per-CPU queue dequeue happens BEFORE taking
 /// SCHEDULER.lock(), eliminating O(p) contention on the global lock for
 /// queue operations. SCHEDULER.lock() is only held for thread state

@@ -224,9 +224,6 @@ pub extern "C" fn _start() -> ! {
     }
 
     // --- Phase 2/3: SPSC test + benchmarks ---
-    // SMP has scheduler lock contention — even syscalls can deadlock.
-    // Skip SPSC on SMP builds. Default: run (single CPU).
-    #[cfg(not(smp))]
     {
         let ring_frame = sys::frame_alloc().unwrap_or_else(|_| panic_halt());
         sys::map(RING_ADDR, ring_frame, MAP_WRITABLE).unwrap_or_else(|_| panic_halt());
@@ -247,10 +244,6 @@ pub extern "C" fn _start() -> ! {
         print_u64(sum);
         print(b"\n");
         run_benchmarks(ring);
-    }
-    #[cfg(smp)]
-    {
-        print(b"SMP: skipping SPSC+bench\n");
     }
 
     // --- Phase 4: Virtio-BLK + Object Store ---
