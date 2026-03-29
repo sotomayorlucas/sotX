@@ -1,10 +1,12 @@
 //! SOT (Secure Object Transactional) exokernel subsystem.
 //!
-//! This module implements the core SOT primitives: Secure Objects,
-//! capability epoch tracking, transactions, provenance, and domains.
+//! Core SOT primitives: Secure Objects, capability epoch tracking,
+//! transactions (Tier 0/1/2), provenance ring buffers, and domains.
 
 pub mod cap_epoch;
 pub mod so;
+pub mod tx;
+pub mod tx_wal;
 pub mod types;
 
 pub use so::{CapObjectAdapter, SecureObject};
