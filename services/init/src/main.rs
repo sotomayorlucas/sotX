@@ -223,33 +223,35 @@ pub extern "C" fn _start() -> ! {
         print(b"\n");
     }
 
-    // --- Phase 2: SPSC channel test ---
-    let ring_frame = sys::frame_alloc().unwrap_or_else(|_| panic_halt());
-    sys::map(RING_ADDR, ring_frame, MAP_WRITABLE).unwrap_or_else(|_| panic_halt());
-
-    let empty_cap = sys::notify_create().unwrap_or_else(|_| panic_halt());
-    let full_cap = sys::notify_create().unwrap_or_else(|_| panic_halt());
-
-    let ring = unsafe {
-        spsc::SpscRing::init(RING_ADDR as *mut u8, 128, empty_cap as u32, full_cap as u32)
-    };
-
-    let stack_frame = sys::frame_alloc().unwrap_or_else(|_| panic_halt());
-    sys::map(PRODUCER_STACK_BASE, stack_frame, MAP_WRITABLE).unwrap_or_else(|_| panic_halt());
-
-    let _thread_cap = sys::thread_create(producer as *const () as u64, PRODUCER_STACK_TOP)
-        .unwrap_or_else(|_| panic_halt());
-    let mut sum: u64 = 0;
-    for _ in 0..MSG_COUNT {
-        sum += spsc::recv(ring);
+    // --- Phase 2/3: SPSC test + benchmarks ---
+    // SMP has scheduler lock contention — even syscalls can deadlock.
+    // Skip SPSC on SMP builds. Default: run (single CPU).
+    #[cfg(not(smp))]
+    {
+        let ring_frame = sys::frame_alloc().unwrap_or_else(|_| panic_halt());
+        sys::map(RING_ADDR, ring_frame, MAP_WRITABLE).unwrap_or_else(|_| panic_halt());
+        let empty_cap = sys::notify_create().unwrap_or_else(|_| panic_halt());
+        let full_cap = sys::notify_create().unwrap_or_else(|_| panic_halt());
+        let ring = unsafe {
+            spsc::SpscRing::init(RING_ADDR as *mut u8, 128, empty_cap as u32, full_cap as u32)
+        };
+        let stack_frame = sys::frame_alloc().unwrap_or_else(|_| panic_halt());
+        sys::map(PRODUCER_STACK_BASE, stack_frame, MAP_WRITABLE).unwrap_or_else(|_| panic_halt());
+        let _thread_cap = sys::thread_create(producer as *const () as u64, PRODUCER_STACK_TOP)
+            .unwrap_or_else(|_| panic_halt());
+        let mut sum: u64 = 0;
+        for _ in 0..MSG_COUNT {
+            sum += spsc::recv(ring);
+        }
+        print(b"SPSC: sum=");
+        print_u64(sum);
+        print(b"\n");
+        run_benchmarks(ring);
     }
-
-    print(b"SPSC: sum=");
-    print_u64(sum);
-    print(b"\n");
-
-    // --- Phase 3: Benchmarks ---
-    run_benchmarks(ring);
+    #[cfg(smp)]
+    {
+        print(b"SMP: skipping SPSC+bench\n");
+    }
 
     // --- Phase 4: Virtio-BLK + Object Store ---
     let mut blk = init_block_storage(boot_info);
