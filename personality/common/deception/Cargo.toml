@@ -1,0 +1,7 @@
+[package]
+name = "sot-deception"
+version = "0.1.0"
+edition = "2021"
+description = "Deception engine for sotOS — adversary-aware capability interposition"
+
+[dependencies]
