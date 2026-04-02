@@ -315,6 +315,8 @@ pub(crate) extern "C" fn child_handler() -> ! {
 
         // Phase 5: Syscall shadow logging (record every child syscall)
         syscall_log_record(pid as u16, syscall_nr as u16, msg.regs[0], 0);
+        // Wine PE loader diagnostics: log every syscall for Wine PIDs
+        crate::wine_diag::log_syscall(pid, syscall_nr, &msg.regs);
         // Clear retry state before dispatch. If the handler sends
         // PIPE_RETRY_TAG it will re-increment via mark_pipe_retry().
         clear_pipe_retry(pid);

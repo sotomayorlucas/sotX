@@ -81,6 +81,7 @@ mod udev;
 mod child_handler;
 mod lucas_handler;
 mod lkl;
+mod wine_diag;
 mod boot_tests;
 
 use framebuffer::{print, print_u64, print_hex64, print_hex, fb_init};
