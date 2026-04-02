@@ -278,6 +278,7 @@ pub(crate) fn sys_futex(ctx: &mut SyscallContext, msg: &IpcMsg) {
     let uaddr = msg.regs[0];
     let op = (msg.regs[1] & 0x7F) as u32; // mask off FUTEX_PRIVATE_FLAG
     let val = msg.regs[2] as u32;
+    crate::wine_diag::log_futex(ctx.pid, op, uaddr, val);
     match op {
         0 => { // FUTEX_WAIT
             // Read the futex value from the child's address space (not init's).
@@ -285,8 +286,10 @@ pub(crate) fn sys_futex(ctx: &mut SyscallContext, msg: &IpcMsg) {
             ctx.guest_read(uaddr, &mut buf);
             let current = u32::from_le_bytes(buf);
             if current != val {
+                crate::wine_diag::log_futex_result(ctx.pid, op, -EAGAIN);
                 reply_val(ctx.ep_cap, -EAGAIN);
             } else {
+                crate::wine_diag::log_blocking(ctx.pid, b"futex WAIT");
                 // For shared futexes (Wine client↔server), we need the
                 // physical address to match across processes. Translate
                 // uaddr to physical if possible, otherwise use virtual.
@@ -299,6 +302,7 @@ pub(crate) fn sys_futex(ctx: &mut SyscallContext, msg: &IpcMsg) {
                     uaddr
                 };
                 let result = futex_wait(key, val);
+                crate::wine_diag::log_futex_result(ctx.pid, op, result);
                 reply_val(ctx.ep_cap, result);
             }
         }
@@ -313,6 +317,7 @@ pub(crate) fn sys_futex(ctx: &mut SyscallContext, msg: &IpcMsg) {
                 uaddr
             };
             let result = futex_wake(key, val);
+            crate::wine_diag::log_futex_result(ctx.pid, op, result);
             reply_val(ctx.ep_cap, result);
         }
         9 => { // FUTEX_WAIT_BITSET — same as FUTEX_WAIT but with bitset mask
@@ -320,8 +325,10 @@ pub(crate) fn sys_futex(ctx: &mut SyscallContext, msg: &IpcMsg) {
             ctx.guest_read(uaddr, &mut buf);
             let current = u32::from_le_bytes(buf);
             if current != val {
+                crate::wine_diag::log_futex_result(ctx.pid, op, -EAGAIN);
                 reply_val(ctx.ep_cap, -EAGAIN);
             } else {
+                crate::wine_diag::log_blocking(ctx.pid, b"futex WAIT_BITSET");
                 let key = if ctx.child_as_cap != 0 {
                     match sotos_common::sys::pte_read(ctx.child_as_cap, uaddr & !0xFFF) {
                         Ok((phys, _flags)) => phys | (uaddr & 0xFFF),
@@ -329,6 +336,7 @@ pub(crate) fn sys_futex(ctx: &mut SyscallContext, msg: &IpcMsg) {
                     }
                 } else { uaddr };
                 let result = futex_wait(key, val);
+                crate::wine_diag::log_futex_result(ctx.pid, op, result);
                 reply_val(ctx.ep_cap, result);
             }
         }
