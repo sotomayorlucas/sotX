@@ -38,6 +38,7 @@ pub mod cat {
     pub const SIGNAL:   u16 = 1 << 6;
     pub const PROCESS:  u16 = 1 << 7;
     pub const REGISTER: u16 = 1 << 8;
+    pub const WINE:     u16 = 1 << 9;
     pub const ALL:      u16 = 0xFFFF;
 }
 
@@ -52,6 +53,7 @@ pub const fn cat_name_bytes(mask: u16) -> &'static [u8] {
     if mask & cat::SIGNAL   != 0 { return b"SIGNAL"; }
     if mask & cat::PROCESS  != 0 { return b"PROCESS"; }
     if mask & cat::REGISTER != 0 { return b"REG"; }
+    if mask & cat::WINE     != 0 { return b"WINE"; }
     b"???"
 }
 

@@ -81,6 +81,7 @@ mod udev;
 mod child_handler;
 mod lucas_handler;
 mod lkl;
+mod wine_diag;
 mod boot_tests;
 mod sot_types;
 mod sot_bridge;

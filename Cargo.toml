@@ -34,6 +34,7 @@ exclude = [
     "services/compositor",
     "services/drm-test",
     "services/hello-gui",
+    "services/styx-test",
     "libs/sotos-testlib",
     "tools/sotctl",
     "tools/capctl",

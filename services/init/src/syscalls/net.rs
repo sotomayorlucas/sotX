@@ -250,6 +250,7 @@ pub(crate) fn sys_socket(ctx: &mut SyscallContext, msg: &IpcMsg) {
     let ep_cap = ctx.ep_cap;
     let domain = msg.regs[0] as u32;
     let sock_type = msg.regs[1] as u32;
+    crate::wine_diag::log_unix_op(ctx.pid, b"socket", domain as usize, (sock_type & 0xFF) as usize);
     let base_type = sock_type & 0xFF;
     let sock_nonblock = sock_type & 0x800; // SOCK_NONBLOCK
     let sock_cloexec = sock_type & 0x80000; // SOCK_CLOEXEC
@@ -335,6 +336,8 @@ pub(crate) fn sys_connect(ctx: &mut SyscallContext, msg: &IpcMsg) {
     let pid = ctx.pid;
     let fd = msg.regs[0] as usize;
     let sockaddr_ptr = msg.regs[1];
+    let fd_kind = if fd < GRP_MAX_FDS { ctx.child_fds[fd] } else { 0 };
+    crate::wine_diag::log_unix_op(pid, b"connect", fd, fd_kind as usize);
     if fd >= GRP_MAX_FDS || (ctx.child_fds[fd] != 16 && ctx.child_fds[fd] != 17 && ctx.child_fds[fd] != 26) {
         reply_val(ep_cap, -EBADF);
     } else if ctx.child_fds[fd] == 26 {
@@ -569,6 +572,8 @@ pub(crate) fn sys_sendmsg(ctx: &mut SyscallContext, msg: &IpcMsg) {
     let ep_cap = ctx.ep_cap;
     let fd = msg.regs[0] as usize;
     let msghdr_ptr = msg.regs[1];
+    let conn = if fd < GRP_MAX_FDS { ctx.sock_conn_id[fd] as usize } else { 0xFFFF };
+    crate::wine_diag::log_unix_op(ctx.pid, b"sendmsg", fd, conn);
 
     if fd >= GRP_MAX_FDS {
         reply_val(ep_cap, -EBADF);
@@ -1007,6 +1012,8 @@ pub(crate) fn sys_recvmsg(ctx: &mut SyscallContext, msg: &IpcMsg) {
     let ep_cap = ctx.ep_cap;
     let fd = msg.regs[0] as usize;
     let msghdr_ptr = msg.regs[1];
+    let conn = if fd < GRP_MAX_FDS { ctx.sock_conn_id[fd] as usize } else { 0xFFFF };
+    crate::wine_diag::log_unix_op(ctx.pid, b"recvmsg", fd, conn);
 
     if fd >= GRP_MAX_FDS {
         reply_val(ep_cap, -EBADF);
@@ -1391,6 +1398,8 @@ pub(crate) fn sys_bind(ctx: &mut SyscallContext, msg: &IpcMsg) {
     let fd = msg.regs[0] as usize;
     let addr_ptr = msg.regs[1];
     let addrlen = msg.regs[2] as usize;
+    let fd_kind = if fd < GRP_MAX_FDS { ctx.child_fds[fd] as usize } else { 0 };
+    crate::wine_diag::log_unix_op(ctx.pid, b"bind", fd, fd_kind);
     if fd >= GRP_MAX_FDS || ctx.child_fds[fd] == 0 {
         reply_val(ctx.ep_cap, -EBADF);
         return;
@@ -1595,12 +1604,13 @@ pub(crate) fn sys_epoll_create(ctx: &mut SyscallContext, _msg: &IpcMsg) {
             break;
         }
     }
+    crate::wine_diag::log_epoll_create(ctx.pid, efd);
     reply_val(ep_cap, efd);
 }
 
 pub(crate) fn sys_epoll_ctl(ctx: &mut SyscallContext, msg: &IpcMsg) {
     let ep_cap = ctx.ep_cap;
-    let _epfd = msg.regs[0] as usize;
+    let epfd = msg.regs[0] as usize;
     let op = msg.regs[1] as u32;
     let fd = msg.regs[2] as i32;
     let event_ptr = msg.regs[3];
@@ -1611,6 +1621,7 @@ pub(crate) fn sys_epoll_ctl(ctx: &mut SyscallContext, msg: &IpcMsg) {
         let d = u64::from_le_bytes([evbuf[4], evbuf[5], evbuf[6], evbuf[7], evbuf[8], evbuf[9], evbuf[10], evbuf[11]]);
         (ev, d)
     } else { (0, 0) };
+    crate::wine_diag::log_epoll_ctl(ctx.pid, epfd, op, fd, events, data);
     match op {
         1 => { // EPOLL_CTL_ADD
             if let Some(i) = ctx.epoll_reg_fd.iter().position(|&x| x == -1) {
@@ -1646,9 +1657,11 @@ pub(crate) fn sys_epoll_ctl(ctx: &mut SyscallContext, msg: &IpcMsg) {
 
 pub(crate) fn sys_epoll_wait(ctx: &mut SyscallContext, msg: &IpcMsg) {
     let ep_cap = ctx.ep_cap;
+    let epfd = msg.regs[0] as usize;
     let events_ptr = msg.regs[1];
     let max_events = (msg.regs[2] as usize).min(32);
     let timeout = msg.regs[3] as i32;
+    crate::wine_diag::log_epoll_wait_enter(ctx.pid, epfd, max_events, timeout);
 
     // Debug: show epoll_wait details for wineserver (pid 5) periodically
     static mut EPOLL_DBG_COUNT: [u32; 16] = [0; 16];
@@ -1776,8 +1789,10 @@ pub(crate) fn sys_epoll_wait(ctx: &mut SyscallContext, msg: &IpcMsg) {
                 print(b" (immediate)")
             });
         }
+        crate::wine_diag::log_epoll_wait_result(ctx.pid, ready_count);
         reply_val(ep_cap, ready_count as i64);
     } else {
+        crate::wine_diag::log_blocking(ctx.pid, b"epoll_wait (polling loop)");
         // Scale timeout for QEMU: wineserver's short timeouts expire too
         // fast in TCG emulation. 10x is enough for WHPX, 100x for TCG.
         let scale = if ctx.pid >= 3 && ctx.pid <= 6 { 10u64 } else { 1u64 };
@@ -1871,6 +1886,7 @@ pub(crate) fn sys_epoll_wait(ctx: &mut SyscallContext, msg: &IpcMsg) {
             }
             sys::yield_now();
         }
+        crate::wine_diag::log_epoll_wait_result(ctx.pid, ready_count);
         reply_val(ep_cap, ready_count as i64);
     }
 }
