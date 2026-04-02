@@ -293,12 +293,21 @@ pub extern "C" fn _start() -> ! {
         *CURSOR_Y.get() = (fb.height / 2) as i32;
     }
 
+    // Initialize input devices (non-fatal -- compositor works without input).
+    if input::try_init() {
+        print(b"compositor: input rings available\n");
+    } else {
+        print(b"compositor: WARNING: input device init failed, continuing without input\n");
+    }
+
     // Active compositing loop with IPC polling.
     loop {
         // Poll for IPC messages (non-blocking with short timeout).
         poll_ipc(ep_cap);
 
-        // Process input (may set damage flag).
+        // Process input if available (may set damage flag).
+        // read_kb_scancode/read_mouse_packet return None when input
+        // is not available, so the compositor continues rendering.
         while let Some(scancode) = input::read_kb_scancode() {
             handle_keyboard(scancode);
         }

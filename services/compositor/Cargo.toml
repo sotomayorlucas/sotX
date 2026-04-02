@@ -1,0 +1,15 @@
+[package]
+name = "sotos-compositor"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+sotos-common = { path = "../../libs/sotos-common" }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
