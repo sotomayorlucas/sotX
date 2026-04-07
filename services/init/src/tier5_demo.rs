@@ -525,6 +525,112 @@ fn run_concurrent_stress() -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// G. Perf comparison with TCG calibration
+//
+// QEMU TCG inflates RDTSC because each emulated instruction takes
+// significantly longer than its native equivalent. We can recover an
+// estimate of native cycle counts by timing a microbenchmark whose
+// native cost is well-known and dividing.
+//
+// Calibration target: a tight loop of LFENCE; RDTSC reads. Native cost
+// is around 30 cycles per iteration on modern x86 (LFENCE serialises
+// ~10 cy + RDTSC ~20 cy). Anything significantly above that under TCG
+// is the inflation factor.
+//
+// Calibrated estimates aren't precise -- TCG inflation isn't uniform
+// across instruction mixes -- but they let us put sotBSD numbers next
+// to published seL4 / L4 figures with the right order of magnitude.
+// ---------------------------------------------------------------------------
+
+const NATIVE_RDTSC_LOOP_CY: u64 = 30; // calibration target
+
+fn run_perf_compare() -> bool {
+    print(b"[G] perf comparison (TCG calibration vs published seL4/L4)\n");
+
+    const ITERS: u64 = 100_000;
+    // Warmup the TLB / icache.
+    for _ in 0..1000 {
+        let _ = rdtsc();
+    }
+    let t0 = rdtsc();
+    for _ in 0..ITERS {
+        unsafe { core::arch::asm!("lfence", options(nomem, nostack, preserves_flags)); }
+        let _ = rdtsc();
+    }
+    let total = rdtsc().wrapping_sub(t0);
+    let measured = total / ITERS;
+    print(b"    calibration: lfence+rdtsc loop measured at ");
+    print_u64(measured);
+    print(b" cy/iter (native ~");
+    print_u64(NATIVE_RDTSC_LOOP_CY);
+    print(b")\n");
+
+    // Inflation factor = measured / native, capped to avoid div-by-zero.
+    let inflation = if measured > NATIVE_RDTSC_LOOP_CY {
+        measured / NATIVE_RDTSC_LOOP_CY
+    } else {
+        1
+    };
+    print(b"    TCG inflation factor: x");
+    print_u64(inflation);
+    print(b"\n");
+
+    // Re-time the cheapest syscall and apply the calibration.
+    for _ in 0..200 { sys::yield_now(); }
+    let t0 = rdtsc();
+    for _ in 0..ITERS { sys::yield_now(); }
+    let yield_total = rdtsc().wrapping_sub(t0);
+    let yield_tcg = yield_total / ITERS;
+    let yield_native = yield_tcg / inflation;
+    print(b"    sys::yield_now : tcg=");
+    print_u64(yield_tcg);
+    print(b" cy estimated_native=");
+    print_u64(yield_native);
+    print(b" cy\n");
+
+    for _ in 0..200 { sys::provenance_emit(1, 0, 0xC0DE, 9999); }
+    let t0 = rdtsc();
+    for i in 0..ITERS {
+        sys::provenance_emit(1, 0, 0xC0DE_0000 + i, 9999);
+    }
+    let emit_total = rdtsc().wrapping_sub(t0);
+    let emit_tcg = emit_total / ITERS;
+    let emit_native = emit_tcg / inflation;
+    print(b"    provenance_emit: tcg=");
+    print_u64(emit_tcg);
+    print(b" cy estimated_native=");
+    print_u64(emit_native);
+    print(b" cy\n");
+
+    // Drain anything we just produced so the ring stays clean.
+    let mut tmp = [KernelProvEntry::zero(); 64];
+    while drain_ring(&mut tmp) > 0 {}
+
+    // Reference numbers from public papers (round-trip 64-byte IPC):
+    //   seL4 (Klein et al.):           ~500 cy   (sync send/recv)
+    //   NOVA (Steinberg/Kauer):        ~700 cy
+    //   Fiasco.OC:                     ~900 cy
+    //   Linux pipe(2):                ~3000 cy
+    //
+    // Our `provenance_emit` is one syscall transition + ring push, so
+    // it's the closest sotBSD primitive to "minimal kernel call" --
+    // not a full IPC round-trip but the same lower bound. Comparing
+    // estimated_native against the seL4 number is a rough but useful
+    // sanity check.
+    print(b"    --- reference (round-trip 64B IPC, native cy) ---\n");
+    print(b"      seL4         ~500\n");
+    print(b"      NOVA         ~700\n");
+    print(b"      Fiasco.OC    ~900\n");
+    print(b"      Linux pipe  ~3000\n");
+    print(b"      sotBSD prov_emit (estimated_native): ");
+    print_u64(emit_native);
+    print(b"\n");
+
+    print(b"    G: PASS (no assertion -- diagnostic section)\n");
+    true
+}
+
+// ---------------------------------------------------------------------------
 // Driver
 // ---------------------------------------------------------------------------
 
@@ -538,6 +644,7 @@ pub fn run() {
     if !run_2pc()               { all_ok = false; }
     if !run_fuzz()              { all_ok = false; }
     if !run_concurrent_stress() { all_ok = false; }
+    if !run_perf_compare()      { all_ok = false; }
     if all_ok {
         print(b"=== Tier 5 demo: PASS ===\n\n");
     } else {

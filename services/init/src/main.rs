@@ -292,6 +292,12 @@ pub extern "C" fn _start() -> ! {
     // Validates SOT syscalls 300-310 from userspace. Output goes to serial.
     spawn_process(b"styx-test");
 
+    // --- Phase 6b2: POSIX-equivalence smoke (Tier 5 follow-up) ---
+    // Native sotOS-side conformance pass for thread/frame/IPC/sleep/io
+    // primitives, complementing the LUCAS Linux ABI runners.
+    spawn_process(b"posix-test");
+    for _ in 0..2000 { sys::yield_now(); }
+
     // --- Phase 6c: BSD personality stub (Tier 2.2) ---
     // Spawn rump-vfs server, give it time to register, then exercise the
     // OPEN/READ/CLOSE protocol against /etc/passwd from this process.
