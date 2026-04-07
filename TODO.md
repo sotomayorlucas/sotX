@@ -340,17 +340,56 @@
       `just signify-keygen [OUTPUT=...]` recipe with sane default
       (`~/.secrets/sotbsd-signify.key`).
 
-### Tier 5 follow-ups (still parked)
-- [ ] Compare benchmark numbers against seL4 (~500 cy) / L4 (~700 cy)
-      on real hardware -- current TCG figures aren't directly
-      comparable.
-- [ ] LTP subset over Linuxulator -- blocked on the rump_init bisect.
+### Tier 5 follow-up pass #5 (2026-04-07) — DONE
+- [x] **Real-HW perf via TCG calibration** (Tier 5 follow-up):
+      WHPX boots Limine but crashes on LAPIC injection (Unexpected VP
+      exit code 4) -- the kernel's IRQ model isn't WHPX-compatible
+      without a deeper rework. Pivot: `tier5_demo.rs` section G times
+      a tight `lfence; rdtsc` loop to derive a TCG inflation factor
+      (typically ~17x) and re-prints `sys::yield_now` and
+      `sys::provenance_emit` cycles in both raw-TCG and
+      estimated-native columns next to published seL4/NOVA/Fiasco/Linux
+      reference numbers. Live numbers from one boot:
+        provenance_emit: tcg=8108 cy  estimated_native=476 cy
+                                                       (~seL4 IPC ~500)
+        sys::yield_now : tcg=368674 cy  estimated_native=21686 cy
+                                                       (full ctx switch)
+- [x] **POSIX-equivalence smoke** (Tier 5 follow-up): LTP itself is
+      blocked on rump_init, and the LUCAS Linux ABI runners
+      (`run_musl_test`, `run_busybox_test`, `run_dynamic_test`)
+      already exercise hundreds of Linux syscalls. New
+      `services/posix-test/` is a no_std sotOS-native binary that
+      covers the OTHER side of the personality split: it asserts the
+      SOT primitives the Linux personalities ride on
+      (frame_alloc/map/unmap, thread_create + sync, endpoint_create +
+      call_timeout, provenance_emit + drain). Boot output:
+      `posix-test: 11 passed, 0 failed`.
+- [x] **rumpuser_sot.c cross-compile CI smoke**: new
+      `rumpuser-sot-smoke` job in `.github/workflows/ci.yml` builds
+      `vendor/netbsd-rump/rumpuser_sot.c` with clang freestanding
+      (`--target=x86_64-unknown-none`, `-mno-red-zone -mno-sse
+      -mcmodel=large`) and asserts that every `rumpuser_*` declared in
+      `rumpuser.h` (60 symbols) is defined as a T symbol in the .o
+      (62 defs). The audit fails the CI job if any are missing.
 
-### CI/CD
-- [ ] GitHub Actions: kernel build + QEMU boot test
-- [ ] TLC model checker run on all 6 TLA+ specs
-- [ ] Clippy + fmt on all Rust code
-- [ ] Cross-compile smoke test for rumpuser_sot.c
+### Tier 5 follow-ups (still parked)
+- [ ] LTP subset under the LUCAS personality runners against the
+      already-supported Linux ABI subset. Blocked: needs a host
+      script to fetch + cross-build LTP itself, which is a big lift
+      independent of sotBSD.
+- [ ] WHPX/KVM IRQ model rework so the real (non-calibrated) cycle
+      counts can be measured under hardware acceleration on the same
+      machine.
+
+### CI/CD ✅ DONE (2026-04-07)
+- [x] GitHub Actions: kernel build + QEMU boot test
+      (`build-kernel` + `boot-smoke` jobs)
+- [x] TLC model checker run on all 6 TLA+ specs (`tla-tlc` job +
+      `just tlc-mc` recipe + `scripts/run_tlc.sh`)
+- [x] Clippy + fmt on all Rust code (`clippy-strict` job +
+      `just clippy` / `just fmt-check` recipes)
+- [x] Cross-compile smoke test for rumpuser_sot.c
+      (`rumpuser-sot-smoke` job, asserts 60/60 symbol coverage)
 
 ---
 

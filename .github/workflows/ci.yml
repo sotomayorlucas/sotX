@@ -195,6 +195,50 @@ jobs:
       - name: TLC model-check all specs
         run: bash scripts/run_tlc.sh formal
 
+  rumpuser-sot-smoke:
+    name: rumpuser_sot.c cross-compile (clang freestanding)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang + llvm tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang llvm
+
+      - name: Compile rumpuser_sot.o
+        run: |
+          clang --target=x86_64-unknown-none \
+              -ffreestanding -fno-stack-protector -fno-builtin -fno-pic \
+              -mno-red-zone -mno-sse -mcmodel=large \
+              -std=c11 -O2 -g -DLIBRUMPUSER \
+              -Ivendor/netbsd-rump \
+              -Ivendor/netbsd-rump/sys/rump/include \
+              -Wall -Wno-unused-parameter \
+              -c vendor/netbsd-rump/rumpuser_sot.c \
+              -o /tmp/rumpuser_sot.o
+          ls -la /tmp/rumpuser_sot.o
+
+      - name: Audit symbol coverage vs rumpuser.h
+        run: |
+          # Every rumpuser_* function declared in rumpuser.h must be
+          # defined as a T (text) symbol in the compiled .o.
+          grep -E '^(int|void|ssize_t|long|uint64_t)\s+rumpuser_' \
+              vendor/netbsd-rump/sys/rump/include/rump/rumpuser.h \
+              | sed -E 's/.*\b(rumpuser_[a-z0-9_]+)\s*\(.*/\1/' \
+              | sort -u > /tmp/decls.txt
+          llvm-nm /tmp/rumpuser_sot.o \
+              | awk '$2=="T" || $2=="t" {print $3}' \
+              | grep '^rumpuser_' \
+              | sort -u > /tmp/defs.txt
+          missing=$(comm -23 /tmp/decls.txt /tmp/defs.txt)
+          if [ -n "$missing" ]; then
+              echo "rumpuser_sot.c is missing definitions for:"
+              echo "$missing"
+              exit 1
+          fi
+          echo "rumpuser_sot.c covers all $(wc -l < /tmp/decls.txt) declared rumpuser symbols"
+
   boot-smoke:
     name: QEMU TCG boot smoke (slow)
     # Opt-in: only runs on the sotBSD branch or labelled PRs to keep
@@ -246,6 +290,7 @@ jobs:
           for marker in \
               "Signify boot chain: PASS" \
               "STYX TEST: ALL PASS" \
+              "posix-test: PASS" \
               "RUMP-VFS-TEST: PASS" \
               "Tier 3 demo: PASS" \
               "Tier 4 demo: PASS" \

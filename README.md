@@ -45,7 +45,8 @@ prints `PASS` or aborts the boot.
 | **2 — rump-vfs** | A real **NetBSD rump kernel** built via `buildrump.sh` (`librump.a + librumpvfs.a + librumpfs_ffs.a + ...`, ~2 MiB) linked into a freestanding sotOS service. `rumpuser_sot.c` satisfies all 60 `rumpuser_*` hypercalls against SOT primitives. `rump_init()` boots on a worker thread (panic-isolated from the IPC server); the service exposes OPEN/READ/CLOSE/STAT IPC and serves `/etc/passwd` to init at boot. | `services/rump-vfs/`, `vendor/netbsd-rump/` |
 | **3 — deception** | An **attacker** binary emits 3 provenance entries (`Write SystemBinary /sbin/sshd`, `Read Credential /etc/shadow`, `Read ConfigFile /proc/version`) under `owner_domain=7`. Init drains the kernel per-CPU provenance ring via `SYS_PROVENANCE_DRAIN (260)`, runs the SAME entries through `sotos_provenance::GraphHunter` AND `sotos_deception::AnomalyDetector`, fires `CredentialTheftAfterBackdoor` (confidence 90), calls `MigrationOrchestrator::migrate()` with the `ubuntu-22.04-webserver` profile, and prints the spoofed `Linux 5.15.0-91-generic` `/proc/version` the migrated attacker now sees. A `DECEPTION-WATCHDOG` worker thread keeps draining post-demo and detects subsequent attacker runs. | `services/init/src/deception_demo.rs`, `services/attacker/`, `kernel/src/sot/provenance.rs` |
 | **4 — advanced** | Three sub-sections: **storage** (real `tx_begin/commit/abort` syscalls produce `OP_TX_COMMIT/ABORT` provenance events that drive `sot_zfs::SnapshotManager` and `sot_hammer2::Hammer2SnapshotManager` to create snapshots and resolve rollback targets), **bhyve** (instantiates a `VmDomain` with the `bare_metal_intel` `VmDeceptionProfile`, decodes spoofed CPUID to verify `GenuineIntel`, Cascade Lake `family=6 model=85 stepping=7`, hypervisor bit OFF, hypervisor leaf zero, plus `IA32_FEATURE_CONTROL` MSR), and **PF firewall** (a `PfInterposer` with default-pass + UDP log rule and an attacker domain in deception mode is intercepted with `PfDecision::Deception` before any rule runs). | `services/init/src/tier4_demo.rs`, `personality/bsd/{zfs,hammer2,bhyve,network}/` |
-| **5 — hardening** | Six sections: **A** IPC throughput (`sys::yield_now`, `sys::provenance_emit` cy/op), **B** provenance ring throughput (4000 push / drain), **C** `MigrationOrchestrator::check_interposition` overhead on a 32-cap migrated domain, **D** real **two-phase commit** for the new `TxTier::MultiObject` — `BEGIN→PREPARE→COMMIT` and `BEGIN→PREPARE→ABORT` happy paths plus negative paths (`BEGIN→COMMIT` no PREPARE rejected, `tx_prepare(bogus)` rejected), **E** 5000 randomized SOT syscalls with garbage args (survival 5000/5000), **F** concurrent transaction stress (main + worker thread each issue 500 ReadOnly tx_begin/commit cycles → 1000/1000). | `services/init/src/tier5_demo.rs`, `kernel/src/sot/tx.rs` |
+| **5 — hardening** | Seven sections: **A** IPC throughput (`sys::yield_now`, `sys::provenance_emit` cy/op), **B** provenance ring throughput (4000 push / drain), **C** `MigrationOrchestrator::check_interposition` overhead on a 32-cap migrated domain, **D** real **two-phase commit** for the new `TxTier::MultiObject` — `BEGIN→PREPARE→COMMIT` and `BEGIN→PREPARE→ABORT` happy paths plus negative paths, **E** 5000 randomized SOT syscalls with garbage args (survival 5000/5000), **F** concurrent transaction stress (main + worker thread, 1000/1000), **G** TCG-calibrated perf comparison: a tight `lfence; rdtsc` loop derives the inflation factor (~17×), then prints `sys::yield_now` and `sys::provenance_emit` in both raw-TCG and estimated-native columns next to published seL4 / NOVA / Fiasco / Linux pipe reference numbers. | `services/init/src/tier5_demo.rs`, `kernel/src/sot/tx.rs` |
+| **5b — POSIX smoke** | `services/posix-test/`, a no_std sotOS-native binary that covers the OTHER side of the personality split from the LUCAS Linux ABI runners. Asserts the SOT primitives the Linux personalities ride on: `frame_alloc + map + unmap_free + readback`, `thread_create + worker sync via AtomicU32`, `endpoint_create + call_timeout`, `provenance_emit + drain`. 11/11 PASS at boot. | `services/posix-test/` |
 
 ## SOT — the exokernel layer
 
@@ -174,6 +175,7 @@ Each runs in its own address space.
 | `services/styx-test` | **Tier 1**: validates SOT syscalls 300–311 |
 | `services/rump-vfs` | **Tier 2**: links real `librump_fused.a`, exposes IPC VFS |
 | `services/attacker` | **Tier 3**: emits provenance entries for the deception demo |
+| `services/posix-test` | **Tier 5b**: POSIX-equivalence smoke over native SOT primitives (11/11 PASS) |
 
 ## Storage
 
@@ -210,7 +212,7 @@ Each runs in its own address space.
 
 ## CI
 
-`.github/workflows/ci.yml` ships **8 jobs**:
+`.github/workflows/ci.yml` ships **9 jobs**:
 
 | Job | Purpose |
 |---|---|
@@ -221,7 +223,8 @@ Each runs in its own address space.
 | `deception-tests` | Host-side `cargo test` for `personality/common/deception` |
 | `tla-sany` | `scripts/run_sany.sh formal` — TLA+ syntax/level checker |
 | `tla-tlc` | `scripts/run_tlc.sh formal` — full TLC model checking on all 6 specs |
-| `boot-smoke` | QEMU TCG boot, asserts the 6 PASS markers, uploads `serial.log` on failure (gated on `sotBSD` branch or `boot-smoke` PR label so the regular CI stays fast) |
+| `rumpuser-sot-smoke` | Cross-compile `vendor/netbsd-rump/rumpuser_sot.c` with clang freestanding (`--target=x86_64-unknown-none -mno-red-zone -mno-sse -mcmodel=large`) and audit symbol coverage against `rumpuser.h` (60/60 must be defined) |
+| `boot-smoke` | QEMU TCG boot, asserts the 7 PASS markers (Signify, STYX, posix-test, RUMP-VFS-TEST, Tier 3, Tier 4, Tier 5), uploads `serial.log` on failure (gated on `sotBSD` branch or `boot-smoke` PR label so the regular CI stays fast) |
 
 ## Build & Run
 
