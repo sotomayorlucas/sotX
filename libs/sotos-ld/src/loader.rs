@@ -3,6 +3,8 @@
 use sotos_common::elf::LoadSegment;
 use sotos_common::sys;
 
+use crate::tls::TlsBlock;
+
 /// Maximum mapped regions per shared library.
 pub const MAX_REGIONS: usize = 8;
 
@@ -40,6 +42,8 @@ pub struct DlHandle {
     pub elf_data_ptr: u64,
     /// Length of the original ELF data.
     pub elf_data_len: usize,
+    /// Static TLS block for this library (empty when no PT_TLS).
+    pub tls: TlsBlock,
 }
 
 const MAP_WRITABLE: u64 = 2;

@@ -11,3 +11,7 @@ panic = "abort"
 
 [profile.release]
 panic = "abort"
+
+# Standalone package — keeps `cargo build` from latching on to a parent
+# workspace (e.g., when invoked from a git worktree subdirectory).
+[workspace]
