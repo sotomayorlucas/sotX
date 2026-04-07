@@ -104,12 +104,15 @@ license-files = []
 
 [bans]
 multiple-versions = "warn"
-# Internal workspace crates use `path = "..."` deps without explicit version
-# numbers, which cargo-deny treats as wildcards. cargo-deny only honours
-# `allow-wildcard-paths` for crates marked `publish = false`, which our
-# internal crates are not (yet). Until they are, demote wildcards from a
-# hard error to a warning so CI does not block on intra-workspace path deps.
-# External wildcard version specifiers will still be surfaced loudly.
+# wildcards: cargo-deny only honors `allow-wildcard-paths` for crates marked
+# `publish = false`. None of our workspace crates declare that yet, so a
+# strict `deny` here would block legitimate intra-workspace `path = "..."`
+# deps (which cargo-deny classifies as wildcards because they have no
+# version field). Demote to "warn" until every sotos-* crate sets
+# `publish = false` in its Cargo.toml; then restore this to "deny" so
+# external wildcard version specifiers are hard-failed.
+# TODO(ci/audit-deny): mark workspace crates `publish = false` and flip
+# this back to "deny".
 wildcards = "warn"
 allow-wildcard-paths = true
 highlight = "all"
