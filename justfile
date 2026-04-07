@@ -561,3 +561,23 @@ run-lkl: image-lkl create-ext4-disk
         -no-reboot \
         -m 2048M \
         -smp 2
+
+# ── Unit 3: persistent rootdisk on second virtio-blk device ──
+
+# Create a 64 MiB raw image for the rootdisk (init formats it on first boot)
+create-rootdisk-disk:
+    python scripts/mkrootdisk.py target/sotbsd-rootdisk.img
+
+# Run with a primary virtio-blk (ObjectStore) and a SECOND virtio-blk
+# acting as the persistent rootdisk that init mounts and writes /persist/boot_marker into.
+run-rootdisk: image create-test-disk create-rootdisk-disk
+    "{{QEMU}}" \
+        -drive format=raw,file={{IMAGE}} \
+        -drive if=none,format=raw,file=target/disk.img,id=disk0 \
+        -device virtio-blk-pci,drive=disk0,disable-modern=on \
+        -drive if=none,format=raw,file=target/sotbsd-rootdisk.img,id=root0 \
+        -device virtio-blk-pci,drive=root0,disable-modern=on \
+        -serial stdio \
+        -display none \
+        -no-reboot \
+        -m 512M

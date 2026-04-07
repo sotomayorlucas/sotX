@@ -115,6 +115,9 @@ use boot_tests::{test_dynamic_linking, test_wasm, run_linux_test, run_musl_test,
 //   0xE60000        LUCAS handler stack (16 pages)
 //   0xE70000        VirtioBlk storage (1 page)
 //   0xE80000+       Child process stacks (0x2000 each)
+//   0xEA0000..0xEA6000  ROOT_BLK (6 pages, second virtio-blk vaddrs from
+//                       BlkVaddrs::sequential — persistent rootdisk)
+//   0xEB0000..0xEB1000  ROOT_STORE (1 page, in-memory RootStore mini-fs)
 //   0x1000000       Shell ELF
 //   0x2000000       brk heap (BRK_LIMIT = 1 MiB)
 //   0x3000000       mmap region
@@ -262,6 +265,10 @@ pub extern "C" fn _start() -> ! {
 
     // --- Phase 4: Virtio-BLK + Object Store ---
     let mut blk = init_block_storage(boot_info);
+
+    // --- Phase 4b (Unit 3): persistent rootdisk on the SECOND virtio-blk ---
+    // Safe no-op when only one drive is present (e.g. plain `just run`).
+    mount_or_format_root(boot_info);
 
     // --- Phase 5: Look up net service endpoint ---
     for _ in 0..50 { sys::yield_now(); }
@@ -896,6 +903,176 @@ fn init_objstore(blk: VirtioBlk) -> Option<VirtioBlk> {
             Some(store.into_blk())
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Unit 3 — persistent rootdisk (second virtio-blk device)
+// ---------------------------------------------------------------------------
+//
+// Probes for a SECOND virtio-blk PCI device (added by `just run-rootdisk`).
+// If present, mounts a tiny "root store" on it: a SOTROOT magic header in
+// sector 0 plus the boot marker `/persist/boot_marker` in sector 2. First
+// boot formats the disk; subsequent boots see the signature and re-verify
+// the marker, demonstrating persistence.
+//
+// This intentionally does NOT spin up a second `ObjectStore` — that type
+// uses a hardcoded STORE_VADDR (0xD00000) and would collide with the
+// primary store. The root store is a self-contained mini-fs on disk.
+//
+// The root virtio-blk uses 6 pages from 0xEA0000 (vq/hdr/status/data laid
+// out by `BlkVaddrs::sequential`); the in-memory `RootStore` lives at
+// 0xEB0000. All inside the previously-unused 0xEA0000..0xEC0000 hole,
+// disjoint from the primary store (0xD00000..0xE40000) and the BLK
+// handler stack (0xE90000..0xE94000).
+
+use sotos_virtio::blk::BlkVaddrs;
+
+const ROOT_BLK_BASE:   u64 = 0xEA0000;
+const ROOT_STORE_BASE: u64 = 0xEB0000;
+
+const ROOT_SIGNATURE: &[u8; 8] = b"SOTROOT\0";
+const ROOT_SECTOR_SIGNATURE: u64 = 0;
+const ROOT_SECTOR_MARKER: u64 = 2;
+const ROOT_MARKER_BODY: &[u8] = b"/persist/boot_marker\nsotOS persistent rootdisk OK\n";
+
+/// In-memory state for the persistent rootdisk. Lives at ROOT_STORE_BASE.
+/// Wraps the second VirtioBlk so child handlers can later borrow it for
+/// /persist/* I/O via SHARED_ROOT_STORE_PTR.
+#[repr(C)]
+pub(crate) struct RootStore {
+    pub(crate) blk: VirtioBlk,
+}
+
+// Build-time guard: RootStore is mapped into a single 4 KiB page at
+// ROOT_STORE_BASE via `frame_alloc + map`, so any future field addition that
+// pushes its size past one page must break the build instead of silently
+// corrupting adjacent memory.
+const _: () = assert!(core::mem::size_of::<RootStore>() <= 4096);
+
+/// Shared pointer to the persistent root store. Null until a second drive
+/// is found and successfully mounted.
+pub(crate) static SHARED_ROOT_STORE_PTR: AtomicU64 = AtomicU64::new(0);
+
+/// Initialize the SECOND virtio-blk device (persistent rootdisk) using its own
+/// vaddr region so it does not collide with the primary device.
+fn init_virtio_root_blk(boot_info: &BootInfo) -> Option<VirtioBlk> {
+    if boot_info.cap_count <= CAP_PCI as u64 {
+        return None;
+    }
+    let pci = PciBus::new(boot_info.caps[CAP_PCI]);
+
+    // Index 0 is the primary virtio-blk; the rootdisk is index 1.
+    let dev = match VirtioBlk::nth_device(&pci, 1) {
+        Some(d) => d,
+        None => {
+            print(b"ROOTBLK: second virtio-blk not present, skipping\n");
+            return None;
+        }
+    };
+
+    print(b"ROOTBLK: found at dev ");
+    print_u64(dev.addr.dev as u64);
+    print(b" IRQ ");
+    print_u64(dev.irq_line as u64);
+    print(b"\n");
+
+    match VirtioBlk::init_at(&dev, &pci, BlkVaddrs::sequential(ROOT_BLK_BASE)) {
+        Ok(blk) => {
+            print(b"ROOTBLK: ");
+            print_u64(blk.capacity);
+            print(b" sectors\n");
+            Some(blk)
+        }
+        Err(e) => {
+            print(b"ROOTBLK: init failed: ");
+            print(e.as_bytes());
+            print(b"\n");
+            None
+        }
+    }
+}
+
+/// Fill the device's data buffer with `bytes` (zero-padded to 512), then
+/// write it to `sector`. Returns true on success, prints `prefix` on error.
+fn rootblk_write_sector(blk: &mut VirtioBlk, sector: u64, bytes: &[u8], prefix: &[u8]) -> bool {
+    unsafe {
+        let p = blk.data_ptr_mut();
+        core::ptr::write_bytes(p, 0, 512);
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), p, bytes.len());
+    }
+    match blk.write_sector(sector) {
+        Ok(()) => true,
+        Err(e) => {
+            print(prefix);
+            print(e.as_bytes());
+            print(b"\n");
+            false
+        }
+    }
+}
+
+/// Probe for SOTROOT signature, format if absent, write/read the boot marker,
+/// and publish the store via SHARED_ROOT_STORE_PTR. Prints the PASS marker on
+/// success. Safe to call when no second drive is present (returns early).
+fn mount_or_format_root(boot_info: &BootInfo) {
+    let mut blk = match init_virtio_root_blk(boot_info) {
+        Some(b) => b,
+        None => return,
+    };
+
+    if blk.read_sector(ROOT_SECTOR_SIGNATURE).is_err() {
+        print(b"ROOTBLK: read sector 0 failed\n");
+        return;
+    }
+    let head = unsafe { core::slice::from_raw_parts(blk.data_ptr(), ROOT_SIGNATURE.len()) };
+    let formatted_now = head != &ROOT_SIGNATURE[..];
+
+    if formatted_now {
+        print(b"ROOTBLK: no signature, formatting...\n");
+        if !rootblk_write_sector(&mut blk, ROOT_SECTOR_SIGNATURE, ROOT_SIGNATURE,
+                                 b"ROOTBLK: write signature failed: ") {
+            return;
+        }
+    } else {
+        print(b"ROOTBLK: SOTROOT signature found (persistent boot)\n");
+    }
+
+    if !rootblk_write_sector(&mut blk, ROOT_SECTOR_MARKER, ROOT_MARKER_BODY,
+                             b"ROOTBLK: write marker failed: ") {
+        return;
+    }
+
+    if let Err(e) = blk.read_sector(ROOT_SECTOR_MARKER) {
+        print(b"ROOTBLK: re-read marker failed: ");
+        print(e.as_bytes());
+        print(b"\n");
+        return;
+    }
+    let verify = unsafe { core::slice::from_raw_parts(blk.data_ptr(), 20) };
+    if verify != b"/persist/boot_marker" {
+        print(b"ROOTBLK: marker mismatch on read-back\n");
+        return;
+    }
+
+    let frame = match sys::frame_alloc() {
+        Ok(f) => f,
+        Err(_) => { print(b"ROOTBLK: frame_alloc failed\n"); return; }
+    };
+    if sys::map(ROOT_STORE_BASE, frame, MAP_WRITABLE).is_err() {
+        print(b"ROOTBLK: map failed\n");
+        return;
+    }
+    unsafe {
+        core::ptr::write(ROOT_STORE_BASE as *mut RootStore, RootStore { blk });
+    }
+    SHARED_ROOT_STORE_PTR.store(ROOT_STORE_BASE, Ordering::Release);
+
+    if formatted_now {
+        print(b"ROOTBLK: formatted + marker written\n");
+    } else {
+        print(b"ROOTBLK: marker re-verified across boot\n");
+    }
+    print(b"=== persistent rootdisk: PASS ===\n");
 }
 
 // ---------------------------------------------------------------------------
