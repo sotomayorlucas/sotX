@@ -279,6 +279,10 @@ pub enum SysError {
 /// Maximum supported CPUs (used by kernel scheduler, IPC, slab, watchdog).
 pub const MAX_CPUS: usize = 16;
 
+/// Maximum number of registered thread-death notifications
+/// (SYS_THREAD_NOTIFY table — fixed-size, no kernel heap).
+pub const MAX_THREAD_NOTIFY: usize = 64;
+
 /// Keyboard scancode ring buffer virtual address (shared: kernel, kbd, init, xhci).
 pub const KB_RING_ADDR: u64 = 0x510000;
 /// Mouse event ring buffer virtual address (shared: kernel, kbd, init).

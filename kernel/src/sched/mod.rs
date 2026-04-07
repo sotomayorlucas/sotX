@@ -190,7 +190,7 @@ fn finish_switch() {
 // Per-core run queues
 // ---------------------------------------------------------------------------
 
-use sotos_common::MAX_CPUS;
+use sotos_common::{MAX_CPUS, MAX_THREAD_NOTIFY};
 
 struct CpuQueue {
     /// Multi-level priority queues: index 0 = highest priority (realtime).
@@ -639,10 +639,6 @@ fn spawn_user_opt(user_rip: u64, user_rsp: u64, cr3: u64, redirect_ep: Option<u3
 // ---------------------------------------------------------------------------
 // Thread death notifications (SYS_THREAD_NOTIFY support)
 // ---------------------------------------------------------------------------
-
-/// Maximum number of registered thread-death notifications.
-/// Fixed-size table avoids any kernel heap usage.
-const MAX_THREAD_NOTIFY: usize = 64;
 
 #[derive(Clone, Copy)]
 struct ThreadNotifyEntry {
