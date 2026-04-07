@@ -115,6 +115,9 @@ use boot_tests::{test_dynamic_linking, test_wasm, run_linux_test, run_musl_test,
 //   0xE60000        LUCAS handler stack (16 pages)
 //   0xE70000        VirtioBlk storage (1 page)
 //   0xE80000+       Child process stacks (0x2000 each)
+//   0xEA0000..0xEA6000  ROOT_BLK (6 pages, second virtio-blk vaddrs from
+//                       BlkVaddrs::sequential — persistent rootdisk)
+//   0xEB0000..0xEB1000  ROOT_STORE (1 page, in-memory RootStore mini-fs)
 //   0x1000000       Shell ELF
 //   0x2000000       brk heap (BRK_LIMIT = 1 MiB)
 //   0x3000000       mmap region
@@ -939,6 +942,12 @@ const ROOT_MARKER_BODY: &[u8] = b"/persist/boot_marker\nsotOS persistent rootdis
 pub(crate) struct RootStore {
     pub(crate) blk: VirtioBlk,
 }
+
+// Build-time guard: RootStore is mapped into a single 4 KiB page at
+// ROOT_STORE_BASE via `frame_alloc + map`, so any future field addition that
+// pushes its size past one page must break the build instead of silently
+// corrupting adjacent memory.
+const _: () = assert!(core::mem::size_of::<RootStore>() <= 4096);
 
 /// Shared pointer to the persistent root store. Null until a second drive
 /// is found and successfully mounted.
