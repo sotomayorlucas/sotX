@@ -22,9 +22,18 @@ static CAP_TABLE: Mutex<CapabilityTable> = Mutex::new(CapabilityTable::new());
 static GLOBAL_EPOCH: AtomicU64 = AtomicU64::new(0);
 
 pub fn init() {
-    // The root capability table is ready — it starts empty.
-    // Pool-backed: grows dynamically as capabilities are created.
-    kdebug!("  capability table ready (dynamic pool, generation-checked)");
+    // Tier 5 KARL: burn `karl::cap_pool_offset()` slots in the cap
+    // pool before the first real allocation, so userspace-visible cap
+    // ids drift across reboots. The slots are filled with Null caps
+    // and never freed -- they're cheap padding (16 max).
+    let burn = (crate::karl::boot_seed() & 0xF) as usize;
+    {
+        let mut table = CAP_TABLE.lock();
+        for _ in 0..burn {
+            let _ = table.insert(CapObject::Null, Rights::ALL, None, 0);
+        }
+    }
+    kdebug!("  capability table ready (dynamic pool, generation-checked, KARL burn={})", burn);
 }
 
 /// Insert a new capability and return its ID.
