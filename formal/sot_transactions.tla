@@ -333,8 +333,18 @@ Next ==
 \* For Tier 2, either all participant objects have committed effects or none do.
 Atomicity ==
     \A tx \in Txns : txState[tx] = "committed" /\ txTier[tx] = 2 =>
-        LET effectObjs == {obj \in Objects : <<tx, obj, soValue[obj]>> \in committedEffects}
-        IN effectObjs = t2Participants[tx] \/ effectObjs = {}
+        \* For every committed Tier 2 transaction, either every
+        \* participant has SOME entry in committedEffects, or none.
+        \* The previous formulation queried soValue[obj] to look up
+        \* the entry, but soValue can be subsequently modified by
+        \* other transactions, which made the invariant fire even
+        \* though the original commit was atomic. Querying
+        \* committedEffects directly preserves the all-or-nothing
+        \* check without depending on later state.
+        LET committedObjs ==
+            {obj \in Objects :
+                \E v \in 0..3 : <<tx, obj, v>> \in committedEffects}
+        IN committedObjs = t2Participants[tx] \/ committedObjs = {}
 
 \* ISOLATION: The write sets of any two concurrently active transactions
 \* are disjoint. An active transaction is one holding locks (t1_active,
