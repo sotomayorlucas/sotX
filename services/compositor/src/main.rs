@@ -16,6 +16,7 @@
 mod wayland;
 mod render;
 mod input;
+mod animation;
 
 use sotos_common::sys;
 use sotos_common::{BootInfo, IpcMsg, BOOT_INFO_ADDR, SyncUnsafeCell};
