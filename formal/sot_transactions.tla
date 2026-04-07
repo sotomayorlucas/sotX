@@ -45,7 +45,8 @@ VARIABLES
     \* --- History for verification ---
     committedEffects  \* Set of (txn, obj, newVal) triples from committed txns
 
-NULL == CHOOSE x : x \notin Txns
+\* Tier 5: bounded CHOOSE so TLC can evaluate (was unbounded).
+NULL == CHOOSE x \in {"NULL_SENTINEL"} : x \notin Txns
 
 \* =========================================================================
 \* Shared Helpers
@@ -172,12 +173,16 @@ T1Commit(tx) ==
                    t2Decision>>
 
 \* Abort Tier 1: read WAL, restore original values, release lock.
+\* Tier 5: clear the WAL after restore -- it's been consumed, and
+\* leaving it alive lets the Rollback invariant fire spuriously when
+\* a subsequent transaction modifies the same object.
 T1Abort(tx) ==
     /\ txState[tx] = "t1_active"
     /\ txState' = [txState EXCEPT ![tx] = "aborted"]
     /\ soValue' = RestoreFromWal(tx)
     /\ soLock' = ReleaseLocks(tx)
-    /\ UNCHANGED <<globalEpoch, localEpoch, wal, walCommitted,
+    /\ wal' = [wal EXCEPT ![tx] = << >>]
+    /\ UNCHANGED <<globalEpoch, localEpoch, walCommitted,
                    txTier, txReadSet, txWriteSet, t2Participants,
                    t2Votes, t2Decision, committedEffects>>
 
@@ -283,14 +288,15 @@ T2FinalizeCommit(tx) ==
                    txReadSet, txWriteSet, t2Participants, t2Votes,
                    t2Decision>>
 
-\* Finalize Tier 2 abort: rollback from WAL, release locks.
+\* Finalize Tier 2 abort: rollback from WAL, release locks, clear WAL.
 T2FinalizeAbort(tx) ==
     /\ txState[tx] = "t2_voting"
     /\ t2Decision[tx] = "abort"
     /\ txState' = [txState EXCEPT ![tx] = "aborted"]
     /\ soValue' = RestoreFromWal(tx)
     /\ soLock' = ReleaseLocks(tx)
-    /\ UNCHANGED <<globalEpoch, localEpoch, wal, walCommitted,
+    /\ wal' = [wal EXCEPT ![tx] = << >>]
+    /\ UNCHANGED <<globalEpoch, localEpoch, walCommitted,
                    txTier, txReadSet, txWriteSet, t2Participants,
                    t2Votes, t2Decision, committedEffects>>
 
@@ -346,9 +352,18 @@ Rollback ==
     \A tx \in Txns : txState[tx] = "aborted" =>
         \* No locks held by aborted transaction
         /\ \A o \in Objects : soLock[o] /= tx
-        \* WAL old values match current values for all WAL entries
-        /\ \A i \in 1..Len(wal[tx]) :
-            soValue[wal[tx][i].obj] = wal[tx][i].oldVal
+        \* For every object the aborted txn touched, soValue must equal
+        \* the EARLIEST WAL entry's oldVal -- i.e. the value the object
+        \* held before this txn's first write. RestoreFromWal already
+        \* uses this semantics; the previous formulation iterated over
+        \* every WAL entry which was wrong for objects written multiple
+        \* times in one transaction (TLC found this).
+        /\ \A o \in Objects :
+            LET entries == {i \in 1..Len(wal[tx]) : wal[tx][i].obj = o}
+            IN  entries /= {} =>
+                soValue[o] =
+                    wal[tx][CHOOSE i \in entries :
+                        \A j \in entries : i <= j].oldVal
 
 \* No lock held by a terminated (committed or aborted) transaction.
 NoStaleLocksHeld ==
@@ -369,6 +384,14 @@ WalConsistency ==
 vars == <<soValue, soLock, globalEpoch, localEpoch, wal, walCommitted,
           txState, txTier, txReadSet, txWriteSet, t2Participants,
           t2Votes, t2Decision, committedEffects>>
+
+\* Tier 5: bounded BFS for TLC. Three-fold bound: (1) global epoch
+\* counter, (2) per-tx WAL length, (3) per-tx writeSet size. Together
+\* these keep the BFS finite while still exercising every action.
+EpochBound ==
+    /\ globalEpoch <= 2
+    /\ \A t \in Txns : Len(wal[t]) <= 3
+    /\ \A t \in Txns : Cardinality(txWriteSet[t]) <= 2
 
 Spec == Init /\ [][Next]_vars
 

@@ -25,7 +25,8 @@ VARIABLES
     timeslice,      \* Function: Thread -> remaining timeslice
     totalTicks      \* Global tick counter
 
-NULL == CHOOSE x : x \notin Threads
+\* Tier 5: bounded NULL sentinel.
+NULL == "NULL_SENTINEL"
 
 TypeInvariant ==
     /\ threadState \in [Threads -> {"ready", "running", "blocked", "dead"}]
@@ -43,8 +44,14 @@ Init ==
     /\ totalTicks = 0
 
 \* --- Enqueue a thread to a CPU's run queue ---
+\* Tier 5: refuse to enqueue a thread that is ALREADY in this CPU's
+\* runQueue. The previous formulation allowed duplicates, which TLC
+\* exhibited as: Enqueue T1 twice, Schedule pops one, the leftover
+\* T1 is still in the queue but threadState[T1] = "running",
+\* violating QueueConsistency.
 Enqueue(cpu, thread) ==
     /\ threadState[thread] = "ready"
+    /\ \A i \in 1..Len(runQueues[cpu]) : runQueues[cpu][i] /= thread
     /\ runQueues' = [runQueues EXCEPT ![cpu] = Append(@, thread)]
     /\ UNCHANGED <<threadState, priority, running, ticks, timeslice, totalTicks>>
 
@@ -132,6 +139,9 @@ SingleExecution ==
 QueueConsistency ==
     \A c \in CPUs : \A i \in 1..Len(runQueues[c]) :
         threadState[runQueues[c][i]] = "ready"
+
+\* Tier 5: bounded BFS for TLC.
+TickBound == totalTicks <= 4
 
 \* --- Liveness Properties ---
 

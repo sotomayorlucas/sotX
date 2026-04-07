@@ -28,7 +28,10 @@ VARIABLES
     interposed,     \* Function: Cap -> Cap or NULL (proxy mapping)
     ops             \* Operation counter (bounds trace length)
 
-NULL == CHOOSE x : x \notin Caps
+\* NULL is a sentinel "no cap" value. The bare CHOOSE form
+\* `CHOOSE x : x \notin Caps` was unbounded -- TLC can't enumerate the
+\* universe -- so we anchor it to a small disjoint set.
+NULL == CHOOSE x \in {"NULL_SENTINEL"} : x \notin Caps
 
 \* The set of all possible rights — mirrors kernel Rights bitmask.
 AllRights == {"read", "write", "execute", "grant", "revoke"}
@@ -226,6 +229,11 @@ AttenuationOnly ==
     \A c \in caps :
         interposed[c] /= NULL /\ interposed[c] \in caps =>
             rights[c] \subseteq rights[interposed[c]]
+
+\* --- State-space bound for TLC model checking ---
+\* Tier 5 follow-up: keep TLC's BFS finite by capping the operation
+\* counter (the spec already increments `ops` on every action).
+OpsBound == ops <= MaxOps
 
 \* --- Specification ---
 Spec == Init /\ [][Next]_vars

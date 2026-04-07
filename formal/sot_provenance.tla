@@ -103,6 +103,9 @@ EventualSpace == \A c \in CPUs :
     Len(ring[c]) = RingCap ~> Len(ring[c]) < RingCap
 
 \* --- Specification ---
+\* Tier 5 follow-up: state-space bound for TLC bounded BFS.
+InvocBound == invocationCount <= 6
+
 Spec == Init /\ [][Next]_vars
 
 FairSpec == Spec /\ \A c \in CPUs :

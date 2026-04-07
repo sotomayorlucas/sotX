@@ -15,3 +15,9 @@ target/sigmanifest
 
 # Editor / OS noise
 .DS_Store
+
+# TLC model-checker artifacts
+formal/*_TTrace_*.tla
+formal/*_TTrace_*.bin
+formal/states/
+tools/tlc.jar

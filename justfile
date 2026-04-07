@@ -153,11 +153,10 @@ fmt-check:
 tlc:
     bash scripts/run_sany.sh formal
 
-# Full TLC model checking (requires per-spec .cfg files in formal/).
+# Full TLC model checking on every formal/*.tla that has a sibling .cfg.
+# Each spec is bounded via state constraints inside the spec itself.
 tlc-mc:
-    @command -v java >/dev/null 2>&1 || { echo "tlc-mc: java not installed"; exit 0; }
-    @test -f tools/tlc.jar || (mkdir -p tools && curl -fsSL -o tools/tlc.jar https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar)
-    bash -c 'for spec in formal/*.tla; do cfg=$${spec%.tla}.cfg; if [ -f "$$cfg" ]; then echo "==> TLC $$spec"; java -cp tools/tlc.jar tlc2.TLC -deadlock -workers auto "$$spec" || true; else echo "==> SKIP $$spec (no .cfg)"; fi; done'
+    bash scripts/run_tlc.sh formal
 
 # Tier 5 close: produce target/sigmanifest with SHA-256 hashes of the
 # Rust-built first-party binaries (init excluded -- chicken-and-egg).
