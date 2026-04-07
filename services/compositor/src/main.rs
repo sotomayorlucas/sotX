@@ -169,6 +169,10 @@ impl FocusState {
     }
 }
 
+// SAFETY: the compositor runs as a single-threaded IPC loop. There are no
+// AP cores polling input, no signal handlers reading FocusState, and all
+// consumers (handle_keyboard, handle_mouse, compose, apply_dispatch_result)
+// are called serially from the main loop. A Mutex would be cargo-cult.
 static FOCUS: SyncUnsafeCell<FocusState> = SyncUnsafeCell::new(FocusState::empty());
 
 /// Drag state: if dragging a window, (toplevel_idx, offset_x, offset_y).
@@ -933,8 +937,16 @@ fn handle_mouse(packet: input::MousePacket) {
             && cursor_y >= close_y0 && cursor_y < close_y0 + 16
         {
             // Close the toplevel.
+            //
+            // The close-button is currently the ONLY surface-destruction path
+            // in the compositor. When client-disconnect / xdg_toplevel.destroy
+            // / wl_surface.destroy land, every one of those code paths MUST
+            // also clear `hovered_surface` (and `focused_*`) for any surface
+            // it tears down — otherwise input handlers will dispatch events
+            // to a dead wl_surface ID.
             unsafe {
                 let toplevels_mut = &mut *TOPLEVELS.get();
+                let destroyed_surface_id = toplevels_mut[hit_tl_idx].wl_surface_id;
                 toplevels_mut[hit_tl_idx].active = false;
                 // Clear focus if this was focused.
                 let focus = &mut *FOCUS.get();
@@ -942,6 +954,11 @@ fn handle_mouse(packet: input::MousePacket) {
                     focus.focused_toplevel_idx = MAX_TOPLEVELS;
                     focus.focused_client_idx = MAX_CLIENTS;
                     focus.keyboard_focus = None;
+                }
+                // Clear hover if it pointed at the destroyed surface, so the
+                // next mouse event doesn't dispatch to a dead wl_surface ID.
+                if focus.hovered_surface == Some(destroyed_surface_id) {
+                    focus.hovered_surface = None;
                 }
             }
             mark_damage();
