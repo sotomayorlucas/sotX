@@ -16,7 +16,9 @@ pub use reloc::{
     apply_relocations, apply_relocations_ctx, applied_count, reset_counters,
     skipped_count, RelocCtx,
 };
-pub use tls::{init_tls, install_tls, tp_offset, TlsBlock, MAX_TLS_BYTES};
+pub use tls::{
+    init_tls, install_tls, tp_offset, unmap_tls, TlsBlock, MAX_TLS_BYTES, MAX_TLS_PAGES,
+};
 
 use sotos_common::elf::{self, LoadSegment, MAX_LOAD_SEGMENTS};
 
@@ -101,4 +103,5 @@ pub fn dl_sym(handle: &DlHandle, name: &[u8]) -> Option<u64> {
 /// Unmap a loaded shared library. After this, the handle is invalid.
 pub fn dl_close(handle: &DlHandle) {
     loader::unmap_segments(&handle.mapping);
+    tls::unmap_tls(&handle.tls);
 }

@@ -284,32 +284,12 @@ fn process_rela(
             }
 
             R_X86_64_GOTPCREL => {
-                // G + GOT + A - P (32-bit). G is the GOT-relative offset of
-                // the symbol's slot. We don't track per-symbol GOT slots
-                // separately; for in-tree libs the GOT entry referenced is
-                // the relocation site itself (G == 0).
-                if ctx.got_base == 0 {
-                    SKIPPED_RELOCS.fetch_add(1, Ordering::Relaxed);
-                    continue;
-                }
-                if r_sym != 0 {
-                    if let Some(sym) = resolve_symbol(ctx, r_sym) {
-                        if sym.undefined {
-                            SKIPPED_RELOCS.fetch_add(1, Ordering::Relaxed);
-                            continue;
-                        }
-                    } else {
-                        SKIPPED_RELOCS.fetch_add(1, Ordering::Relaxed);
-                        continue;
-                    }
-                }
-                let g: i64 = 0;
-                let val = g + ctx.got_base as i64 + r_addend - target as i64;
-                if val < i32::MIN as i64 || val > i32::MAX as i64 {
-                    return Err("GOTPCREL relocation overflows i32");
-                }
-                write_i32(target, val as i32);
-                APPLIED_RELOCS.fetch_add(1, Ordering::Relaxed);
+                // GOTPCREL needs per-symbol GOT slot tracking, not yet implemented.
+                // Writing G+GOT+A-P with G=0 would store a wrong displacement at
+                // the relocation site, so we skip and let the caller notice via
+                // SKIPPED_RELOCS instead of silently corrupting the load.
+                SKIPPED_RELOCS.fetch_add(1, Ordering::Relaxed);
+                continue;
             }
 
             R_X86_64_IRELATIVE => {

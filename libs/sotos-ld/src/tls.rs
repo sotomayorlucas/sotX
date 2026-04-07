@@ -22,8 +22,6 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use sotos_common::elf::PtTls;
 use sotos_common::sys;
 
-use crate::loader::MAX_REGIONS;
-
 /// Default base virtual address for the first TLS block.
 ///
 /// Located between the dynamic linker scratch region and INTERP_BUF_BASE.
@@ -32,6 +30,8 @@ use crate::loader::MAX_REGIONS;
 const TLS_AREA_BASE: u64 = 0x7000000;
 /// Maximum static TLS bytes we will install for one library.
 pub const MAX_TLS_BYTES: usize = 64 * 1024;
+/// Maximum 4 KiB pages a single TLS block may span.
+pub const MAX_TLS_PAGES: usize = MAX_TLS_BYTES / 4096;
 
 const MAP_WRITABLE: u64 = 2;
 
@@ -106,6 +106,9 @@ pub fn init_tls(elf_data: &[u8], pt_tls: &PtTls) -> Result<TlsBlock, &'static st
     if pt_tls.memsz > MAX_TLS_BYTES {
         return Err("TLS template too large");
     }
+    if pt_tls.filesz > pt_tls.memsz {
+        return Err("tls: filesz > memsz (malformed ELF)");
+    }
 
     let align = (pt_tls.align as usize).max(1);
     let static_size = align_up(pt_tls.memsz, align);
@@ -113,8 +116,8 @@ pub fn init_tls(elf_data: &[u8], pt_tls: &PtTls) -> Result<TlsBlock, &'static st
     if pages == 0 {
         return Ok(TlsBlock::empty());
     }
-    if pages > MAX_REGIONS as u64 {
-        return Err("TLS region too large");
+    if pages > MAX_TLS_PAGES as u64 {
+        return Err("tls: too many pages");
     }
 
     // Bump-allocate a fresh page-aligned region.
@@ -165,6 +168,20 @@ pub fn install_tls(block: &TlsBlock) -> Result<(), &'static str> {
         return Ok(());
     }
     sys::set_fs_base(block.tp).map_err(|_| "tls: set_fs_base failed")
+}
+
+/// Unmap every page that backs this TLS block. No-op for empty blocks.
+///
+/// Mirrors `loader::unmap_segments` — calls `sys::unmap` per page so the
+/// virtual range is freed even though the underlying frame caps remain
+/// owned by the caller (consistent with how PT_LOAD regions are torn down).
+pub fn unmap_tls(block: &TlsBlock) {
+    if block.is_empty() {
+        return;
+    }
+    for i in 0..block.pages {
+        let _ = sys::unmap(block.base + i * 0x1000);
+    }
 }
 
 /// Compute the negative TPOFF for a TLS symbol whose template offset is
