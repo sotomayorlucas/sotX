@@ -345,6 +345,13 @@ pub extern "C" fn _start() -> ! {
     // MultiObject transactions, fuzz / robustness pass.
     tier5_demo::run();
 
+    // --- Unit 9: ABI fuzz harness (Tier 5 follow-up) ---
+    // Hammers the kernel syscall surface with deterministic random
+    // arguments. Prints `=== abi-fuzz: <ok>/<total> survived ===`
+    // when done. Driven from CI by scripts/abi_fuzz.py.
+    spawn_process(b"abi-fuzz");
+    for _ in 0..4000 { sys::yield_now(); }
+
     // --- Phase 6g: Tier 6 PANDORA Task 1 — DTrace integration ---
     // Spawn the sot-dtrace service first, give it time to register,
     // then run the client demo that streams provenance-backed probes
