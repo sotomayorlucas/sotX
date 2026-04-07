@@ -462,6 +462,11 @@ pub fn init() {
     let mut sched = SCHEDULER.lock();
     let percpu = percpu::current_percpu();
 
+    // Tier 5 KARL: seed next_id from the per-boot offset (mod a small
+    // safe range so the first allocations stay well inside MAX_THREADS).
+    // Boot 1 might assign tids 0x40..0x4F, boot 2 0x73..0x82, etc.
+    sched.next_id = crate::karl::thread_id_offset() & 0x7F;
+
     // Thread 0 = BSP idle thread.
     let idle = Thread {
         id: ThreadId(sched.next_id),

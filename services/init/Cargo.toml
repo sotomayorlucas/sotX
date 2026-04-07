@@ -5,6 +5,12 @@ edition = "2021"
 
 [dependencies]
 sotos-common = { path = "../../libs/sotos-common" }
+sotos-deception = { path = "../../personality/common/deception" }
+sotos-provenance = { path = "../../personality/common/provenance" }
+sot-zfs = { path = "../../personality/bsd/zfs" }
+sot-hammer2 = { path = "../../personality/bsd/hammer2" }
+sot-bhyve = { path = "../../personality/bsd/bhyve" }
+sot-network = { path = "../../personality/bsd/network" }
 sotos-pci = { path = "../../libs/sotos-pci" }
 sotos-virtio = { path = "../../libs/sotos-virtio" }
 sotos-objstore = { path = "../../libs/sotos-objstore" }
@@ -16,6 +22,7 @@ rand_core = { version = "0.6", default-features = false }
 rand_chacha = { version = "0.3", default-features = false }
 vte = { version = "0.13", default-features = false, features = ["no_std"] }
 ufmt = { version = "0.2", default-features = false }
+ed25519-compact = { version = "2", default-features = false }
 
 [features]
 default = ["trace"]

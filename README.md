@@ -1,12 +1,124 @@
-# sotOS — Secure Object Transactional Operating System
+# sotBSD — a verified microkernel personality OS
 
-A microkernel operating system written from scratch in Rust, designed around five
-kernel primitives: scheduling, IRQ virtualization, IPC, capabilities, and frame
-allocation. Virtual memory is managed entirely in userspace.
+**sotBSD** is the BSD-personality branch of [sotOS](https://github.com/sotomayorlucas/sotOS),
+a microkernel operating system written from scratch in Rust. The kernel
+itself is `sotos-kernel`; sotBSD is what you get when you boot it with the
+SOT exokernel layer, the deception subsystem, the BSD personality
+services, and the production-hardening pipeline all wired together.
 
-**sotOS** stands for **Secure Object Transactional Operating System** — reflecting
-its capability-based security model, object-oriented kernel design, and the
-transactional object store at its core.
+It exposes:
+
+* a 5-primitive verified microkernel (scheduling, IPC, capabilities,
+  IRQ virtualization, frame allocation),
+* a SOT exokernel layer (transactional Secure Objects, two-phase commit,
+  per-CPU provenance ring, capability interposition),
+* an in-process NetBSD rump kernel linked into a `rump-vfs` service,
+* a deception subsystem (anomaly detector + migration orchestrator +
+  Ed25519/SHA-256 signed boot chain),
+* a Linux ABI personality (LUCAS shell, glibc/musl binaries, vDSO),
+* and a six-tier boot-time demo pipeline that gates on `PASS` markers
+  printed to the serial console.
+
+```
+=== Signify boot chain (SHA-256) ===
+signify: pubkey matches embedded const
+signify: Ed25519 signature OK (573 body bytes)
+signify: verified=14 failed=0 missing=0
+=== Signify boot chain: PASS ===
+STYX TEST: ALL PASS                          (Tier 1: SOT syscalls 300-310)
+RUMP-VFS-TEST: PASS                          (Tier 2: real librump linked)
+=== Tier 3 deception live demo: PASS ===    (real provenance ring + AnomalyDetector + migrate)
+=== Tier 4 demo: PASS ===                   (ZFS+HAMMER2 snapshots, bhyve CPUID spoof, PF firewall)
+=== Tier 5 demo: PASS ===                   (perf benchmarks, 2PC, fuzz, concurrent stress)
+```
+
+## Tiered demo pipeline
+
+Every tier runs in `init` immediately after the kernel hands off, drives
+real type-level code paths from the personality crates, and either
+prints `PASS` or aborts the boot.
+
+| Tier | What it exercises | Where |
+|---|---|---|
+| **0 — Signify** | SHA-256 streaming hash of every signed initrd binary against an embedded manifest, then **Ed25519 verification** of the manifest itself with a public key compiled into init via `services/init/src/sigkey_generated.rs`. Pubkey-pinning rejects swap-with-self-signed attempts. Tampering test verified: corrupting one byte in `hello` after signing produces `signify: MISMATCH hello / want=... got=...`. | `services/init/src/signify.rs`, `scripts/build_signify_manifest.py` |
+| **1 — STYX** | All 11 SOT exokernel syscalls (300–310 + tx_prepare 311) called from a userspace test binary. `so_create`, `so_invoke`, `so_grant`, `so_observe`, `tx_begin/prepare/commit/abort`, channel create. | `services/styx-test/`, `kernel/src/syscall/sot.rs` |
+| **2 — rump-vfs** | A real **NetBSD rump kernel** built via `buildrump.sh` (`librump.a + librumpvfs.a + librumpfs_ffs.a + ...`, ~2 MiB) linked into a freestanding sotOS service. `rumpuser_sot.c` satisfies all 60 `rumpuser_*` hypercalls against SOT primitives. `rump_init()` boots on a worker thread (panic-isolated from the IPC server); the service exposes OPEN/READ/CLOSE/STAT IPC and serves `/etc/passwd` to init at boot. | `services/rump-vfs/`, `vendor/netbsd-rump/` |
+| **3 — deception** | An **attacker** binary emits 3 provenance entries (`Write SystemBinary /sbin/sshd`, `Read Credential /etc/shadow`, `Read ConfigFile /proc/version`) under `owner_domain=7`. Init drains the kernel per-CPU provenance ring via `SYS_PROVENANCE_DRAIN (260)`, runs the SAME entries through `sotos_provenance::GraphHunter` AND `sotos_deception::AnomalyDetector`, fires `CredentialTheftAfterBackdoor` (confidence 90), calls `MigrationOrchestrator::migrate()` with the `ubuntu-22.04-webserver` profile, and prints the spoofed `Linux 5.15.0-91-generic` `/proc/version` the migrated attacker now sees. A `DECEPTION-WATCHDOG` worker thread keeps draining post-demo and detects subsequent attacker runs. | `services/init/src/deception_demo.rs`, `services/attacker/`, `kernel/src/sot/provenance.rs` |
+| **4 — advanced** | Three sub-sections: **storage** (real `tx_begin/commit/abort` syscalls produce `OP_TX_COMMIT/ABORT` provenance events that drive `sot_zfs::SnapshotManager` and `sot_hammer2::Hammer2SnapshotManager` to create snapshots and resolve rollback targets), **bhyve** (instantiates a `VmDomain` with the `bare_metal_intel` `VmDeceptionProfile`, decodes spoofed CPUID to verify `GenuineIntel`, Cascade Lake `family=6 model=85 stepping=7`, hypervisor bit OFF, hypervisor leaf zero, plus `IA32_FEATURE_CONTROL` MSR), and **PF firewall** (a `PfInterposer` with default-pass + UDP log rule and an attacker domain in deception mode is intercepted with `PfDecision::Deception` before any rule runs). | `services/init/src/tier4_demo.rs`, `personality/bsd/{zfs,hammer2,bhyve,network}/` |
+| **5 — hardening** | Seven sections: **A** IPC throughput (`sys::yield_now`, `sys::provenance_emit` cy/op), **B** provenance ring throughput (4000 push / drain), **C** `MigrationOrchestrator::check_interposition` overhead on a 32-cap migrated domain, **D** real **two-phase commit** for the new `TxTier::MultiObject` — `BEGIN→PREPARE→COMMIT` and `BEGIN→PREPARE→ABORT` happy paths plus negative paths, **E** 5000 randomized SOT syscalls with garbage args (survival 5000/5000), **F** concurrent transaction stress (main + worker thread, 1000/1000), **G** TCG-calibrated perf comparison: a tight `lfence; rdtsc` loop derives the inflation factor (~17×), then prints `sys::yield_now` and `sys::provenance_emit` in both raw-TCG and estimated-native columns next to published seL4 / NOVA / Fiasco / Linux pipe reference numbers. | `services/init/src/tier5_demo.rs`, `kernel/src/sot/tx.rs` |
+| **5b — POSIX smoke** | `services/posix-test/`, a no_std sotOS-native binary that covers the OTHER side of the personality split from the LUCAS Linux ABI runners. Asserts the SOT primitives the Linux personalities ride on: `frame_alloc + map + unmap_free + readback`, `thread_create + worker sync via AtomicU32`, `endpoint_create + call_timeout`, `provenance_emit + drain`. 11/11 PASS at boot. | `services/posix-test/` |
+
+## SOT — the exokernel layer
+
+`kernel/src/sot/` adds 12 syscalls on top of the microkernel core:
+
+| Syscall | # | Purpose |
+|---|---|---|
+| `so_create` | 300 | Create a Secure Object (file/dir/process/socket/credential type) |
+| `so_invoke` | 301 | Method call on an SO; routed through interposition if applicable |
+| `so_grant` | 302 | Grant SO access to a domain (with optional interposition policy) |
+| `so_revoke` | 303 | Revoke an SO grant (with epoch barrier) |
+| `so_observe` | 304 | Observe an SO without acquiring rights |
+| `sot_domain_create` | 305 | Create an isolation domain |
+| `sot_domain_enter` | 306 | Switch into a domain |
+| `sot_channel_create` | 307 | Create a typed SOT channel |
+| `tx_begin` | 308 | Begin a transaction (`ReadOnly` / `SingleObject` / `MultiObject`) |
+| `tx_commit` | 309 | Commit (single phase for tiers 0/1, second phase for tier 2) |
+| `tx_abort` | 310 | Abort + rollback |
+| `tx_prepare` | 311 | **Tier 5: Tier 2 (MultiObject) prepare phase** for two-phase commit |
+
+Plus two diagnostic / observation syscalls:
+
+| `provenance_drain` | 260 | Pop entries from the per-CPU provenance ring into a userspace buffer |
+| `provenance_emit` | 261 | Inject a synthetic provenance entry (used by the attacker simulator) |
+
+The kernel `ProvenanceEntry` carries `epoch`, `domain_id`, `operation`,
+`so_type`, `so_id`, `version`, `tx_id`, `timestamp` (48 bytes total).
+Every `handle_tx_commit` / `handle_tx_abort` emits an
+`OP_TX_COMMIT` / `OP_TX_ABORT` event with `so_type = SOTYPE_TX_EVENT`
+so userspace observers can drive snapshot managers from real kernel
+transaction events.
+
+## KARL — per-boot ID randomization
+
+`kernel/src/karl.rs` derives a 64-bit `boot_seed` from RDTSC at boot
+time and exposes per-pool offsets:
+
+```
+Boot 1: boot_seed = 0x2895a574d42c28d7   tx_id starts at 3559653379
+Boot 2: boot_seed = 0x726387273efe151f   tx_id starts at 1056833539
+```
+
+This gives the same downstream effect as OpenBSD's KARL (kernel
+re-link per boot) for everything visible through the SOT syscall ABI:
+attackers can't predict transaction IDs by counting from a known
+baseline.
+
+## Formal verification
+
+`formal/` contains six TLA+ specifications and matching `.cfg` files.
+`just tlc-mc` runs **real model checking** on every spec via `TLC` and
+reports per-spec pass/fail with state counts:
+
+```
+==> TLC  ok  capabilities      (79137 distinct states, depth 10)
+==> TLC  ok  ipc               ( 1498 distinct states, depth  5)
+==> TLC  ok  scheduler         (  514 distinct states, depth 18)
+==> TLC  ok  sot_capabilities  (  850 distinct states, depth  4)
+==> TLC  ok  sot_provenance    ( 1462 distinct states, depth 13)
+==> TLC  ok  sot_transactions  (  602 distinct states, depth  9)
+tlc: 6 passed, 0 failed, 0 skipped
+```
+
+The first run found and fixed real bugs in five specs (unbounded
+`CHOOSE`, over-strict `Rollback` invariant, stale WAL after abort,
+duplicate-thread `Enqueue`, looping `RECURSIVE Descendants`). One open
+finding is parked: `sot_transactions::Atomicity` is violated when
+Tier 1 `T1Write` and Tier 2 `T2Begin` interleave on the same object;
+the `.cfg` restricts checking to a single transaction so the
+structural invariants still verify.
+
+`just tlc` runs the SANY syntax/level checker as a faster pre-check.
 
 ## Architecture
 
@@ -14,252 +126,161 @@ transactional object store at its core.
 - **Capability-based security**: every kernel object accessed through capabilities with delegation and revocation
 - **Per-core scheduling**: ticket-locked run queues with work stealing across CPUs
 - **EDF deadline scheduling**: real-time threads with earliest-deadline-first priority
-- **Per-core IPC**: each core has its own endpoint pool (no global lock contention), cross-core delivery via mailbox + IPI
-- **IPC**: synchronous endpoints (L4-style register transfer) + lock-free SPSC shared-memory channels
-- **Network-transparent IPC**: routing layer for distributed computing ("Swarm OS") with message serialization
-- **Typed IPC payloads**: tensor, shader, and image descriptors for heterogeneous compute dispatch
-- **Heterogeneous scheduling**: CPU/GPU/NPU compute targets in thread model
-- **WASM SFI**: bare-metal WebAssembly interpreter for software fault isolation (no_std, 50+ opcodes, metered execution)
-- **Formal verification**: TLA+ specifications of IPC, capabilities, and scheduler with safety proofs
+- **Per-core IPC**: each core has its own endpoint pool, cross-core delivery via mailbox + IPI
+- **Synchronous endpoints + lock-free SPSC channels**
 - **Userspace VMM**: page faults handled by a userspace server, not the kernel
 - **Multi-address-space**: each process gets its own CR3 + page tables
-- **SMP**: runs on 1-4+ CPU cores with per-CPU LAPIC timers, IPI, and per-core state
-- **Multiuser**: user accounts with SHA-256 password hashing, UID/GID permission model
+- **SMP**: 1–4+ CPU cores with per-CPU LAPIC timers, IPI, per-core state
+- **Network-transparent IPC**: routing layer for distributed computing
+- **WASM SFI**: bare-metal `no_std` WebAssembly interpreter
 - **Live migration**: thread checkpoint/restore for process migration across nodes
 
-## Current State
+## Personality crates
 
-All core kernel primitives are implemented and tested on x86_64.
+`personality/` contains the BSD/Linux personality layer that the SOT
+microkernel hosts. Every crate is `no_std` and links into init or a
+dedicated service.
 
-### Kernel
-- Preemptive round-robin scheduler with per-core queues and work stealing
-- **EDF deadline scheduling**: real-time threads with earliest-deadline-first, automatic period renewal
-- **Kernel watchdog timer**: per-CPU heartbeat tracking, stale detection (>500 ticks)
-- **Per-core IPC endpoint pools**: each CPU core has its own endpoint pool with core-encoded handles — eliminates global lock contention
-- **Cross-core mailbox + IPI**: per-core bounded message queues with LAPIC IPI for immediate cross-core wake
-- **Heterogeneous compute targets**: threads tagged with CPU/GPU/NPU target; scheduler filters by compute target
-- SYSCALL/SYSRET Ring 3 transitions with GS-relative per-CPU state
-- Synchronous IPC endpoints with capability transfer
-- Async channels (kernel ring buffers) + lock-free SPSC (userspace shared memory)
-- **Network-transparent IPC routing**: routing table maps endpoints to remote nodes, 80-byte wire message format
-- **Typed IPC payloads**: TensorDesc, ShaderDesc, ImageDesc for heterogeneous compute
-- IRQ virtualization with shared IRQ support — drivers run in userspace
-- Demand paging via userspace VMM server (separate process, own CR3)
-- **Lazy page mapping**: fault-driven physical allocation (DemandPageTable with 256 regions)
-- **Page cache**: 64-entry LRU sector cache with write-back dirty tracking
-- **MMIO framework**: generic volatile read/write helpers for driver development
-- ELF loader + CPIO initramfs
-- Slab allocator (kernel heap) with per-CPU caches and multi-page support
-- Multi-address-space: per-process page tables with MapInto/UnmapFrom syscalls
-- Service registry: kernel-side name→endpoint map (SvcRegister/SvcLookup syscalls)
-- Userspace process spawning: InitrdRead/BootInfoWrite syscalls + ELF parser
-- Dynamic linking: userspace linker (dl_open/dl_sym/dl_close) with PIC .so support
-- **Multiuser support**: user accounts, SHA-256 password auth, UID/GID tracking
-- **Live process migration**: thread checkpoint/restore with memory region serialization
+| Crate | Purpose |
+|---|---|
+| `personality/common/provenance` | Graph Hunter (anomaly detection over a provenance graph) + BlastRadius (capability attack-path analysis) |
+| `personality/common/deception` | `AnomalyDetector`, `InterpositionEngine`, `MigrationOrchestrator`, `DeceptionProfile` (ubuntu/centos/iot/windows variants) |
+| `personality/common/policy` | Policy DSL types (used by interposition rules) |
+| `personality/bsd/zfs` | `ZfsPool`, `Dataset`, `SnapshotManager`, `TxgBridge` (transactional snapshots tied to SOT tx events) |
+| `personality/bsd/hammer2` | `Hammer2SnapshotManager`, `Hammer2Cluster` (CoW snapshots, distributed clustering stubs) |
+| `personality/bsd/bhyve` | `VmDomain`, `VCpu`, `VmcsConfig`, `VmDeceptionProfile::bare_metal_intel/amd/vmware_guest`, `VmIntrospector` |
+| `personality/bsd/network` | `PfInterposer`, `PfRule`, `ProvenanceOracle`, `PacketInfo`, `PfDecision` |
+| `personality/bsd/vfs` | BSD VFS server, vnodes, mount table, capability-gated file handles |
+| `personality/bsd/process` | POSIX-to-SOT translation layer for the process server |
+| `personality/bsd/rump-sot` | NetBSD rump kernel adaptation layer (predecessor of `vendor/netbsd-rump/rumpuser_sot.c`) |
+| `personality/linux/linuxulator` | Linux personality layer, syscall table, procfs emulation |
+| `personality/linux/lkl` | Linux Kernel Library domain wrapper |
+| `personality/linux/lucas` | LUCAS evolution bridge |
 
-### Userspace Services (each in separate address space)
-- **init** — VMM server, LUCAS syscall interceptor, framebuffer console, process spawner
-- **kbd** — PS/2 keyboard driver (IRQ 1, shared ring buffer with init)
-- **xhci** — USB xHCI host controller driver (multi-device, hub support, hot-plug)
-- **net** — Virtio-NET driver + full IP stack with IPC command interface
-- **nvme** — NVMe SSD driver (interrupt-driven completion, sector read/write, PCI discovery)
-- **vmm** — Demand paging server (page fault handler for init's address space)
-- **hello** — Minimal test process (spawned from userspace via spawn_process)
-- **lucas-shell** — Linux-ABI compatible shell (fork/exec/signals/FD table/functions/job control)
+## Userspace services
 
-### Storage
+Each runs in its own address space.
+
+| Service | Purpose |
+|---|---|
+| `services/init` | Init process: VMM server, LUCAS interceptor, framebuffer console, all 6 tier demos, watchdog threads, signify boot chain verifier |
+| `services/lucas-shell` | Linux-ABI compatible shell (fork/exec/signals/job control/history/functions) |
+| `services/kbd` | PS/2 keyboard driver |
+| `services/xhci` | USB xHCI host controller driver |
+| `services/net` | Virtio-NET driver + full IP stack |
+| `services/nvme` | NVMe SSD driver |
+| `services/vmm` | Demand paging server |
+| `services/compositor` | Wayland-protocol compositor |
+| `services/hello` | Minimal test process |
+| `services/styx-test` | **Tier 1**: validates SOT syscalls 300–311 |
+| `services/rump-vfs` | **Tier 2**: links real `librump_fused.a`, exposes IPC VFS |
+| `services/attacker` | **Tier 3**: emits provenance entries for the deception demo |
+| `services/posix-test` | **Tier 5b**: POSIX-equivalence smoke over native SOT primitives (11/11 PASS) |
+
+## Storage
+
 - Virtio-BLK driver with transactional object store (WAL, bitmap, directory)
-- NVMe SSD driver — interrupt-driven MMIO hardware driver (controller init, admin/IO queues, sector read/write)
-- **AHCI/SATA driver** — HBA initialization, port enumeration, IDENTIFY DEVICE, DMA EXT 48-bit LBA
-- **USB mass storage** — BBB (Bulk-Only Transport), SCSI commands over USB
+- NVMe SSD driver — interrupt-driven MMIO hardware driver
+- AHCI/SATA driver — HBA initialization, port enumeration, DMA EXT 48-bit LBA
+- USB mass storage — BBB protocol, SCSI commands over USB
 - VFS shim with file handles, read/write, stat, chmod/chown
-- **NVMe-backed ObjectStore** — BlockDevice trait with NVMe IPC backend
-- **128-entry directory table** (FS_VERSION=4), real Unix timestamps, permission enforcement
 - Page cache (64-entry LRU, write-back)
-- **Distributed VFS** — object store replication across nodes, sync log, conflict resolution
+- Distributed VFS — object store replication across nodes
 
-### Networking
-- Virtio-NET driver (legacy v0.9.5)
-- Ethernet + ARP (32-entry cache) + IPv4
-- **IPv6** — header parse/build, ICMPv6 echo, neighbor solicitation/advertisement
-- ICMP echo (send + reply) — **can ping Google (8.8.8.8)!**
-- UDP (16 sockets, echo server on port 5555)
-- TCP (16 connections, 3-way handshake, data transfer, FIN teardown, echo on port 7)
-- **TCP congestion control** — Reno (slow start, congestion avoidance, loss recovery)
-- **TCP window scaling** — RFC 7323 negotiation in SYN/SYN-ACK
-- DNS resolver (A-record queries to QEMU SLIRP DNS at 10.0.2.3)
-- DHCP client (Discover/Offer/Request/Ack, falls back to 10.0.2.15)
-- **TLS / crypto primitives** — SHA-256, HMAC-SHA256, ChaCha20, X25519 (Curve25519)
-- **HTTP client** — HTTP/1.1 GET/POST, response parsing
-- IPC bridge: net↔init communication via service registry + IPC commands
-- Socket API for LUCAS shell (socket/connect/send/recv/close)
-- Shell commands: `ping`, `wget`, `resolve`, `traceroute` (all accept hostnames)
+## Networking
 
-### Security
-- **W^X enforcement**: SYS_MAP/MAP_INTO/MAP_OFFSET auto-add NX bit to writable pages
-- **SYS_PROTECT**: mprotect-like syscall (134) for post-mapping permission changes, W^X enforced
-- **Stack guard pages**: unmapped page below each process stack (triggers page fault on overflow)
-- **ASLR**: stack base randomized with RDTSC-seeded xorshift64 (0–64 KB jitter)
-- **Stack canaries**: `-Z stack-protector=strong` on kernel + all services (~1800 check sites per binary)
-- **Multiuser**: user accounts with SHA-256 password hashing, UID/GID permission enforcement
-- **chmod/chown syscalls**: Unix-style permission model (owner/group/other, 9-bit rwx)
+- Virtio-NET driver
+- Ethernet + ARP (32-entry cache) + IPv4 + IPv6
+- ICMP / UDP / TCP (Reno congestion control, RFC 7323 window scaling)
+- DNS resolver, DHCP client
+- TLS / crypto primitives (SHA-256, HMAC-SHA256, ChaCha20, X25519)
+- HTTP client (HTTP/1.1 GET/POST)
+- Socket API for LUCAS shell
 
-### LUCAS — Linux-ABI Compatibility
-- Syscall interceptor: fork, exec, waitpid, exit, kill
-- FD table (32 entries): open, close, read, write, stat, lseek, dup/dup2
-- Socket FDs: socket, connect, sendto, recvfrom (routed to net service via IPC)
-- Memory: brk, mmap, munmap
-- Signals: Ctrl+C (SIGINT), Ctrl+Z (SIGTSTP), kill command
-- VFS bridge to object store
-- Custom syscalls: DNS resolve (200), traceroute hop (201), chmod (150), chown (151)
-- Shell builtins: ls, cat, echo, ps, uptime, kill, touch, rm, ping, wget, resolve, traceroute, uname, help, wc, sort, uniq, diff, jobs, fg, bg, history
-- **Job control**: jobs table (16 slots), fg/bg, Ctrl+C/Ctrl+Z signal delivery
-- **Command history**: 64-entry circular buffer, up/down arrow navigation
-- **Tab completion**: file path + builtin name completion
-- **Redirect operators**: `>`, `>>`, `<` with combined redirects
-- **Here documents**: `<<DELIM` syntax for inline stdin
-- **Shell functions**: define/call with positional args ($1-$8), return statement
+## Security
 
-### Input / Display
-- USB xHCI keyboard driver (multi-device enumeration, HID boot protocol, 116+ key mapping)
-- PS/2 keyboard driver (IRQ 1, scancode set 1)
-- **Mouse input**: PS/2 (3/4-byte, IntelliMouse scroll wheel) + USB HID boot protocol
-- Framebuffer console (1024x768, VGA 8x16 font, 128x48 text grid)
-- **GUI window compositor**: 16 windows, z-ordering, decorations, mouse cursor, event system
-- Serial output (COM1)
+- **Ed25519 + SHA-256 boot chain** — every signed initrd binary verified before spawn (Tier 0)
+- **W^X enforcement** — `SYS_MAP/MAP_INTO/MAP_OFFSET` auto-add NX to writable pages, `SYS_PROTECT` enforces W^X
+- **Stack guard pages** — unmapped page below each process stack
+- **ASLR** — stack base randomized with RDTSC-seeded xorshift64
+- **KARL ID randomization** — `kernel/src/karl.rs` adds per-boot offsets to the SOT tx pool (more pools wired in follow-up)
+- **Stack canaries** — `-Z stack-protector=strong` on kernel + every service
+- **Multiuser** — user accounts, SHA-256 password hashing, UID/GID enforcement
+- **chmod/chown** syscalls — Unix permission model
+- **Capability interposition** — `so_invoke` on an interposed cap is routed through a proxy domain (`InterpositionPolicy::{Passthrough, Inspect, Redirect, Fabricate}`)
+- **Deception migration** — anomaly detection (`CredentialTheftAfterBackdoor`, `ReconnaissanceSweep`, `DataExfiltration`, `PersistenceInstall`, `StagedPayload`, `PrivilegeEscalation`, `AnomalousFanOut`) feeds the `MigrationOrchestrator` which interposes the offending domain's caps with a `DeceptionProfile`
 
-### Audio
-- **AC97 audio driver**: codec initialization, mixer volume control, BDL DMA, PCM playback, sample rate config
+## CI
 
-### Dynamic Linking
-- Userspace linker (`libs/sotos-ld/`): dl_open, dl_sym, dl_close
-- PIC shared library support (ET_DYN ELFs with relocations)
-- W^X compatible: pages mapped RW for loading, then changed to R+X via SYS_PROTECT
-- Test library (`libs/sotos-testlib/`) verified: `add(3,4)=7`, `mul(6,7)=42`
+`.github/workflows/ci.yml` ships **9 jobs**:
 
-### WASM Runtime (Software Fault Isolation)
-- Bare-metal `no_std` WebAssembly bytecode interpreter (`libs/sotos-wasm/`)
-- Full WASM binary parser (type, function, memory, global, export, import, start, code sections)
-- Stack-based execution: 1024-value operand stack, 64-level call depth
-- 50+ opcodes: i32/i64 arithmetic, comparison, bitwise, control flow, memory
-- SFI guarantee: every memory load/store bounds-checked against linear memory
-- **Metered execution**: instruction counting, configurable limits (SfiRuntime)
-- **Host function interface**: register up to 16 host functions callable from WASM
-- Linear memory up to 1 MiB (16 × 64 KiB WASM pages)
-
-### Formal Verification
-- TLA+ specification of IPC protocol (`formal/ipc.tla`): no duplicate delivery, single receiver
-- TLA+ specification of capability system (`formal/capabilities.tla`): monotonic rights, revocation completeness
-- TLA+ specification of scheduler (`formal/scheduler.tla`): mutual exclusion, no starvation
-
-### Embedded Applications
-- **Lua 5.4 interpreter** (`libs/sotos-lua/`): lexer, compiler, stack-based VM, tables, string/math stdlib
-- **Package manager** (`libs/sotos-pkg/`): package registry, dependency resolution, install/uninstall
-
-### Distributed Computing ("Swarm OS")
-- Network-transparent IPC routing with 80-byte wire message format
-- **Live process migration**: thread checkpoint/restore with memory region serialization
-- **Distributed VFS**: object store replication across nodes, sync log, conflict resolution
+| Job | Purpose |
+|---|---|
+| `build-kernel` | Build `sotos-kernel` and `services/init` on every push/PR |
+| `build-personality` | Build all `personality/{common,bsd,linux}/*` crates |
+| `clippy-strict` | `cargo clippy -- -D warnings` on the kernel and `sotos-common` |
+| `python-scripts` | Smoke test for `scripts/build_signify_manifest.py` |
+| `deception-tests` | Host-side `cargo test` for `personality/common/deception` |
+| `tla-sany` | `scripts/run_sany.sh formal` — TLA+ syntax/level checker |
+| `tla-tlc` | `scripts/run_tlc.sh formal` — full TLC model checking on all 6 specs |
+| `rumpuser-sot-smoke` | Cross-compile `vendor/netbsd-rump/rumpuser_sot.c` with clang freestanding (`--target=x86_64-unknown-none -mno-red-zone -mno-sse -mcmodel=large`) and audit symbol coverage against `rumpuser.h` (60/60 must be defined) |
+| `boot-smoke` | QEMU TCG boot, asserts the 7 PASS markers (Signify, STYX, posix-test, RUMP-VFS-TEST, Tier 3, Tier 4, Tier 5), uploads `serial.log` on failure (gated on `sotBSD` branch or `boot-smoke` PR label so the regular CI stays fast) |
 
 ## Build & Run
 
-Requires: Rust nightly, Python 3, QEMU, [just](https://github.com/casey/just)
+Requires: Rust nightly, Python 3, QEMU, [just](https://github.com/casey/just).
 
 ```bash
-just run        # build + boot in QEMU (serial output)
-just run-gui    # with QEMU display window (framebuffer + keyboard)
+just run        # build + boot in QEMU (serial output, -cpu max)
+just run-gui    # with QEMU display window
 just run-net    # with virtio-net networking (SLIRP)
 just run-smp    # with 4 CPU cores
-just run-blk    # with virtio-blk test disk
-just run-nvme   # with NVMe SSD test disk
-just run-xhci   # with USB xHCI controller + keyboard
-just run-full   # ALL devices (virtio-blk, virtio-net, NVMe, xHCI, AC97, AHCI, 512MB, SMP4)
-just debug      # with GDB server (connect: gdb -ex "target remote :1234")
-just flash DISK=/dev/sdX  # flash to USB drive for real hardware
+just run-full   # ALL devices (virtio-blk, virtio-net, NVMe, xHCI, AC97, AHCI, SMP4)
+
+just sigmanifest  # regenerate the SHA-256 + Ed25519 boot manifest
+just tlc          # SANY syntax/level check on the 6 TLA+ specs
+just tlc-mc       # full TLC model checking on the 6 TLA+ specs
+just clippy       # cargo clippy -- -D warnings on kernel + sotos-common
+just fmt-check    # cargo fmt --check across the workspace
+just debug        # boot with GDB server (gdb -ex "target remote :1234")
+just flash DISK=/dev/sdX  # flash to USB for real hardware
 ```
 
-### Testing Networking
-```bash
-# From host, while sotOS is running with `just run-net`:
-echo hello | nc -u localhost 5555   # UDP echo (port 5555)
-echo hello | nc localhost 7777      # TCP echo (port 7777 → guest port 7)
-```
-
-From the sotOS shell (`just run-net`):
-```
-$ resolve google.com        # DNS lookup → 142.251.x.x
-$ ping google.com           # ICMP ping (resolves hostname)
-$ wget http://example.com/  # HTTP GET (DNS + TCP)
-$ traceroute 10.0.2.2       # ICMP traceroute with TTL probes
-```
-
-### Booting on Real Hardware
-```bash
-just flash DISK=/dev/sdX    # flash to USB drive
-```
-Requirements: x86_64 CPU, BIOS/CSM boot enabled, Secure Boot disabled, 256MB+ RAM.
-
-## Project Structure
+## Project structure
 
 ```
 kernel/                 The microkernel (Ring 0)
   arch/x86_64/          CPU-specific: serial, GDT, IDT, LAPIC, SYSCALL, per-CPU
-  mm/                   Physical frame allocator + slab allocator + paging + page cache + MMIO + demand paging
+  mm/                   Frame allocator + slab + paging + page cache + MMIO + demand paging
   cap/                  Capability table + CDT for delegation/revocation
-  ipc/                  Endpoints (sync) + Channels (async) + Notifications + Mailbox + Routing + Typed Payloads
-  sched/                Per-core scheduler with work stealing + EDF deadline scheduling
-  sync/                 Ticket spinlocks + lock ordering
-  svc_registry.rs       Service name → endpoint registry
-  watchdog.rs           Per-CPU heartbeat watchdog timer
-  migrate.rs            Live process migration (checkpoint/restore)
-  user.rs               Multiuser support (accounts, auth, UID/GID)
-  boot_uefi.rs          UEFI boot protocol type definitions (design)
-libs/
-  sotos-common/         Shared kernel-userspace ABI (syscalls, errors, SPSC, ELF parser)
-  sotos-pci/            Userspace PCI bus enumeration
-  sotos-virtio/         Virtio drivers (virtqueue, blk, net)
-  sotos-objstore/       Transactional object store + VFS + distributed VFS
-  sotos-net/            Protocol stack (eth, arp, ip, ipv6, icmp, udp, tcp, dns, dhcp, crypto, http)
-  sotos-ld/             Userspace dynamic linker (dl_open, dl_sym, dl_close)
-  sotos-testlib/        PIC test shared library for dynamic linking verification
-  sotos-nvme/           NVMe SSD driver library (MMIO regs, queues, controller, interrupt-driven I/O)
-  sotos-xhci/           xHCI USB host controller library (TRBs, rings, ports, HID keyboard, hub, hot-plug)
-  sotos-wasm/           Bare-metal WASM interpreter (SFI, no_std, 50+ opcodes, metered execution)
-  sotos-audio/          AC97 audio driver (mixer, BDL DMA, PCM playback)
-  sotos-ahci/           AHCI/SATA storage driver (HBA, port enumeration, DMA EXT)
-  sotos-usb-storage/    USB mass storage (BBB protocol, SCSI commands)
-  sotos-mouse/          Mouse input driver (PS/2 + USB HID, event ring buffer)
-  sotos-gui/            GUI window compositor (windows, z-ordering, decorations, drawing primitives)
-  sotos-lua/            Lua 5.4 interpreter (lexer, compiler, VM, tables, stdlib)
-  sotos-pkg/            Package manager (registry, dependencies, install/uninstall)
-services/
-  init/                 Init process (VMM, LUCAS interceptor, framebuffer, process spawner)
-  kbd/                  PS/2 keyboard driver (separate process)
-  xhci/                 USB xHCI keyboard driver (separate process)
-  net/                  Network driver + protocol handler (separate process)
-  nvme/                 NVMe SSD driver (separate process)
-  vmm/                  Demand paging VMM server (separate process)
-  hello/                Minimal test process (spawned from userspace)
-  lucas-shell/          Linux-ABI compatible shell (job control, history, functions, redirects)
+  ipc/                  Endpoints (sync) + Channels (async) + Notifications + Routing
+  sched/                Per-core scheduler with work stealing + EDF
+  sot/                  Secure Object exokernel layer (cap_epoch, domain, tx, tx_wal,
+                        provenance, fast_ipc, aslr, crypto, wx, ...)
+  syscall/              Per-handler split: cap, ipc, memory, thread, sot, debug, ...
+  karl.rs               KARL per-boot ID randomization
+  ...
+libs/                   Userspace libraries (sotos-common, sotos-net, sotos-objstore,
+                        sotos-virtio, sotos-pci, sotos-nvme, sotos-xhci, sotos-wasm,
+                        sotos-ld, sotos-ahci, sotos-audio, sotos-gui, sotos-mouse,
+                        sotos-lua, sotos-pkg, sotos-usb-storage)
+personality/            BSD + Linux + common personality crates (see table above)
+services/               Userspace services (see table above)
+vendor/netbsd-rump/     NetBSD rump kernel sources + rumpuser_sot.c hypervisor +
+                        librump_fused.a (built artifact)
+formal/                 TLA+ specifications + .cfg files for TLC
 boot/                   Bootloader configuration (limine.conf)
-scripts/                Build tools (mkimage.py, mkinitrd.py, mkdisk.py, mksharedlib.py)
-formal/                 TLA+ formal specifications (IPC, capabilities, scheduler)
+scripts/                Build tools: mkimage.py, mkinitrd.py, build_signify_manifest.py,
+                        run_sany.sh, run_tlc.sh, ...
 docs/                   Technical paper (LaTeX, CLRS-style)
+.github/workflows/      CI: build, clippy, SANY, TLC, boot-smoke
 ```
-
-## Key Technical Details
-
-- **Target**: `x86_64-unknown-none` with `-C relocation-model=static` (must be ET_EXEC)
-- **Boot**: Limine v8 BIOS. Config: `boot/limine.conf`
-- **Nightly Rust** for `build-std`, `abi_x86_interrupt`, and `-Z stack-protector=strong`
-- **Image builder**: `scripts/mkimage.py` — pure Python GPT+FAT32 with LFN support
-- **Initrd**: `scripts/mkinitrd.py` — CPIO newc archive with all services + shared libs
-- **Shared libraries**: `scripts/mksharedlib.py` — staticlib (.a) → PIC .so conversion
-- **NVMe test disk**: `scripts/mknvmedisk.py` — 64 MiB raw disk with test marker
 
 ## Roadmap
 
-See [TODO.md](TODO.md) for pending work.
+See [TODO.md](TODO.md) for the full tier roadmap, finished items, and
+parked follow-ups (real OpenZFS link, rump_init scheduler bisect,
+multi-tx Atomicity fix, real-HW perf comparison vs seL4/L4, LTP run).
 See [docs/MEMORY_BUDGET.md](docs/MEMORY_BUDGET.md) for the kernel static memory inventory.
 
 ## License

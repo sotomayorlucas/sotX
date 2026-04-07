@@ -19,6 +19,7 @@ mod domain;
 mod service;
 mod shm;
 mod debug;
+mod sot;
 
 use crate::kdebug;
 use crate::arch::x86_64::syscall::TrapFrame;
@@ -142,6 +143,20 @@ pub(super) const SYS_CHOWN: u64 = 151;
 pub(super) const SYS_THREAD_INFO: u64 = 140;
 pub(super) const SYS_RESOURCE_LIMIT: u64 = 141;
 pub(super) const SYS_THREAD_COUNT: u64 = 142;
+
+/// SOT Exokernel syscalls (300-310).
+pub(super) const SYS_SO_CREATE: u64 = 300;
+pub(super) const SYS_SO_INVOKE: u64 = 301;
+pub(super) const SYS_SO_GRANT: u64 = 302;
+pub(super) const SYS_SO_REVOKE: u64 = 303;
+pub(super) const SYS_SO_OBSERVE: u64 = 304;
+pub(super) const SYS_SOT_DOMAIN_CREATE: u64 = 305;
+pub(super) const SYS_SOT_DOMAIN_ENTER: u64 = 306;
+pub(super) const SYS_SOT_CHANNEL_CREATE: u64 = 307;
+pub(super) const SYS_TX_BEGIN: u64 = 308;
+pub(super) const SYS_TX_COMMIT: u64 = 309;
+pub(super) const SYS_TX_ABORT: u64 = 310;
+pub(super) const SYS_TX_PREPARE: u64 = 311;
 
 /// Debug syscall: write a single byte to serial (COM1).
 pub(super) const SYS_DEBUG_PRINT: u64 = 255;
@@ -507,6 +522,7 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
         _ if service::handle(frame, nr) => {}
         _ if shm::handle(frame, nr) => {}
         _ if debug::handle(frame, nr) => {}
+        _ if sot::handle(frame, nr) => {}
 
         // Unknown syscall
         _ => {

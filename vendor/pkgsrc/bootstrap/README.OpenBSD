@@ -1,0 +1,30 @@
+$NetBSD: README.OpenBSD,v 1.17 2022/06/15 15:04:48 schmonz Exp $
+
+Please read the general README file as well.
+
+# Instructions
+
+pkgsrc bootstrap installs several tools whose names happen to match
+programs already provided by OpenBSD. The two sets of package tools are
+not interchangeable, so you'll need to decide which ones should appear
+earlier in your PATH -- probably pkgsrc paths before system ones.
+
+Once that's settled, you might think about moving OpenBSD's native
+package tools out of the way so they can't get invoked by mistake,
+perhaps like so:
+
+	# cd /usr/sbin && for i in pkg_*; do mv $i $i.orig; done
+
+But you probably don't want to do this, because it would (for instance)
+also prevent OpenBSD's pkg_add(1) from being invoked on purpose by
+fw_update(1).
+
+# Status
+
+pkgsrc bootstrap has been tested on OpenBSD 7.1 (amd64, i386) with the
+system-provided clang. Earlier version/platform/compiler combinations
+have previously been reported to work.
+
+Once bootstrapped, as is typical with pkgsrc, many packages build as is.
+For any particular package that doesn't, fixes are often in OpenBSD
+Ports waiting to be borrowed.
