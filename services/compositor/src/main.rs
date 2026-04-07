@@ -16,6 +16,11 @@
 mod wayland;
 mod render;
 mod input;
+// Fine-grained API (add_rect, Rect, intersects, union, ...) is kept
+// live so follow-up call sites can adopt it incrementally; the
+// first-cut migration only uses add_fullscreen.
+#[allow(dead_code)]
+mod damage;
 
 use sotos_common::sys;
 use sotos_common::{BootInfo, IpcMsg, BOOT_INFO_ADDR, SyncUnsafeCell};
@@ -146,8 +151,6 @@ static DRAG_OFS_Y: SyncUnsafeCell<i32> = SyncUnsafeCell::new(0);
 
 /// TSC of last composed frame (SDF: fixed token production rate).
 static LAST_FRAME_TSC: SyncUnsafeCell<u64> = SyncUnsafeCell::new(0);
-/// Damage flag: set when any visual state changes.
-static DAMAGE: SyncUnsafeCell<bool> = SyncUnsafeCell::new(true);
 
 /// Frame interval in TSC ticks: ~16.67ms at 2 GHz = 60 Hz.
 const FRAME_INTERVAL: u64 = 33_340_000;
@@ -198,8 +201,11 @@ fn rdtsc() -> u64 {
     ((hi as u64) << 32) | (lo as u64)
 }
 
+/// Mark the whole screen dirty. Existing call sites don't know their
+/// exact dirty rect, so they escalate. Use `damage::add_rect` directly
+/// when the rect is known.
 fn mark_damage() {
-    unsafe { *DAMAGE.get() = true; }
+    damage::add_fullscreen();
 }
 
 fn next_event_serial() -> u32 {
@@ -235,6 +241,12 @@ pub extern "C" fn _start() -> ! {
         fb.pitch = boot_info.fb_pitch;
         fb.bpp = boot_info.fb_bpp;
     }
+
+    // Teach the damage tracker the screen area so coalescing can
+    // escalate to a fullscreen repaint when it makes sense.
+    damage::set_screen_size(boot_info.fb_width, boot_info.fb_height);
+    // Start dirty: first frame must be fully painted.
+    damage::add_fullscreen();
 
     print(b"compositor: fb ");
     print_hex(boot_info.fb_addr);
@@ -318,14 +330,13 @@ pub extern "C" fn _start() -> ! {
         // Frame pacing: only compose if damaged or interval elapsed.
         let now = rdtsc();
         let elapsed = unsafe { now.wrapping_sub(*LAST_FRAME_TSC.get()) };
-        let damaged = unsafe { *DAMAGE.get() };
+        let damaged = !damage::is_clean();
 
         if damaged || elapsed >= FRAME_INTERVAL {
+            // `compose()` takes ownership of the damage snapshot and
+            // resets the region to clean.
             compose();
-            unsafe {
-                *LAST_FRAME_TSC.get() = now;
-                *DAMAGE.get() = false;
-            }
+            unsafe { *LAST_FRAME_TSC.get() = now; }
         } else {
             sys::yield_now();
         }
@@ -1049,6 +1060,11 @@ fn handle_mouse(packet: input::MousePacket) {
 // ---------------------------------------------------------------------------
 
 fn compose() {
+    // Snapshot-and-clear up front so mid-frame input can re-dirty the
+    // region for the next pass. Today we always do a full clear; the
+    // snapshot's rect list will drive sub-region clears in a follow-up.
+    let _ = damage::take_dirty();
+
     unsafe {
         let fb = &mut *FB.get();
         let toplevels = &*TOPLEVELS.get();
