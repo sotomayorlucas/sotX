@@ -43,6 +43,7 @@ exclude = [
     "services/sot-pkg",
     "services/sot-carp",
     "services/sot-cheri",
+    "services/abi-fuzz",
     "libs/sotos-testlib",
     "tools/sotctl",
     "tools/capctl",
