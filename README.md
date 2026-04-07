@@ -281,6 +281,7 @@ docs/                   Technical paper (LaTeX, CLRS-style)
 See [TODO.md](TODO.md) for the full tier roadmap, finished items, and
 parked follow-ups (real OpenZFS link, rump_init scheduler bisect,
 multi-tx Atomicity fix, real-HW perf comparison vs seL4/L4, LTP run).
+See [docs/MEMORY_BUDGET.md](docs/MEMORY_BUDGET.md) for the kernel static memory inventory.
 
 ## License
 
