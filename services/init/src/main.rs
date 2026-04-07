@@ -298,6 +298,12 @@ pub extern "C" fn _start() -> ! {
     spawn_process(b"posix-test");
     for _ in 0..2000 { sys::yield_now(); }
 
+    // --- Phase 6b3: Per-subsystem kernel test suite (Tier 5 follow-up) ---
+    // Mini battery across mm/frame, ipc/endpoint+channel+notify,
+    // sched/thread, sot/tx+so+provenance, cap/debug.
+    spawn_process(b"kernel-test");
+    for _ in 0..3000 { sys::yield_now(); }
+
     // --- Phase 6c: BSD personality stub (Tier 2.2) ---
     // Spawn rump-vfs server, give it time to register, then exercise the
     // OPEN/READ/CLOSE protocol against /etc/passwd from this process.

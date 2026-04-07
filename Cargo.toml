@@ -38,6 +38,7 @@ exclude = [
     "services/rump-vfs",
     "services/attacker",
     "services/posix-test",
+    "services/kernel-test",
     "libs/sotos-testlib",
     "tools/sotctl",
     "tools/capctl",

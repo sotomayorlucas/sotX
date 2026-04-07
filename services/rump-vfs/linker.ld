@@ -2,6 +2,7 @@ ENTRY(_start)
 PHDRS {
     text PT_LOAD FLAGS(5);   /* R+X */
     data PT_LOAD FLAGS(6);   /* R+W */
+    tls  PT_TLS  FLAGS(4);   /* R (TLS template) */
 }
 SECTIONS {
     . = 0x200000;
@@ -64,6 +65,20 @@ SECTIONS {
 
     . = ALIGN(4096);
     .data   : { *(.data .data.*) } :data
+
+    /*
+     * TLS template: __thread variables in the rump kernel code live
+     * here. The initial-exec model used by -fno-pic + __thread emits
+     * `fs:offset` loads; the runtime must copy this template into a
+     * per-thread TLS block pointed to by FS_BASE. We keep it in its
+     * own PT_TLS segment so ld can build the p_filesz / p_memsz the
+     * dynamic loader (and our trampoline) need. Our init's
+     * rump_worker allocates a TLS block and copies this template in
+     * before calling rump_init.
+     */
+    .tdata  : ALIGN(16) { *(.tdata .tdata.*) } :data :tls
+    .tbss   : ALIGN(16) { *(.tbss .tbss.* .gnu.linkonce.tb.*) } :data :tls
+
     .bss    : { *(.bss .bss.*) *(COMMON) } :data
 
     /DISCARD/ : { *(.eh_frame) *(.note*) *(.comment) }

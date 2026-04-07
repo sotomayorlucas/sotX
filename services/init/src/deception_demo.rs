@@ -390,8 +390,21 @@ extern "C" fn deception_watchdog() -> ! {
         so_id: 0, version: 0, tx_id: 0, timestamp: 0,
     }; MAX_DRAIN];
     let mut total_seen: u64 = 0;
+    let mut last_dropped: u64 = 0;
     loop {
         for _ in 0..TICKS_BETWEEN_DRAIN { sys::yield_now(); }
+
+        // Ring health sample -- Tier 5 follow-up: surface drop pressure.
+        let (_ring_len, dropped, _total, _cap) = sys::provenance_stats(0);
+        if dropped != last_dropped {
+            print(b"DECEPTION-WATCHDOG: ring drops increased ");
+            print_u64(last_dropped);
+            print(b" -> ");
+            print_u64(dropped);
+            print(b"\n");
+            last_dropped = dropped;
+        }
+
         let n = drain_kernel_ring(&mut k_buf);
         if n == 0 { continue; }
         total_seen += n as u64;

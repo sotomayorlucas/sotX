@@ -291,6 +291,7 @@ jobs:
               "Signify boot chain: PASS" \
               "STYX TEST: ALL PASS" \
               "posix-test: PASS" \
+              "kernel-test: PASS" \
               "RUMP-VFS-TEST: PASS" \
               "Tier 3 demo: PASS" \
               "Tier 4 demo: PASS" \

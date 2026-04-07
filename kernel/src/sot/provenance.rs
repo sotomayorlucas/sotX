@@ -166,6 +166,17 @@ impl ProvenanceRing {
     pub fn dropped_count(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
     }
+
+    /// Total number of entries successfully pushed over the ring's lifetime.
+    /// This is `head` taken as an absolute counter (it never wraps back).
+    pub fn total_pushed(&self) -> u64 {
+        self.head.load(Ordering::Relaxed)
+    }
+
+    /// Ring capacity.
+    pub const fn capacity(&self) -> usize {
+        RING_CAPACITY
+    }
 }
 
 static PROVENANCE_RINGS: [ProvenanceRing; MAX_CPUS] = {
@@ -186,5 +197,20 @@ pub fn drain_cpu(cpu_id: usize, buf: &mut [ProvenanceEntry]) -> usize {
     match PROVENANCE_RINGS.get(cpu_id) {
         Some(ring) => ring.drain_to(buf),
         None => 0,
+    }
+}
+
+/// Return `(len, dropped, total_pushed, capacity)` for the given CPU's
+/// ring. Used by `SYS_PROVENANCE_STATS` so userspace observers can
+/// monitor ring pressure without draining.
+pub fn stats_cpu(cpu_id: usize) -> (u64, u64, u64, u64) {
+    match PROVENANCE_RINGS.get(cpu_id) {
+        Some(ring) => (
+            ring.len() as u64,
+            ring.dropped_count(),
+            ring.total_pushed(),
+            ring.capacity() as u64,
+        ),
+        None => (0, 0, 0, 0),
     }
 }

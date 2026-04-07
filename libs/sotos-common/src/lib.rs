@@ -651,6 +651,36 @@ pub mod sys {
         );
     }
 
+    /// Snapshot the per-CPU provenance ring statistics. Returns
+    /// `(len, dropped, total_pushed, capacity)`. Zero if `cpu_id` is
+    /// out of range.
+    ///
+    /// `len` = unread entries currently in the ring
+    /// `dropped` = entries dropped because the ring was full
+    /// `total_pushed` = lifetime count of successful pushes
+    /// `capacity` = ring capacity (entries, not bytes)
+    #[inline(always)]
+    pub fn provenance_stats(cpu_id: u64) -> (u64, u64, u64, u64) {
+        let len: u64;
+        let dropped: u64;
+        let total: u64;
+        let cap: u64;
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                inlateout("rax") 262u64 => len,
+                in("rdi") cpu_id,
+                lateout("rdx") dropped,
+                lateout("r8")  total,
+                lateout("r9")  cap,
+                lateout("rcx") _,
+                lateout("r11") _,
+                options(nostack),
+            );
+        }
+        (len, dropped, total, cap)
+    }
+
     /// Non-blocking read one byte from serial. Returns Some(byte) or None.
     #[inline(always)]
     pub fn debug_read() -> Option<u8> {

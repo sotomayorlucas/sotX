@@ -69,6 +69,18 @@ pub fn handle(frame: &mut TrapFrame, nr: u64) -> bool {
             frame.rax = crate::sot::provenance::drain_cpu(cpu, buf) as u64;
         }
 
+        // SYS_PROVENANCE_STATS (262) — return ring statistics for cpu_id.
+        //   rdi = cpu_id
+        //   returns rax=len, rdx=dropped, r8=total_pushed, r9=capacity
+        262 => {
+            let cpu = frame.rdi as usize;
+            let (len, dropped, total, cap) = crate::sot::provenance::stats_cpu(cpu);
+            frame.rax = len;
+            frame.rdx = dropped;
+            frame.r8 = total;
+            frame.r9 = cap;
+        }
+
         // SYS_PROVENANCE_EMIT (261) — let userspace push a synthetic
         // provenance entry into the current CPU's ring. The shape mirrors
         // the kernel `record_provenance_typed` path so the deception
