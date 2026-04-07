@@ -20,6 +20,7 @@ mod elf;
 mod fault;
 mod initrd;
 mod ipc;
+mod karl;
 mod irq;
 mod migrate;
 mod mm;
@@ -135,6 +136,11 @@ extern "C" fn kmain() -> ! {
     arch::serial::init();
     kprintln!("sotOS v0.1.0 — microkernel booting...");
     kprintln!("  sotBSD/STYX exokernel v0.1.0");
+
+    // KARL-style per-boot ID seed -- derived from RDTSC + a fixed
+    // mixer. Read by tx, sched, and other id pools so that visible
+    // identifiers drift across reboots.
+    karl::init();
 
     if !BASE_REVISION.is_supported() {
         kprintln!("FATAL: Limine base revision not supported");

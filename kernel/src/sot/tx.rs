@@ -85,8 +85,16 @@ const MAX_ACTIVE_TX: usize = 256;
 /// Global monotonic epoch counter (Tier 0 reads snapshot this).
 static GLOBAL_EPOCH: AtomicU64 = AtomicU64::new(1);
 
-/// Monotonic transaction id generator.
-static NEXT_TX_ID: AtomicU64 = AtomicU64::new(1);
+/// Monotonic transaction id counter (offset added at handout time).
+static NEXT_TX_ID: AtomicU64 = AtomicU64::new(0);
+
+/// Tier 5 KARL: returns the next tx id using the per-boot offset
+/// from `karl::tx_id_offset`. This makes IDs drift across reboots
+/// so attackers can't predict them by counting.
+fn alloc_tx_id() -> u64 {
+    let n = NEXT_TX_ID.fetch_add(1, Ordering::Relaxed);
+    crate::karl::tx_id_offset().wrapping_add(n)
+}
 
 pub struct TxManager {
     slots: [Option<TxSlot>; MAX_ACTIVE_TX],
@@ -110,7 +118,7 @@ impl TxManager {
             .position(|s| s.is_none())
             .ok_or(TxError::TableFull)?;
 
-        let id = NEXT_TX_ID.fetch_add(1, Ordering::Relaxed);
+        let id = alloc_tx_id();
         let epoch_snapshot = if matches!(tier, TxTier::ReadOnly) {
             GLOBAL_EPOCH.load(Ordering::Acquire)
         } else {
