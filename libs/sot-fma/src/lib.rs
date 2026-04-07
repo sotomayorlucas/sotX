@@ -57,6 +57,15 @@ pub struct ProvenanceEntry {
 /// `sotos_provenance::types::Operation::Revoke`.
 pub const OP_REVOKE: u16 = 7;
 
+// Compile-time guard: if a future edit grows or shrinks `ProvenanceEntry`
+// without updating the consumers that walk drained ring entries, this
+// assertion breaks the build instead of silently corrupting the data.
+// Reflects rustc's default field-reordered layout (no `#[repr(C)]`).
+const _: () = assert!(core::mem::size_of::<ProvenanceEntry>() == 40);
+// Pin the Solaris-FMA "Revoke" discriminant — local invariant only;
+// upstream divergence still has to be caught at the ingest boundary.
+const _: () = assert!(OP_REVOKE == 7);
+
 /// Hardware fault classes the FMA engine knows how to correlate.
 ///
 /// Kept deliberately small. New classes should map onto a real driver

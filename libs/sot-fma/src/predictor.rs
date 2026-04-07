@@ -21,7 +21,7 @@ use crate::{HwFault, HwFaultClass, MigrationRecommendation};
 pub const DEFAULT_DISK_WINDOW_TSC: u64 = 1_000_000_000;
 
 /// Threshold for the disk-retry rule.
-pub const DISK_RETRY_THRESHOLD: usize = 3;
+pub const DISK_RETRY_THRESHOLD: usize = 5;
 
 /// Threshold for the soft-ECC clustering rule.
 pub const ECC_CORRECTABLE_THRESHOLD: usize = 5;
@@ -162,9 +162,9 @@ mod tests {
     }
 
     #[test]
-    fn three_disk_retries_same_lba_migrates_now() {
+    fn five_disk_retries_same_lba_migrates_now() {
         let mut h = empty();
-        for i in 0..3 {
+        for i in 0..5 {
             h[i] = Some(fault(HwFaultClass::DiskReadRetry, 0x1000, 100 + i as u64));
         }
         assert_eq!(
@@ -174,10 +174,11 @@ mod tests {
     }
 
     #[test]
-    fn two_disk_retries_only_monitor() {
+    fn four_disk_retries_only_monitor() {
         let mut h = empty();
-        h[0] = Some(fault(HwFaultClass::DiskReadRetry, 0x1000, 100));
-        h[1] = Some(fault(HwFaultClass::DiskReadRetry, 0x1000, 101));
+        for i in 0..4 {
+            h[i] = Some(fault(HwFaultClass::DiskReadRetry, 0x1000, 100 + i as u64));
+        }
         assert!(matches!(
             predict(&h, 0),
             MigrationRecommendation::MonitorClosely { .. }
