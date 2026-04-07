@@ -1,0 +1,17 @@
+[package]
+name = "sotos-rump-vfs"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "rump-vfs"
+path = "src/main.rs"
+
+[dependencies]
+sotos-common = { path = "../../libs/sotos-common" }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

@@ -64,6 +64,18 @@ impl Channel {
 
 static CHANNELS: TicketMutex<Pool<Channel>> = TicketMutex::new(Pool::new());
 
+/// Tier 5 KARL: burn `n` padding channel slots so userspace-visible
+/// channel IDs drift across reboots. Called once from kmain after the
+/// karl seed is available. The padding slots are allocated and never
+/// freed; n is bounded to 0..15 so the cost is trivial.
+pub fn init() {
+    let burn = ((crate::karl::boot_seed() >> 4) & 0xF) as usize;
+    let mut chs = CHANNELS.lock();
+    for _ in 0..burn {
+        let _ = chs.alloc(Channel::new());
+    }
+}
+
 /// Allocate a new channel.
 pub fn create() -> Option<ChannelId> {
     let mut chs = CHANNELS.lock();

@@ -1,0 +1,9 @@
+[package]
+name = "sot-test-integration"
+version = "0.1.0"
+edition = "2021"
+description = "Integration tests for sotBSD: boot sequence, IPC, and domain lifecycle"
+
+[workspace]
+
+[dependencies]
