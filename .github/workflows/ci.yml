@@ -195,6 +195,28 @@ jobs:
       - name: TLC model-check all specs
         run: bash scripts/run_tlc.sh formal
 
+  abi-freeze:
+    # Sprint 3 -- fail if libs/sotos-common::ABI_VERSION diverges from
+    # the version encoded in docs/ABI_v0.1.0.md. Any intentional bump
+    # must update both in the same commit.
+    name: ABI freeze gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cross-check ABI_VERSION vs docs/ABI_v*.md
+        run: |
+          set -e
+          ABI_CONST=$(grep -E 'pub const ABI_VERSION' libs/sotos-common/src/lib.rs \
+                      | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          ABI_DOC=$(ls docs/ABI_v*.md 2>/dev/null | sed -E 's|.*ABI_v([^.]+\.[^.]+\.[^.]+)\.md|\1|' | sort -V | tail -1)
+          echo "ABI_VERSION in code: $ABI_CONST"
+          echo "ABI_VERSION in docs: $ABI_DOC"
+          if [ "$ABI_CONST" != "$ABI_DOC" ]; then
+              echo "ABI freeze gate: sotos-common::ABI_VERSION ($ABI_CONST) diverges from docs ($ABI_DOC)"
+              echo "Either update libs/sotos-common/src/lib.rs or create docs/ABI_v${ABI_CONST}.md"
+              exit 1
+          fi
+
   rumpuser-sot-smoke:
     name: rumpuser_sot.c cross-compile (clang freestanding)
     runs-on: ubuntu-latest
@@ -295,7 +317,11 @@ jobs:
               "RUMP-VFS-TEST: PASS" \
               "Tier 3 demo: PASS" \
               "Tier 4 demo: PASS" \
-              "Tier 5 demo: PASS"; do
+              "Tier 5 demo: PASS" \
+              "Tier 6 PANDORA T1 DTrace demo: PASS" \
+              "Tier 6 PANDORA T2 pkgsrc demo: PASS" \
+              "Tier 6 PANDORA T3 CARP/pfsync demo: PASS" \
+              "Tier 6 PANDORA T4 CHERI demo: PASS"; do
               if ! grep -aq "$marker" target/serial.log; then
                   echo "boot-smoke: missing PASS marker: $marker"
                   echo "--- last 200 lines of serial.log ---"
@@ -303,7 +329,7 @@ jobs:
                   exit 1
               fi
           done
-          echo "boot-smoke: all 6 PASS markers present"
+          echo "boot-smoke: all 12 PASS markers present"
 
       - name: Upload serial log on failure
         if: failure()

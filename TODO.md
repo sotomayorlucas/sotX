@@ -393,6 +393,97 @@
 
 ---
 
+## Sprint 1-2-3 follow-up: hardening + robustness (added 2026-04-07)
+
+These items came out of writing the Sprint 1, 2 and 3 status reports
+(`docs/SPRINT[123]_STATUS.md`). They are explicitly **non-blocking**
+for the v0.1.0 SDK ship; they are the next round of work to make the
+beta robust enough that downstream teams will trust it on real hardware
+and in real CI environments.
+
+### Sprint 1 follow-up (unblock beta)
+
+- [ ] **rump_init curlwp rewrite** -- compile rump with `-F CFLAGS=-DRUMP_CURLWP=20502`,
+      add a TLS runtime initializer that sets up FS_BASE before
+      `rump_init`. Today rump wedges ~64 hypercalls in.
+- [ ] **SMP work-stealing race fix** -- replace the per-core
+      `spin::Mutex` runqueue with a Chase-Lev deque or seqlock-style
+      retry. Reproducer: `just run-smp` hangs intermittently in the
+      SPSC producer/consumer loop.
+- [ ] **Live block-device installer test** -- run
+      `python scripts/sotbsd-install.py --target /dev/sdX --force` against
+      a real USB stick and verify it boots on bare metal (not just QEMU).
+- [ ] **Persistent rootdisk in init** -- detect the second virtio-blk
+      drive at boot and mount its ObjectStore as the writable root
+      so user state survives reboots.
+
+### Sprint 2 follow-up (make it useful)
+
+- [ ] **`SYS_THREAD_NOTIFY` syscall** -- kernel-side hook so init can
+      register a callback for child death and the supervisor can do
+      *active* respawn instead of just passive detection.
+- [ ] **Active respawn loop in init** -- once SYS_THREAD_NOTIFY lands,
+      wire `services/init/src/supervisor.rs` to actually re-spawn the
+      tracked Tier-6 services when they die.
+- [ ] **TLS reloc support in sotos-ld** -- implement
+      `R_X86_64_TPOFF64`, `_DTPOFF64`, `_DTPMOD64` plus the prologue
+      that allocates a per-thread TLS block. Required for any glibc
+      shared object that uses thread-local storage.
+- [ ] **IFUNC resolver in sotos-ld** -- implement `R_X86_64_IRELATIVE`
+      so glibc-built libc.so / libm.so can use ifunc-dispatched
+      memcpy / memset / strlen variants.
+- [ ] **`PC32` / `PLT32` / `GOTPCREL` for non-PIC objects** -- needed
+      for shared libraries built without `-fPIC`. Right now they're
+      counted as skipped relocs and the loaded image misbehaves.
+- [ ] **Compositor input routing** -- pipe kbd / mouse events from
+      the kernel rings to the focused compositor surface, so a real
+      window can receive keystrokes.
+- [ ] **Weston DRM end-to-end** -- finish the Weston backend load
+      path so a real Wayland surface composites onto the framebuffer.
+
+### Sprint 3 follow-up (production)
+
+- [ ] **GitHub Releases automation** -- a workflow that on `git tag
+      v*` builds the SDK tarball, runs the boot-smoke pass, and
+      uploads the tarball + signify signature as a Release asset.
+- [ ] **pkgsrc binary mirror** -- run a real NetBSD or DragonFlyBSD
+      build host, populate `target/binpkg/` with `.tgz` files, host
+      via `python -m http.server` and document the URL in the SDK.
+- [ ] **ABI fuzz harness** -- a host tool that hammers every syscall
+      in `sotos-common::Syscall` with random arg combinations and
+      asserts the kernel never panics. Should run as part of CI.
+- [ ] **Reproducible build verification** -- two CI runs (Linux,
+      Windows-WSL) must produce byte-identical `target/sotos.img`
+      from the same git commit. Today they don't because the initrd
+      includes timestamps.
+- [ ] **Signed SDK tarball** -- `make-sdk.sh` should also emit
+      `target/sotbsd-sdk-v0.1.0.tar.gz.sig` using the production
+      signify key from `just sigkey-prod`.
+- [ ] **Per-PR ABI diff comment** -- a CI bot that diffs
+      `libs/sotos-common/src/lib.rs::ABI_VERSION` and the docs and
+      posts the result as a PR comment, so reviewers see the ABI
+      delta inline.
+
+### Cross-cutting hardening
+
+- [ ] **Real fuzz coverage** -- cargo-fuzz against the kernel's
+      message decoders (currently we have only the cap_interpose
+      fuzz pass).
+- [ ] **Static analyzer pass** -- run `cargo audit` + `cargo deny` on
+      every push, gate on missing licences and known CVEs.
+- [ ] **Memory budget docs** -- a doc that lists the worst-case
+      static memory footprint of every kernel pool (PEERS, STATES,
+      CAPS, GRP_FDS, etc.) so we can detect blow-ups.
+- [ ] **Runtime safety asserts** -- audit every `unsafe` block in
+      the kernel, add a `debug_assert!` for the precondition that
+      makes the operation safe, document the proof in a comment.
+- [ ] **CHERI follow-up: real Morello target** -- an
+      `aarch64-morello-purecap` target plus an in-kernel CHERI
+      enforcement path, so the software model in `services/sot-cheri`
+      becomes a hardware-checked one.
+
+---
+
 ## Completed
 
 - [x] Phase 0: SOT kernel core (13 modules, 11 syscalls, 3 TLA+ specs)

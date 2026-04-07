@@ -91,6 +91,8 @@ mod tier5_demo;
 mod tier6_demo;
 mod tier6b_demo;
 mod tier6c_demo;
+mod tier6d_demo;
+mod supervisor;
 mod signify;
 
 use framebuffer::{print, print_u64, print_hex64, print_hex, fb_init};
@@ -348,6 +350,7 @@ pub extern "C" fn _start() -> ! {
     // then run the client demo that streams provenance-backed probes
     // through the sotbsd::: provider namespace.
     spawn_process(b"sot-dtrace");
+    supervisor::record(b"sot-dtrace");
     for _ in 0..400 { sys::yield_now(); }
     tier6_demo::run();
 
@@ -357,6 +360,7 @@ pub extern "C" fn _start() -> ! {
     // / info / remove against it. This is the in-init equivalent of a
     // pkgsrc `pkg_add` flow once the vendor tools land.
     spawn_process(b"sot-pkg");
+    supervisor::record(b"sot-pkg");
     for _ in 0..400 { sys::yield_now(); }
     tier6b_demo::run();
 
@@ -367,8 +371,26 @@ pub extern "C" fn _start() -> ! {
     // that the elected MASTER changes on death and that the replicated
     // pfsync state table survives the cutover.
     spawn_process(b"sot-carp");
+    supervisor::record(b"sot-carp");
     for _ in 0..400 { sys::yield_now(); }
     tier6c_demo::run();
+
+    // --- Phase 6j: Tier 6 PANDORA Task 4 — software CHERI ---
+    // Spawn the sot-cheri service (the 128-bit compressed-cap shim,
+    // vendored from CTSRD-CHERI under vendor/cheri-compressed-cap) and
+    // let the tier6d client demo exercise every CHERI invariant we
+    // care about: bounds monotonicity, permission monotonicity,
+    // sealing / unsealing, and out-of-bounds enforcement.
+    spawn_process(b"sot-cheri");
+    supervisor::record(b"sot-cheri");
+    for _ in 0..400 { sys::yield_now(); }
+    tier6d_demo::run();
+
+    // Sprint 2 -- final supervisor sweep before LUCAS shell takes over.
+    // Reports any tracked Tier 6 service that silently died during the
+    // demo phase. Passive only -- no respawn yet (parked on
+    // SYS_THREAD_NOTIFY).
+    supervisor::check_all();
 
     // --- Phase 7: Dynamic linking test ---
     test_dynamic_linking();

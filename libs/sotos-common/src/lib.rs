@@ -6,6 +6,14 @@
 
 #![no_std]
 
+/// Sprint 3 -- frozen ABI version of this crate.
+///
+/// Bump the minor on additive changes (new syscall, new struct field
+/// at the end), the major on breaking changes (renumbering, struct
+/// reshuffling, deletions). The CI gate in `.github/workflows/ci.yml`
+/// asserts this constant matches `docs/ABI_v0.1.0.md`.
+pub const ABI_VERSION: &str = "0.1.0";
+
 pub mod elf;
 pub mod linux_abi;
 pub mod spsc;

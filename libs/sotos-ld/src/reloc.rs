@@ -5,11 +5,31 @@
 
 use sotos_common::elf::DynamicInfo;
 
-// x86_64 relocation types.
+// x86_64 relocation types (subset we implement; see Sprint 2 status).
+//
+// Implemented:
 const R_X86_64_RELATIVE: u32 = 8;  // base + addend
 const R_X86_64_64: u32 = 1;        // S + A
 const R_X86_64_GLOB_DAT: u32 = 6;  // S
 const R_X86_64_JUMP_SLOT: u32 = 7; // S
+// Known-unimplemented (silently skipped -- tracked in SKIPPED_RELOCS
+// so the loader can assert zero skips on a clean shared object):
+const R_X86_64_PC32: u32      = 2;   // S + A - P       (not emitted in PIC)
+const R_X86_64_PLT32: u32     = 4;   // L + A - P       (not emitted in PIC)
+const R_X86_64_GOTPCREL: u32  = 9;   // G + GOT + A - P (partial PIC)
+const R_X86_64_DTPMOD64: u32  = 16;  // TLS module id   (needs TLS runtime)
+const R_X86_64_DTPOFF64: u32  = 17;  // TLS offset      (needs TLS runtime)
+const R_X86_64_TPOFF64: u32   = 18;  // TLS offset      (needs TLS runtime)
+const R_X86_64_IRELATIVE: u32 = 37;  // ifunc           (needs resolver call)
+
+/// Count of relocation entries we encountered but silently skipped.
+/// Read it with `skipped_count()` after a load to assert the library
+/// doesn't rely on reloc types the loader can't handle.
+static mut SKIPPED_RELOCS: u64 = 0;
+
+pub fn skipped_count() -> u64 { unsafe { SKIPPED_RELOCS } }
+
+pub fn reset_skipped() { unsafe { SKIPPED_RELOCS = 0; } }
 
 fn read_u64(addr: u64) -> u64 {
     unsafe { core::ptr::read(addr as *const u64) }
@@ -82,8 +102,20 @@ fn process_rela(
                 // Non-zero sym: would need symbol lookup from .dynsym.
                 // For simple PIC libs without external deps, sym=0 suffices.
             }
+            R_X86_64_PC32
+            | R_X86_64_PLT32
+            | R_X86_64_GOTPCREL
+            | R_X86_64_DTPMOD64
+            | R_X86_64_DTPOFF64
+            | R_X86_64_TPOFF64
+            | R_X86_64_IRELATIVE => {
+                // Known but unimplemented -- bump the counter so the
+                // caller can detect a library that actually needs them.
+                unsafe { SKIPPED_RELOCS += 1; }
+            }
             _ => {
-                // Unknown relocation type — skip.
+                // Unknown relocation type -- also counted.
+                unsafe { SKIPPED_RELOCS += 1; }
             }
         }
     }
