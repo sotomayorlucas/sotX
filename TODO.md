@@ -325,14 +325,26 @@
       SOT syscall table, KARL evidence, formal verification results,
       8-job CI workflow.
 
+### Tier 5 follow-up pass #4 (2026-04-07) — DONE
+- [x] **KARL drift on channel/notify/endpoint pools**: each pool's
+      `init()` is called from `kmain` right after `cap::init` and
+      `karl::init`. channel + notify burn 0..15 padding slots; the
+      per-core endpoint pool seeds `next_scan` from the boot seed
+      mixed with the core index. Free slots wrap, so capacity is
+      unaffected; only the FIRST allocated index drifts.
+- [x] **Signify production keypair workflow**: `build_signify_manifest.py`
+      now picks the signing key from `--key`, then `SIGNIFY_KEY` env
+      var, then a clearly-marked deterministic dev seed. New
+      `scripts/signify_keygen.py` generates a 32-byte raw Ed25519
+      private key with mode 0600 and a matching .pub. New
+      `just signify-keygen [OUTPUT=...]` recipe with sane default
+      (`~/.secrets/sotbsd-signify.key`).
+
 ### Tier 5 follow-ups (still parked)
 - [ ] Compare benchmark numbers against seL4 (~500 cy) / L4 (~700 cy)
       on real hardware -- current TCG figures aren't directly
       comparable.
 - [ ] LTP subset over Linuxulator -- blocked on the rump_init bisect.
-- [ ] Real production keypair for signify (currently a deterministic
-      dev seed) and store the private key offline.
-- [ ] Apply KARL drift to channel and endpoint pool counters too.
 
 ### CI/CD
 - [ ] GitHub Actions: kernel build + QEMU boot test
