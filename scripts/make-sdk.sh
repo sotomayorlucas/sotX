@@ -27,17 +27,38 @@
 #
 # Signing
 # -------
-# If `SIGNIFY_KEY` is set in the environment (or if
-# `~/.secrets/sotbsd-signify.key` exists) the script signs the tarball
-# with Ed25519 and writes a raw 64-byte signature next to it. The
-# signature is byte-compatible with the format consumed by
+# Signing key sources, in priority order:
+#   1. `SIGNIFY_KEY_BYTES` env var: base64-encoded 32-byte raw Ed25519
+#      private key. Decoded into a 0600 tempfile (cleaned up on exit).
+#      This is what the GitHub Releases workflow uses so the secret
+#      can be stored as raw bytes rather than a filesystem path.
+#   2. `SIGNIFY_KEY` env var: absolute path to a 32-byte raw Ed25519
+#      private key file already on disk.
+#   3. `~/.secrets/sotbsd-signify.key`: the per-developer fallback.
+# If none of these exists the script logs a warning and does NOT fail
+# -- unsigned dev builds are still valid SDK artifacts. The signature
+# itself is byte-compatible with the format consumed by
 # `services/init/src/signify.rs::verify_manifest()` (raw 64-byte
 # Ed25519 over the tarball bytes; the matching public key lives in
-# `services/init/src/sigkey_generated.rs`). If no key is available the
-# script logs a warning and does NOT fail -- unsigned dev builds are
-# valid SDK artifacts.
+# `services/init/src/sigkey_generated.rs`).
+#
+# Python interpreter
+# ------------------
+# The signing block runs a small Python helper that uses
+# `cryptography.hazmat.primitives.asymmetric.ed25519`. Fresh Ubuntu CI
+# runners ship `python3` but not `python`, so this script picks
+# whichever exists at startup and stores it in `$PY`.
 
 set -euo pipefail
+
+# Pick a Python interpreter once. Prefer python3 (Ubuntu CI default),
+# fall back to python (older distros / dev workstations). Signing is
+# optional, so leaving $PY empty just disables the .sig step rather
+# than hard-failing the SDK build.
+PY="$(command -v python3 || command -v python || true)"
+if [ -z "${PY}" ]; then
+    echo "make-sdk.sh: python3 (or python) not found on PATH -- signing disabled" >&2
+fi
 
 REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$REPO_ROOT"
@@ -70,7 +91,8 @@ Options:
 Outputs (under target/):
     sotbsd-sdk-v<VERSION>.tar.gz
     sotbsd-sdk-v<VERSION>.tar.gz.sha256
-    sotbsd-sdk-v<VERSION>.tar.gz.sig    (only if SIGNIFY_KEY is set or
+    sotbsd-sdk-v<VERSION>.tar.gz.sig    (only if SIGNIFY_KEY_BYTES,
+                                         SIGNIFY_KEY is set, or
                                          ~/.secrets/sotbsd-signify.key
                                          exists)
 
@@ -201,22 +223,62 @@ printf "make-sdk: wrote %s\n" "$SDK_SHA"
 
 # -- Ed25519 signature -----------------------------------------------------
 # Pick the signing key in this order:
-#   1. SIGNIFY_KEY env var (absolute path to a 32-byte raw private key)
-#   2. ~/.secrets/sotbsd-signify.key (the workflow Lucas documents)
-# If neither exists, log a warning and skip -- unsigned dev tarballs
+#   1. SIGNIFY_KEY_BYTES env var (base64-encoded 32-byte raw private
+#      key). Decoded to a 0600 tempfile that is removed on exit. This
+#      is what the GitHub Releases workflow passes from the
+#      SIGNIFY_KEY_B64 secret.
+#   2. SIGNIFY_KEY env var (absolute path to a 32-byte raw private key)
+#   3. ~/.secrets/sotbsd-signify.key (the workflow Lucas documents)
+# If none exist, log a warning and skip -- unsigned dev tarballs
 # are still valid SDK artifacts.
 SIGN_KEY_PATH=""
-if [ -n "${SIGNIFY_KEY:-}" ] && [ -f "${SIGNIFY_KEY}" ]; then
+SIGN_KEY_TMP=""
+cleanup_sign_key() {
+    if [ -n "$SIGN_KEY_TMP" ] && [ -f "$SIGN_KEY_TMP" ]; then
+        rm -f "$SIGN_KEY_TMP"
+    fi
+}
+trap cleanup_sign_key EXIT
+
+if [ -n "${SIGNIFY_KEY_BYTES:-}" ]; then
+    if [ -z "$PY" ]; then
+        echo "make-sdk: SIGNIFY_KEY_BYTES set but no python interpreter found -- skipping .sig" >&2
+    else
+        SIGN_KEY_TMP="$(mktemp)"
+        chmod 600 "$SIGN_KEY_TMP"
+        # Decode base64 -> raw bytes via python (portable: no `base64`
+        # binary needed). Strips whitespace so heredoc/secret blobs
+        # with trailing newlines decode cleanly.
+        if SIGNIFY_KEY_BYTES="$SIGNIFY_KEY_BYTES" "$PY" - "$SIGN_KEY_TMP" <<'PY'
+import base64, os, sys
+out_path = sys.argv[1]
+b64 = os.environ.get("SIGNIFY_KEY_BYTES", "")
+raw = base64.b64decode("".join(b64.split()))
+if len(raw) != 32:
+    sys.stderr.write(f"make-sdk: SIGNIFY_KEY_BYTES must decode to 32 bytes (got {len(raw)})\n")
+    sys.exit(3)
+with open(out_path, "wb") as f:
+    f.write(raw)
+PY
+        then
+            SIGN_KEY_PATH="$SIGN_KEY_TMP"
+        else
+            echo "make-sdk: failed to decode SIGNIFY_KEY_BYTES -- skipping .sig" >&2
+            rm -f "$SIGN_KEY_TMP"
+            SIGN_KEY_TMP=""
+        fi
+    fi
+elif [ -n "${SIGNIFY_KEY:-}" ] && [ -f "${SIGNIFY_KEY}" ]; then
     SIGN_KEY_PATH="${SIGNIFY_KEY}"
 elif [ -f "${HOME:-/nonexistent}/.secrets/sotbsd-signify.key" ]; then
     SIGN_KEY_PATH="${HOME}/.secrets/sotbsd-signify.key"
 fi
 
 if [ -n "$SIGN_KEY_PATH" ]; then
-    if ! command -v python >/dev/null 2>&1; then
+    if [ -z "$PY" ]; then
         echo "make-sdk: python not found, cannot sign tarball" >&2
     else
-        python - "$SIGN_KEY_PATH" "$SDK_TAR" "$SDK_SIG" <<'PY'
+        "$PY" - "$SIGN_KEY_PATH" "$SDK_TAR" "$SDK_SIG" <<'PY'
 import sys
 
 key_path, tar_path, sig_path = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -251,7 +313,7 @@ PY
         printf "make-sdk: wrote %s\n" "$SDK_SIG"
     fi
 else
-    echo "make-sdk: no signing key found (set SIGNIFY_KEY or place one at ~/.secrets/sotbsd-signify.key) -- skipping .sig"
+    echo "make-sdk: no signing key found (set SIGNIFY_KEY_BYTES, SIGNIFY_KEY, or place one at ~/.secrets/sotbsd-signify.key) -- skipping .sig"
 fi
 
 printf "make-sdk: done -- artifacts in target/\n"

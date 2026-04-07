@@ -19,12 +19,23 @@
 #      assertion logic is duplicated here on purpose: a release must
 #      not depend on a label-gated CI job that may not have run.
 #   6. Runs `bash scripts/make-sdk.sh --version <tag>` to produce the
-#      tarball, the SHA-256 manifest, and (if a SIGNIFY_KEY repo
-#      secret is configured) the Ed25519 .sig file.
+#      tarball, the SHA-256 manifest, and (if the `SIGNIFY_KEY_B64`
+#      repo secret is configured) the Ed25519 .sig file.
 #   7. Uploads `target/sotbsd-sdk-<tag>.tar.gz`, `.sha256`, and
 #      `.sig` (if present) as Release assets via
 #      `softprops/action-gh-release@v2`, with auto-generated release
 #      notes drawn from the commit history.
+#
+# Signing secret
+# --------------
+# Set the `SIGNIFY_KEY_B64` repo secret to a base64-encoded 32-byte
+# raw Ed25519 private key. Example for generating one locally:
+#     head -c 32 /dev/urandom | base64
+# The workflow forwards the secret to make-sdk.sh as the
+# `SIGNIFY_KEY_BYTES` environment variable; the script decodes it to a
+# 0600 tempfile (cleaned up on exit) before signing. If the secret is
+# unset the script logs a warning and skips the .sig file -- the
+# release still publishes the unsigned tarball + SHA-256.
 #
 # Repo guard: this workflow only runs on the canonical sotBSD repo
 # (`sotomayorlucas/sotBSD`). Forks may push tags freely without
@@ -116,8 +127,11 @@ jobs:
 
       - name: Build SDK tarball + SHA-256 + signature
         env:
-          SIGNIFY_KEY: ${{ secrets.SIGNIFY_KEY_PATH }}
-        run: bash scripts/make-sdk.sh --version ${{ github.ref_name }}
+          # Raw 32-byte Ed25519 key, base64-encoded. See the workflow
+          # header comment for the exact format and how to generate one.
+          # If unset, make-sdk.sh skips the .sig file gracefully.
+          SIGNIFY_KEY_BYTES: ${{ secrets.SIGNIFY_KEY_B64 }}
+        run: bash scripts/make-sdk.sh --version "${GITHUB_REF_NAME}"
 
       - name: Upload serial log on failure
         if: failure()
