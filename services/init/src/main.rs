@@ -393,10 +393,17 @@ pub extern "C" fn _start() -> ! {
     for _ in 0..400 { sys::yield_now(); }
     tier6d_demo::run();
 
+    // Unit 1 — SMF active respawn. Wire main.rs's spawn_process into the
+    // supervisor as the respawn callback, then run the boot self-test that
+    // exercises SYS_THREAD_NOTIFY (143) end-to-end: spawn -> register ->
+    // detect natural exit -> respawn -> verify. Prints
+    // `=== SMF respawn: PASS ===` for the boot-smoke CI grep.
+    supervisor::install_respawn_fn(spawn_process);
+    supervisor::run_smf_test();
+
     // Sprint 2 -- final supervisor sweep before LUCAS shell takes over.
-    // Reports any tracked Tier 6 service that silently died during the
-    // demo phase. Passive only -- no respawn yet (parked on
-    // SYS_THREAD_NOTIFY).
+    // Walks the SMF service table and reports current state of every
+    // tracked service. Now backed by the new SMF dependency graph.
     supervisor::check_all();
 
     // --- Phase 7: Dynamic linking test ---
@@ -548,7 +555,7 @@ extern "C" fn blk_handler() -> ! {
 }
 
 /// Spawn a new process from an initrd binary by name.
-fn spawn_process(name: &[u8]) {
+fn spawn_process(name: &[u8]) -> Option<u64> {
     use sotos_common::elf;
 
     print(b"SPAWN: loading '");
@@ -562,13 +569,13 @@ fn spawn_process(name: &[u8]) {
             Ok(f) => f,
             Err(_) => {
                 print(b"SPAWN: frame_alloc failed for buffer\n");
-                return;
+                return None;
             }
         };
         buf_frames[i as usize] = frame_cap;
         if sys::map(SPAWN_BUF_BASE + i * 0x1000, frame_cap, MAP_WRITABLE).is_err() {
             print(b"SPAWN: map buffer page failed\n");
-            return;
+            return None;
         }
     }
 
@@ -584,7 +591,7 @@ fn spawn_process(name: &[u8]) {
             for i in 0..SPAWN_BUF_PAGES {
                 let _ = sys::unmap_free(SPAWN_BUF_BASE + i * 0x1000);
             }
-            return;
+            return None;
         }
     };
 
@@ -602,7 +609,7 @@ fn spawn_process(name: &[u8]) {
             for i in 0..SPAWN_BUF_PAGES {
                 let _ = sys::unmap_free(SPAWN_BUF_BASE + i * 0x1000);
             }
-            return;
+            return None;
         }
     };
 
@@ -617,7 +624,7 @@ fn spawn_process(name: &[u8]) {
             for i in 0..SPAWN_BUF_PAGES {
                 let _ = sys::unmap_free(SPAWN_BUF_BASE + i * 0x1000);
             }
-            return;
+            return None;
         }
     };
 
@@ -639,14 +646,14 @@ fn spawn_process(name: &[u8]) {
                 Ok(f) => f,
                 Err(_) => {
                     print(b"SPAWN: frame_alloc failed for segment\n");
-                    return;
+                    return None;
                 }
             };
 
             let temp_vaddr = 0x5100000u64;
             if sys::map(temp_vaddr, frame_cap, MAP_WRITABLE).is_err() {
                 print(b"SPAWN: temp map failed\n");
-                return;
+                return None;
             }
 
             unsafe {
@@ -678,7 +685,7 @@ fn spawn_process(name: &[u8]) {
             let flags = if is_writable { MAP_WRITABLE } else { 0 };
             if sys::map_into(as_cap, page_vaddr, frame_cap, flags).is_err() {
                 print(b"SPAWN: map_into failed\n");
-                return;
+                return None;
             }
 
             page_vaddr += 4096;
@@ -695,12 +702,12 @@ fn spawn_process(name: &[u8]) {
             Ok(f) => f,
             Err(_) => {
                 print(b"SPAWN: frame_alloc failed for stack\n");
-                return;
+                return None;
             }
         };
         if sys::map_into(as_cap, stack_base + i * 0x1000, frame_cap, MAP_WRITABLE).is_err() {
             print(b"SPAWN: map_into stack failed\n");
-            return;
+            return None;
         }
     }
     let stack_top = stack_base + stack_pages * 0x1000;
@@ -708,25 +715,28 @@ fn spawn_process(name: &[u8]) {
     let caps: [u64; 0] = [];
     if sys::bootinfo_write(as_cap, caps.as_ptr() as u64, 0).is_err() {
         print(b"SPAWN: bootinfo_write failed\n");
-        return;
+        return None;
     }
 
-    match sys::thread_create_in(as_cap, elf_info.entry, stack_top, 0) {
+    let result = match sys::thread_create_in(as_cap, elf_info.entry, stack_top, 0) {
         Ok(tid) => {
             print(b"SPAWN: '");
             print(name);
             print(b"' launched (tid cap = ");
             print_u64(tid);
             print(b")\n");
+            Some(tid)
         }
         Err(_) => {
             print(b"SPAWN: thread_create_in failed\n");
+            None
         }
-    }
+    };
 
     for i in 0..SPAWN_BUF_PAGES {
         let _ = sys::unmap_free(SPAWN_BUF_BASE + i * 0x1000);
     }
+    result
 }
 
 // ---------------------------------------------------------------------------
