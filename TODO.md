@@ -413,67 +413,121 @@ and in real CI environments.
 - [ ] **Live block-device installer test** -- run
       `python scripts/sotbsd-install.py --target /dev/sdX --force` against
       a real USB stick and verify it boots on bare metal (not just QEMU).
-- [ ] **Persistent rootdisk in init** -- detect the second virtio-blk
+- [x] **Persistent rootdisk in init** -- detect the second virtio-blk
       drive at boot and mount its ObjectStore as the writable root
-      so user state survives reboots.
+      so user state survives reboots. **(landed in #52, 2026-04-07.
+      `init_virtio_root_blk` + `mount_or_format_root` + `RootStore` at
+      `0xEB0000`. SOTROOT signature on sector 0, marker file on sector 2.
+      `just run-rootdisk` recipe + `scripts/mkrootdisk.py`. Verified
+      by graceful no-second-drive fallback in plain `just run`.)**
 
 ### Sprint 2 follow-up (make it useful)
 
-- [ ] **`SYS_THREAD_NOTIFY` syscall** -- kernel-side hook so init can
+- [x] **`SYS_THREAD_NOTIFY` syscall** -- kernel-side hook so init can
       register a callback for child death and the supervisor can do
-      *active* respawn instead of just passive detection.
-- [ ] **Active respawn loop in init** -- once SYS_THREAD_NOTIFY lands,
+      *active* respawn instead of just passive detection. **(landed
+      in #51, 2026-04-07. `SYS_THREAD_NOTIFY (143)` + `SYS_NOTIFY_POLL
+      (144)`. Fixed-size 64-entry table, `on_thread_exit` walks +
+      signals registered notifications under THREAD_NOTIFY lock then
+      releases before signaling. Double-check race pattern protects
+      the spawn->register window. `MAX_THREAD_NOTIFY` lives in
+      `sotos-common`.)**
+- [x] **Active respawn loop in init** -- once SYS_THREAD_NOTIFY lands,
       wire `services/init/src/supervisor.rs` to actually re-spawn the
-      tracked Tier-6 services when they die.
-- [ ] **TLS reloc support in sotos-ld** -- implement
+      tracked Tier-6 services when they die. **(landed in #51 as the
+      SMF supervisor rewrite. Verified at boot: kills `attacker`,
+      observes death, respawns, prints `=== SMF respawn: PASS ===`.)**
+- [x] **TLS reloc support in sotos-ld** -- implement
       `R_X86_64_TPOFF64`, `_DTPOFF64`, `_DTPMOD64` plus the prologue
       that allocates a per-thread TLS block. Required for any glibc
-      shared object that uses thread-local storage.
-- [ ] **IFUNC resolver in sotos-ld** -- implement `R_X86_64_IRELATIVE`
+      shared object that uses thread-local storage. **(landed in #47,
+      2026-04-07. New `libs/sotos-ld/src/tls.rs` with `TlsBlock` /
+      `init_tls` / `install_tls` / `unmap_tls`. `MAX_TLS_PAGES = 16`
+      guard, `filesz <= memsz` validation, `dl_close` unmaps via
+      tracked page count.)**
+- [x] **IFUNC resolver in sotos-ld** -- implement `R_X86_64_IRELATIVE`
       so glibc-built libc.so / libm.so can use ifunc-dispatched
-      memcpy / memset / strlen variants.
-- [ ] **`PC32` / `PLT32` / `GOTPCREL` for non-PIC objects** -- needed
+      memcpy / memset / strlen variants. **(landed in #47. Casts
+      `r_addend` to `extern "C" fn() -> u64`, calls it, writes the
+      returned address to the GOT slot.)**
+- [x] **`PC32` / `PLT32` / `GOTPCREL` for non-PIC objects** -- needed
       for shared libraries built without `-fPIC`. Right now they're
       counted as skipped relocs and the loaded image misbehaves.
-- [ ] **Compositor input routing** -- pipe kbd / mouse events from
+      **(partial in #47, 2026-04-07. PC32 + PLT32 implemented with
+      `S+A-P` + i32-overflow check. GOTPCREL still bumps
+      `SKIPPED_RELOCS` -- needs per-symbol GOT slot tracking, which
+      no current consumer requires.)**
+- [x] **Compositor input routing** -- pipe kbd / mouse events from
       the kernel rings to the focused compositor surface, so a real
-      window can receive keystrokes.
+      window can receive keystrokes. **(landed in #44, 2026-04-07.
+      Rewrote ring readers to match the kbd producer (u32 indices,
+      256-byte scancode slot, 64x4-byte mouse packets). New
+      `FocusState` (keyboard_focus / pointer_x,y / hovered_surface)
+      in `SyncUnsafeCell`. Click-to-focus + close-button hover clear.
+      Boot prints `=== compositor input: WIRED ===`.)**
 - [ ] **Weston DRM end-to-end** -- finish the Weston backend load
       path so a real Wayland surface composites onto the framebuffer.
 
 ### Sprint 3 follow-up (production)
 
-- [ ] **GitHub Releases automation** -- a workflow that on `git tag
+- [x] **GitHub Releases automation** -- a workflow that on `git tag
       v*` builds the SDK tarball, runs the boot-smoke pass, and
       uploads the tarball + signify signature as a Release asset.
+      **(landed in #42, 2026-04-07. `.github/workflows/release.yml`
+      asserts the 6 PASS markers in QEMU, builds the SDK, signs with
+      Ed25519, uploads via `softprops/action-gh-release@v2`. Repo
+      guard + `python3` fallback.)**
 - [ ] **pkgsrc binary mirror** -- run a real NetBSD or DragonFlyBSD
       build host, populate `target/binpkg/` with `.tgz` files, host
       via `python -m http.server` and document the URL in the SDK.
-- [ ] **ABI fuzz harness** -- a host tool that hammers every syscall
+- [x] **ABI fuzz harness** -- a host tool that hammers every syscall
       in `sotos-common::Syscall` with random arg combinations and
       asserts the kernel never panics. Should run as part of CI.
-- [ ] **Reproducible build verification** -- two CI runs (Linux,
+      **(landed in #48, 2026-04-07. New `services/abi-fuzz/` no_std
+      binary + `scripts/abi_fuzz.py` + nightly `fuzz.yml` cron.
+      Verified at boot: `=== abi-fuzz: 10000/10000 survived ===`.
+      75-syscall whitelist excludes blocking + ThreadExit.)**
+- [x] **Reproducible build verification** -- two CI runs (Linux,
       Windows-WSL) must produce byte-identical `target/sotos.img`
       from the same git commit. Today they don't because the initrd
-      includes timestamps.
-- [ ] **Signed SDK tarball** -- `make-sdk.sh` should also emit
+      includes timestamps. **(landed in #43, 2026-04-07. Pinned all
+      6 FAT32 dir-entry timestamp fields to `SOURCE_DATE_EPOCH`
+      (default 1700000000) via UTC `gmtime`. New `repro.yml` matrix
+      [linux, windows] builds twice per host then cross-compares
+      SHA-256.)**
+- [x] **Signed SDK tarball** -- `make-sdk.sh` should also emit
       `target/sotbsd-sdk-v0.1.0.tar.gz.sig` using the production
-      signify key from `just sigkey-prod`.
-- [ ] **Per-PR ABI diff comment** -- a CI bot that diffs
+      signify key from `just sigkey-prod`. **(landed in #42 cleanup
+      commit, 2026-04-07. Reads `SIGNIFY_KEY_BYTES` (base64 raw 32B
+      Ed25519) into a 0600 tempfile with `trap` cleanup, falls back
+      to `SIGNIFY_KEY` path or `~/.secrets/sotbsd-signify.key`.
+      Emits `.tar.gz` + `.sha256` + raw 64-byte `.sig`.)**
+- [x] **Per-PR ABI diff comment** -- a CI bot that diffs
       `libs/sotos-common/src/lib.rs::ABI_VERSION` and the docs and
       posts the result as a PR comment, so reviewers see the ABI
-      delta inline.
+      delta inline. **(landed in #41, 2026-04-07. `scripts/abi_diff.py`
+      + `.github/workflows/abi-diff.yml` posts a sticky markdown
+      comment via `marocchino/sticky-pull-request-comment@v2`.)**
 
 ### Cross-cutting hardening
 
 - [ ] **Real fuzz coverage** -- cargo-fuzz against the kernel's
       message decoders (currently we have only the cap_interpose
       fuzz pass).
-- [ ] **Static analyzer pass** -- run `cargo audit` + `cargo deny` on
-      every push, gate on missing licences and known CVEs.
-- [ ] **Memory budget docs** -- a doc that lists the worst-case
+- [x] **Static analyzer pass** -- run `cargo audit` + `cargo deny` on
+      every push, gate on missing licences and known CVEs. **(landed
+      in #45, 2026-04-07. New `.github/workflows/audit.yml` matrix
+      job + `deny.toml` v2 schema with the standard MIT/Apache/BSD
+      allowlist, no GPL/AGPL, `unknown-git = deny`. Local
+      `cargo deny check` clean.)**
+- [x] **Memory budget docs** -- a doc that lists the worst-case
       static memory footprint of every kernel pool (PEERS, STATES,
-      CAPS, GRP_FDS, etc.) so we can detect blow-ups.
+      CAPS, GRP_FDS, etc.) so we can detect blow-ups. **(landed in
+      #46, 2026-04-07. New `docs/MEMORY_BUDGET.md` with per-pool
+      table totalling ~4.37 MiB; `FRAME_REFCOUNT` is the dominant
+      pool at 4 MiB. Cleanup commit also fixed two stale comments
+      in `kernel/src/mm/mod.rs:35,39` (said 2 MB / 4 GB / 1048576,
+      actual is 4 MB / 8 GB / 2097152).)**
 - [ ] **Runtime safety asserts** -- audit every `unsafe` block in
       the kernel, add a `debug_assert!` for the precondition that
       makes the operation safe, document the proof in a comment.
@@ -511,3 +565,50 @@ passive liveness check.
 - [x] Phase 5: Graph Hunter + BlastRadius, bhyve hypervisor domain, ZFS tx snapshots, HAMMER2 clustering
 - [x] Boot wiring: STYX banner, SOT syscall wrappers in sotos-common, init compiles with sot_bridge
 - [x] 20+ personality/driver/tool crates, 5 docs, 4 test crates (157+ tests), 5 CLI tools
+
+---
+
+### v0.2.0+ Roadmap: The Illumos Heirlooms (Solaris/OpenIndiana)
+
+Codename: **Project STYX**. Long-term architectural goals inspired by
+Illumos/OpenIndiana (Sun Microsystems heritage), layered on top of the
+sotBSD v0.1.0 + PANDORA T1-T4 baseline.
+
+- [x] **SMF (Service Management Facility) implementation** -- Evolve
+      `services/init/src/supervisor.rs` from a passive watcher into a
+      strict dependency-graph service manager. When `SYS_THREAD_NOTIFY`
+      lands, SMF must handle active respawns. If the Honeypot DB dies,
+      SMF must automatically restart it and gracefully cycle any
+      dependent deception services to maintain the illusion without
+      breaking the attacker's TCP state. **(landed in #51, 2026-04-07.
+      `SmfService { name, deps, state, restart_policy, tid, notify_cap,
+      respawn_count }`, fixed-size 16-service table, topological
+      cascade on death. Verified at boot via `=== SMF respawn: PASS ===`
+      after a real attacker death + respawn cycle.)**
+
+- [x] **Project Crossbow (Virtual Network Architecture)** -- Implement
+      kernel-level VNICs and virtual switches to complement
+      `PfInterposer`. When an APT is detected, dynamically provision a
+      VNIC with a spoofed MAC and hardware-enforced bandwidth limits
+      (e.g., 10 Mbps). Isolate the attacker in a network sandbox at
+      O(1) cost, preventing lateral movement or cryptomining
+      exhaustion. **(landed in #49, 2026-04-07. New `libs/sot-crossbow`
+      crate with `VirtualSwitch<32 ports>`, O(1) provision/revoke/
+      route, token-bucket rate limit (`bw_kbps * 125 = bytes/sec`),
+      Knuth golden-ratio MAC mix with LAA bit set. Wired into
+      `PfInterposer::enable_deception`/`disable_deception`. 18 unit
+      tests + boot smoke `=== Crossbow: PASS ===`.)**
+
+- [x] **FMA (Fault Management Architecture) integration** -- Build a
+      predictive self-healing engine that consumes the `sot_provenance`
+      ring buffers. Correlate hardware error telemetry (e.g., disk read
+      retries, ECC RAM faults) and trigger atomic CSpace migrations of
+      Tier-1/Tier-2 transactions to healthy memory regions *before* the
+      silicon throws a fatal exception. **(landed in #50, 2026-04-07.
+      New `libs/sot-fma` crate with `FaultManagement` ring (64 faults
+      + 256 prov anomalies), 6 prioritized correlation rules
+      (uncorrectable ECC > ECC clustering > 5+ DiskReadRetry > thermal
+      + behavioral). 26 unit tests + boot smoke `=== FMA: PASS ===`.
+      Follow-up: local `ProvenanceEntry` mirror is NOT ABI-compat with
+      kernel's 48-byte `#[repr(C)]` struct -- needs fix when real
+      drained-ring data is plumbed in.)**
