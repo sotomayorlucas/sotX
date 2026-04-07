@@ -88,6 +88,7 @@ mod sot_bridge;
 mod deception_demo;
 mod tier4_demo;
 mod tier5_demo;
+mod tier6_demo;
 mod signify;
 
 use framebuffer::{print, print_u64, print_hex64, print_hex, fb_init};
@@ -339,6 +340,14 @@ pub extern "C" fn _start() -> ! {
     // IPC + provenance ring + cap_interpose benchmarks, real 2PC
     // MultiObject transactions, fuzz / robustness pass.
     tier5_demo::run();
+
+    // --- Phase 6g: Tier 6 PANDORA Task 1 — DTrace integration ---
+    // Spawn the sot-dtrace service first, give it time to register,
+    // then run the client demo that streams provenance-backed probes
+    // through the sotbsd::: provider namespace.
+    spawn_process(b"sot-dtrace");
+    for _ in 0..400 { sys::yield_now(); }
+    tier6_demo::run();
 
     // --- Phase 7: Dynamic linking test ---
     test_dynamic_linking();
