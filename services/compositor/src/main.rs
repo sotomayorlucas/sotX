@@ -133,11 +133,43 @@ static CONFIGURE_SERIAL: SyncUnsafeCell<u32> = SyncUnsafeCell::new(1);
 /// Global event serial counter (for input events sent to clients).
 static EVENT_SERIAL: SyncUnsafeCell<u32> = SyncUnsafeCell::new(100);
 
-/// Index of the focused (keyboard-receiving) client, or MAX_CLIENTS if none.
-static FOCUSED_CLIENT: SyncUnsafeCell<usize> = SyncUnsafeCell::new(MAX_CLIENTS);
+/// Per-frame input focus state.
+///
+/// Consolidates the keyboard / pointer focus tracked across the compositor.
+/// Surface IDs are Wayland `wl_surface` object IDs (per-client). The
+/// `*_idx` fields cache the matching slots in the global `CLIENTS`,
+/// `TOPLEVELS` and `SURFACES` tables so the input handlers can dispatch
+/// without re-walking those arrays.
+struct FocusState {
+    /// Wayland `wl_surface` object ID with keyboard focus, or `None`.
+    keyboard_focus: Option<u32>,
+    /// Latest pointer position in screen coordinates.
+    pointer_x: i32,
+    pointer_y: i32,
+    /// Wayland `wl_surface` object ID currently under the cursor, or `None`.
+    hovered_surface: Option<u32>,
+    /// Cached index into `CLIENTS` for the keyboard-focused client
+    /// (`MAX_CLIENTS` if none).
+    focused_client_idx: usize,
+    /// Cached index into `TOPLEVELS` for the focused toplevel
+    /// (`MAX_TOPLEVELS` if none).
+    focused_toplevel_idx: usize,
+}
 
-/// Index of the focused toplevel (for keyboard routing), or MAX_TOPLEVELS if none.
-static FOCUSED_TOPLEVEL: SyncUnsafeCell<usize> = SyncUnsafeCell::new(MAX_TOPLEVELS);
+impl FocusState {
+    const fn empty() -> Self {
+        Self {
+            keyboard_focus: None,
+            pointer_x: 0,
+            pointer_y: 0,
+            hovered_surface: None,
+            focused_client_idx: MAX_CLIENTS,
+            focused_toplevel_idx: MAX_TOPLEVELS,
+        }
+    }
+}
+
+static FOCUS: SyncUnsafeCell<FocusState> = SyncUnsafeCell::new(FocusState::empty());
 
 /// Drag state: if dragging a window, (toplevel_idx, offset_x, offset_y).
 static DRAG_TL: SyncUnsafeCell<usize> = SyncUnsafeCell::new(MAX_TOPLEVELS);
@@ -267,11 +299,29 @@ pub extern "C" fn _start() -> ! {
         Err(_) => print(b"compositor: svc_register failed\n"),
     }
 
+    // Initialise input rings non-destructively. We probe the KB/MOUSE
+    // SPSC pages (and mark them as "polled" for the WIRED smoke test)
+    // BEFORE waiting for a client, so the boot-smoke marker is emitted
+    // even when the compositor has no clients yet. We do NOT consume any
+    // bytes here -- LUCAS still owns the hardware until a client arrives.
+    if input::try_init() {
+        print(b"compositor: input rings available\n");
+    } else {
+        print(b"compositor: WARNING: input device init failed, continuing without input\n");
+    }
+    if input::rings_polled() {
+        print(b"=== compositor input: WIRED ===\n");
+    } else {
+        print(b"=== compositor input: FAIL ===\n");
+    }
+
     print(b"compositor: waiting for clients on IPC\n");
 
     // Passive: block on IPC endpoint waiting for Wayland client connections.
-    // Do NOT touch framebuffer or KB/MOUSE rings until a client connects --
-    // the serial console and LUCAS shell own those resources until then.
+    // Do NOT touch framebuffer or consume KB/MOUSE bytes until a client
+    // connects -- the serial console and LUCAS shell own those resources
+    // until then. Boot-smoke: events are silently swallowed when no
+    // client is connected (this is NOT an error).
     loop {
         match sys::recv(ep_cap) {
             Ok(msg) => {
@@ -291,13 +341,9 @@ pub extern "C" fn _start() -> ! {
         fb.clear(BG_COLOR);
         *CURSOR_X.get() = (fb.width / 2) as i32;
         *CURSOR_Y.get() = (fb.height / 2) as i32;
-    }
-
-    // Initialize input devices (non-fatal -- compositor works without input).
-    if input::try_init() {
-        print(b"compositor: input rings available\n");
-    } else {
-        print(b"compositor: WARNING: input device init failed, continuing without input\n");
+        let focus = &mut *FOCUS.get();
+        focus.pointer_x = (fb.width / 2) as i32;
+        focus.pointer_y = (fb.height / 2) as i32;
     }
 
     // Active compositing loop with IPC polling.
@@ -745,15 +791,15 @@ fn apply_dispatch_result(client_idx: usize, result: &DispatchResult) {
     // When a new toplevel is created, auto-focus the first one.
     if tl_id != 0 {
         unsafe {
-            let focused_tl = &mut *FOCUSED_TOPLEVEL.get();
-            let focused_cl = &mut *FOCUSED_CLIENT.get();
-            if *focused_tl >= MAX_TOPLEVELS {
+            let focus = &mut *FOCUS.get();
+            if focus.focused_toplevel_idx >= MAX_TOPLEVELS {
                 // Find the toplevel we just created.
                 let tls = &*TOPLEVELS.get();
                 for i in 0..MAX_TOPLEVELS {
                     if tls[i].active && tls[i].toplevel_id == tl_id {
-                        *focused_tl = i;
-                        *focused_cl = client_idx;
+                        focus.focused_toplevel_idx = i;
+                        focus.focused_client_idx = client_idx;
+                        focus.keyboard_focus = Some(tls[i].wl_surface_id);
                         print(b"compositor: focused toplevel ");
                         print_u32_dec(tl_id);
                         print(b"\n");
@@ -782,10 +828,13 @@ fn handle_keyboard(scancode: u8) {
 
     let state = if is_release { 0u32 } else { 1u32 };
 
-    // Send wl_keyboard::key event to the focused client.
+    // Send wl_keyboard::key event to the focused client. With no
+    // focused client we silently swallow the event (boot-smoke path).
     unsafe {
-        let focused_cl = *FOCUSED_CLIENT.get();
+        let focus = &*FOCUS.get();
+        let focused_cl = focus.focused_client_idx;
         if focused_cl >= MAX_CLIENTS { return; }
+        if focus.keyboard_focus.is_none() { return; }
 
         let clients = &*CLIENTS.get();
         if !clients[focused_cl].active { return; }
@@ -823,6 +872,9 @@ fn handle_mouse(packet: input::MousePacket) {
         *cy = (*cy + packet.dy).max(0).min(fb.height as i32 - 1);
         cursor_x = *cx;
         cursor_y = *cy;
+        let focus = &mut *FOCUS.get();
+        focus.pointer_x = *cx;
+        focus.pointer_y = *cy;
     }
 
     mark_damage();
@@ -885,8 +937,11 @@ fn handle_mouse(packet: input::MousePacket) {
                 let toplevels_mut = &mut *TOPLEVELS.get();
                 toplevels_mut[hit_tl_idx].active = false;
                 // Clear focus if this was focused.
-                if *FOCUSED_TOPLEVEL.get() == hit_tl_idx {
-                    *FOCUSED_TOPLEVEL.get() = MAX_TOPLEVELS;
+                let focus = &mut *FOCUS.get();
+                if focus.focused_toplevel_idx == hit_tl_idx {
+                    focus.focused_toplevel_idx = MAX_TOPLEVELS;
+                    focus.focused_client_idx = MAX_CLIENTS;
+                    focus.keyboard_focus = None;
                 }
             }
             mark_damage();
@@ -917,23 +972,21 @@ fn handle_mouse(packet: input::MousePacket) {
                     let a = core::ptr::addr_of_mut!(toplevels_mut[hit_tl_idx]);
                     let b = core::ptr::addr_of_mut!(toplevels_mut[last_active]);
                     core::ptr::swap(a, b);
-                    // Update focused_tl to track the moved window.
-                    *FOCUSED_TOPLEVEL.get() = last_active;
                     hit_tl_idx = last_active;
-                } else {
-                    *FOCUSED_TOPLEVEL.get() = hit_tl_idx;
                 }
             }
         }
 
-        // Update focus to this window's client.
+        // Click-to-focus: update focus to this window's client + surface.
         unsafe {
-            *FOCUSED_TOPLEVEL.get() = hit_tl_idx;
             let surfaces = &*SURFACES.get();
             let tl = &(*TOPLEVELS.get())[hit_tl_idx];
+            let focus = &mut *FOCUS.get();
+            focus.focused_toplevel_idx = hit_tl_idx;
+            focus.keyboard_focus = Some(tl.wl_surface_id);
             for si in 0..MAX_SURFACES {
                 if surfaces[si].active && surfaces[si].surface_id == tl.wl_surface_id {
-                    *FOCUSED_CLIENT.get() = surfaces[si].client_idx;
+                    focus.focused_client_idx = surfaces[si].client_idx;
                     break;
                 }
             }
@@ -943,7 +996,17 @@ fn handle_mouse(packet: input::MousePacket) {
 
     unsafe { *PREV_BUTTONS.get() = packet.buttons; }
 
+    unsafe {
+        let focus = &mut *FOCUS.get();
+        focus.hovered_surface = if hit_tl_idx < MAX_TOPLEVELS {
+            Some(toplevels[hit_tl_idx].wl_surface_id)
+        } else {
+            None
+        };
+    }
+
     // Send pointer events to the client that owns the hit toplevel.
+    // No client = silently swallow (not an error).
     if hit_tl_idx < MAX_TOPLEVELS {
         let tl = &toplevels[hit_tl_idx];
         // Find the client owning this toplevel's surface.
@@ -1055,7 +1118,7 @@ fn compose() {
         let surfaces = &*SURFACES.get();
         let buffers = &*BUFFERS.get();
         let pools = &*POOLS.get();
-        let focused_tl = *FOCUSED_TOPLEVEL.get();
+        let focused_tl = (*FOCUS.get()).focused_toplevel_idx;
 
         // Clear background (needed since we only redraw on damage).
         fb.clear(BG_COLOR);
