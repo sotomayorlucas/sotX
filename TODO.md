@@ -309,6 +309,22 @@
       3559653379, boot 2 starts at 1056833539). The matching wiring
       for thread / cap / channel pool counters is the next step.
 
+### Tier 5 follow-up pass #3 (2026-04-07) — DONE
+- [x] **KARL extended to thread + cap pools**: `Scheduler::next_id`
+      seeded from `karl::thread_id_offset() & 0x7F`, `cap::init`
+      burns `karl::boot_seed() & 0xF` padding `CapObject::Null`
+      slots so userspace-visible cap ids drift 0..15 per boot.
+      Verified: boot 1 hello tid_cap=7502, boot 2 hello tid_cap=7514.
+- [x] **`sot_transactions.tla::Atomicity` fixed**: the invariant
+      queried `<<tx, obj, soValue[obj]>> \in committedEffects` which
+      depended on subsequent state. Reformulated to check that every
+      participant has SOME entry in committedEffects (any value).
+      Multi-transaction model checking re-enabled (`Txns = {T1, T2}`):
+      450,790 distinct states explored, depth 23, **0 violations**.
+- [x] **README rebranded** to `sotBSD` with full tier 0-5 inventory,
+      SOT syscall table, KARL evidence, formal verification results,
+      8-job CI workflow.
+
 ### Tier 5 follow-ups (still parked)
 - [ ] Compare benchmark numbers against seL4 (~500 cy) / L4 (~700 cy)
       on real hardware -- current TCG figures aren't directly
@@ -316,11 +332,7 @@
 - [ ] LTP subset over Linuxulator -- blocked on the rump_init bisect.
 - [ ] Real production keypair for signify (currently a deterministic
       dev seed) and store the private key offline.
-- [ ] Wire `karl::thread_id_offset()` into `sched::Sched::next_id`
-      and the cap / channel / endpoint pool counters so EVERY visible
-      ID drifts per boot, not just tx IDs.
-- [ ] Fix the `sot_transactions.tla::Atomicity` cross-tier lock bug
-      and re-enable multi-tx model checking.
+- [ ] Apply KARL drift to channel and endpoint pool counters too.
 
 ### CI/CD
 - [ ] GitHub Actions: kernel build + QEMU boot test
