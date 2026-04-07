@@ -175,6 +175,8 @@ remainder is ~390 KiB.
   with (default `-m 256M` only needs ~128 KiB of refcounts at this
   granularity, ~32× over-provisioned for the typical dev VM and
   ~16× for the documented 512 MiB default).
+- Source comment at `kernel/src/mm/mod.rs:39` (corrected in this PR)
+  previously said "2 MB static allocation"; the actual cost is 4 MB.
 - **Per-core IPC pools scale linearly with `MAX_CPUS = 16`.** The
   endpoint pool (~11 KiB/core) and mailbox (~3.3 KiB/core) together
   consume **~228 KiB** even on a single-CPU boot. If `MAX_CPUS` is
