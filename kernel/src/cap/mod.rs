@@ -13,9 +13,13 @@ pub use table::{CapId, CapObject, CapabilityTable, Rights};
 use crate::kdebug;
 use sotos_common::SysError;
 
+use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
 static CAP_TABLE: Mutex<CapabilityTable> = Mutex::new(CapabilityTable::new());
+
+/// Global monotonic epoch counter for O(1) capability revocation.
+static GLOBAL_EPOCH: AtomicU64 = AtomicU64::new(0);
 
 pub fn init() {
     // The root capability table is ready — it starts empty.
@@ -24,8 +28,11 @@ pub fn init() {
 }
 
 /// Insert a new capability and return its ID.
+///
+/// The capability is stamped with the current global epoch.
 pub fn insert(object: CapObject, rights: Rights, parent: Option<CapId>) -> Option<CapId> {
-    CAP_TABLE.lock().insert(object, rights, parent)
+    let epoch = GLOBAL_EPOCH.load(Ordering::Relaxed);
+    CAP_TABLE.lock().insert(object, rights, parent, epoch)
 }
 
 /// Look up a capability by ID.
@@ -52,5 +59,37 @@ pub fn grant(source_id: u32, rights_mask: u32) -> Result<CapId, SysError> {
     let _obj = table.validate(src, Rights::GRANT)?;
     let (obj, src_rights) = table.lookup(src).ok_or(SysError::InvalidCap)?;
     let new_rights = src_rights.restrict(Rights::from_raw(rights_mask));
-    table.insert(obj, new_rights, Some(src)).ok_or(SysError::OutOfResources)
+    let epoch = GLOBAL_EPOCH.load(Ordering::Relaxed);
+    table
+        .insert(obj, new_rights, Some(src), epoch)
+        .ok_or(SysError::OutOfResources)
+}
+
+/// Attenuate: create a derived cap with narrowed rights (child in CDT).
+pub fn attenuate(cap_id: u32, rights_mask: u32) -> Result<CapId, SysError> {
+    CAP_TABLE
+        .lock()
+        .attenuate(CapId::new(cap_id), Rights::from_raw(rights_mask))
+        .ok_or(SysError::InvalidCap)
+}
+
+/// Interpose: create a proxied cap that routes through `proxy_domain`.
+pub fn interpose(cap_id: u32, proxy_domain: u32, policy: u8) -> Result<CapId, SysError> {
+    CAP_TABLE
+        .lock()
+        .interpose(CapId::new(cap_id), proxy_domain, policy)
+        .ok_or(SysError::InvalidCap)
+}
+
+/// Return the current global epoch value.
+pub fn current_epoch() -> u64 {
+    GLOBAL_EPOCH.load(Ordering::Acquire)
+}
+
+/// Advance the global epoch and return the new value.
+///
+/// All capabilities minted before this new epoch can be rejected
+/// via `check_epoch(cap, new_epoch)` in O(1).
+pub fn advance_epoch() -> u64 {
+    GLOBAL_EPOCH.fetch_add(1, Ordering::Release) + 1
 }

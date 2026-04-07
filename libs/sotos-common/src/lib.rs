@@ -231,6 +231,8 @@ pub enum Syscall {
     TxCommit = 309,
     /// Abort current transaction, rollback changes.
     TxAbort = 310,
+    /// Tier 2 (MultiObject) two-phase commit: PREPARE phase.
+    TxPrepare = 311,
 }
 
 /// Error codes returned by syscalls.
@@ -621,6 +623,32 @@ pub mod sys {
     #[inline(always)]
     pub fn debug_free_frames() -> u64 {
         syscall0(252)
+    }
+
+    /// Drain up to `max` provenance entries from `cpu_id`'s ring into the
+    /// caller-provided buffer at `dest`. Each slot is 48 bytes (matching
+    /// kernel `ProvenanceEntry`). Returns the number of entries written.
+    /// SAFETY: caller must ensure `dest` points at writable storage of at
+    /// least `max * 48` bytes.
+    #[inline(always)]
+    pub unsafe fn provenance_drain(dest: *mut u8, max: u64, cpu_id: u64) -> u64 {
+        syscall3(260, dest as u64, max, cpu_id)
+    }
+
+    /// Inject a synthetic provenance entry into the current CPU's ring.
+    /// `operation` matches `sotos_provenance::Operation` (u16),
+    /// `so_type` matches `sotos_provenance::SoType` (u8). Used by the
+    /// Tier 3 deception demo's attacker simulator to drive the kernel
+    /// ring with semantically meaningful events.
+    #[inline(always)]
+    pub fn provenance_emit(operation: u16, so_type: u8, so_id: u64, owner_domain: u32) {
+        let _ = syscall4(
+            261,
+            operation as u64,
+            so_type as u64,
+            so_id,
+            owner_domain as u64,
+        );
     }
 
     /// Non-blocking read one byte from serial. Returns Some(byte) or None.
@@ -1425,6 +1453,13 @@ pub mod sys {
     pub fn so_create(type_id: u64, policy: u64) -> Result<u64, i64> {
         check_val(syscall2(super::Syscall::SoCreate as u64, type_id, policy))
     }
+    /// Same as `so_create` but also sets the owner_domain field used by
+    /// the kernel provenance recorder. Lets userspace tag activity it
+    /// produces with a domain id so the GraphHunter can group operations.
+    #[inline(always)]
+    pub fn so_create_owned(type_id: u64, policy: u64, owner_domain: u64) -> Result<u64, i64> {
+        check_val(syscall3(super::Syscall::SoCreate as u64, type_id, policy, owner_domain))
+    }
     #[inline(always)]
     pub fn so_invoke(cap: u64, method: u64, arg0: u64, arg1: u64) -> Result<u64, i64> {
         check_val(syscall4(super::Syscall::SoInvoke as u64, cap, method, arg0, arg1))
@@ -1455,7 +1490,9 @@ pub mod sys {
     }
     #[inline(always)]
     pub fn tx_begin(tier: u64) -> Result<u64, i64> {
-        check_val(syscall1(super::Syscall::TxBegin as u64, tier))
+        // Pass domain_cap=0 (root) explicitly so kernel sees a clean rdi/rsi.
+        // Use syscall2 to ensure tier lands in rsi instead of leaving it uninitialized.
+        check_val(syscall2(super::Syscall::TxBegin as u64, 0, tier))
     }
     #[inline(always)]
     pub fn tx_commit(tx_id: u64) -> Result<(), i64> {
@@ -1464,5 +1501,11 @@ pub mod sys {
     #[inline(always)]
     pub fn tx_abort(tx_id: u64) -> Result<(), i64> {
         check_unit(syscall1(super::Syscall::TxAbort as u64, tx_id))
+    }
+    /// Tier 2 (MultiObject) two-phase commit: PREPARE phase.
+    /// Active -> Preparing. Must be followed by `tx_commit` or `tx_abort`.
+    #[inline(always)]
+    pub fn tx_prepare(tx_id: u64) -> Result<(), i64> {
+        check_unit(syscall1(super::Syscall::TxPrepare as u64, tx_id))
     }
 }

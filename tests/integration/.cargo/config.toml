@@ -1,0 +1,4 @@
+# Override the root .cargo/config.toml which targets x86_64-unknown-none.
+# Test crates are host-side test runners that use std.
+[build]
+target = "x86_64-pc-windows-msvc"

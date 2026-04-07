@@ -35,7 +35,18 @@ exclude = [
     "services/drm-test",
     "services/hello-gui",
     "services/styx-test",
+    "services/rump-vfs",
+    "services/attacker",
     "libs/sotos-testlib",
+    "tools/sotctl",
+    "tools/capctl",
+    "tools/txlog",
+    "tools/provenance-viewer",
+    "tools/deception-config",
+    "tests/integration",
+    "tests/security",
+    "tests/posix",
+    "tests/deception",
 ]
 
 [profile.dev]

@@ -1,0 +1,9 @@
+[package]
+name = "sot-lucas"
+version = "0.1.0"
+edition = "2021"
+description = "LUCAS evolution bridge: compatibility layer from existing LUCAS handler to SOT process server"
+
+[workspace]
+
+[dependencies]

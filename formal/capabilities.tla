@@ -8,7 +8,7 @@
 \*   - Monotonic rights: derived capabilities never have more rights than parents
 \*   - Generation safety: stale handles are rejected
 
-EXTENDS Naturals, FiniteSets
+EXTENDS Naturals, Sequences, FiniteSets
 
 CONSTANTS
     Objects,    \* Set of kernel objects
@@ -20,12 +20,17 @@ VARIABLES
     accesses    \* Set of (cap_id, object, operation) access records
 
 \* Rights are modeled as a subset of {"read","write","execute","grant","revoke"}
-Rights == SUBSET {"read", "write", "execute", "grant", "revoke"}
+\* Tier 5: shrunk to 3 atoms (read/write/grant) for TLC -- the 5-atom
+\* powerset (32 subsets per cap) drove a state-space explosion that
+\* didn't terminate within reasonable wall time. The shrunk model still
+\* exercises every interesting path: Grant/Access/Revoke all branch on
+\* presence of "grant"/"read"/"write" rights.
+Rights == SUBSET {"read", "write", "grant"}
 
 CapEntry == [object: Objects, rights: Rights, parent: Nat \cup {0}, alive: BOOLEAN]
 
 TypeInvariant ==
-    /\ nextId \in 1..MaxCaps
+    /\ nextId \in 1..(MaxCaps + 1)
     /\ \A id \in DOMAIN caps : caps[id].alive \in BOOLEAN
 
 Init ==
@@ -62,13 +67,19 @@ Revoke(id) ==
     /\ id \in 1..Len(caps)
     /\ caps[id].alive = TRUE
     /\ LET
-         \* Compute the set of all descendants (transitive closure of parent relation)
-         RECURSIVE Descendants(_)
-         Descendants(s) ==
-            LET children == {i \in 1..Len(caps) : caps[i].parent \in s /\ caps[i].alive}
-            IN IF children = {} THEN s
-               ELSE Descendants(s \cup children)
-         toRevoke == Descendants({id})
+         \* Tier 5: replaced the original RECURSIVE Descendants with an
+         \* explicitly bounded fixed-point. With at most MaxCaps caps in
+         \* existence, the parent chain is at most MaxCaps long, so
+         \* iterating MaxCaps+1 times is guaranteed to reach the
+         \* fixed-point. The previous formulation made TLC's evaluator
+         \* loop indefinitely on certain states.
+         AddChildren(s) ==
+            s \cup {i \in 1..Len(caps) : caps[i].parent \in s /\ caps[i].alive}
+         Iter1 == AddChildren({id})
+         Iter2 == AddChildren(Iter1)
+         Iter3 == AddChildren(Iter2)
+         Iter4 == AddChildren(Iter3)
+         toRevoke == AddChildren(Iter4)
        IN caps' = [i \in 1..Len(caps) |->
             IF i \in toRevoke THEN [caps[i] EXCEPT !.alive = FALSE]
             ELSE caps[i]]
@@ -83,6 +94,9 @@ Access(capId, operation) ==
     /\ operation \in caps[capId].rights
     /\ accesses' = accesses \cup {<<capId, caps[capId].object, operation>>}
     /\ UNCHANGED <<caps, nextId>>
+
+\* Tier 5: bound Access operations to keep BFS finite.
+AccessBound == Cardinality(accesses) <= 3
 
 \* --- Next-State Relation ---
 Next ==

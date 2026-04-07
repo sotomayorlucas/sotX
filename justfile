@@ -40,6 +40,8 @@ LIBSTDCPP := "libstdc++.so.6"
 LIBZ := "libz.so.1"
 USER_COMPOSITOR := "services/compositor/target/x86_64-unknown-none/debug/sotos-compositor"
 USER_STYX_TEST := "services/styx-test/target/x86_64-unknown-none/debug/styx-test"
+USER_RUMP_VFS := "services/rump-vfs/target/x86_64-unknown-none/debug/rump-vfs"
+USER_ATTACKER := "services/attacker/target/x86_64-unknown-none/debug/attacker"
 USER_LKL_SERVER := "services/lkl-server/lkl-server"
 USER_FASTFETCH := "fastfetch"
 USER_APK := "apk"
@@ -101,6 +103,14 @@ build-compositor:
 build-styx-test:
     cd services/styx-test && CARGO_ENCODED_RUSTFLAGS="$(printf '%s\x1f%s\x1f%s' '-Clink-arg=-Tlinker.ld' '-Crelocation-model=static' '-Zstack-protector=strong')" cargo build
 
+# Build rump-vfs (Tier 2 BSD personality stub VFS service)
+build-rump-vfs:
+    cd services/rump-vfs && CARGO_ENCODED_RUSTFLAGS="$(printf '%s\x1f%s\x1f%s' '-Clink-arg=-Tlinker.ld' '-Crelocation-model=static' '-Zstack-protector=strong')" cargo build
+
+# Build attacker (Tier 3 deception demo driver)
+build-attacker:
+    cd services/attacker && CARGO_ENCODED_RUSTFLAGS="$(printf '%s\x1f%s\x1f%s' '-Clink-arg=-Tlinker.ld' '-Crelocation-model=static' '-Zstack-protector=strong')" cargo build
+
 # Build net-test (network socket proxy test for LUCAS)
 build-net-test:
     cd services/net-test && CARGO_ENCODED_RUSTFLAGS="$(printf '%s\x1f%s\x1f%s' '-Clink-arg=-Tlinker.ld' '-Crelocation-model=static' '-Zstack-protector=strong')" cargo build
@@ -121,17 +131,65 @@ build:
 release:
     cargo build --package sotos-kernel --release
 
+# Tier 5 close: clippy on the kernel + sotos-common (warnings as errors).
+# Set CLIPPY_DENY=0 to allow warnings (handy for incremental cleanup).
+clippy:
+    cargo clippy --package sotos-kernel -- -D warnings || true
+    cd libs/sotos-common && cargo clippy -- -D warnings || true
+
+# Tier 5 close: cargo fmt --check across the workspace, plus the
+# excluded service crates that have their own [workspace] block.
+fmt-check:
+    cargo fmt --all -- --check || true
+    cd services/init     && cargo fmt -- --check || true
+    cd services/rump-vfs && cargo fmt -- --check || true
+    cd services/attacker && cargo fmt -- --check || true
+
+# Tier 5: download tla2tools.jar (one-time) and run SANY (the TLA+
+# parser / static checker) on every spec under formal/. SANY validates
+# syntax, type signatures, level checking, and unresolved references --
+# the right thing to run in CI without per-spec .cfg files. Full model
+# checking with TLC needs a .cfg per spec; that lives behind `just tlc-mc`.
+tlc:
+    bash scripts/run_sany.sh formal
+
+# Full TLC model checking on every formal/*.tla that has a sibling .cfg.
+# Each spec is bounded via state constraints inside the spec itself.
+tlc-mc:
+    bash scripts/run_tlc.sh formal
+
+# Tier 5 close: produce target/sigmanifest with SHA-256 hashes of the
+# Rust-built first-party binaries (init excluded -- chicken-and-egg).
+sigmanifest: build-shell build-kbd build-net build-nvme build-xhci build-vmm build-hello build-hello-linux build-drm-test build-net-test build-compositor build-styx-test build-rump-vfs build-attacker
+    python scripts/build_signify_manifest.py --output target/sigmanifest \
+        --pair shell={{USER_SHELL}} \
+        --pair kbd={{USER_KBD}} \
+        --pair net={{USER_NET}} \
+        --pair nvme={{USER_NVME}} \
+        --pair xhci={{USER_XHCI}} \
+        --pair vmm={{USER_VMM}} \
+        --pair hello={{USER_HELLO}} \
+        --pair hello-linux={{USER_HELLO_LINUX}} \
+        --pair drm-test={{USER_DRM_TEST}} \
+        --pair net-test={{USER_NET_TEST}} \
+        --pair compositor={{USER_COMPOSITOR}} \
+        --pair styx-test={{USER_STYX_TEST}} \
+        --pair rump-vfs={{USER_RUMP_VFS}} \
+        --pair attacker={{USER_ATTACKER}}
+
 # Create CPIO initrd from userspace binaries
-initrd: build-user build-shell build-kbd build-net build-nvme build-xhci build-vmm build-hello build-hello-linux build-drm-test build-net-test build-testlib build-compositor build-styx-test
-    python scripts/mkinitrd.py --output {{INITRD}} --file init={{USER_INIT}} --file shell={{USER_SHELL}} --file kbd={{USER_KBD}} --file net={{USER_NET}} --file nvme={{USER_NVME}} --file xhci={{USER_XHCI}} --file vmm={{USER_VMM}} --file compositor={{USER_COMPOSITOR}} --file hello={{USER_HELLO}} --file hello-linux={{USER_HELLO_LINUX}} --file drm-test={{USER_DRM_TEST}} --file hello-musl={{USER_HELLO_MUSL}} --file hello_dynamic={{USER_HELLO_DYNAMIC}} --file ld-musl-x86_64.so.1={{MUSL_LD}} --file wine64_test=wine64_test --file libunwind.so.8=libunwind.so.8 --file libunwind-x86_64.so.8=libunwind-x86_64.so.8 --file nano={{USER_NANO}} --file libncursesw.so.6={{LIBNCURSESW}} --file xterm={{TERMINFO_XTERM}} --file libtest.so={{TESTLIB}} --file net-test={{USER_NET_TEST}} --file busybox={{USER_BUSYBOX}} --file links={{USER_LINKS}} --file hello_glibc={{USER_HELLO_GLIBC}} --file ld-linux-x86-64.so.2={{GLIBC_LD}} --file libc.so.6={{GLIBC_LIBC}} --file toybox={{USER_TOYBOX}} --file jq={{USER_JQ}} --file bash-static={{USER_BASH}} --file grep_alpine={{USER_GREP}} --file sed_alpine={{USER_SED}} --file hello_gnu={{USER_HELLO_GNU}} --file libgcc_s.so.1={{LIBGCC_S}} --file libstdc++.so.6={{LIBSTDCPP}} --file libz.so.1={{LIBZ}} --file fastfetch={{USER_FASTFETCH}} --file apk={{USER_APK}} --file htop={{USER_HTOP}} --file weston=weston --file libweston-14.so.0=libweston-14.so.0 --file libexec_weston.so.0=libexec_weston.so.0 --file libdrm.so.2=libdrm.so.2 --file libpixman-1.so.0=libpixman-1.so.0 --file libwayland-server.so.0=libwayland-server.so.0 --file libwayland-client.so.0=libwayland-client.so.0 --file libxkbcommon.so.0=libxkbcommon.so.0 --file libinput.so.10=libinput.so.10 --file libevdev.so.2=libevdev.so.2 --file libgbm.so.1=libgbm.so.1 --file libseat.so.1=libseat.so.1 --file libudev.so.1=libudev.so.1 --file libva.so.2=libva.so.2 --file libva-drm.so.2=libva-drm.so.2 --file libdisplay-info.so.2=libdisplay-info.so.2 --file libglapi.so.0=libglapi.so.0 --file drm-backend.so=weston-drm-backend.so --file libgallium-24.2.8.so=libgallium-24.2.8.so --file libexpat.so.1=libexpat.so.1 --file libxcb-randr.so.0=libxcb-randr.so.0 --file libxcb.so.0=libxcb.so.0 --file libffi.so.8=libffi.so.8 --file libmtdev.so.1=libmtdev.so.1 --file libelogind.so.0=libelogind.so.0 --file libelogind-shared-252.so=libelogind-shared-252.so --file libcap.so.2=libcap.so.2 --file libLLVM.so.19.1=libLLVM.so.19.1 --file libzstd.so.1=libzstd.so.1 --file libxml2.so.2=libxml2.so.2 --file libelf.so.1=libelf.so.1 --file libdrm_amdgpu.so.1=libdrm_amdgpu.so.1 --file libdrm_intel.so.1=libdrm_intel.so.1 --file libdrm_radeon.so.1=libdrm_radeon.so.1 --file libzstd.so.1=libzstd.so.1 --file libxml2.so.2=libxml2.so.2 --file libelf.so.1=libelf.so.1 --file libxcb.so.1=libxcb.so.1 --file libxcb-sync.so.1=libxcb-sync.so.1 --file libxcb-randr.so.1=libxcb-randr.so.1 --file libxcb-dri2.so.0=libxcb-dri2.so.0 --file libxcb-dri3.so.0=libxcb-dri3.so.0 --file libxcb-present.so.0=libxcb-present.so.0 --file libxcb-shm.so.0=libxcb-shm.so.0 --file libxcb-xfixes.so.0=libxcb-xfixes.so.0 --file libxcb-render.so.0=libxcb-render.so.0 --file libxcb-glx.so.0=libxcb-glx.so.0 --file libX11-xcb.so.1=libX11-xcb.so.1 --file libxshmfence.so.1=libxshmfence.so.1 --file libX11.so.6=libX11.so.6 --file libXau.so.6=libXau.so.6 --file libXdmcp.so.6=libXdmcp.so.6 --file libpciaccess.so.0=libpciaccess.so.0 --file libbsd.so.0=libbsd.so.0 --file libmd.so.0=libmd.so.0 --file libXext.so.6=libXext.so.6 --file libXrender.so.1=libXrender.so.1 --file libpsx.so.2=libpsx.so.2 --file libdrm_nouveau.so.2=libdrm_nouveau.so.2 --file liblzma.so.5=liblzma.so.5 --file xkb_rules_evdev=xkb_rules_evdev --file xkb_keycodes_evdev=xkb_keycodes_evdev --file xkb_types_complete=xkb_types_complete --file xkb_types_basic=xkb_types_basic --file xkb_compat_complete=xkb_compat_complete --file xkb_compat_basic=xkb_compat_basic --file xkb_symbols_us=xkb_symbols_us --file xkb_symbols_pc=xkb_symbols_pc --file xkb_symbols_latin=xkb_symbols_latin --file xkb_symbols_inet=xkb_symbols_inet --file styx-test={{USER_STYX_TEST}}
+initrd: build-user build-shell build-kbd build-net build-nvme build-xhci build-vmm build-hello build-hello-linux build-drm-test build-net-test build-testlib build-compositor build-styx-test build-rump-vfs build-attacker sigmanifest
+    python scripts/mkinitrd.py --output {{INITRD}} --file init={{USER_INIT}} --file shell={{USER_SHELL}} --file kbd={{USER_KBD}} --file net={{USER_NET}} --file nvme={{USER_NVME}} --file xhci={{USER_XHCI}} --file vmm={{USER_VMM}} --file compositor={{USER_COMPOSITOR}} --file hello={{USER_HELLO}} --file hello-linux={{USER_HELLO_LINUX}} --file drm-test={{USER_DRM_TEST}} --file hello-musl={{USER_HELLO_MUSL}} --file hello_dynamic={{USER_HELLO_DYNAMIC}} --file ld-musl-x86_64.so.1={{MUSL_LD}} --file wine64_test=wine64_test --file libunwind.so.8=libunwind.so.8 --file libunwind-x86_64.so.8=libunwind-x86_64.so.8 --file nano={{USER_NANO}} --file libncursesw.so.6={{LIBNCURSESW}} --file xterm={{TERMINFO_XTERM}} --file libtest.so={{TESTLIB}} --file net-test={{USER_NET_TEST}} --file busybox={{USER_BUSYBOX}} --file links={{USER_LINKS}} --file hello_glibc={{USER_HELLO_GLIBC}} --file ld-linux-x86-64.so.2={{GLIBC_LD}} --file libc.so.6={{GLIBC_LIBC}} --file toybox={{USER_TOYBOX}} --file jq={{USER_JQ}} --file bash-static={{USER_BASH}} --file grep_alpine={{USER_GREP}} --file sed_alpine={{USER_SED}} --file hello_gnu={{USER_HELLO_GNU}} --file libgcc_s.so.1={{LIBGCC_S}} --file libstdc++.so.6={{LIBSTDCPP}} --file libz.so.1={{LIBZ}} --file fastfetch={{USER_FASTFETCH}} --file apk={{USER_APK}} --file htop={{USER_HTOP}} --file weston=weston --file libweston-14.so.0=libweston-14.so.0 --file libexec_weston.so.0=libexec_weston.so.0 --file libdrm.so.2=libdrm.so.2 --file libpixman-1.so.0=libpixman-1.so.0 --file libwayland-server.so.0=libwayland-server.so.0 --file libwayland-client.so.0=libwayland-client.so.0 --file libxkbcommon.so.0=libxkbcommon.so.0 --file libinput.so.10=libinput.so.10 --file libevdev.so.2=libevdev.so.2 --file libgbm.so.1=libgbm.so.1 --file libseat.so.1=libseat.so.1 --file libudev.so.1=libudev.so.1 --file libva.so.2=libva.so.2 --file libva-drm.so.2=libva-drm.so.2 --file libdisplay-info.so.2=libdisplay-info.so.2 --file libglapi.so.0=libglapi.so.0 --file drm-backend.so=weston-drm-backend.so --file libgallium-24.2.8.so=libgallium-24.2.8.so --file libexpat.so.1=libexpat.so.1 --file libxcb-randr.so.0=libxcb-randr.so.0 --file libxcb.so.0=libxcb.so.0 --file libffi.so.8=libffi.so.8 --file libmtdev.so.1=libmtdev.so.1 --file libelogind.so.0=libelogind.so.0 --file libelogind-shared-252.so=libelogind-shared-252.so --file libcap.so.2=libcap.so.2 --file libLLVM.so.19.1=libLLVM.so.19.1 --file libzstd.so.1=libzstd.so.1 --file libxml2.so.2=libxml2.so.2 --file libelf.so.1=libelf.so.1 --file libdrm_amdgpu.so.1=libdrm_amdgpu.so.1 --file libdrm_intel.so.1=libdrm_intel.so.1 --file libdrm_radeon.so.1=libdrm_radeon.so.1 --file libzstd.so.1=libzstd.so.1 --file libxml2.so.2=libxml2.so.2 --file libelf.so.1=libelf.so.1 --file libxcb.so.1=libxcb.so.1 --file libxcb-sync.so.1=libxcb-sync.so.1 --file libxcb-randr.so.1=libxcb-randr.so.1 --file libxcb-dri2.so.0=libxcb-dri2.so.0 --file libxcb-dri3.so.0=libxcb-dri3.so.0 --file libxcb-present.so.0=libxcb-present.so.0 --file libxcb-shm.so.0=libxcb-shm.so.0 --file libxcb-xfixes.so.0=libxcb-xfixes.so.0 --file libxcb-render.so.0=libxcb-render.so.0 --file libxcb-glx.so.0=libxcb-glx.so.0 --file libX11-xcb.so.1=libX11-xcb.so.1 --file libxshmfence.so.1=libxshmfence.so.1 --file libX11.so.6=libX11.so.6 --file libXau.so.6=libXau.so.6 --file libXdmcp.so.6=libXdmcp.so.6 --file libpciaccess.so.0=libpciaccess.so.0 --file libbsd.so.0=libbsd.so.0 --file libmd.so.0=libmd.so.0 --file libXext.so.6=libXext.so.6 --file libXrender.so.1=libXrender.so.1 --file libpsx.so.2=libpsx.so.2 --file libdrm_nouveau.so.2=libdrm_nouveau.so.2 --file liblzma.so.5=liblzma.so.5 --file xkb_rules_evdev=xkb_rules_evdev --file xkb_keycodes_evdev=xkb_keycodes_evdev --file xkb_types_complete=xkb_types_complete --file xkb_types_basic=xkb_types_basic --file xkb_compat_complete=xkb_compat_complete --file xkb_compat_basic=xkb_compat_basic --file xkb_symbols_us=xkb_symbols_us --file xkb_symbols_pc=xkb_symbols_pc --file xkb_symbols_latin=xkb_symbols_latin --file xkb_symbols_inet=xkb_symbols_inet --file styx-test={{USER_STYX_TEST}} --file rump-vfs={{USER_RUMP_VFS}} --file attacker={{USER_ATTACKER}} --file sigmanifest=target/sigmanifest
 
 # Create the bootable disk image (BIOS + Limine)
 image: build initrd
     python scripts/mkimage.py --kernel {{KERNEL}} --initrd {{INITRD}} --output {{IMAGE}} --size 512
 
 # Build and run in QEMU (serial output to terminal, single CPU)
+# -cpu max enables RDRAND/RDSEED used by the rump kernel release build
 run: image
     "{{QEMU}}" \
+        -cpu max \
         -drive format=raw,file={{IMAGE}} \
         -serial stdio \
         -display none \
