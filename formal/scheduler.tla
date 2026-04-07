@@ -130,7 +130,7 @@ SingleExecution ==
 
 \* No thread in the run queue is also running.
 QueueConsistency ==
-    \A c \in CPUs, i \in 1..Len(runQueues[c]) :
+    \A c \in CPUs : \A i \in 1..Len(runQueues[c]) :
         threadState[runQueues[c][i]] = "ready"
 
 \* --- Liveness Properties ---

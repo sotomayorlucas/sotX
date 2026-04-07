@@ -8,7 +8,7 @@
 \*   - Monotonic rights: derived capabilities never have more rights than parents
 \*   - Generation safety: stale handles are rejected
 
-EXTENDS Naturals, FiniteSets
+EXTENDS Naturals, Sequences, FiniteSets
 
 CONSTANTS
     Objects,    \* Set of kernel objects
