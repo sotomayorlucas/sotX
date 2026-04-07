@@ -6,3 +6,4 @@ edition = "2021"
 [workspace]
 
 [dependencies]
+sot-crossbow = { path = "../../../libs/sot-crossbow" }

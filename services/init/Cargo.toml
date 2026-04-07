@@ -3,6 +3,8 @@ name = "sotos-init"
 version = "0.1.0"
 edition = "2021"
 
+[workspace]
+
 [dependencies]
 sotos-common = { path = "../../libs/sotos-common" }
 sotos-deception = { path = "../../personality/common/deception" }
@@ -11,6 +13,7 @@ sot-zfs = { path = "../../personality/bsd/zfs" }
 sot-hammer2 = { path = "../../personality/bsd/hammer2" }
 sot-bhyve = { path = "../../personality/bsd/bhyve" }
 sot-network = { path = "../../personality/bsd/network" }
+sot-crossbow = { path = "../../libs/sot-crossbow" }
 sotos-pci = { path = "../../libs/sotos-pci" }
 sotos-virtio = { path = "../../libs/sotos-virtio" }
 sotos-objstore = { path = "../../libs/sotos-objstore" }

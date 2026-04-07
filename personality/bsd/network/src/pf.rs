@@ -16,6 +16,8 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::net::{Ipv4Addr, SocketAddrV4};
 
+use sot_crossbow::{VirtualSwitch, DEFAULT_BW_LIMIT_KBPS};
+
 /// Protocol selector for PF rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Proto {
@@ -188,6 +190,10 @@ pub struct PfInterposer {
     /// Log buffer (ring -- oldest entries evicted when full).
     log: VecDeque<LogEntry>,
     log_max: usize,
+    /// Crossbow virtual switch -- one VNIC per deception domain so
+    /// we can enforce per-domain bandwidth limits in addition to
+    /// the rule-level Pass / Block decision.
+    pub crossbow: VirtualSwitch,
 }
 
 impl PfInterposer {
@@ -198,6 +204,7 @@ impl PfInterposer {
             log: VecDeque::new(),
             log_max: 1024,
             deception_domains: Vec::new(),
+            crossbow: VirtualSwitch::new(),
         }
     }
 
@@ -228,15 +235,41 @@ impl PfInterposer {
     }
 
     /// Mark a domain for deception routing.
+    ///
+    /// Also provisions a Crossbow VNIC for this domain so subsequent
+    /// packets are subject to a per-domain bandwidth limit. The VNIC
+    /// allocation is best-effort: if the switch is full we still
+    /// honor the deception bit, the packet just won't have a port.
     pub fn enable_deception(&mut self, domain: DomainId) {
         if !self.deception_domains.contains(&domain) {
             self.deception_domains.push(domain);
+            // Best-effort: ignore PortsExhausted -- the deception
+            // path still works without a dedicated VNIC, you just
+            // lose the rate limit.
+            let _ = self
+                .crossbow
+                .provision(domain as u64, DEFAULT_BW_LIMIT_KBPS);
         }
     }
 
-    /// Remove a domain from deception mode.
+    /// Remove a domain from deception mode and free its VNIC.
     pub fn disable_deception(&mut self, domain: DomainId) {
         self.deception_domains.retain(|&d| d != domain);
+        if let Some(port) = self.crossbow.lookup_domain(domain as u64) {
+            self.crossbow.revoke(port);
+        }
+    }
+
+    /// Alias for `enable_deception` matching the Crossbow naming
+    /// convention used elsewhere in the codebase.
+    pub fn deception_enter(&mut self, domain: DomainId) {
+        self.enable_deception(domain);
+    }
+
+    /// Alias for `disable_deception` matching the Crossbow naming
+    /// convention used elsewhere in the codebase.
+    pub fn deception_exit(&mut self, domain: DomainId) {
+        self.disable_deception(domain);
     }
 
     /// Returns true if the domain is in deception mode.
