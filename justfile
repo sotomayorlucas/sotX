@@ -105,11 +105,14 @@ build-styx-test:
 build-net-test:
     cd services/net-test && CARGO_ENCODED_RUSTFLAGS="$(printf '%s\x1f%s\x1f%s' '-Clink-arg=-Tlinker.ld' '-Crelocation-model=static' '-Zstack-protector=strong')" cargo build
 
-# Build test shared library (for dynamic linking)
+# Build test shared library (for dynamic linking).
+# Built in release mode to avoid pulling in debug-only `core::panicking::*`
+# pointer-check imports, and with `initial-exec` so TLS accesses emit
+# `R_X86_64_TPOFF64` (instead of dynamic `__tls_get_addr` calls).
 build-testlib:
-    cd libs/sotos-testlib && CARGO_ENCODED_RUSTFLAGS="$(printf '%s' '-Crelocation-model=pic')" cargo build
+    cd libs/sotos-testlib && CARGO_ENCODED_RUSTFLAGS="$(printf '%s\x1f%s' '-Crelocation-model=pic' '-Ztls-model=initial-exec')" cargo build --release
     python scripts/mksharedlib.py \
-        --archive libs/sotos-testlib/target/x86_64-unknown-none/debug/libsotos_testlib.a \
+        --archive libs/sotos-testlib/target/x86_64-unknown-none/release/libsotos_testlib.a \
         --linker-script libs/sotos-testlib/linker-so.ld \
         --output {{TESTLIB}}
 
