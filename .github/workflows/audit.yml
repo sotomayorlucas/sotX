@@ -1,0 +1,45 @@
+name: Security Audit
+
+on:
+  push:
+    branches:
+      - sotBSD
+      - main
+  pull_request:
+
+jobs:
+  audit:
+    name: ${{ matrix.tool }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - tool: cargo-audit
+            run: cargo audit
+          - tool: cargo-deny
+            run: cargo deny check
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # cargo-audit and cargo-deny only inspect Cargo.lock / Cargo.toml,
+      # so they need the nightly channel from rust-toolchain.toml but not
+      # the build-std components (rust-src, llvm-tools, x86_64-unknown-none).
+      - name: Install Rust nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo bin
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin
+          key: ${{ runner.os }}-${{ matrix.tool }}-bin-v1
+
+      - name: Install ${{ matrix.tool }}
+        run: |
+          if ! command -v ${{ matrix.tool }} >/dev/null 2>&1; then
+            cargo install ${{ matrix.tool }} --locked
+          fi
+
+      - name: Run ${{ matrix.tool }}
+        run: ${{ matrix.run }}
