@@ -190,7 +190,7 @@ fn finish_switch() {
 // Per-core run queues
 // ---------------------------------------------------------------------------
 
-use sotos_common::MAX_CPUS;
+use sotos_common::{MAX_CPUS, MAX_THREAD_NOTIFY};
 
 struct CpuQueue {
     /// Multi-level priority queues: index 0 = highest priority (realtime).
@@ -636,6 +636,128 @@ fn spawn_user_opt(user_rip: u64, user_rsp: u64, cr3: u64, redirect_ep: Option<u3
     tid
 }
 
+// ---------------------------------------------------------------------------
+// Thread death notifications (SYS_THREAD_NOTIFY support)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy)]
+struct ThreadNotifyEntry {
+    in_use: bool,
+    tid: u32,
+    notify_handle: u32, // PoolHandle::raw() of the target Notification.
+}
+
+impl ThreadNotifyEntry {
+    const fn empty() -> Self {
+        Self { in_use: false, tid: 0, notify_handle: 0 }
+    }
+}
+
+static THREAD_NOTIFY: Mutex<[ThreadNotifyEntry; MAX_THREAD_NOTIFY]> =
+    Mutex::new([ThreadNotifyEntry::empty(); MAX_THREAD_NOTIFY]);
+
+/// Check whether a thread has exited (slot gone or state == Dead).
+fn is_thread_dead(tid: ThreadId) -> bool {
+    let sched = SCHEDULER.lock();
+    match sched.slot_of(tid) {
+        None => true,
+        Some(slot) => match sched.threads.get_by_index(slot) {
+            None => true,
+            Some(t) => t.state == ThreadState::Dead,
+        },
+    }
+}
+
+/// Register a death notification: when `tid` exits, the kernel will signal
+/// `notify_handle`. Multiple registrations per tid are allowed (each fires
+/// independently). Returns `Err(OutOfResources)` if the table is full.
+///
+/// Race handling: we re-check liveness AFTER writing the table entry. If
+/// the thread died between spawn and registration, we either (a) catch it
+/// in the pre-check and signal immediately, or (b) on_thread_exit already
+/// ran past an empty table — the post-check catches this and fires. This
+/// is the standard "double-check for missed wakeup" pattern and is safe
+/// because on_thread_exit walks the table with its own THREAD_NOTIFY lock.
+pub fn register_thread_notify(
+    tid: ThreadId,
+    notify_handle: PoolHandle,
+) -> Result<(), sotos_common::SysError> {
+    // Fast path: if the thread has clearly already exited, signal and
+    // skip writing to the table.
+    if is_thread_dead(tid) {
+        let _ = crate::ipc::notify::signal(notify_handle);
+        return Ok(());
+    }
+
+    // Install the entry.
+    {
+        let mut tbl = THREAD_NOTIFY.lock();
+        let mut found = false;
+        for slot in tbl.iter_mut() {
+            if !slot.in_use {
+                *slot = ThreadNotifyEntry {
+                    in_use: true,
+                    tid: tid.0,
+                    notify_handle: notify_handle.raw(),
+                };
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return Err(sotos_common::SysError::OutOfResources);
+        }
+    }
+
+    // Post-check: if the thread died while we were inserting, on_thread_exit
+    // might have already walked an older version of the table and missed us.
+    // Close the race by re-checking and firing ourselves if needed.
+    if is_thread_dead(tid) {
+        // Claim the entry ourselves to prevent a double fire.
+        let mut tbl = THREAD_NOTIFY.lock();
+        for slot in tbl.iter_mut() {
+            if slot.in_use
+                && slot.tid == tid.0
+                && slot.notify_handle == notify_handle.raw()
+            {
+                slot.in_use = false;
+                drop(tbl);
+                let _ = crate::ipc::notify::signal(notify_handle);
+                return Ok(());
+            }
+        }
+        // on_thread_exit already consumed our entry — it signaled.
+    }
+    Ok(())
+}
+
+/// Hook fired when a thread transitions to Dead. Walks the death-notify
+/// table and signals every notification whose registered tid matches.
+/// Each fired entry is removed (one-shot semantics — userspace must
+/// re-register for the respawned thread).
+///
+/// Lock ordering: THREAD_NOTIFY first; `notify::signal()` runs AFTER the
+/// table lock drops because it acquires NOTIFICATIONS (and may call
+/// `sched::wake`, which re-enters SCHEDULER).
+pub fn on_thread_exit(dead_tid: ThreadId) {
+    let mut to_signal: [u32; MAX_THREAD_NOTIFY] = [0; MAX_THREAD_NOTIFY];
+    let mut count = 0usize;
+    {
+        let mut tbl = THREAD_NOTIFY.lock();
+        for slot in tbl.iter_mut() {
+            if slot.in_use && slot.tid == dead_tid.0 {
+                to_signal[count] = slot.notify_handle;
+                count += 1;
+                slot.in_use = false;
+            }
+        }
+    }
+    for i in 0..count {
+        let handle = crate::pool::PoolHandle::from_raw(to_signal[i]);
+        let _ = crate::ipc::notify::signal(handle);
+    }
+}
+
 /// Terminate the current thread and switch away.
 pub fn exit_current() -> ! {
     // Check for redirect endpoint BEFORE acquiring scheduler lock,
@@ -678,16 +800,26 @@ pub fn exit_current() -> ! {
         let ep_handle = crate::pool::PoolHandle::from_raw(ep_raw);
         let _ = crate::ipc::endpoint::send(ep_handle, exit_msg);
     }
-    // Now mark the thread as Dead.
-    {
+    // Now mark the thread as Dead and capture its tid for the death-notify hook.
+    let dead_tid = {
         let percpu = percpu::current_percpu();
         let idx = percpu.current_thread;
         if idx != usize::MAX {
             let mut sched = SCHEDULER.lock();
             if let Some(t) = sched.threads.get_mut_by_index(idx as u32) {
                 t.state = ThreadState::Dead;
+                Some(t.id)
+            } else {
+                None
             }
+        } else {
+            None
         }
+    };
+    // Fire any registered death notifications. The hook acquires its own
+    // table lock and notification lock; SCHEDULER must already be released.
+    if let Some(tid) = dead_tid {
+        on_thread_exit(tid);
     }
     schedule();
     crate::arch::halt_loop();
@@ -1543,6 +1675,10 @@ pub fn tick() {
                 if t.cpu_tick_limit > 0 && t.cpu_ticks >= t.cpu_tick_limit {
                     t.state = ThreadState::Dead;
                     resched = true;
+                    // NOTE: death-notify hook is intentionally NOT called here.
+                    // We're inside the timer ISR holding the SCHEDULER lock; firing
+                    // notifications would nest into NOTIFICATIONS + SCHEDULER again.
+                    // Only graceful exits via exit_current() invoke on_thread_exit.
                 }
 
                 if t.timeslice > 0 {

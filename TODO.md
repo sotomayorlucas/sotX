@@ -482,6 +482,23 @@ and in real CI environments.
       enforcement path, so the software model in `services/sot-cheri`
       becomes a hardware-checked one.
 
+### Tier-6 SMF supervisor -- known limitations
+
+The SMF supervisor introduced in PR #51 (`services/init` /
+`sotos-init`) detects service deaths via `SYS_THREAD_NOTIFY` (143),
+which the kernel fires from `sched::on_thread_exit` in the normal
+`exit_current()` path. **However**, the timer-ISR resource-limit kill
+path (`kernel/src/sched/mod.rs::tick`) intentionally does NOT call
+`on_thread_exit` to avoid lock-order inversion (NOTIFICATIONS lock
+inside an interrupt handler). Consequence: services killed by the
+resource enforcer (CPU tick or memory page quotas) will NOT trigger
+SMF respawn -- the supervisor sees them as still alive until they
+actually run again.
+
+Workaround: services with strict resource limits should be marked
+`RestartPolicy::Always` so the next poll cycle catches them via the
+passive liveness check.
+
 ---
 
 ## Completed

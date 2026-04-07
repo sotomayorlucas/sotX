@@ -144,6 +144,16 @@ pub(super) const SYS_THREAD_INFO: u64 = 140;
 pub(super) const SYS_RESOURCE_LIMIT: u64 = 141;
 pub(super) const SYS_THREAD_COUNT: u64 = 142;
 
+/// Syscall number — register a death notification for a target thread.
+/// rdi = thread_cap (READ), rsi = notification_cap (WRITE).
+/// When the target thread exits, the kernel will signal the notification.
+/// Used by SMF-style supervisors for active respawn.
+pub(super) const SYS_THREAD_NOTIFY: u64 = 143;
+/// Syscall number — non-blocking poll of a notification's pending bit.
+/// rdi = notify_cap (READ). Returns 1 if pending (and clears), 0 otherwise.
+/// Used by supervisors that need to check many notifications without blocking.
+pub(super) const SYS_NOTIFY_POLL: u64 = 144;
+
 /// SOT Exokernel syscalls (300-310).
 pub(super) const SYS_SO_CREATE: u64 = 300;
 pub(super) const SYS_SO_INVOKE: u64 = 301;

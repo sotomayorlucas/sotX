@@ -17,6 +17,7 @@ members = [
     "libs/sotos-gui",
     "libs/sotos-lua",
     "libs/sotos-pkg",
+    "libs/sot-fma",
     "libs/sot-crossbow",
 ]
 exclude = [
@@ -44,6 +45,7 @@ exclude = [
     "services/sot-pkg",
     "services/sot-carp",
     "services/sot-cheri",
+    "services/abi-fuzz",
     "libs/sotos-testlib",
     "tools/sotctl",
     "tools/capctl",

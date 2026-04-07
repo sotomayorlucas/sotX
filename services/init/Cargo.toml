@@ -3,12 +3,17 @@ name = "sotos-init"
 version = "0.1.0"
 edition = "2021"
 
+# Standalone (not part of any cargo workspace). Required when building
+# inside a git worktree, where the parent .claude/worktrees/.../Cargo.toml
+# excludes services/init. Without this block, cargo walks up to the main
+# repo's Cargo.toml and reports a path mismatch.
 [workspace]
 
 [dependencies]
 sotos-common = { path = "../../libs/sotos-common" }
 sotos-deception = { path = "../../personality/common/deception" }
 sotos-provenance = { path = "../../personality/common/provenance" }
+sot-fma = { path = "../../libs/sot-fma" }
 sot-zfs = { path = "../../personality/bsd/zfs" }
 sot-hammer2 = { path = "../../personality/bsd/hammer2" }
 sot-bhyve = { path = "../../personality/bsd/bhyve" }

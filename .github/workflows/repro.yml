@@ -1,0 +1,177 @@
+name: reproducible-image
+
+# Verifies that scripts/mkimage.py produces a byte-identical disk image when
+# run with the same inputs on both Linux and Windows runners. This protects
+# against accidental introduction of timestamps, random GUIDs, locale-
+# dependent ordering, or other non-determinism in the image builder.
+#
+# We use deterministic stub binaries for the kernel and other bootloader
+# inputs so this workflow tests mkimage.py in isolation: cross-platform
+# reproducibility of the kernel itself is a separate concern (rustc remap-
+# path-prefix, Cargo.lock pinning, etc.) handled elsewhere.
+
+on:
+  push:
+    branches: [main, sotBSD]
+  pull_request:
+    branches: [main, sotBSD]
+
+permissions:
+  contents: read
+
+jobs:
+  build-linux:
+    name: build image on ubuntu-latest
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Stage deterministic stub inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p limine
+          mkdir -p target/x86_64-unknown-none/debug
+          # 1 MiB of 0xCC (a recognisable fill) for the kernel stub.
+          python -c "open('target/x86_64-unknown-none/debug/sotos-kernel','wb').write(b'\\xcc'*1048576)"
+          # Stub limine BIOS bootloader files. Sizes match nothing real but
+          # are stable across runs.
+          python -c "open('limine/limine-bios.sys','wb').write(b'L'*65536)"
+          python -c "open('limine/BOOTX64.EFI','wb').write(b'E'*32768)"
+          # NB: do NOT stage limine.exe — that would invoke a non-Python
+          # tool whose output is not guaranteed reproducible across hosts.
+          # mkimage.py prints a warning and continues without it.
+
+      - name: Build image with mkimage.py
+        env:
+          SOURCE_DATE_EPOCH: "1700000000"
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/mkimage.py --size 16
+          sha256sum target/sotos.img | tee linux.sha256
+
+      - name: Verify back-to-back determinism
+        env:
+          SOURCE_DATE_EPOCH: "1700000000"
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp target/sotos.img target/sotos.img.first
+          python scripts/mkimage.py --size 16
+          cmp target/sotos.img target/sotos.img.first
+          echo "Two consecutive runs produced identical bytes."
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sotos-img-linux
+          path: target/sotos.img
+          if-no-files-found: error
+
+      - name: Upload hash
+        uses: actions/upload-artifact@v4
+        with:
+          name: sotos-sha-linux
+          path: linux.sha256
+          if-no-files-found: error
+
+  build-windows:
+    name: build image on windows-latest
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Stage deterministic stub inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p limine
+          mkdir -p target/x86_64-unknown-none/debug
+          python -c "open('target/x86_64-unknown-none/debug/sotos-kernel','wb').write(b'\\xcc'*1048576)"
+          python -c "open('limine/limine-bios.sys','wb').write(b'L'*65536)"
+          python -c "open('limine/BOOTX64.EFI','wb').write(b'E'*32768)"
+
+      - name: Build image with mkimage.py
+        env:
+          SOURCE_DATE_EPOCH: "1700000000"
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/mkimage.py --size 16
+          sha256sum target/sotos.img | tee windows.sha256
+
+      - name: Verify back-to-back determinism
+        env:
+          SOURCE_DATE_EPOCH: "1700000000"
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp target/sotos.img target/sotos.img.first
+          python scripts/mkimage.py --size 16
+          cmp target/sotos.img target/sotos.img.first
+          echo "Two consecutive runs produced identical bytes."
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sotos-img-windows
+          path: target/sotos.img
+          if-no-files-found: error
+
+      - name: Upload hash
+        uses: actions/upload-artifact@v4
+        with:
+          name: sotos-sha-windows
+          path: windows.sha256
+          if-no-files-found: error
+
+  compare:
+    name: compare linux vs windows hashes
+    needs: [build-linux, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Linux image
+        uses: actions/download-artifact@v4
+        with:
+          name: sotos-img-linux
+          path: linux
+
+      - name: Download Windows image
+        uses: actions/download-artifact@v4
+        with:
+          name: sotos-img-windows
+          path: windows
+
+      - name: Compare SHA-256 hashes
+        shell: bash
+        run: |
+          set -euo pipefail
+          linux_sha=$(sha256sum linux/sotos.img  | awk '{print $1}')
+          windows_sha=$(sha256sum windows/sotos.img | awk '{print $1}')
+          echo "Linux   sotos.img sha256 = $linux_sha"
+          echo "Windows sotos.img sha256 = $windows_sha"
+          if [ "$linux_sha" != "$windows_sha" ]; then
+            echo "ERROR: cross-platform hash mismatch — mkimage.py is not reproducible." >&2
+            exit 1
+          fi
+          echo "Cross-platform reproducibility verified."
+
+      - name: Byte-level diff (sanity)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmp linux/sotos.img windows/sotos.img
+          echo "Linux and Windows images are byte-identical."
