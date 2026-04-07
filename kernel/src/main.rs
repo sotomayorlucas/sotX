@@ -196,6 +196,11 @@ extern "C" fn kmain() -> ! {
 
     // Capability system.
     cap::init();
+    // Tier 5 KARL: seed the channel/notification/endpoint pools so
+    // their visible IDs drift across reboots, just like cap IDs.
+    ipc::channel::init();
+    ipc::notify::init();
+    ipc::endpoint::init();
     kprintln!("[sot] === Project STYX exokernel layer active ===");
     kinfo!(sotos_common::trace::cat::IPC, "[ok] Capabilities");
 

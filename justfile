@@ -131,6 +131,14 @@ build:
 release:
     cargo build --package sotos-kernel --release
 
+# Tier 5 production: generate a real Ed25519 signing key for signify.
+# Default OUTPUT lands in ~/.secrets/sotbsd-signify.key with mode 0600.
+# After generation, set SIGNIFY_KEY=<that path> in your environment so
+# subsequent `just sigmanifest` runs use the production key instead of
+# the deterministic dev seed embedded in build_signify_manifest.py.
+signify-keygen OUTPUT="$HOME/.secrets/sotbsd-signify.key":
+    python scripts/signify_keygen.py --output {{OUTPUT}}
+
 # Tier 5 close: clippy on the kernel + sotos-common (warnings as errors).
 # Set CLIPPY_DENY=0 to allow warnings (handy for incremental cleanup).
 clippy:

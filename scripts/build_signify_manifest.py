@@ -7,12 +7,28 @@ each host file, signs the resulting manifest with Ed25519, and writes
 the binary manifest at the requested output path. The manifest is
 consumed by `services/init/src/signify.rs::verify_manifest`.
 
-The signing key is derived deterministically from a fixed seed so dev
-builds are reproducible without key management. For production
-deployments the seed should be replaced with a real keypair held
-offline; the public key would still be committed for verification.
+# Key sources (production vs dev)
 
-Format v2 (little-endian):
+The script picks the signing key in this order:
+
+  1. **`SIGNIFY_KEY` env var** (production path) -- absolute path to a
+     32-byte raw Ed25519 private key file held OUTSIDE the repo on a
+     hardware token, encrypted volume, or build server secret store.
+     Use `just signify-keygen PATH=<path>` to generate one.
+
+  2. **`--key <path>` CLI flag** (same as #1, override).
+
+  3. **Deterministic dev seed** (default) -- the keypair is derived
+     from a fixed string via SHA-256. Reproducible across builds, but
+     anyone with the source can forge a manifest. Marked clearly in
+     the script's stdout so dev builds aren't confused with prod.
+
+The pubkey embedded into init via `services/init/src/sigkey_generated.rs`
+matches whichever key was used at build time. A mismatch between the
+key used to sign and the pubkey baked into init causes
+`signify: pubkey != embedded SIGKEY_PUB` at boot.
+
+# Format v2 (little-endian)
 
     magic       u32   = 0x53494732  ("SIG2")
     entry_count u32
@@ -29,15 +45,20 @@ self-describing aid. Init's verifier compares the embedded pubkey
 against a const baked into the binary at compile time, rejecting any
 attempt to swap the manifest+pubkey together.
 
-Side effects:
-  * `services/init/src/sigkey_generated.rs` is rewritten with the
-    derived public key as a Rust const. init's signify module includes
-    this file via `include!`.
+# Side effects
 
-Usage:
+  * `services/init/src/sigkey_generated.rs` is rewritten with the
+    derived/loaded public key as a Rust const. init's signify module
+    includes this file via `include!`.
+
+# Usage
+
     python scripts/build_signify_manifest.py \
         --output target/sigmanifest \
         --pair name1=path1 name2=path2 ...
+
+    SIGNIFY_KEY=/secrets/sotbsd-signify.key \
+        python scripts/build_signify_manifest.py ...
 """
 import argparse
 import hashlib
@@ -65,6 +86,36 @@ def derive_keypair(seed_text: bytes) -> tuple[Ed25519PrivateKey, bytes]:
         format=serialization.PublicFormat.Raw,
     )
     return sk, pk_bytes
+
+
+def load_keypair_from_file(path: str) -> tuple[Ed25519PrivateKey, bytes]:
+    """Load a 32-byte raw Ed25519 private key from a file held offline."""
+    with open(path, "rb") as f:
+        priv = f.read()
+    if len(priv) != 32:
+        raise ValueError(
+            f"signify: key file {path} must be exactly 32 bytes (got {len(priv)})"
+        )
+    sk = Ed25519PrivateKey.from_private_bytes(priv)
+    pk_bytes = sk.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    return sk, pk_bytes
+
+
+def select_keypair(cli_key: str | None) -> tuple[Ed25519PrivateKey, bytes, str]:
+    """Pick the signing key per the precedence rules. Returns
+    `(sk, pk_bytes, source_label)` for diagnostic logging."""
+    env_key = os.environ.get("SIGNIFY_KEY")
+    if cli_key:
+        sk, pk = load_keypair_from_file(cli_key)
+        return sk, pk, f"file ({cli_key})"
+    if env_key:
+        sk, pk = load_keypair_from_file(env_key)
+        return sk, pk, f"env SIGNIFY_KEY ({env_key})"
+    sk, pk = derive_keypair(SIGKEY_SEED_TEXT)
+    return sk, pk, "DEV SEED (insecure -- do not use in production)"
 
 
 def write_pubkey_rs(path: str, pk_bytes: bytes) -> None:
@@ -100,6 +151,12 @@ def main() -> int:
         default=[],
         help="initrd_name=host_path pair (repeatable)",
     )
+    ap.add_argument(
+        "--key",
+        default=None,
+        help="Path to a 32-byte raw Ed25519 private key (production). "
+             "Overrides SIGNIFY_KEY env var.",
+    )
     args = ap.parse_args()
 
     pairs = []
@@ -110,7 +167,12 @@ def main() -> int:
         name, path = spec.split("=", 1)
         pairs.append((name, path))
 
-    sk, pk_bytes = derive_keypair(SIGKEY_SEED_TEXT)
+    try:
+        sk, pk_bytes, key_source = select_keypair(args.key)
+    except (OSError, ValueError) as e:
+        print(f"signify: {e}", file=sys.stderr)
+        return 5
+    print(f"signify: signing with key from {key_source}")
 
     # Build the signed body (everything before pubkey + signature).
     body = bytearray()

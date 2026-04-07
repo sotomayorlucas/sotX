@@ -32,6 +32,16 @@ impl Notification {
 
 static NOTIFICATIONS: TicketMutex<Pool<Notification>> = TicketMutex::new(Pool::new());
 
+/// Tier 5 KARL: burn padding notification slots so visible IDs drift
+/// across reboots. Called once from kmain.
+pub fn init() {
+    let burn = ((crate::karl::boot_seed() >> 8) & 0xF) as usize;
+    let mut ns = NOTIFICATIONS.lock();
+    for _ in 0..burn {
+        let _ = ns.alloc(Notification::new());
+    }
+}
+
 /// Allocate a new notification.
 pub fn create() -> Option<NotifyId> {
     let mut ns = NOTIFICATIONS.lock();
