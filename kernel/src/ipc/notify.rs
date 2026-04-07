@@ -95,6 +95,24 @@ pub fn wait(handle: PoolHandle) -> Result<(), SysError> {
     }
 }
 
+/// Non-blocking check: if pending, clear it and return true.
+/// If not pending, return false without blocking.
+/// Used by supervisors that poll many notifications without sleeping.
+pub fn take_pending(handle: PoolHandle) -> u64 {
+    let mut ns = NOTIFICATIONS.lock();
+    match ns.get_mut(handle) {
+        Some(n) => {
+            if n.pending {
+                n.pending = false;
+                1
+            } else {
+                0
+            }
+        }
+        None => 0,
+    }
+}
+
 /// Action decided under NOTIFICATIONS lock, executed after drop.
 enum SignalAction {
     /// A waiter was present — wake it.

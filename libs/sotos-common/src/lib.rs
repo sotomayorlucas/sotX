@@ -201,6 +201,13 @@ pub enum Syscall {
     ResourceLimit = 141,
     /// Get total live thread count.
     ThreadCount = 142,
+    /// Register a death notification for a target thread.
+    /// rdi = thread_cap (READ), rsi = notification_cap (WRITE).
+    /// Kernel signals the notification when the thread transitions to Dead.
+    ThreadNotify = 143,
+    /// Non-blocking poll of a notification's pending bit.
+    /// rdi = notification_cap (READ). Returns 1 if pending (and clears), 0 otherwise.
+    NotifyPoll = 144,
     /// Combined send+receive with timeout (ticks in extra reg).
     CallTimeout = 135,
     /// Receive with timeout (ep_cap in rdi[31:0], timeout in rdi[63:32]).
@@ -1418,6 +1425,32 @@ pub mod sys {
     #[inline(always)]
     pub fn thread_count() -> u64 {
         syscall0(super::Syscall::ThreadCount as u64)
+    }
+
+    /// Register a death notification for a target thread.
+    ///
+    /// When the kernel-tracked thread referred to by `thread_cap` transitions
+    /// to the Dead state (graceful exit via SYS_THREAD_EXIT), the notification
+    /// referred to by `notify_cap` will be signaled (pending bit set, or
+    /// any blocked waiter woken).
+    ///
+    /// The kernel uses one-shot semantics: a single registration fires exactly
+    /// once. If the supervisor wants to track a respawned thread, it must
+    /// re-register against the new tid.
+    ///
+    /// `thread_cap` must be a Thread capability with READ rights;
+    /// `notify_cap` must be a Notification capability with WRITE rights.
+    #[inline(always)]
+    pub fn thread_notify(thread_cap: u64, notify_cap: u64) -> Result<(), i64> {
+        check_unit(syscall2(super::Syscall::ThreadNotify as u64, thread_cap, notify_cap))
+    }
+
+    /// Non-blocking poll of a notification's pending bit.
+    /// Returns true if the notification was pending (and clears it), false otherwise.
+    /// Used by supervisors that need to check many notifications without sleeping.
+    #[inline(always)]
+    pub fn notify_poll(notify_cap: u64) -> bool {
+        syscall1(super::Syscall::NotifyPoll as u64, notify_cap) != 0
     }
 
     /// Set the FS_BASE MSR for the current thread (TLS support).
