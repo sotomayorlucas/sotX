@@ -85,6 +85,7 @@ mod wine_diag;
 mod boot_tests;
 mod sot_types;
 mod sot_bridge;
+mod crossbow_demo;
 mod deception_demo;
 mod fma_demo;
 mod tier4_demo;
@@ -354,6 +355,14 @@ pub extern "C" fn _start() -> ! {
     // bhyve (bare-metal Intel CPUID/MSR spoofing), and PF firewall
     // (capability interposer with deception override).
     tier4_demo::run();
+
+    // --- Phase 6e+: Crossbow VNIC primitive demo ---
+    // Provisions VNICs for three deception domains, drives a small
+    // route burst to trip the per-port rate limiter, revokes and
+    // re-provisions to confirm slot reuse. Companion to PfInterposer.
+    if !crossbow_demo::run() {
+        print(b"!! crossbow_demo failed -- continuing anyway\n");
+    }
 
     // --- Phase 6f: Tier 5 production hardening demo ---
     // IPC + provenance ring + cap_interpose benchmarks, real 2PC

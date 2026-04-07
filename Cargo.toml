@@ -18,6 +18,7 @@ members = [
     "libs/sotos-lua",
     "libs/sotos-pkg",
     "libs/sot-fma",
+    "libs/sot-crossbow",
 ]
 exclude = [
     "services/init",

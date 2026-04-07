@@ -3,5 +3,12 @@
 version = 4
 
 [[package]]
+name = "sot-crossbow"
+version = "0.1.0"
+
+[[package]]
 name = "sot-network"
 version = "0.1.0"
+dependencies = [
+ "sot-crossbow",
+]
