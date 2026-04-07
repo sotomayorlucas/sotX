@@ -89,6 +89,7 @@ mod deception_demo;
 mod tier4_demo;
 mod tier5_demo;
 mod tier6_demo;
+mod tier6b_demo;
 mod signify;
 
 use framebuffer::{print, print_u64, print_hex64, print_hex, fb_init};
@@ -348,6 +349,15 @@ pub extern "C" fn _start() -> ! {
     spawn_process(b"sot-dtrace");
     for _ in 0..400 { sys::yield_now(); }
     tier6_demo::run();
+
+    // --- Phase 6h: Tier 6 PANDORA Task 2 — pkgsrc bridge ---
+    // Spawn the sot-pkg service (the pkgng-compatible package manager
+    // shim) and let the tier6b client demo walk through register / list
+    // / info / remove against it. This is the in-init equivalent of a
+    // pkgsrc `pkg_add` flow once the vendor tools land.
+    spawn_process(b"sot-pkg");
+    for _ in 0..400 { sys::yield_now(); }
+    tier6b_demo::run();
 
     // --- Phase 7: Dynamic linking test ---
     test_dynamic_linking();

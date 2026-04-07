@@ -40,6 +40,7 @@ exclude = [
     "services/posix-test",
     "services/kernel-test",
     "services/sot-dtrace",
+    "services/sot-pkg",
     "libs/sotos-testlib",
     "tools/sotctl",
     "tools/capctl",

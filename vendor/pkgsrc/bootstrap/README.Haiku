@@ -1,0 +1,9 @@
+$NetBSD: README.Haiku,v 1.4 2025/03/29 15:44:07 nia Exp $
+
+As of 2025, Haiku R1/beta5 with GCC 13 has been tested and works.
+
+Due to restrictions on the root file system, the default PREFIX of
+/usr/pkg is unsuitable. Either bootstrap with --unprivileged,
+or use a different PREFIX:
+
+	./bootstrap --prefix /boot/pkg
