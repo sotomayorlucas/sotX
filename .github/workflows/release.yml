@@ -1,0 +1,137 @@
+# sotBSD Release automation
+# =========================
+#
+# Trigger: pushing a tag matching `v*` (e.g. `v0.1.0`).
+#
+# What this workflow does, in order:
+#   1. Checks out the repo with full git history (signify manifest
+#      builder reads `git describe`).
+#   2. Installs the nightly Rust toolchain pinned by
+#      `rust-toolchain.toml` (rust-src + x86_64-unknown-none target).
+#   3. Installs `just` (the project's task runner) and
+#      `qemu-system-x86` (for the boot smoke test).
+#   4. Runs `just sigmanifest` to build all signed userspace
+#      components and produce `target/sigmanifest`, then `just image`
+#      to build the bootable disk image.
+#   5. Runs the boot smoke test under QEMU TCG with a 4-minute
+#      timeout, then asserts the same PASS markers checked by the
+#      regular `boot-smoke` job in `.github/workflows/ci.yml`. The
+#      assertion logic is duplicated here on purpose: a release must
+#      not depend on a label-gated CI job that may not have run.
+#   6. Runs `bash scripts/make-sdk.sh --version <tag>` to produce the
+#      tarball, the SHA-256 manifest, and (if a SIGNIFY_KEY repo
+#      secret is configured) the Ed25519 .sig file.
+#   7. Uploads `target/sotbsd-sdk-<tag>.tar.gz`, `.sha256`, and
+#      `.sig` (if present) as Release assets via
+#      `softprops/action-gh-release@v2`, with auto-generated release
+#      notes drawn from the commit history.
+#
+# Repo guard: this workflow only runs on the canonical sotBSD repo
+# (`sotomayorlucas/sotBSD`). Forks may push tags freely without
+# triggering an erroneous release publish.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build SDK + smoke test + publish Release
+    runs-on: ubuntu-latest
+    if: github.repository == 'sotomayorlucas/sotBSD'
+    timeout-minutes: 45
+    steps:
+      - name: Checkout (full history for git describe)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install nightly Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: x86_64-unknown-none
+          components: rust-src, llvm-tools
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+
+      - name: Install just
+        uses: extractions/setup-just@v2
+
+      - name: Install qemu + python
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 python3 python3-pip
+
+      - name: Install python deps for signify
+        run: pip install --user cryptography
+
+      - name: Build signing manifest
+        run: just sigmanifest
+
+      - name: Build bootable image
+        run: just image
+
+      - name: Boot smoke test (QEMU TCG, 4 min cap)
+        run: |
+          set -euo pipefail
+          rm -f target/serial.log
+          timeout 240 qemu-system-x86_64 \
+              -cpu max \
+              -drive format=raw,file=target/sotos.img \
+              -serial file:target/serial.log \
+              -display none \
+              -no-reboot \
+              -m 2048M &
+          QPID=$!
+          sleep 220
+          kill $QPID 2>/dev/null || true
+          wait $QPID 2>/dev/null || true
+
+      - name: Assert all PASS markers present
+        run: |
+          set -e
+          for marker in \
+              "Signify boot chain: PASS" \
+              "STYX TEST: ALL PASS" \
+              "RUMP-VFS-TEST: PASS" \
+              "Tier 3 demo: PASS" \
+              "Tier 4 demo: PASS" \
+              "Tier 5 demo: PASS"; do
+              if ! grep -aq "$marker" target/serial.log; then
+                  echo "release: missing PASS marker: $marker"
+                  echo "--- last 200 lines of serial.log ---"
+                  tail -200 target/serial.log
+                  exit 1
+              fi
+          done
+          echo "release: all 6 PASS markers present"
+
+      - name: Build SDK tarball + SHA-256 + signature
+        env:
+          SIGNIFY_KEY: ${{ secrets.SIGNIFY_KEY_PATH }}
+        run: bash scripts/make-sdk.sh --version ${{ github.ref_name }}
+
+      - name: Upload serial log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: serial-log
+          path: target/serial.log
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          fail_on_unmatched_files: false
+          files: |
+            target/sotbsd-sdk-${{ github.ref_name }}.tar.gz
+            target/sotbsd-sdk-${{ github.ref_name }}.tar.gz.sha256
+            target/sotbsd-sdk-${{ github.ref_name }}.tar.gz.sig
