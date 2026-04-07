@@ -41,6 +41,7 @@ exclude = [
     "services/kernel-test",
     "services/sot-dtrace",
     "services/sot-pkg",
+    "services/sot-carp",
     "libs/sotos-testlib",
     "tools/sotctl",
     "tools/capctl",

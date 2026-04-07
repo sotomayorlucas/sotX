@@ -90,6 +90,7 @@ mod tier4_demo;
 mod tier5_demo;
 mod tier6_demo;
 mod tier6b_demo;
+mod tier6c_demo;
 mod signify;
 
 use framebuffer::{print, print_u64, print_hex64, print_hex, fb_init};
@@ -358,6 +359,16 @@ pub extern "C" fn _start() -> ! {
     spawn_process(b"sot-pkg");
     for _ in 0..400 { sys::yield_now(); }
     tier6b_demo::run();
+
+    // --- Phase 6i: Tier 6 PANDORA Task 3 — CARP + pfsync cluster ---
+    // Spawn the sot-carp service (the OpenBSD ip_carp + if_pfsync shim
+    // -- vendor sources live under vendor/openbsd-carp) and let the
+    // tier6c client demo drive a two-node failover scenario, asserting
+    // that the elected MASTER changes on death and that the replicated
+    // pfsync state table survives the cutover.
+    spawn_process(b"sot-carp");
+    for _ in 0..400 { sys::yield_now(); }
+    tier6c_demo::run();
 
     // --- Phase 7: Dynamic linking test ---
     test_dynamic_linking();
