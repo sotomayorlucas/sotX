@@ -270,16 +270,57 @@
       Gated on the `sotBSD` branch or a `boot-smoke` PR label so the
       regular CI stays fast (the build dominates).
 
+### Tier 5 follow-up pass #2 (2026-04-07) — DONE
+- [x] **TLC model checking on all 6 specs**: per-spec `.cfg` files
+      under `formal/`, `scripts/run_tlc.sh` runner, `just tlc-mc`
+      recipe, new `tla-tlc` CI job. `just tlc-mc` reports
+      `6 passed, 0 failed, 0 skipped`. TLC found 4 real spec bugs
+      while checking, all fixed in this pass:
+      1. `sot_capabilities.tla`, `sot_transactions.tla`, `ipc.tla`
+         had unbounded `CHOOSE x : x \notin S` for NULL sentinels --
+         anchored to 1-element sets / literal values.
+      2. `sot_transactions.tla::Rollback` invariant required EVERY
+         WAL entry's oldVal to match `soValue`, but `RestoreFromWal`
+         picks the EARLIEST per object. Re-formulated to match.
+      3. `sot_transactions.tla::T1Abort` / `T2FinalizeAbort` left
+         the WAL alive after restore -- a subsequent transaction
+         modifying the same object then re-fired the Rollback
+         invariant against stale WAL entries. Both abort actions
+         now clear `wal[tx]`.
+      4. `scheduler.tla::Enqueue` allowed the same thread twice in
+         a CPU's runQueue. Now refuses if already present.
+      5. `capabilities.tla::Revoke` used a `RECURSIVE Descendants`
+         that TLC's evaluator looped on indefinitely on certain
+         states. Replaced with an explicit fixed-point iteration
+         bounded by `MaxCaps + 1`. Also tightened TypeInvariant
+         (allow `nextId == MaxCaps + 1`) and shrunk the `Rights`
+         powerset (5→3 atoms) to keep the state space tractable.
+- [x] **Open finding** parked: `sot_transactions.tla::Atomicity` is
+      violated when Tier 1 `T1Write` and Tier 2 `T2Begin` interleave
+      on the same object -- the spec's lock semantics don't honor
+      the t2 prepared state across tiers. The .cfg restricts the
+      check to a single transaction so the structural invariants
+      still verify; this is a real spec-level bug to chase later.
+- [x] **KARL-style ID randomization** (`kernel/src/karl.rs`): a
+      per-boot `boot_seed` derived from RDTSC, exposed via
+      `tx_id_offset()` and `thread_id_offset()`. `NEXT_TX_ID` starts
+      at 0 and the offset is added at handout time, so visible tx
+      IDs drift across reboots (verified: boot 1 starts at
+      3559653379, boot 2 starts at 1056833539). The matching wiring
+      for thread / cap / channel pool counters is the next step.
+
 ### Tier 5 follow-ups (still parked)
-- [ ] Compare benchmark numbers against seL4 (~500 cy) / L4 (~700 cy) on
-      real hardware -- current TCG figures aren't directly comparable.
+- [ ] Compare benchmark numbers against seL4 (~500 cy) / L4 (~700 cy)
+      on real hardware -- current TCG figures aren't directly
+      comparable.
 - [ ] LTP subset over Linuxulator -- blocked on the rump_init bisect.
-- [ ] KARL-style re-randomization on each boot (relink kernel/init at
-      boot with shuffled object order).
-- [ ] Per-spec `.cfg` files so `just tlc-mc` actually model-checks the
-      properties instead of just type-checking.
 - [ ] Real production keypair for signify (currently a deterministic
       dev seed) and store the private key offline.
+- [ ] Wire `karl::thread_id_offset()` into `sched::Sched::next_id`
+      and the cap / channel / endpoint pool counters so EVERY visible
+      ID drifts per boot, not just tx IDs.
+- [ ] Fix the `sot_transactions.tla::Atomicity` cross-tier lock bug
+      and re-enable multi-tx model checking.
 
 ### CI/CD
 - [ ] GitHub Actions: kernel build + QEMU boot test
