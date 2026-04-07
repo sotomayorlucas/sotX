@@ -227,10 +227,6 @@ name = "sotos-pkg"
 version = "0.1.0"
 
 [[package]]
-name = "sotos-provenance"
-version = "0.1.0"
-
-[[package]]
 name = "sotos-usb-storage"
 version = "0.1.0"
 

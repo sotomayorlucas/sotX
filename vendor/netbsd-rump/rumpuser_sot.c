@@ -58,6 +58,10 @@ typedef void (*rump_biodone_fn)(void *, size_t, int);
 static struct rumpuser_hyperup rump_hyp;
 static int rump_initialized;
 
+/* Tier 2 close: post-init hypercall counter (filled below at definition). */
+static volatile uint64_t hyp_call_count;
+static inline void hyp_trace(const char *name);
+
 /* ---------------------------------------------------------------
  * Forward declarations (libc-free string/memory helpers)
  * --------------------------------------------------------------- */
@@ -313,6 +317,7 @@ extern void rump_thread_trampoline(void);
 int rumpuser_thread_create(void *(*f)(void *), void *arg, const char *name,
     int joinable, int priority, int cpuidx, void **cookie)
 {
+    hyp_trace("thread_create");
     (void)priority;
     (void)cpuidx;
 
@@ -451,6 +456,7 @@ int rumpuser_thread_join(void *cookie)
 
 void rumpuser_curlwpop(int op, struct lwp *l)
 {
+    hyp_trace("curlwpop");
     struct rump_thread_data *td = get_thread_data();
 
     /* enum: CREATE=0, DESTROY=1, SET=2, CLEAR=3 */
@@ -499,6 +505,7 @@ struct lwp *rumpuser_curlwp(void)
  */
 void rumpuser_mutex_init(struct rumpuser_mtx **mtxp, int flags)
 {
+    hyp_trace("mutex_init");
     struct rumpuser_mtx *mtx = (struct rumpuser_mtx *)
         rump_arena_alloc(sizeof(struct rumpuser_mtx));
     if (!mtx) {
@@ -534,8 +541,10 @@ void rumpuser_mutex_init(struct rumpuser_mtx **mtxp, int flags)
  */
 void rumpuser_mutex_enter(struct rumpuser_mtx *mtx)
 {
+    hyp_trace("mutex_enter");
     if (!mtx) return;
 
+    uint64_t spins = 0;
     if (!(mtx->flags & RUMPUSER_MTX_SPIN)) {
         int nlocks;
         rumpkern_unsched(&nlocks, (void *)0);
@@ -546,14 +555,31 @@ void rumpuser_mutex_enter(struct rumpuser_mtx *mtx)
                 sot_notify_wait(mtx->notify_cap);
             else
                 sot_yield();
+            if ((++spins & 0xFFFFF) == 0) {
+                sot_serial_puts("[rumpuser] mutex_enter stuck KMUTEX mtx=0x");
+                sot_serial_dec((int64_t)(uint64_t)mtx);
+                sot_serial_puts(" spins=");
+                sot_serial_dec((int64_t)spins);
+                sot_serial_puts("\n");
+            }
+            if (spins > 0x800000) break;
         }
 
         rumpkern_sched(nlocks, (void *)0);
     } else {
         /* SPIN mutex: pure spinning, no schedule/unschedule. */
         while (__atomic_test_and_set((volatile void *)&mtx->locked,
-                                     __ATOMIC_ACQUIRE))
+                                     __ATOMIC_ACQUIRE)) {
             sot_yield();
+            if ((++spins & 0xFFFFF) == 0) {
+                sot_serial_puts("[rumpuser] mutex_enter stuck SPIN mtx=0x");
+                sot_serial_dec((int64_t)(uint64_t)mtx);
+                sot_serial_puts(" spins=");
+                sot_serial_dec((int64_t)spins);
+                sot_serial_puts("\n");
+            }
+            if (spins > 0x800000) break;
+        }
     }
 
     mtx->owner = rumpuser_curlwp();
@@ -567,11 +593,22 @@ void rumpuser_mutex_enter(struct rumpuser_mtx *mtx)
  */
 void rumpuser_mutex_enter_nowrap(struct rumpuser_mtx *mtx)
 {
+    hyp_trace("mutex_enter_nowrap");
     if (!mtx) return;
 
+    uint64_t spins = 0;
     while (__atomic_test_and_set((volatile void *)&mtx->locked,
-                                 __ATOMIC_ACQUIRE))
+                                 __ATOMIC_ACQUIRE)) {
         sot_yield();
+        if ((++spins & 0xFFFFF) == 0) {
+            sot_serial_puts("[rumpuser] mutex_enter_nowrap stuck mtx=0x");
+            sot_serial_dec((int64_t)(uint64_t)mtx);
+            sot_serial_puts(" spins=");
+            sot_serial_dec((int64_t)spins);
+            sot_serial_puts("\n");
+        }
+        if (spins > 0x800000) break;
+    }
 
     mtx->owner = rumpuser_curlwp();
 }
@@ -877,6 +914,7 @@ void rumpuser_rw_held(int write, struct rumpuser_rw *rw, int *heldp)
  */
 void rumpuser_cv_init(struct rumpuser_cv **cvp)
 {
+    hyp_trace("cv_init");
     struct rumpuser_cv *cv = (struct rumpuser_cv *)
         rump_arena_alloc(sizeof(struct rumpuser_cv));
     if (!cv) {
@@ -928,12 +966,27 @@ void rumpuser_cv_wait(struct rumpuser_cv *cv, struct rumpuser_mtx *mtx)
     int nlocks;
     rumpkern_unsched(&nlocks, (void *)0);
 
-    /* Wait for generation to change (signal or broadcast). */
+    /* Wait for generation to change (signal or broadcast).
+     * Tier 2 close instrumentation: print a marker after a million
+     * yield iterations so a stuck rump_init shows the offending cv. */
+    uint64_t spins = 0;
     while (__atomic_load_n(&cv->generation, __ATOMIC_ACQUIRE) == gen) {
         if (cv->notify_cap)
             sot_notify_wait(cv->notify_cap);
         else
             sot_yield();
+        if ((++spins & 0xFFFFF) == 0) {
+            sot_serial_puts("[rumpuser] cv_wait stuck cv=0x");
+            sot_serial_dec((int64_t)(uint64_t)cv);
+            sot_serial_puts(" spins=");
+            sot_serial_dec((int64_t)spins);
+            sot_serial_puts("\n");
+        }
+        if (spins > 0x800000) {
+            /* Give up after ~8M iterations -- caller treats as spurious wakeup. */
+            sot_serial_puts("[rumpuser] cv_wait BAILING after 8M spins\n");
+            break;
+        }
     }
 
     rumpkern_sched(nlocks, (void *)0);
@@ -1084,6 +1137,7 @@ void rumpuser_cv_has_waiters(struct rumpuser_cv *cv, int *hwaitersp)
  */
 int rumpuser_malloc(size_t len, int alignment, void **memp)
 {
+    hyp_trace("malloc");
     if (len == 0) {
         *memp = (void *)0;
         return 0;
@@ -1878,8 +1932,35 @@ int rumpuser_init(int version, const struct rumpuser_hyperup *hyp)
     sot_serial_puts("[rumpuser] init complete (arena=");
     sot_serial_dec((int64_t)(RUMP_ARENA_SIZE / 1024 / 1024));
     sot_serial_puts(" MiB, SOT hypervisor)\n");
+    sot_serial_puts("[rumpuser] returning to rump kernel main init\n");
 
     return 0;
+}
+
+/* ---------------------------------------------------------------
+ * Tier 2 close: post-init hypercall counters
+ *
+ * Once `rump_initialized` is set, every public hypercall bumps a
+ * counter. The first 16 calls are also logged so the bisect of
+ * "where does rump_init hang" is observable from the serial output
+ * even when the rump kernel itself prints nothing.
+ * --------------------------------------------------------------- */
+
+static inline void hyp_trace(const char *name)
+{
+    if (!rump_initialized) return;
+    uint64_t n = __atomic_add_fetch(&hyp_call_count, 1, __ATOMIC_RELAXED);
+    if (n <= 64) {
+        sot_serial_puts("[hyp ");
+        sot_serial_dec((int64_t)n);
+        sot_serial_puts("] ");
+        sot_serial_puts(name);
+        sot_serial_puts("\n");
+    } else if ((n & 0xFFF) == 0) {
+        sot_serial_puts("[hyp ");
+        sot_serial_dec((int64_t)n);
+        sot_serial_puts("] (live)\n");
+    }
 }
 
 /* ---------------------------------------------------------------

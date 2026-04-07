@@ -103,11 +103,6 @@ impl TxManager {
 
     /// Begin a new transaction in the given domain at the requested tier.
     pub fn tx_begin(&mut self, domain_id: u32, tier: TxTier) -> Result<TxId, TxError> {
-        // Tier 2 is not implemented yet.
-        if matches!(tier, TxTier::MultiObject) {
-            return Err(TxError::NotImplemented);
-        }
-
         // Find a free slot.
         let free = self
             .slots
@@ -133,19 +128,52 @@ impl TxManager {
         Ok(TxId(id))
     }
 
+    /// Tier 2 (MultiObject) two-phase commit: PREPARE phase.
+    ///
+    /// Transitions an `Active` MultiObject transaction into the
+    /// `Preparing` state. After this point, the transaction is
+    /// "decided once committed" -- the only valid follow-ups are
+    /// `tx_commit` (which moves it to `Committed`) or `tx_abort`
+    /// (rollback). ReadOnly / SingleObject transactions reject
+    /// `tx_prepare` -- they go straight from Active to Committed
+    /// via `tx_commit`.
+    pub fn tx_prepare(&mut self, tx_id: TxId) -> Result<(), TxError> {
+        let idx = self.find_index(tx_id.0).ok_or(TxError::NotFound)?;
+        let slot = self.slots[idx].as_mut().unwrap();
+
+        if slot.state != TxState::Active {
+            return Err(TxError::InvalidState);
+        }
+        if !matches!(slot.tier, TxTier::MultiObject) {
+            return Err(TxError::InvalidState);
+        }
+        slot.state = TxState::Preparing;
+        Ok(())
+    }
+
     /// Commit a transaction.
     pub fn tx_commit(&mut self, tx_id: TxId) -> Result<(), TxError> {
         let idx = self.find_index(tx_id.0).ok_or(TxError::NotFound)?;
         let slot = self.slots[idx].as_ref().unwrap();
 
-        if slot.state != TxState::Active {
-            return Err(TxError::InvalidState);
-        }
-
         match slot.tier {
-            TxTier::ReadOnly => {} // no-op
-            TxTier::SingleObject => self.wal.commit(tx_id.0),
-            TxTier::MultiObject => return Err(TxError::NotImplemented),
+            TxTier::ReadOnly => {
+                if slot.state != TxState::Active {
+                    return Err(TxError::InvalidState);
+                }
+            }
+            TxTier::SingleObject => {
+                if slot.state != TxState::Active {
+                    return Err(TxError::InvalidState);
+                }
+                self.wal.commit(tx_id.0);
+            }
+            TxTier::MultiObject => {
+                // Tier 2 requires a PREPARE before COMMIT.
+                if slot.state != TxState::Preparing {
+                    return Err(TxError::InvalidState);
+                }
+            }
         }
 
         self.slots[idx] = None;
@@ -157,14 +185,17 @@ impl TxManager {
         let idx = self.find_index(tx_id.0).ok_or(TxError::NotFound)?;
         let slot = self.slots[idx].as_ref().unwrap();
 
-        if slot.state != TxState::Active {
-            return Err(TxError::InvalidState);
+        // Tier 2 abort is allowed from Active OR Preparing (so a
+        // participant that fails after PREPARE can still rollback).
+        match slot.state {
+            TxState::Active | TxState::Preparing => {}
+            _ => return Err(TxError::InvalidState),
         }
 
         match slot.tier {
             TxTier::ReadOnly => {} // no-op
             TxTier::SingleObject => self.wal.rollback(tx_id.0),
-            TxTier::MultiObject => return Err(TxError::NotImplemented),
+            TxTier::MultiObject => {} // 2PC abort: just drop the slot
         }
 
         self.slots[idx] = None;

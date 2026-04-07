@@ -156,6 +156,7 @@ pub(super) const SYS_SOT_CHANNEL_CREATE: u64 = 307;
 pub(super) const SYS_TX_BEGIN: u64 = 308;
 pub(super) const SYS_TX_COMMIT: u64 = 309;
 pub(super) const SYS_TX_ABORT: u64 = 310;
+pub(super) const SYS_TX_PREPARE: u64 = 311;
 
 /// Debug syscall: write a single byte to serial (COM1).
 pub(super) const SYS_DEBUG_PRINT: u64 = 255;

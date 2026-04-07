@@ -85,6 +85,10 @@ mod wine_diag;
 mod boot_tests;
 mod sot_types;
 mod sot_bridge;
+mod deception_demo;
+mod tier4_demo;
+mod tier5_demo;
+mod signify;
 
 use framebuffer::{print, print_u64, print_hex64, print_hex, fb_init};
 use exec::MAP_WRITABLE;
@@ -275,8 +279,54 @@ pub extern "C" fn _start() -> ! {
     // To enable: boot with -smp 2 and LKL auto-activates when kernel finishes booting.
     lkl::init();
 
+    // --- Phase 5c: Tier 5 close — SHA-256 boot chain verification ---
+    // Stream every signed initrd binary through the streaming SHA-256
+    // implementation in services/init/src/signify.rs and compare against
+    // the manifest produced by scripts/build_signify_manifest.py.
+    signify::verify_manifest();
+
     // --- Phase 6: Userspace process spawning ---
     spawn_process(b"hello");
+
+    // --- Phase 6b: STYX exokernel syscall validation (Tier 1.2) ---
+    // Validates SOT syscalls 300-310 from userspace. Output goes to serial.
+    spawn_process(b"styx-test");
+
+    // --- Phase 6c: BSD personality stub (Tier 2.2) ---
+    // Spawn rump-vfs server, give it time to register, then exercise the
+    // OPEN/READ/CLOSE protocol against /etc/passwd from this process.
+    spawn_process(b"rump-vfs");
+    for _ in 0..200 { sys::yield_now(); }
+    test_rump_vfs();
+
+    // --- Phase 6d: Deception live demo (Tier 3) ---
+    // First spawn the "attacker" binary so it produces real provenance
+    // entries on the kernel SOT ring under owner_domain=7. Then run the
+    // demo which drains the ring, runs the AnomalyDetector + Migration
+    // orchestrator, and exercises the interposition + fake /proc/version
+    // path with the Ubuntu 22.04 webserver profile.
+    spawn_process(b"attacker");
+    for _ in 0..200 { sys::yield_now(); }
+    deception_demo::run();
+
+    // After the one-shot demo + watchdog launch, spawn the attacker a
+    // second time so the watchdog has fresh provenance to drain. Proves
+    // continuous draining works, not just the boot one-shot.
+    for _ in 0..2000 { sys::yield_now(); }
+    spawn_process(b"attacker");
+    // Give the watchdog enough yields to pick up the second wave.
+    for _ in 0..8000 { sys::yield_now(); }
+
+    // --- Phase 6e: Tier 4 advanced features demo ---
+    // Storage (ZFS + HAMMER2 snapshot managers driven by SOT tx events),
+    // bhyve (bare-metal Intel CPUID/MSR spoofing), and PF firewall
+    // (capability interposer with deception override).
+    tier4_demo::run();
+
+    // --- Phase 6f: Tier 5 production hardening demo ---
+    // IPC + provenance ring + cap_interpose benchmarks, real 2PC
+    // MultiObject transactions, fuzz / robustness pass.
+    tier5_demo::run();
 
     // --- Phase 7: Dynamic linking test ---
     test_dynamic_linking();
@@ -907,6 +957,129 @@ fn start_lucas(blk: Option<VirtioBlk>) {
 fn panic_halt() -> ! {
     print(b"PANIC\n");
     loop {}
+}
+
+// ---------------------------------------------------------------------------
+// Tier 2.2 — rump-vfs client smoke test
+// ---------------------------------------------------------------------------
+
+/// Exercise the rump-vfs IPC ABI by opening, reading, and printing /etc/passwd.
+/// Mirrors the protocol declared in `services/rump-vfs/src/main.rs`.
+fn test_rump_vfs() {
+    use sotos_common::IpcMsg;
+
+    print(b"RUMP-VFS-TEST: looking up service...\n");
+    let svc_name = b"rump-vfs";
+    let ep = match sys::svc_lookup(svc_name.as_ptr() as u64, svc_name.len() as u64) {
+        Ok(cap) => cap,
+        Err(e) => {
+            print(b"RUMP-VFS-TEST: svc_lookup failed (");
+            print_i64(e);
+            print(b")\n");
+            return;
+        }
+    };
+
+    // OPEN /etc/passwd
+    let path = b"/etc/passwd";
+    let mut open_msg = IpcMsg::empty();
+    open_msg.tag = 1; // TAG_OPEN
+    {
+        let dst = unsafe {
+            core::slice::from_raw_parts_mut(open_msg.regs.as_mut_ptr() as *mut u8, 56)
+        };
+        dst[..path.len()].copy_from_slice(path);
+    }
+    let open_reply = match sys::call(ep, &open_msg) {
+        Ok(r) => r,
+        Err(e) => {
+            print(b"RUMP-VFS-TEST: OPEN call failed (");
+            print_i64(e);
+            print(b")\n");
+            return;
+        }
+    };
+    let fd = open_reply.regs[0] as i64;
+    if fd <= 0 {
+        print(b"RUMP-VFS-TEST: OPEN returned errno ");
+        print_i64(fd);
+        print(b"\n");
+        return;
+    }
+    print(b"RUMP-VFS-TEST: OPEN /etc/passwd -> fd=");
+    print_u64(fd as u64);
+    print(b"\n");
+
+    // READ in 64-byte chunks until EOF (tag=0)
+    print(b"--- /etc/passwd ---\n");
+    let mut offset: u64 = 0;
+    let mut total: u64 = 0;
+    loop {
+        let mut read_msg = IpcMsg::empty();
+        read_msg.tag = 2; // TAG_READ
+        read_msg.regs[0] = fd as u64;
+        read_msg.regs[1] = offset;
+        let read_reply = match sys::call(ep, &read_msg) {
+            Ok(r) => r,
+            Err(e) => {
+                print(b"\nRUMP-VFS-TEST: READ call failed (");
+                print_i64(e);
+                print(b")\n");
+                break;
+            }
+        };
+        let n = read_reply.tag as usize;
+        if n == 0 {
+            break;
+        }
+        let bytes = unsafe {
+            core::slice::from_raw_parts(read_reply.regs.as_ptr() as *const u8, n)
+        };
+        for &b in bytes {
+            sys::debug_print(b);
+        }
+        offset += n as u64;
+        total += n as u64;
+        if n < 64 {
+            // Short read: end of file. Avoid one extra round trip.
+            break;
+        }
+    }
+    print(b"--- EOF (");
+    print_u64(total);
+    print(b" bytes) ---\n");
+
+    // CLOSE
+    let mut close_msg = IpcMsg::empty();
+    close_msg.tag = 3; // TAG_CLOSE
+    close_msg.regs[0] = fd as u64;
+    match sys::call(ep, &close_msg) {
+        Ok(r) if r.regs[0] == 0 => print(b"RUMP-VFS-TEST: CLOSE ok\n"),
+        Ok(r) => {
+            print(b"RUMP-VFS-TEST: CLOSE errno ");
+            print_i64(r.regs[0] as i64);
+            print(b"\n");
+        }
+        Err(e) => {
+            print(b"RUMP-VFS-TEST: CLOSE call failed (");
+            print_i64(e);
+            print(b")\n");
+        }
+    }
+
+    if total > 0 {
+        print(b"RUMP-VFS-TEST: PASS\n");
+    } else {
+        print(b"RUMP-VFS-TEST: FAIL (no bytes read)\n");
+    }
+}
+
+fn print_i64(mut n: i64) {
+    if n < 0 {
+        sys::debug_print(b'-');
+        n = -n;
+    }
+    print_u64(n as u64);
 }
 
 #[panic_handler]

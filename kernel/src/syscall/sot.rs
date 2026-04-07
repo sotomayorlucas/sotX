@@ -23,7 +23,7 @@ use sotos_common::SysError;
 use super::{
     SYS_SO_CREATE, SYS_SO_INVOKE, SYS_SO_GRANT, SYS_SO_REVOKE, SYS_SO_OBSERVE,
     SYS_SOT_DOMAIN_CREATE, SYS_SOT_DOMAIN_ENTER, SYS_SOT_CHANNEL_CREATE,
-    SYS_TX_BEGIN, SYS_TX_COMMIT, SYS_TX_ABORT,
+    SYS_TX_BEGIN, SYS_TX_COMMIT, SYS_TX_ABORT, SYS_TX_PREPARE,
 };
 
 // Provenance operation codes.
@@ -35,6 +35,11 @@ const OP_INVOKE_DIRECT: u16 = 0x14;
 const OP_CREATE: u16 = 0x20;
 const OP_GRANT: u16 = 0x30;
 const OP_REVOKE: u16 = 0x40;
+const OP_TX_COMMIT: u16 = 0x50;
+const OP_TX_ABORT: u16 = 0x51;
+// Reserved Tier 4 SoType: identifies tx events on the provenance ring.
+// Userspace drainers (init's tier4_demo) translate so_id = TxId.
+const SOTYPE_TX_EVENT: u8 = 0xF0;
 
 /// IPC message tags for proxy domain communication.
 const PROXY_INSPECT_TAG: u64 = 0xDE_C0_0001;
@@ -49,12 +54,17 @@ fn current_cpu() -> usize {
 }
 
 fn record_provenance(domain_id: u32, operation: u16, so_id: u64) {
+    record_provenance_typed(domain_id, operation, 0, so_id);
+}
+
+fn record_provenance_typed(domain_id: u32, operation: u16, so_type: u8, so_id: u64) {
     let cpu = current_cpu();
     let epoch = cap::current_epoch();
     provenance::record(cpu, ProvenanceEntry {
         epoch,
         domain_id,
         operation,
+        so_type,
         _pad: 0,
         so_id,
         version: 0,
@@ -111,6 +121,7 @@ pub fn handle(frame: &mut TrapFrame, nr: u64) -> bool {
         SYS_TX_BEGIN => { handle_tx_begin(frame); true }
         SYS_TX_COMMIT => { handle_tx_commit(frame); true }
         SYS_TX_ABORT => { handle_tx_abort(frame); true }
+        SYS_TX_PREPARE => { handle_tx_prepare(frame); true }
         _ => false,
     }
 }
@@ -124,7 +135,9 @@ fn handle_so_create(frame: &mut TrapFrame) {
     kdebug!("so_create: type={} policy_bits={:#x} owner={}", so_type, frame.rsi, owner_domain);
 
     let cap_obj = match so_type {
-        0 => CapObject::Memory { base: 0, size: 0 },
+        // Generic SO types (0,1,3,4,5) collapse to a Memory cap (placeholder).
+        // Specific kernel object types map directly: 2=Channel, 6=Endpoint, 8=Notification.
+        0 | 1 | 3 | 4 | 5 => CapObject::Memory { base: 0, size: 0 },
         2 => match crate::ipc::channel::create() {
             Some(ch_id) => CapObject::Channel { id: ch_id.0.raw() },
             None => { frame.rax = SysError::OutOfResources as i64 as u64; return; }
@@ -454,15 +467,22 @@ fn handle_tx_begin(frame: &mut TrapFrame) {
 
     kdebug!("tx_begin: domain_cap={} tier={}", domain_cap, tier_val);
 
-    let domain_id = match cap::validate(domain_cap, Rights::WRITE) {
-        Ok(CapObject::Domain { id }) => id,
-        Ok(_) => { frame.rax = SysError::InvalidCap as i64 as u64; return; }
-        Err(e) => { frame.rax = e as i64 as u64; return; }
+    // domain_cap=0 means "root/null domain" — used by simple userspace tests
+    // that have not yet created a real domain via SOT_DOMAIN_CREATE.
+    let domain_id = if domain_cap == 0 {
+        0u32
+    } else {
+        match cap::validate(domain_cap, Rights::WRITE) {
+            Ok(CapObject::Domain { id }) => id,
+            Ok(_) => { frame.rax = SysError::InvalidCap as i64 as u64; return; }
+            Err(e) => { frame.rax = e as i64 as u64; return; }
+        }
     };
 
     let tier = match tier_val {
         0 => TxTier::ReadOnly,
         1 => TxTier::SingleObject,
+        2 => TxTier::MultiObject,
         _ => { frame.rax = SysError::InvalidArg as i64 as u64; return; }
     };
 
@@ -477,7 +497,25 @@ fn handle_tx_begin(frame: &mut TrapFrame) {
 fn handle_tx_commit(frame: &mut TrapFrame) {
     kdebug!("tx_commit: tx={}", frame.rdi);
 
-    match TX_MANAGER.lock().tx_commit(TxId(frame.rdi)) {
+    let tx_id = frame.rdi;
+    match TX_MANAGER.lock().tx_commit(TxId(tx_id)) {
+        Ok(()) => {
+            // Tier 4 hook: emit a provenance event so userspace observers
+            // (sot-zfs SnapshotManager, sot-hammer2 Hammer2SnapshotManager)
+            // can drive auto-snapshots from a successful commit.
+            record_provenance_typed(0, OP_TX_COMMIT, SOTYPE_TX_EVENT, tx_id);
+            frame.rax = 0;
+        }
+        Err(_) => frame.rax = SysError::InvalidArg as i64 as u64,
+    }
+}
+
+/// SYS_TX_PREPARE (311) -- 2PC prepare phase for MultiObject txns.
+/// rdi = tx_handle
+fn handle_tx_prepare(frame: &mut TrapFrame) {
+    kdebug!("tx_prepare: tx={}", frame.rdi);
+
+    match TX_MANAGER.lock().tx_prepare(TxId(frame.rdi)) {
         Ok(()) => frame.rax = 0,
         Err(_) => frame.rax = SysError::InvalidArg as i64 as u64,
     }
@@ -488,8 +526,14 @@ fn handle_tx_commit(frame: &mut TrapFrame) {
 fn handle_tx_abort(frame: &mut TrapFrame) {
     kdebug!("tx_abort: tx={}", frame.rdi);
 
-    match TX_MANAGER.lock().tx_abort(TxId(frame.rdi)) {
-        Ok(()) => frame.rax = 0,
+    let tx_id = frame.rdi;
+    match TX_MANAGER.lock().tx_abort(TxId(tx_id)) {
+        Ok(()) => {
+            // Tier 4 hook: emit a provenance event so userspace observers
+            // can locate the rollback target snapshot via on_tx_abort().
+            record_provenance_typed(0, OP_TX_ABORT, SOTYPE_TX_EVENT, tx_id);
+            frame.rax = 0;
+        }
         Err(_) => frame.rax = SysError::InvalidArg as i64 as u64,
     }
 }

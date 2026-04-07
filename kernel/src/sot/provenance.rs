@@ -19,8 +19,11 @@ pub struct ProvenanceEntry {
     pub domain_id: u32,
     /// Operation type (read, write, invoke, grant, revoke, etc.)
     pub operation: u16,
+    /// Semantic object type tag (matches `sotos_provenance::types::SoType`
+    /// when set; 0 = unknown / not classified).
+    pub so_type: u8,
     /// Padding for alignment.
-    pub _pad: u16,
+    pub _pad: u8,
     /// Secure Object that was acted upon.
     pub so_id: u64,
     /// Version of the SO after the operation.
@@ -39,6 +42,7 @@ impl ProvenanceEntry {
             epoch: 0,
             domain_id: 0,
             operation: 0,
+            so_type: 0,
             _pad: 0,
             so_id: 0,
             version: 0,

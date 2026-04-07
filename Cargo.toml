@@ -35,6 +35,8 @@ exclude = [
     "services/drm-test",
     "services/hello-gui",
     "services/styx-test",
+    "services/rump-vfs",
+    "services/attacker",
     "libs/sotos-testlib",
     "tools/sotctl",
     "tools/capctl",
