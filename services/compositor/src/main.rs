@@ -16,6 +16,7 @@
 mod wayland;
 mod render;
 mod input;
+mod font;
 
 use sotos_common::sys;
 use sotos_common::{BootInfo, IpcMsg, BOOT_INFO_ADDR, SyncUnsafeCell};
@@ -1156,16 +1157,19 @@ fn compose() {
             let close_x = tl.x + tl.width as i32 - 20;
             let close_y = tl.y - TITLE_BAR_HEIGHT as i32 + 4;
             fb.fill_rect(close_x, close_y, 16, 16, 0xFFFF5555);
-            // "X" on close button
-            fb.draw_text(close_x + 4, close_y + 4, b"x", 0xFFFFFFFF);
+            // "X" on close button (compact font)
+            fb.draw_text(close_x + 5, close_y + 3, b"x", 0xFFFFFFFF);
 
-            // Title text in the title bar.
+            // Title text in the title bar — anti-aliased large font (10x20),
+            // centered vertically inside the 24px bar.
             let text_x = tl.x + 6;
-            let text_y = tl.y - TITLE_BAR_HEIGHT as i32 + 8;
-            let max_chars = ((tl.width as i32 - 30) / 8).max(0) as usize;
+            let text_y = tl.y - TITLE_BAR_HEIGHT as i32
+                + ((TITLE_BAR_HEIGHT as i32 - font::TITLE_FONT_HEIGHT) / 2).max(0);
+            let max_chars = ((tl.width as i32 - 30) / 10).max(0) as usize;
             let len = tl.title_len.min(max_chars);
             if len > 0 {
-                fb.draw_text(text_x, text_y, &tl.title[..len], 0xFFEEEEEE);
+                let s = core::str::from_utf8(&tl.title[..len]).unwrap_or("");
+                font::draw_text(fb, text_x, text_y, s, 0xFFEEEEEE, true);
             }
 
             // Find the surface and its buffer.
