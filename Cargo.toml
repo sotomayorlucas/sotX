@@ -17,6 +17,7 @@ members = [
     "libs/sotos-gui",
     "libs/sotos-lua",
     "libs/sotos-pkg",
+    "libs/sot-fma",
 ]
 exclude = [
     "services/init",

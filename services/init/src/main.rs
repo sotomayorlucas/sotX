@@ -86,6 +86,7 @@ mod boot_tests;
 mod sot_types;
 mod sot_bridge;
 mod deception_demo;
+mod fma_demo;
 mod tier4_demo;
 mod tier5_demo;
 mod tier6_demo;
@@ -332,6 +333,13 @@ pub extern "C" fn _start() -> ! {
     spawn_process(b"attacker");
     for _ in 0..200 { sys::yield_now(); }
     deception_demo::run();
+
+    // --- Phase 6d2: FMA predictive engine demo (Unit 12) ---
+    // Run the in-process FaultManagement state machine through five
+    // canned scenarios (clean, disk-retry cluster, ECC uncorrectable,
+    // thermal alone, thermal + behavioral anomalies). Boot test marker:
+    // `=== FMA: PASS ===`.
+    let _ = crate::fma_demo::run();
 
     // After the one-shot demo + watchdog launch, spawn the attacker a
     // second time so the watchdog has fresh provenance to drain. Proves
