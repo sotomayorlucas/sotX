@@ -218,6 +218,10 @@ name = "sot-bhyve"
 version = "0.1.0"
 
 [[package]]
+name = "sot-fma"
+version = "0.1.0"
+
+[[package]]
 name = "sot-hammer2"
 version = "0.1.0"
 
@@ -258,6 +262,7 @@ dependencies = [
  "rand_chacha",
  "rand_core",
  "sot-bhyve",
+ "sot-fma",
  "sot-hammer2",
  "sot-network",
  "sot-zfs",
