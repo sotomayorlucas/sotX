@@ -260,6 +260,7 @@ docs/                   Technical paper (LaTeX, CLRS-style)
 ## Roadmap
 
 See [TODO.md](TODO.md) for pending work.
+See [docs/MEMORY_BUDGET.md](docs/MEMORY_BUDGET.md) for the kernel static memory inventory.
 
 ## License
 
