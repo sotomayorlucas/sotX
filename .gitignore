@@ -7,7 +7,6 @@ limine/
 **/*.d
 services/init/lkl/liblkl_fused.a
 
-<<<<<<< HEAD
 # ---------------------------------------------------------------------------
 # Build artifacts and external binaries used for ABI compatibility testing.
 # These are downloaded/extracted host binaries (Alpine, Debian, glibc, musl,
