@@ -302,18 +302,9 @@ pub extern "C" fn _start() -> ! {
     // --- Phase 6: Userspace process spawning ---
     spawn_process(b"hello");
 
-    // --- Phase 6a: Tokyo Night layer-shell status bar ---
-    // Compositor was spawned by the kernel (see kernel/src/main.rs), so it's
-    // already up by the time init reaches this point. The bar gracefully
-    // exits with `statusbar: no layer-shell` on compositors that haven't
-    // landed G7 (zwlr_layer_shell_v1) yet.
-    //
-    // TEMPORARILY DISABLED: spawn_process passes self_as_cap=0 to children,
-    // so the statusbar can't allocate caps for its SHM pool and ends up in
-    // an infinite VMM SEGV loop at 0x903890 that floods the serial bandwidth
-    // and starves the rest of the boot. Re-enable once init forwards the
-    // child's AS cap (or once kernel-side spawn lands like compositor).
-    // spawn_process(b"sot-statusbar");
+    // sot-statusbar is spawned kernel-side so it gets a real self_as_cap
+    // in BootInfo (required for shm_map). See load_statusbar_process() in
+    // kernel/src/main.rs; init-side spawn_process would pass caps[]=0.
 
     // --- Phase 6b: STYX exokernel syscall validation (Tier 1.2) ---
     // Validates SOT syscalls 300-310 from userspace. Output goes to serial.

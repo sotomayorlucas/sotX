@@ -865,9 +865,11 @@ fn load_initrd(cr3: u64) {
         "xhci",
         "compositor",
         "hello-gui",
+        "sot-statusbar",
     ];
     let found = initrd::find_all(module_data, &names);
-    // Indices: 0=init, 1=shell, 2=vmm, 3=kbd, 4=net, 5=nvme, 6=xhci, 7=compositor, 8=hello-gui
+    // Indices: 0=init, 1=shell, 2=vmm, 3=kbd, 4=net, 5=nvme, 6=xhci,
+    //          7=compositor, 8=hello-gui, 9=sot-statusbar
 
     let elf_data = match found[0] {
         Some(d) => d,
@@ -950,6 +952,11 @@ fn load_initrd(cr3: u64) {
     if let Some(gui_data) = found[8] {
         kdebug!("  initrd: found 'hello-gui' ({} bytes)", gui_data.len());
         load_hello_gui_process(gui_data);
+    }
+    // Must follow the compositor load so svc_lookup(b"compositor") resolves.
+    if let Some(sb_data) = found[9] {
+        kdebug!("  initrd: found 'sot-statusbar' ({} bytes)", sb_data.len());
+        load_statusbar_process(sb_data);
     }
 }
 
@@ -1400,4 +1407,60 @@ fn write_hello_gui_boot_info(gui_as: &mm::paging::AddressSpace) {
 
     write_bootinfo(phys, &info);
     kdebug!("  hello-gui bootinfo: 1 cap at {:#x}", BOOT_INFO_ADDR);
+}
+
+// ---------------------------------------------------------------------------
+// sot-statusbar process (Tokyo Night layer-shell status bar)
+// ---------------------------------------------------------------------------
+
+/// Load `sot-statusbar` as its own process with a real `self_as_cap`.
+///
+/// Must be called AFTER `load_compositor_process` so the statusbar's
+/// `svc_lookup(b"compositor")` call at startup resolves. The statusbar
+/// is a Wayland client that only needs its own AddrSpace cap (to `shm_map`
+/// the pixel pool into itself), mirroring `load_hello_gui_process`.
+fn load_statusbar_process(sb_data: &[u8]) {
+    let proc = match load_service(&ProcessSpec {
+        name: "sot-statusbar",
+        data: sb_data,
+        stack_pages: 4,
+    }) {
+        Some(p) => p,
+        None => return,
+    };
+    write_statusbar_boot_info(&proc.addr_space);
+    proc.spawn();
+    kdebug!("  sot-statusbar: separate process, cr3={:#x}", proc.cr3);
+}
+
+/// Write BootInfo for the sot-statusbar process.
+///
+/// Cap 0: AddrSpace (statusbar's own CR3) -- for `shm_map` into self.
+/// No IPC endpoint needed (it looks up the compositor via `svc_lookup`).
+fn write_statusbar_boot_info(sb_as: &mm::paging::AddressSpace) {
+    use sotos_common::{BootInfo, BOOT_INFO_ADDR, BOOT_INFO_MAGIC};
+
+    let phys = alloc_bootinfo_page(sb_as, "sot-statusbar");
+
+    // Cap 0: AddrSpace for statusbar's own CR3 (needed for shm_map).
+    let sb_as_cap = cap::insert(
+        cap::CapObject::AddrSpace { cr3: sb_as.cr3() },
+        cap::Rights::ALL,
+        None,
+    )
+    .expect("failed to create sot-statusbar AS cap");
+    kdebug!(
+        "  sot-statusbar cap {}: addr_space (self, cr3={:#x})",
+        sb_as_cap.raw(),
+        sb_as.cr3()
+    );
+
+    let mut info = BootInfo::empty();
+    info.magic = BOOT_INFO_MAGIC;
+    info.cap_count = 1;
+    info.caps[0] = sb_as_cap.raw() as u64;
+    info.self_as_cap = sb_as_cap.raw() as u64;
+
+    write_bootinfo(phys, &info);
+    kdebug!("  sot-statusbar bootinfo: 1 cap at {:#x}", BOOT_INFO_ADDR);
 }
