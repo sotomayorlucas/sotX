@@ -337,6 +337,9 @@ fn boot_aps() {
     // Update BSP percpu with correct LAPIC ID from ACPI.
     let bsp_percpu = arch::percpu::current_percpu();
     bsp_percpu.lapic_id = bsp_lapic_id;
+    // R1: register BSP's logical-index → LAPIC-ID mapping so reschedule
+    // IPIs targeting CPU 0 from another CPU resolve to the right APIC.
+    sched::register_cpu_lapic_id(0, bsp_lapic_id);
 
     let ap_count = cpus.iter().filter(|c| c.lapic_id != bsp_lapic_id).count();
     if ap_count == 0 {
@@ -357,6 +360,11 @@ fn boot_aps() {
 
         // Allocate PerCpu for this AP.
         let percpu = arch::percpu::alloc_ap(cpu_index, cpu.lapic_id);
+
+        // R1: register the AP's logical-index → LAPIC-ID mapping. Must
+        // happen before the AP is launched so any reschedule IPI from
+        // the BSP to this CPU resolves to the correct APIC.
+        sched::register_cpu_lapic_id(cpu_index as usize, cpu.lapic_id);
 
         // Create an idle thread for this AP.
         let idle_idx = sched::create_idle_thread();

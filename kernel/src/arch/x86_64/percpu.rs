@@ -51,6 +51,16 @@ pub struct PerCpu {
     pub held_locks: u16,
     /// offset 64: pointer to this CPU's TSS (not accessed from asm)
     pub tss: *mut TaskStateSegment,
+    /// offset 72: FPU/SSE save area pointer for the *incoming* thread on a
+    /// context switch. Set by `sched::schedule` BEFORE `context_switch`,
+    /// read AFTER on the new thread. Survives the stack swap because it
+    /// lives in PerCpu (heap), not on either thread's stack.
+    ///
+    /// Without this, the schedule() local `new_fpu` is spilled to the OLD
+    /// thread's stack and re-loaded from the SAME offset on the NEW thread's
+    /// stack — yielding garbage that WHPX rejects on `fxrstor64` with #GP
+    /// (TCG accepts it silently).
+    pub next_fpu_ptr: u64,
 }
 
 unsafe impl Send for PerCpu {}
@@ -71,6 +81,7 @@ impl PerCpu {
             _pad: [0; 5],
             held_locks: 0,
             tss: core::ptr::null_mut(),
+            next_fpu_ptr: 0,
         }
     }
 

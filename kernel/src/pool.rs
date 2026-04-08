@@ -124,6 +124,18 @@ impl<T> Pool<T> {
         self.slots.get_mut(idx as usize)?.as_mut()
     }
 
+    /// Construct a generation-checked handle for the given live slot index.
+    /// Returns `None` if the slot is out of range or currently free.
+    /// Used by the scheduler to enqueue a thread into the lock-free WSDeque,
+    /// where the stored handle later validates the slot has not been recycled.
+    pub fn handle_at_index(&self, idx: u32) -> Option<PoolHandle> {
+        let i = idx as usize;
+        if i >= self.slots.len() || self.slots[i].is_none() {
+            return None;
+        }
+        Some(PoolHandle::pack(i, self.generations[i]))
+    }
+
     /// Free by raw slot index. Returns the value and bumps generation.
     pub fn free_by_index(&mut self, idx: u32) -> Option<T> {
         let idx = idx as usize;

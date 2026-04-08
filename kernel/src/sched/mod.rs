@@ -12,6 +12,7 @@
 
 pub mod domain;
 pub mod thread;
+pub mod wsdeque;
 
 use thread::Thread;
 pub use thread::{ComputeTarget, IpcRole, ThreadId, ThreadState};
@@ -23,6 +24,7 @@ use crate::sync::ticket::TicketMutex;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use wsdeque::{Steal as WsSteal, WsDeque};
 
 use crate::kdebug;
 use domain::{DomainState, SchedDomain};
@@ -194,12 +196,16 @@ fn finish_switch() {
 
 use sotos_common::{MAX_CPUS, MAX_THREAD_NOTIFY};
 
-struct CpuQueue {
-    /// Multi-level priority queues: index 0 = highest priority (realtime).
+/// Global ready queue for unaffinitized threads (Graham's list scheduling).
+///
+/// Stays a ticket-locked `VecDeque`-of-priority-levels: this queue is the
+/// *fallback* path (non-affinitized threads + WSDeque overflow), so it is
+/// far less hot than the per-CPU run queues. FIFO ordering is preserved.
+struct GlobalReadyQueue {
     levels: [VecDeque<usize>; PRIORITY_CLASSES],
 }
 
-impl CpuQueue {
+impl GlobalReadyQueue {
     const fn new() -> Self {
         Self {
             levels: [
@@ -211,7 +217,6 @@ impl CpuQueue {
         }
     }
 
-    /// Dequeue from highest priority non-empty level.
     fn pop_front(&mut self) -> Option<usize> {
         for level in self.levels.iter_mut() {
             if let Some(idx) = level.pop_front() {
@@ -220,78 +225,195 @@ impl CpuQueue {
         }
         None
     }
+}
 
-    /// Steal from lowest priority non-empty level (steal cold/low-priority work).
-    fn pop_back_lowest(&mut self) -> Option<usize> {
-        for level in self.levels.iter_mut().rev() {
-            if let Some(idx) = level.pop_back() {
-                return Some(idx);
-            }
+static GLOBAL_READY: TicketMutex<GlobalReadyQueue> = TicketMutex::new(GlobalReadyQueue::new());
+
+/// Per-CPU lock-free run queue: one Chase-Lev work-stealing deque per
+/// priority class. Owner pushes/pops from its own CPU; other CPUs steal.
+///
+/// Replaces the legacy `TicketMutex<CpuQueue>` to eliminate the SMP race
+/// where the owner's `pop()` and a remote `steal()` would both try to
+/// claim the single remaining element. The Chase-Lev `mfence` between
+/// the bottom decrement and top load (see `wsdeque::WsDeque::pop`)
+/// closes that window.
+#[repr(C, align(64))]
+struct LocalCpuQueue {
+    levels: [WsDeque; PRIORITY_CLASSES],
+}
+
+impl LocalCpuQueue {
+    const fn new() -> Self {
+        Self {
+            levels: [
+                WsDeque::new(),
+                WsDeque::new(),
+                WsDeque::new(),
+                WsDeque::new(),
+            ],
         }
-        None
     }
 
-    #[allow(dead_code)]
-    fn is_empty(&self) -> bool {
-        self.levels.iter().all(|l| l.is_empty())
+    /// Best-effort emptiness check across all priority levels. Used by
+    /// `tick()` to decide whether an idle CPU has work to wake up to.
+    /// Lock-free; the result may be stale by the time the caller acts on
+    /// it, which is fine — `schedule()` re-checks under the proper
+    /// dequeue protocol.
+    fn looks_empty(&self) -> bool {
+        self.levels.iter().all(|d| d.len_hint() <= 0)
     }
 }
 
-/// Per-core run queues, each protected by a ticket lock for FIFO fairness.
-static PER_CPU_QUEUES: [TicketMutex<CpuQueue>; MAX_CPUS] = {
-    const INIT: TicketMutex<CpuQueue> = TicketMutex::new(CpuQueue::new());
+/// Per-core lock-free run queues. No outer mutex — concurrency is
+/// handled inside `WsDeque` per the Lê et al. 2013 algorithm.
+static PER_CPU_QUEUES: [LocalCpuQueue; MAX_CPUS] = {
+    const INIT: LocalCpuQueue = LocalCpuQueue::new();
     [INIT; MAX_CPUS]
 };
 
-/// Global ready queue for unaffinitized threads (Graham's list scheduling).
-/// Dequeue order: local CPU → global queue → work-steal from other CPUs.
-/// Provides (2-1/p) competitive ratio for makespan minimization.
-static GLOBAL_READY: TicketMutex<CpuQueue> = TicketMutex::new(CpuQueue::new());
+/// Resolve `cpu_index` (a logical pool index, 0..MAX_CPUS) to its actual
+/// LAPIC ID. Populated by SMP bring-up; entries are `u32::MAX` until the
+/// AP for that index has been allocated. R1 fix: the legacy code passed
+/// `cpu_index` directly to `send_ipi`, which writes it as the physical
+/// destination LAPIC ID — wrong on any topology where the two diverge.
+pub static CPU_INDEX_TO_LAPIC: [AtomicU32; MAX_CPUS] = {
+    const SENTINEL: AtomicU32 = AtomicU32::new(u32::MAX);
+    [SENTINEL; MAX_CPUS]
+};
 
-/// Enqueue a thread index to a specific CPU's run queue at the given priority class.
-fn enqueue_to_cpu_pri(cpu: usize, idx: usize, pri_class: usize) {
-    let target = cpu % MAX_CPUS;
-    PER_CPU_QUEUES[target].lock().levels[pri_class].push_back(idx);
-    // Wake idle CPUs: send reschedule IPI if enqueueing on a remote CPU.
-    let my_cpu = percpu::current_percpu().cpu_index as usize;
-    if target != my_cpu && crate::mm::slab::is_percpu_ready() {
-        crate::arch::x86_64::lapic::send_ipi(
-            target as u32,
-            crate::arch::x86_64::lapic::RESCHEDULE_VECTOR,
-        );
+/// Register the LAPIC ID for a given logical CPU index. Called by SMP
+/// bring-up (`main::smp_init` for APs, kernel init for the BSP).
+pub fn register_cpu_lapic_id(cpu_index: usize, lapic_id: u32) {
+    if cpu_index < MAX_CPUS {
+        CPU_INDEX_TO_LAPIC[cpu_index].store(lapic_id, Ordering::Release);
     }
 }
 
-/// Enqueue a thread index to a specific CPU's run queue (default: normal priority).
-#[allow(dead_code)]
-fn enqueue_to_cpu(cpu: usize, idx: usize) {
-    enqueue_to_cpu_pri(cpu, idx, 2); // normal priority
+/// Send a reschedule IPI to the specified logical CPU index, translating
+/// through `CPU_INDEX_TO_LAPIC`. Silently no-ops if the target's LAPIC ID
+/// has not been registered yet (e.g. before SMP bring-up completes).
+fn reschedule_remote_cpu(target_idx: usize) {
+    if target_idx >= MAX_CPUS {
+        return;
+    }
+    let lapic_id = CPU_INDEX_TO_LAPIC[target_idx].load(Ordering::Acquire);
+    if lapic_id == u32::MAX {
+        return;
+    }
+    crate::arch::x86_64::lapic::send_ipi(lapic_id, crate::arch::x86_64::lapic::RESCHEDULE_VECTOR);
+}
+
+/// Result of a dequeue: either a thread to run (carried as a generation-
+/// checked handle so the lock-free fast path is ABA-safe), or empty.
+type Dequeued = Option<PoolHandle>;
+
+/// Enqueue a thread index to a specific CPU's run queue at the given priority
+/// class. On WSDeque overflow, falls back to `GLOBAL_READY` so the thread is
+/// never lost (it just temporarily loses CPU affinity).
+///
+/// **Caller contract**: must already hold `SCHEDULER.lock()`. The lock is
+/// passed by reference so we can resolve the live handle for `idx` without
+/// re-acquiring it. This keeps the dequeue path lock-free (handle is
+/// stable across the lock-free path because the slot is owned by this CPU
+/// while the lock is held).
+fn enqueue_to_cpu_pri_with(sched: &Scheduler, cpu: usize, idx: usize, pri_class: usize) {
+    let target = cpu % MAX_CPUS;
+    let pri = pri_class.min(PRIORITY_CLASSES - 1);
+    let handle = sched.threads.handle_at_index(idx as u32);
+    let pushed = match handle {
+        Some(h) => PER_CPU_QUEUES[target].levels[pri].push(h).is_ok(),
+        None => false,
+    };
+    if !pushed {
+        // Either the slot was racily freed (no live handle) or the local
+        // deque is full. Fall back to the global ready queue: this
+        // preserves the no-loss guarantee that the lock-free deque
+        // alone cannot make.
+        GLOBAL_READY.lock().levels[pri].push_back(idx);
+    }
+    // Wake idle CPUs: send reschedule IPI if enqueueing on a remote CPU.
+    let my_cpu = percpu::current_percpu().cpu_index as usize;
+    if target != my_cpu && crate::mm::slab::is_percpu_ready() {
+        reschedule_remote_cpu(target);
+    }
 }
 
 /// Dequeue from the current CPU's queue, or work-steal from others.
 /// Priority-aware: always dequeues highest priority available.
-/// Lock ordering: local PER_CPU → GLOBAL_READY → remote PER_CPU (steal).
-fn dequeue_from_any(my_cpu: usize) -> Option<usize> {
-    // 1. Try own queue first (highest priority first).
-    if let Some(idx) = PER_CPU_QUEUES[my_cpu % MAX_CPUS].lock().pop_front() {
-        return Some(idx);
-    }
-    // 2. Graham: try global ready queue (unaffinitized threads).
-    if let Some(mut gq) = GLOBAL_READY.try_lock() {
-        if let Some(idx) = gq.pop_front() {
-            return Some(idx);
+///
+/// **Lock-free fast path**: per-CPU deques are pure Chase-Lev pops; the
+/// global ready queue is the only ticket-locked stop. Returns a
+/// generation-checked `PoolHandle` so the caller (Phase 2 of `schedule`)
+/// can validate the slot is still live with one `Pool::get()` call under
+/// the SCHEDULER lock it's about to take anyway.
+///
+/// Steal retries handle the CAS-contention case from Lê et al. 2013:
+/// `Steal::Retry` from the owner-pop single-element race or from a thief
+/// CAS loss means *somebody else* made progress, so we loop instead of
+/// reporting empty.
+fn dequeue_from_any(my_cpu: usize) -> Dequeued {
+    let me = my_cpu % MAX_CPUS;
+
+    // Total-attempt bound prevents pathological retry storms.
+    let mut total_attempts: u32 = 0;
+    const MAX_ATTEMPTS: u32 = 1024;
+
+    loop {
+        if total_attempts >= MAX_ATTEMPTS {
+            return None;
         }
-    }
-    // 3. Work stealing: try other CPUs, steal lowest-priority work.
-    for offset in 1..MAX_CPUS {
-        let victim = (my_cpu + offset) % MAX_CPUS;
-        if let Some(mut q) = PER_CPU_QUEUES[victim].try_lock() {
-            if let Some(idx) = q.pop_back_lowest() {
-                return Some(idx);
+        total_attempts += 1;
+
+        // 1. Own deques, highest priority first.
+        let mut owner_retry = false;
+        for level in 0..PRIORITY_CLASSES {
+            match PER_CPU_QUEUES[me].levels[level].pop() {
+                WsSteal::Success(handle) => return Some(handle),
+                WsSteal::Empty => {}
+                WsSteal::Retry => owner_retry = true,
             }
         }
+        if owner_retry {
+            // Lost the single-element CAS to a stealer — retry.
+            continue;
+        }
+
+        // 2. Graham's list: global ready queue (unaffinitized threads).
+        if let Some(mut gq) = GLOBAL_READY.try_lock() {
+            if let Some(idx) = gq.pop_front() {
+                // Build a handle for the global-queue slot. This is the
+                // one place we touch SCHEDULER from the dequeue path; it
+                // is rare (overflow + unaffinitized threads only) and
+                // try_lock above already serialized us.
+                let sched = SCHEDULER.lock();
+                if let Some(h) = sched.threads.handle_at_index(idx as u32) {
+                    return Some(h);
+                }
+                // Stale slot in the global queue: drop it and continue.
+                continue;
+            }
+        }
+
+        // 3. Work stealing across remote CPUs. Steal lowest-priority
+        //    work first to leave the victim's hot data alone.
+        let mut any_retry = false;
+        for offset in 1..MAX_CPUS {
+            let victim = (me + offset) % MAX_CPUS;
+            for level in (0..PRIORITY_CLASSES).rev() {
+                match PER_CPU_QUEUES[victim].levels[level].steal() {
+                    WsSteal::Success(handle) => return Some(handle),
+                    WsSteal::Empty => {}
+                    WsSteal::Retry => any_retry = true,
+                }
+            }
+        }
+        if !any_retry {
+            // All deques observed empty and no CAS lost: nothing to do.
+            return None;
+        }
+        // At least one CAS lost — somebody else is making progress;
+        // loop back instead of reporting empty.
     }
-    None
 }
 
 /// Dequeue a non-depleted, CPU-targeted thread. If a dequeued thread belongs
@@ -305,7 +427,13 @@ fn dequeue_from_any(my_cpu: usize) -> Option<usize> {
 /// (which causes re-entrant lock issues with timer interrupts on SMP).
 fn dequeue_non_depleted(my_cpu: usize, sched: &mut Scheduler) -> Option<usize> {
     for _ in 0..MAX_THREADS {
-        let idx = dequeue_from_any(my_cpu)?;
+        let handle = dequeue_from_any(my_cpu)?;
+        // Generation-checked: if the slot was recycled since the push,
+        // `Pool::get(handle)` returns None and we drop the stale entry.
+        let idx = match sched.threads.get(handle) {
+            Some(_) => handle.index(),
+            None => continue,
+        };
 
         // Skip non-CPU compute targets (GPU/NPU threads wait for offload).
         let compute_target = sched
@@ -420,6 +548,11 @@ impl Scheduler {
     /// Enqueue a thread to its preferred CPU's queue, or to the global ready
     /// queue if the thread has no CPU affinity (Graham's list scheduling).
     /// Uses the thread's priority to select the correct multi-level queue.
+    ///
+    /// **Lock contract**: callers must already hold `SCHEDULER.lock()` —
+    /// `&self` here is borrowed from a `TicketGuard<Scheduler>`. The
+    /// underlying `enqueue_to_cpu_pri_with` does NOT re-acquire the lock,
+    /// so this is safe to call from anywhere already inside the scheduler.
     pub fn enqueue(&self, idx: usize) {
         let (target_cpu, pri_class, has_affinity) = self
             .threads
@@ -432,7 +565,7 @@ impl Scheduler {
             .unwrap_or_else(|| (percpu::current_percpu().cpu_index as usize, 2, false));
 
         if has_affinity {
-            enqueue_to_cpu_pri(target_cpu, idx, pri_class);
+            enqueue_to_cpu_pri_with(self, target_cpu, idx, pri_class);
         } else {
             // Graham's list scheduling: unaffinitized threads go to global queue.
             GLOBAL_READY.lock().levels[pri_class].push_back(idx);
@@ -1724,20 +1857,18 @@ pub fn tick() {
         let mut sched = match SCHEDULER.try_lock() {
             Some(s) => s,
             None => {
-                // Lock contended. If we're the idle thread, check local queue
-                // directly — don't skip, or idle CPUs miss enqueued threads.
+                // Lock contended. If we're the idle thread, peek the
+                // lock-free local queue — don't skip, or idle CPUs miss
+                // enqueued threads. Lock-free `looks_empty` is best-effort
+                // but a stale "has work" reading just causes one extra
+                // tick of latency, never a lost wakeup.
                 let percpu = percpu::current_percpu();
                 let my_cpu = percpu.cpu_index as usize;
-                if percpu.current_thread == percpu.idle_thread {
-                    if let Some(q) = PER_CPU_QUEUES[my_cpu % MAX_CPUS].try_lock() {
-                        if !q.is_empty() {
-                            drop(q);
-                            // Queue has work — force reschedule ASAP.
-                            // Can't call schedule() here (needs SCHEDULER lock),
-                            // but the next timer tick will pick it up since we
-                            // won't be contended forever.
-                        }
-                    }
+                if percpu.current_thread == percpu.idle_thread
+                    && !PER_CPU_QUEUES[my_cpu % MAX_CPUS].looks_empty()
+                {
+                    // Queue has work — next timer tick (or any IPI) will
+                    // re-enter schedule() and pick it up.
                 }
                 return;
             }
@@ -1746,12 +1877,12 @@ pub fn tick() {
         let idx = percpu.current_thread;
         let mut resched = false;
         // If running idle thread and local queue has work, force reschedule.
+        // Lock-free peek — `looks_empty` is best-effort but the worst case
+        // is a missed reschedule that the next tick catches.
         if idx == percpu.idle_thread {
             let my_cpu = percpu.cpu_index as usize;
-            if let Some(q) = PER_CPU_QUEUES[my_cpu % MAX_CPUS].try_lock() {
-                if !q.is_empty() {
-                    resched = true;
-                }
+            if !PER_CPU_QUEUES[my_cpu % MAX_CPUS].looks_empty() {
+                resched = true;
             }
         }
 
@@ -1945,60 +2076,72 @@ pub fn schedule() {
 
         let old_idx = percpu.current_thread;
         if old_idx == usize::MAX {
-            // If candidate was dequeued, put it back.
-            if let Some(idx) = candidate {
-                sched.enqueue(idx);
+            // If candidate was dequeued, put it back. Use the validated
+            // slot index from the handle (Pool::get None ⇒ slot is gone,
+            // nothing to re-enqueue).
+            if let Some(handle) = candidate {
+                if sched.threads.get(handle).is_some() {
+                    sched.enqueue(handle.index());
+                }
             }
             return;
         }
 
-        // Validate candidate against state + domain/compute constraints.
-        // SMP fix: between Phase 1 (dequeue without SCHEDULER lock) and Phase 2
-        // (here, with lock), another CPU may have changed the thread's state
-        // (e.g., Blocked via notify_wait). Re-enqueue if no longer Ready.
-        let new_idx = if let Some(idx) = candidate {
-            let valid = {
-                match sched.threads.get_by_index(idx as u32) {
-                    None => false, // Thread gone
-                    Some(t) => {
-                        // SMP race guard: reject threads that became Blocked/Dead
-                        // between Phase 1 dequeue and Phase 2 lock acquisition.
-                        if t.state == ThreadState::Blocked || t.state == ThreadState::Dead {
-                            false
-                        } else if t.compute_target != ComputeTarget::Cpu {
-                            false // GPU/NPU thread — re-enqueue
-                        } else {
-                            match t.domain_idx {
-                                None => true,
-                                Some(di) => {
-                                    let is_active = sched
-                                        .domains
-                                        .get_by_index(di)
-                                        .map_or(true, |d| d.state == DomainState::Active);
-                                    if !is_active {
-                                        if let Some(dom) = sched.domains.get_mut_by_index(di) {
-                                            dom.suspended.push(idx);
-                                        }
-                                    }
-                                    is_active
-                                }
+        // Validate candidate handle: ABA-safe via the packed (gen, idx)
+        // PoolHandle that the WSDeque carries — `Pool::get` rejects stale
+        // handles whose slot was recycled since the push. State checks
+        // (Blocked/Dead/wrong-compute/depleted-domain) still apply because
+        // those transitions can race the lock-free dequeue.
+        //
+        // R5 invariant: an invalid candidate is *dropped*, not re-enqueued.
+        // The party that transitioned the state (block_current_*, mark_dead,
+        // domain depletion) is responsible for whatever follow-up enqueue is
+        // appropriate; double-enqueue from this path was a long-standing
+        // confusion in the legacy scheduler.
+        let new_idx = if let Some(handle) = candidate {
+            let validated_idx: Option<usize> = sched.threads.get(handle).and_then(|t| {
+                if t.state == ThreadState::Blocked || t.state == ThreadState::Dead {
+                    None
+                } else if t.compute_target != ComputeTarget::Cpu {
+                    None
+                } else {
+                    match t.domain_idx {
+                        None => Some(handle.index()),
+                        Some(di) => {
+                            let is_active = sched
+                                .domains
+                                .get_by_index(di)
+                                .map_or(true, |d| d.state == DomainState::Active);
+                            if is_active {
+                                Some(handle.index())
+                            } else {
+                                None
                             }
                         }
                     }
                 }
-            };
-            if valid {
+            });
+
+            // Park into suspended-list if depleted-domain dropped it.
+            if validated_idx.is_none() {
+                if let Some(t) = sched.threads.get(handle) {
+                    if let Some(di) = t.domain_idx {
+                        let is_active = sched
+                            .domains
+                            .get_by_index(di)
+                            .map_or(true, |d| d.state == DomainState::Active);
+                        if !is_active {
+                            if let Some(dom) = sched.domains.get_mut_by_index(di) {
+                                dom.suspended.push(handle.index());
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some(idx) = validated_idx {
                 idx
             } else {
-                // Invalid candidate. Re-enqueue if not suspended.
-                let was_suspended = sched
-                    .threads
-                    .get_by_index(idx as u32)
-                    .and_then(|t| t.domain_idx)
-                    .is_some();
-                if !was_suspended {
-                    sched.enqueue(idx);
-                }
                 // Fall through to idle/stay logic
                 let old_t = match sched.threads.get_mut_by_index(old_idx as u32) {
                     Some(t) => t,
@@ -2189,15 +2332,32 @@ pub fn schedule() {
                     core::arch::asm!("fxsave64 [{}]", in(reg) fpu_ptr, options(nostack));
                 }
             }
+            // Stash the new thread's FPU pointer in PerCpu so it survives the
+            // stack swap. The local `new_fpu` would otherwise be spilled to the
+            // OLD thread's stack and re-loaded from the SAME offset on the NEW
+            // thread's stack — yielding garbage that WHPX rejects on fxrstor64
+            // with #GP (TCG silently accepts garbage XMM state).
+            percpu::current_percpu().next_fpu_ptr = new_fpu as u64;
             context_switch(old_rsp_ptr, new_rsp);
-            // After context_switch: we're the NEW thread. Restore FPU.
-            // Check if the state was ever saved (first u16 = FCW; 0 means uninitialized).
-            let fcw = *(new_fpu as *const u16);
-            if fcw != 0 {
-                core::arch::asm!("fxrstor64 [{}]", in(reg) new_fpu, options(nostack));
-            } else {
-                // First context switch for this thread — initialize FPU to default state.
-                core::arch::asm!("fninit", options(nostack));
+            // After context_switch: we're the NEW thread. Re-fetch percpu
+            // (same CPU, but the local `new_fpu` register/spill is no longer
+            // valid). Read the stashed pointer.
+            let nfp = percpu::current_percpu().next_fpu_ptr as *const u8;
+            // Defensive: clear so a stale value can't be re-used if a future
+            // schedule path is taken without setting it (e.g. fresh thread
+            // first run goes via user_thread_trampoline, never reaching this).
+            percpu::current_percpu().next_fpu_ptr = 0;
+            if !nfp.is_null() {
+                // Check if the state was ever saved (first u16 = FCW; 0 means
+                // uninitialized — Thread::new sets fpu_state to all zeros).
+                let fcw = *(nfp as *const u16);
+                if fcw != 0 {
+                    core::arch::asm!("fxrstor64 [{}]", in(reg) nfp, options(nostack));
+                } else {
+                    // First context switch for this thread — initialize FPU
+                    // to default state.
+                    core::arch::asm!("fninit", options(nostack));
+                }
             }
         }
         finish_switch();

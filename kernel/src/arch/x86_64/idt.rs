@@ -385,8 +385,25 @@ core::arch::global_asm!(
     "    add rsp, 8", // pop error code
     "    swapgs",
     "    iretq",
-    // === Kernel-mode #GP: panic ===
+    // === Kernel-mode #GP: save GPRs, print, panic ===
     "2:",
+    "    push r15",
+    "    push r14",
+    "    push r13",
+    "    push r12",
+    "    push r11",
+    "    push r10",
+    "    push r9",
+    "    push r8",
+    "    push rbp",
+    "    push rdi",
+    "    push rsi",
+    "    push rdx",
+    "    push rcx",
+    "    push rbx",
+    "    push rax",
+    "    mov rdi, rsp",
+    "    lea rsi, [rsp + 120]",
     "    call gp_fault_kernel_handler",
     "    ud2",
 );
@@ -441,9 +458,33 @@ extern "C" fn gp_fault_user_handler(gprs: *mut u64, iframe: *mut u64) {
     crate::sched::exit_current(); // diverges
 }
 
-/// Kernel-mode #GP handler — panics.
+/// Kernel-mode #GP handler — prints the saved GPRs / iframe, then panics.
+///
+/// The asm stub pushes 15 GPRs (rax..r15) before calling us, identical to
+/// the user-mode path but without swapgs. `gprs` points at the save area,
+/// `iframe` at error_code+rip+cs+rflags+rsp+ss.
 #[no_mangle]
-extern "C" fn gp_fault_kernel_handler() {
+extern "C" fn gp_fault_kernel_handler(gprs: *mut u64, iframe: *mut u64) {
+    // SAFETY: see gp_fault_user_handler — same layout, same lifetime contract.
+    let error_code = unsafe { *iframe };
+    let rip = unsafe { *iframe.add(1) };
+    let cs = unsafe { *iframe.add(2) };
+    let rflags = unsafe { *iframe.add(3) };
+    let rsp = unsafe { *iframe.add(4) };
+    let ss = unsafe { *iframe.add(5) };
+    let rax = unsafe { *gprs };
+    let rcx = unsafe { *gprs.add(2) };
+    let rdx = unsafe { *gprs.add(3) };
+    kprintln!(
+        "#GP(kernel) rip={:#x} cs={:#x} rflags={:#x} rsp={:#x} ss={:#x} code={:#x}",
+        rip,
+        cs,
+        rflags,
+        rsp,
+        ss,
+        error_code
+    );
+    kprintln!("  rax={:#x} rcx={:#x} rdx={:#x}", rax, rcx, rdx);
     panic!("EXCEPTION: #GP general protection fault (kernel)");
 }
 
@@ -744,8 +785,7 @@ extern "C" fn page_fault_user_handler(gprs: *mut u64, iframe: *mut u64) {
                 if let Some(tid) = crate::sched::current_tid() {
                     crate::sched::set_pending_signal(tid, 11);
                 }
-                crate::sched::exit_current();
-                return;
+                crate::sched::exit_current(); // diverges
             }
             crate::sched::set_last_fault_rip_by_idx(idx as u32, rip);
 
@@ -791,8 +831,7 @@ extern "C" fn page_fault_user_handler(gprs: *mut u64, iframe: *mut u64) {
         if let Some(tid) = crate::sched::current_tid() {
             crate::sched::set_pending_signal(tid, 11);
         }
-        crate::sched::exit_current();
-        return;
+        crate::sched::exit_current(); // diverges
     }
 
     // Log null-pointer faults (diagnostic only — VMM maps page 0 on demand,
