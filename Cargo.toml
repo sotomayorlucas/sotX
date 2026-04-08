@@ -45,6 +45,7 @@ exclude = [
     "services/sot-pkg",
     "services/sot-carp",
     "services/sot-cheri",
+    "services/sot-statusbar",
     "services/abi-fuzz",
     "libs/sotos-testlib",
     "tools/sotctl",
