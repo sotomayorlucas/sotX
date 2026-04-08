@@ -4,17 +4,31 @@
 // TRB structure (16 bytes, 16-byte aligned)
 // ---------------------------------------------------------------------------
 
+/// xHCI Transfer Request Block — 16 bytes, `repr(C, align(16))`.
+///
+/// The unit of work exchanged between host and controller on every
+/// ring (command, transfer, event). Layout matches xHCI 1.2 §4.11:
+/// a 64-bit parameter, a 32-bit status/length word, and a 32-bit
+/// control word carrying the TRB type, cycle bit, and flags.
 #[repr(C, align(16))]
 #[derive(Clone, Copy)]
 pub struct Trb {
+    /// Parameter (DW0/DW1). Meaning depends on [`trb_type`](Self::trb_type):
+    /// e.g. data buffer physical address, input context pointer, or
+    /// immediate setup-packet bytes.
     pub param: u64,
+    /// Status word (DW2). For transfer TRBs holds the TRB Transfer Length;
+    /// for event TRBs the upper byte holds the completion code.
     pub status: u32,
+    /// Control word (DW3): cycle bit (0), flags, TRB type (15:10),
+    /// endpoint/slot id (31:16), and type-specific bits.
     pub control: u32,
 }
 
 const _: () = assert!(core::mem::size_of::<Trb>() == 16);
 
 impl Trb {
+    /// All-zeros TRB. `const` so callers can build static ring buffers.
     pub const fn zeroed() -> Self {
         Trb { param: 0, status: 0, control: 0 }
     }
@@ -46,29 +60,45 @@ impl Trb {
 }
 
 // ---------------------------------------------------------------------------
-// TRB Type constants
+// TRB Type constants (xHCI 1.2 §6.4.6 — Table 6-91)
 // ---------------------------------------------------------------------------
 
+/// Normal TRB — bulk/interrupt transfer data buffer (type 1).
 pub const TRB_NORMAL: u8 = 1;
+/// Setup Stage TRB — first TRB of a control transfer (type 2).
 pub const TRB_SETUP_STAGE: u8 = 2;
+/// Data Stage TRB — optional data phase of a control transfer (type 3).
 pub const TRB_DATA_STAGE: u8 = 3;
+/// Status Stage TRB — final TRB of a control transfer (type 4).
 pub const TRB_STATUS_STAGE: u8 = 4;
+/// Link TRB — pointer used to chain ring segments or wrap a ring (type 6).
 pub const TRB_LINK: u8 = 6;
+/// No-Op Command TRB — used to verify the command ring (type 23).
 pub const TRB_NO_OP_CMD: u8 = 23;
+/// Enable Slot Command TRB — allocate a device slot (type 9).
 pub const TRB_ENABLE_SLOT: u8 = 9;
+/// Disable Slot Command TRB — release a device slot (type 10).
 pub const TRB_DISABLE_SLOT: u8 = 10;
+/// Address Device Command TRB — bind a slot to a USB address (type 11).
 pub const TRB_ADDRESS_DEV: u8 = 11;
+/// Configure Endpoint Command TRB — add/remove endpoints on a slot (type 12).
 pub const TRB_CONFIGURE_EP: u8 = 12;
+/// Reset Endpoint Command TRB — clear a halted endpoint (type 14).
 pub const TRB_RESET_EP: u8 = 14;
+/// Stop Endpoint Command TRB — pause transfers on an endpoint (type 15).
 pub const TRB_STOP_EP: u8 = 15;
+/// Transfer Event TRB — completion report for a transfer ring (type 32).
 pub const TRB_XFER_EVENT: u8 = 32;
+/// Command Completion Event TRB — result of a command ring submission (type 33).
 pub const TRB_CMD_COMPLETE: u8 = 33;
+/// Port Status Change Event TRB — root-hub port event (type 34).
 pub const TRB_PORT_STATUS: u8 = 34;
 
 // ---------------------------------------------------------------------------
 // Completion codes
 // ---------------------------------------------------------------------------
 
+/// xHCI 1.2 §6.4.5 completion code 1 — operation completed without error.
 pub const CC_SUCCESS: u8 = 1;
 
 // ---------------------------------------------------------------------------
@@ -198,6 +228,12 @@ pub fn trb_normal(buf_phys: u64, length: u16) -> Trb {
 // TrbRing — Producer ring (for Command Ring and Transfer Rings)
 // ---------------------------------------------------------------------------
 
+/// Producer-side state for a TRB ring (command ring or transfer ring).
+///
+/// Owns the enqueue cursor and the Producer Cycle State bit used by
+/// the controller to tell new TRBs from stale ones. The backing page
+/// is caller-allocated (4 KiB, `RING_SIZE` entries) and the last slot
+/// is reserved for the Link TRB that wraps back to the start.
 pub struct TrbRing {
     base: *mut Trb,
     phys: u64,
@@ -265,6 +301,11 @@ impl TrbRing {
 // EventRing — Consumer ring (for Event Ring)
 // ---------------------------------------------------------------------------
 
+/// Consumer-side state for an Event Ring.
+///
+/// Tracks the dequeue cursor and the Consumer Cycle State; the
+/// controller posts events with its own cycle bit and software
+/// compares against `ccs` to find fresh entries.
 pub struct EventRing {
     base: *const Trb,
     phys: u64,
@@ -314,10 +355,16 @@ impl EventRing {
 // ---------------------------------------------------------------------------
 
 /// Event Ring Segment Table Entry (16 bytes).
+///
+/// The ERST lets the controller know where one or more event-ring
+/// segments live in physical memory. Our driver uses a single
+/// segment, so the table has exactly one entry.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ErstEntry {
+    /// Physical base address of the event ring segment (64-byte aligned).
     pub ring_segment_base: u64,
+    /// Number of TRBs in the segment (16..4096 per xHCI 1.2 §6.5).
     pub ring_segment_size: u32,
     _reserved: u32,
 }
@@ -325,6 +372,8 @@ pub struct ErstEntry {
 const _: () = assert!(core::mem::size_of::<ErstEntry>() == 16);
 
 impl ErstEntry {
+    /// Build a single-segment ERST entry pointing at `base_phys` and
+    /// advertising `size` TRB slots.
     pub fn new(base_phys: u64, size: u32) -> Self {
         ErstEntry {
             ring_segment_base: base_phys,
