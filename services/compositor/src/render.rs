@@ -74,27 +74,14 @@ impl Framebuffer {
         }
     }
 
-    /// Draw a simple title bar for a window.
-    pub fn draw_title_bar(&self, x: i32, y: i32, w: u32, title: &[u8]) {
-        const BAR_HEIGHT: u32 = 24;
-        const BAR_COLOR: u32 = 0xFF404040; // dark gray
-        const CLOSE_COLOR: u32 = 0xFFFF5555; // red
-        const CLOSE_SIZE: u32 = 16;
-
-        self.fill_rect(x, y, w, BAR_HEIGHT, BAR_COLOR);
-
-        // Close button (top-right)
-        let close_x = x + w as i32 - CLOSE_SIZE as i32 - 4;
-        let close_y = y + 4;
-        self.fill_rect(close_x, close_y, CLOSE_SIZE, CLOSE_SIZE, CLOSE_COLOR);
-
-        // Title text — large font, centered vertically in the title bar.
-        let text_x = x + 6;
-        let text_y = y + ((BAR_HEIGHT as i32 - crate::font::TITLE_FONT_HEIGHT) / 2).max(0);
-        let max_chars = ((w as i32 - (CLOSE_SIZE as i32 + 14)) / 10).max(0) as usize;
-        let len = title.len().min(max_chars);
-        let s = core::str::from_utf8(&title[..len]).unwrap_or("");
-        crate::font::draw_text(self, text_x, text_y, s, 0xFFEEEEEE, true);
+    /// Draw a title bar for a window.
+    ///
+    /// Thin forwarder to `crate::decorations::draw_title_bar`, which owns all
+    /// the Tokyo Night-styled chrome (traffic lights, rounded corners).
+    /// Kept on `Framebuffer` for backwards compatibility with older callers.
+    pub fn draw_title_bar(&mut self, x: i32, y: i32, w: u32, title: &[u8]) {
+        let title_str = core::str::from_utf8(title).unwrap_or("");
+        crate::decorations::draw_title_bar(self, x, y, w as i32, true, title_str);
     }
 
     /// Draw text at `(x, y)` using the compact `FONT_6X10` font.
