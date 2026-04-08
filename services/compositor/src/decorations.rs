@@ -1,7 +1,7 @@
 //! Modern window decorations.
 //!
-//! Tokyo Night-styled window chrome: gradient title bar, drop shadow,
-//! rounded traffic-light buttons on the LEFT side of the title bar.
+//! Tokyo Night-styled window chrome: gradient title bar with rounded
+//! traffic-light buttons on the LEFT side of the title bar.
 //!
 //! The title bar is 28px tall (replacing the previous bare 24px bar).
 //! Traffic-light buttons mirror macOS layout:
@@ -26,8 +26,14 @@ pub const TITLE_BAR_HEIGHT: i32 = 28;
 #[allow(dead_code)]
 pub const BORDER_RADIUS: i32 = 8;
 
-/// Drop shadow offset below the title bar.
-pub const SHADOW_OFFSET: i32 = 4;
+/// Advance (in pixels) of every glyph drawn by `Framebuffer::draw_text`.
+///
+/// Matches the advance of `font::FONT_6X10` that PR #56 installs as the
+/// `draw_text` backend. The current `draw_text` still uses the built-in
+/// 8x8 bitmap font, but hardcoding 6 here keeps the title centering math
+/// correct after #56 lands without introducing a dependency on a
+/// `crate::font` module that does not exist on this branch yet.
+const GLYPH_ADVANCE: i32 = 6;
 
 /// Diameter of each traffic-light button.
 const BUTTON_DIAMETER: i32 = 14;
@@ -56,14 +62,17 @@ pub struct Theme {
 }
 
 /// Tokyo Night flavored palette.
+///
+/// Values taken from the canonical Tokyo Night (storm) spec:
+/// <https://github.com/folke/tokyonight.nvim/blob/main/extras/lua/tokyonight_night.lua>
 pub const TOKYO_NIGHT: Theme = Theme {
-    title_active: 0xFF3461A7,
-    title_inactive: 0xFF45475A,
-    title_text: 0xFFCDD6F4,
+    title_active: 0xFF7AA2F7,   // TN blue
+    title_inactive: 0xFF24283B, // TN bg-storm
+    title_text: 0xFFC0CAF5,     // TN foreground (matches sot-statusbar TN_FG)
     close_red: 0xFFF7768E,
     min_yellow: 0xFFE0AF68,
     max_green: 0xFF73DACA,
-    border: 0xFF45475A,
+    border: 0xFF24283B,
     shadow: 0x55000000,
 };
 
@@ -76,7 +85,6 @@ pub const TOKYO_NIGHT: Theme = Theme {
 /// Layout:
 ///   row 0..TITLE_BAR_HEIGHT-1: vertical gradient (active/inactive color).
 ///   row TITLE_BAR_HEIGHT-1   : 1px border line.
-///   rows TITLE_BAR_HEIGHT..+SHADOW_OFFSET: decreasing-darkness shadow strip.
 ///   traffic lights: 3 circles on the LEFT, vertically centered.
 ///   title text: centered horizontally, 8px from top.
 pub fn draw_title_bar(fb: &mut Framebuffer, x: i32, y: i32, w: i32, focused: bool, title: &str) {
@@ -104,8 +112,9 @@ pub fn draw_title_bar(fb: &mut Framebuffer, x: i32, y: i32, w: i32, focused: boo
     // 1px bottom border line inside the title bar.
     fb.fill_rect(x, y + TITLE_BAR_HEIGHT - 1, width, 1, TOKYO_NIGHT.border);
 
-    // Drop shadow strip: a few darker rows below the bar, decreasing darkness.
-    draw_window_shadow(fb, x, y + TITLE_BAR_HEIGHT, w, SHADOW_OFFSET);
+    // No drop-shadow strip: rows below the bar coincide with the start of
+    // the client content area, so the compose loop would overwrite any
+    // shadow painted here on the same frame.
 
     // Traffic-light buttons on the LEFT.
     let cy = y + TITLE_BAR_HEIGHT / 2;
@@ -115,31 +124,15 @@ pub fn draw_title_bar(fb: &mut Framebuffer, x: i32, y: i32, w: i32, focused: boo
     draw_traffic_light(fb, cx2, cy, TOKYO_NIGHT.max_green);
 
     // Title text: centered horizontally, 8px from top. Clipped so it never
-    // overlaps the traffic lights. Uses the existing 8x8 bitmap font.
+    // overlaps the traffic lights.
     let bytes = title.as_bytes();
     let reserved_left = cx2 + BUTTON_DIAMETER / 2 + 8;
     let available = (x + w - 8 - reserved_left).max(0);
-    let max_chars = ((available / 8).max(0) as usize).min(bytes.len());
+    let max_chars = ((available / GLYPH_ADVANCE).max(0) as usize).min(bytes.len());
     if max_chars > 0 {
-        let draw_width = (max_chars as i32) * 8;
+        let draw_width = (max_chars as i32) * GLYPH_ADVANCE;
         let tx = (x + (w - draw_width) / 2).max(reserved_left);
         fb.draw_text(tx, y + 8, &bytes[..max_chars], TOKYO_NIGHT.title_text);
-    }
-}
-
-/// Paint a drop-shadow strip of `height` rows below a window title bar.
-///
-/// We approximate alpha blending by darkening the background color per-row.
-pub fn draw_window_shadow(fb: &mut Framebuffer, x: i32, y: i32, w: i32, h: i32) {
-    if w <= 0 || h <= 0 {
-        return;
-    }
-    let width = w as u32;
-    for row in 0..h {
-        // Shadow darkness decays linearly with distance from the bar.
-        let darkness = 60 - (row * 15).min(60);
-        let color = shade(darkness as u8);
-        fb.fill_rect(x, y + row, width, 1, color);
     }
 }
 
@@ -201,12 +194,6 @@ fn darken(c: u32, percent: u32) -> u32 {
     let g = (((c >> 8) & 0xFF) * scale / 100) & 0xFF;
     let b = ((c & 0xFF) * scale / 100) & 0xFF;
     (c & 0xFF00_0000) | (r << 16) | (g << 8) | b
-}
-
-/// Opaque grayscale at the given brightness (0 = black, 255 = white).
-fn shade(brightness: u8) -> u32 {
-    let v = brightness as u32;
-    0xFF00_0000 | (v << 16) | (v << 8) | v
 }
 
 /// Convert a BGRA `0xFFRRGGBB` u32 into an `embedded_graphics` `Rgb888`.
