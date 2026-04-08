@@ -612,3 +612,157 @@ sotBSD v0.1.0 + PANDORA T1-T4 baseline.
       Follow-up: local `ProvenanceEntry` mirror is NOT ABI-compat with
       kernel's 48-byte `#[repr(C)]` struct -- needs fix when real
       drained-ring data is plumbed in.)**
+
+---
+
+## v0.2.0+ Wave: GUI Renewal + Cleanup Pass (added 2026-04-08)
+
+A 20-unit batch landed during 2026-04-07/08 split into GUI renewal
+(G1-G12), `services/init` modular splits (I1-I3), CI strictness (C1)
+and four hygiene passes (H1-H4). All 20 units shipped as PRs #53-#72
+and merged to `sotBSD` HEAD `eb137e3`. Verified end-to-end via
+`just run`: 16 PASS markers in a single boot, zero panics.
+
+### GUI renewal (compositor stack, 12 units)
+
+- [x] **G1 Font system upgrade** -- Replace 8x8 bitmap with
+      `embedded-graphics` mono font (10x20 large + 6x10 compact),
+      anti-aliased. **(PR #56)**
+- [x] **G2 Cursor theme + 8 shapes** -- `CursorShape` enum with
+      Default, Pointer, Text, Wait, Move, ResizeNS, ResizeEW,
+      NotAllowed. Each shape is a hand-crafted static BGRA glyph
+      with hot-spot. Foundation for future `wl_cursor` protocol.
+      **(PR #55)**
+- [x] **G3 Modern window decorations** -- Tokyo Night palette,
+      `decorations` module with traffic-light buttons (red/yellow/
+      green circles, 14px), 24/28 px title bar, rounded corners,
+      `embedded-graphics` adapter. **(PR #62)**
+- [x] **G4 tiny-skia path render pipeline** -- `skia_render` module
+      gated behind the `skia` Cargo feature so the default
+      `#![no_std]` build is unchanged. Provides
+      `SkiaCanvas::fill_rounded_rect`/`stroke_rounded_rect`/
+      `fill_circle`/`linear_gradient` + `present()` BGRA blit.
+      **(PR #54)**
+- [x] **G5 Damage tracking by rectangle** -- `damage` module with
+      32-rect dirty list, coalescing on overflow, escalation to
+      fullscreen if union > 3/4 of screen. Replaces the single
+      `bool` flag. **(PR #53)**
+- [x] **G6 xdg-shell popups + positioner** -- `xdg_popup` module
+      with 16-positioner / 16-popup pools, `place_popup` algorithm
+      handling all anchor + gravity combinations, `xdg_popup::
+      reposition` recompute geometry on the fly. **(PR #70)**
+- [x] **G7 Layer shell protocol** -- `zwlr_layer_shell_v1` with
+      4-layer z-order (Background → Bottom → Top → Overlay), anchor
+      bitmask, `exclusive_zone` reservation, margin support, 8
+      layer-surface pool. Compose loop renders layers in strict
+      z-order with cumulative inset clamping. **(PR #69, merged
+      auto via local push)**
+- [x] **G8 wl_output protocol stub** -- Single-output `wl_output`
+      v4 global advertised with framebuffer geometry/mode/scale/
+      name/description from BootInfo. Foundation for multi-monitor.
+      **(PR #61)**
+- [x] **G9 Fractional scaling stub** -- `wp_fractional_scale_v1`
+      manager + per-surface objects, always reports 120 (1.0x in
+      120-fixed). Foundation for HiDPI. **(PR #60)**
+- [x] **G10 Wallpaper subsystem + Tokyo Night gradient** -- New
+      `wallpaper` module with vertical gradient cache (Tokyo Night
+      `#1A1B26 → #10101C`, up to 2160 rows), optional BMP image
+      tile path with raw volatile pointer writes (replaced
+      per-pixel `fill_rect`). **(PR #57)**
+- [x] **G11 Animation framework** -- `animation` module with
+      `Animation` struct, `Easing::Linear/EaseOut/EaseInOut`,
+      `interpolate_color`, 32-anim global pool. Pure no_std,
+      no `powf` (manual cubic). **(PR #58)**
+- [x] **G12 sot-statusbar layer-shell client** -- New
+      `services/sot-statusbar/` no_std crate with full Wayland
+      handshake, `zwlr_layer_surface_v1::ack_configure` round-trip,
+      Tokyo Night palette, clock + memory + procs sampling.
+      Spawned by init. Connects to compositor; happy path needs
+      kernel-side spawn for `self_as_cap` (documented limitation).
+      **(PR #72)**
+
+### `services/init` modular splits (3 units)
+
+- [x] **I1 Split fs_vfs.rs (2940 LOC)** -- 5 sub-modules
+      (`vfs_read_write`, `vfs_metadata`, `vfs_open`, `vfs_path`,
+      `vfs_delete`) plus a re-export shim. 44 functions verified
+      via inventory diff, end-to-end QEMU boot showed
+      **39 PASS markers byte-for-byte identical** to baseline.
+      **(PR #71)**
+- [x] **I2 Split boot_tests.rs (2778 LOC)** -- 6 sub-modules
+      (`dynamic`, `linux_abi`, `dynamic_test`, `busybox`,
+      `validation`, `benchmarks`) + `mod.rs` re-exports.
+      Includes the 55-line TLS reloc test hunk from PR #47.
+      **(PR #68)**
+- [x] **I3 Split builtins.rs (2033 LOC)** -- 5 sub-modules
+      (`text`, `files`, `system`, `apt`, `util`) + glob
+      re-exports. 63 functions verified. **(PR #63)**
+
+### CI strictness (1 unit)
+
+- [x] **C1 Strict fmt + clippy gate** -- New `lint-strict-core`
+      job in `.github/workflows/ci.yml` runs `cargo fmt --check`
+      and `cargo clippy -D warnings` against `sotos-kernel`,
+      `sotos-common`, `sot-fma`, `sot-crossbow`, `sotos-ld`
+      WITHOUT `continue-on-error`. Includes 11 inline clippy
+      fixes (mostly `.flatten()` / `div_ceil` / `iter_mut`)
+      and a drive-by `kernel/linker.ld` fix folding `.got` /
+      `.got.plt` into `.data` to resolve a pre-existing
+      `.text` overlap. **(PR #67)**
+
+### Hygiene (4 units)
+
+- [x] **H1 .gitignore expansion** -- 84-line addition anchored
+      to repo root for ABI test artifacts (`.so`, `.apk`,
+      `bash-static`, `busybox`, `lib*`, `libdrm`, `libwayland`,
+      etc.). Reduced `git status` untracked count from 215 to 53.
+      **(PR #59)**
+- [x] **H2 rustdoc on driver crates** -- 152 missing-doc warnings
+      → 0 across `sotos-pci`, `sotos-nvme`, `sotos-xhci`,
+      `sotos-mouse`, `sotos-ahci`, `sotos-usb-storage`. xhci was
+      the largest contribution (119 items documented).
+      **(PR #64, merged auto via local push)**
+- [x] **H3 SAFETY comments on kernel/arch/x86_64** -- 74 unsafe
+      blocks across 9 files (`gdt`, `idt`, `io`, `lapic`, `percpu`,
+      `pic`, `pit`, `serial`, `syscall`) got 1:1 `// SAFETY:`
+      coverage. Highest density: `idt.rs` (47 blocks for fault
+      handler iframe layouts). **(PR #66)**
+- [x] **H4 unwrap → Result in services/init/syscalls** -- 32
+      sites audited in `fs_initrd`, `fs_pipe`, `info`, `net`,
+      `signal`. All Type C (statically-proven invariants from
+      `try_into` on 8-byte slices) -- upgraded to
+      `.expect("invariant: 8-byte slice")` for documentation.
+      One Type A site (`net.rs::sys_socketpair`) refactored to
+      explicit match returning `-ENOMEM`. **(PR #65)**
+
+### v0.2.0+ Wave verification (post-merge boot)
+
+`just build && just run` on `sotBSD` HEAD `eb137e3` reaches
+**16 PASS markers in a single boot**, zero panics, zero triple
+faults. The 16 markers are: `compositor input: WIRED`, `Signify
+boot chain: PASS` (22 entries), `STYX TEST: ALL PASS`,
+`posix-test: PASS`, `kernel-test: PASS`, `RUMP-VFS-TEST: PASS`,
+`Tier 3 demo: PASS`, `FMA: PASS`, `Tier 4 demo: PASS`,
+`Crossbow: PASS`, `Tier 5 demo: PASS`, `abi-fuzz: 10000/10000
+survived`, `SMF respawn: PASS`, `DLTEST: PASS - dynamic linking
+works!`, `DLTEST: mul PASS`. Build is 2-warning clean (both
+pre-existing `unreachable_code` in `idt.rs`).
+
+### v0.2.0+ Wave -- known follow-ups (non-blocking)
+
+- **sot-statusbar happy path**: init's `spawn_process` passes
+  `cap=0`, so the statusbar can't allocate caps for SHM pool
+  setup. Requires either kernel-side spawn (like compositor)
+  or forwarding the child's AS cap via `bootinfo_write`. The
+  statusbar gracefully connects-and-waits today.
+- **sot-fma `ProvenanceEntry`**: local mirror is 40 bytes (rustc
+  default layout) and has different fields than the kernel's
+  48-byte `#[repr(C)]` struct. Fine for the synthesised demo,
+  but real drained-ring data would be misread. Fix: import the
+  upstream type or add `#[repr(C)]` + `const_assert!` on size.
+- **G7+G70 linker.ld duplicate fix**: PR #67 (CI strict) and
+  PR #70 (xdg_popup) both made independent fixes for the same
+  `.got` overlap. PR #67's fold-into-`.data` won; #70 dropped
+  its hunk in the fix-up.
+- **TODO**: Update README + create v0.2.0 whitepaper PDF (this
+  is in flight as the next batch).

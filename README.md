@@ -16,8 +16,17 @@ It exposes:
 * a deception subsystem (anomaly detector + migration orchestrator +
   Ed25519/SHA-256 signed boot chain),
 * a Linux ABI personality (LUCAS shell, glibc/musl binaries, vDSO),
-* and a six-tier boot-time demo pipeline that gates on `PASS` markers
-  printed to the serial console.
+* a v0.2.0+ "Illumos Heirlooms" layer (SMF service manager, Project
+  Crossbow VNIC switch, FMA predictive self-healing engine), and
+* a Wayland compositor with Tokyo Night theme, layer-shell, popups,
+  fractional scaling stub, anti-aliased fonts, multi-shape cursors,
+  and per-rect damage tracking,
+* an active-respawn supervisor wired through `SYS_THREAD_NOTIFY` (143),
+* a six-tier boot-time demo pipeline plus 16 PASS markers in a single
+  boot end-to-end (`compositor input WIRED`, `Signify`, `STYX TEST`,
+  `posix-test`, `kernel-test`, `RUMP-VFS-TEST`, `Tier 3`, `FMA`,
+  `Tier 4`, `Crossbow`, `Tier 5`, `abi-fuzz: 10000/10000 survived`,
+  `SMF respawn`, `DLTEST + DLTEST mul` (TLS reloc)).
 
 ```
 === Signify boot chain (SHA-256) ===
@@ -163,19 +172,21 @@ Each runs in its own address space.
 
 | Service | Purpose |
 |---|---|
-| `services/init` | Init process: VMM server, LUCAS interceptor, framebuffer console, all 6 tier demos, watchdog threads, signify boot chain verifier |
-| `services/lucas-shell` | Linux-ABI compatible shell (fork/exec/signals/job control/history/functions) |
+| `services/init` | Init process: VMM server, LUCAS interceptor, framebuffer console, all 6 tier demos, watchdog threads, signify boot chain verifier, **SMF active-respawn supervisor** |
+| `services/lucas-shell` | Linux-ABI compatible shell (fork/exec/signals/job control/history/functions). Builtins split across `text/files/system/apt/util` sub-modules |
 | `services/kbd` | PS/2 keyboard driver |
 | `services/xhci` | USB xHCI host controller driver |
 | `services/net` | Virtio-NET driver + full IP stack |
 | `services/nvme` | NVMe SSD driver |
 | `services/vmm` | Demand paging server |
-| `services/compositor` | Wayland-protocol compositor |
+| `services/compositor` | Wayland compositor with **Tokyo Night theme**, layer-shell, popups, fractional scaling stub, multi-shape cursors, anti-aliased font, animation framework, per-rect damage tracking |
 | `services/hello` | Minimal test process |
 | `services/styx-test` | **Tier 1**: validates SOT syscalls 300–311 |
 | `services/rump-vfs` | **Tier 2**: links real `librump_fused.a`, exposes IPC VFS |
 | `services/attacker` | **Tier 3**: emits provenance entries for the deception demo |
 | `services/posix-test` | **Tier 5b**: POSIX-equivalence smoke over native SOT primitives (11/11 PASS) |
+| `services/abi-fuzz` | **Nightly**: 10 000-iteration random syscall fuzzer with deterministic xorshift64 seed |
+| `services/sot-statusbar` | Wayland layer-shell client (Top layer): Tokyo Night status bar with TSC clock + free memory + thread count |
 
 ## Storage
 
@@ -212,19 +223,27 @@ Each runs in its own address space.
 
 ## CI
 
-`.github/workflows/ci.yml` ships **9 jobs**:
+The `.github/workflows/` tree ships **15+ jobs** across multiple workflows
+(`ci.yml`, `audit.yml`, `repro.yml`, `release.yml`, `abi-diff.yml`, `fuzz.yml`):
 
 | Job | Purpose |
 |---|---|
 | `build-kernel` | Build `sotos-kernel` and `services/init` on every push/PR |
 | `build-personality` | Build all `personality/{common,bsd,linux}/*` crates |
-| `clippy-strict` | `cargo clippy -- -D warnings` on the kernel and `sotos-common` |
+| `clippy-strict` | `cargo clippy -- -D warnings` on the kernel and `sotos-common` (legacy non-blocking) |
+| **`lint-strict-core`** | NEW: hard-fail `cargo fmt --check` + `cargo clippy -D warnings` on `sotos-kernel`, `sotos-common`, `sot-fma`, `sot-crossbow`, `sotos-ld`. No `continue-on-error`. |
 | `python-scripts` | Smoke test for `scripts/build_signify_manifest.py` |
 | `deception-tests` | Host-side `cargo test` for `personality/common/deception` |
 | `tla-sany` | `scripts/run_sany.sh formal` — TLA+ syntax/level checker |
 | `tla-tlc` | `scripts/run_tlc.sh formal` — full TLC model checking on all 6 specs |
 | `rumpuser-sot-smoke` | Cross-compile `vendor/netbsd-rump/rumpuser_sot.c` with clang freestanding (`--target=x86_64-unknown-none -mno-red-zone -mno-sse -mcmodel=large`) and audit symbol coverage against `rumpuser.h` (60/60 must be defined) |
-| `boot-smoke` | QEMU TCG boot, asserts the 7 PASS markers (Signify, STYX, posix-test, RUMP-VFS-TEST, Tier 3, Tier 4, Tier 5), uploads `serial.log` on failure (gated on `sotBSD` branch or `boot-smoke` PR label so the regular CI stays fast) |
+| `boot-smoke` | QEMU TCG boot, asserts the 16 PASS markers (Signify, STYX, posix-test, kernel-test, RUMP-VFS-TEST, Tier 3, FMA, Tier 4, Crossbow, Tier 5, abi-fuzz, SMF respawn, DLTEST + DLTEST mul, compositor input WIRED), uploads `serial.log` on failure |
+| **`audit / cargo-audit`** | NEW: `cargo audit` (RustSec) on every push/PR. Hard-fail on advisories. |
+| **`audit / cargo-deny`** | NEW: `cargo deny check` against `deny.toml` license / source / advisory allowlist. |
+| **`abi-diff`** | NEW: per-PR ABI diff bot. Parses `libs/sotos-common::Syscall` enum from base + head, posts a sticky markdown diff comment. |
+| **`repro / build-linux + build-windows + compare`** | NEW: matrix builds `target/sotos.img` twice per host then cross-compares SHA-256 to enforce reproducibility (`SOURCE_DATE_EPOCH`). |
+| **`fuzz` (nightly cron)** | NEW: runs the `services/abi-fuzz` random-syscall harness for 10 000 iterations under QEMU; fails if the kernel panics. |
+| **`release` (on tag `v*`)** | NEW: builds the SDK tarball, runs the boot-smoke pass, signs with Ed25519 (`SIGNIFY_KEY_BYTES` base64 secret), uploads `.tar.gz + .sha256 + .sig` to the GitHub Release. |
 
 ## Build & Run
 
@@ -276,12 +295,23 @@ docs/                   Technical paper (LaTeX, CLRS-style)
 .github/workflows/      CI: build, clippy, SANY, TLC, boot-smoke
 ```
 
+## Documentation
+
+- [docs/sotBSD_v0.2.0_whitepaper.pdf](docs/sotBSD_v0.2.0_whitepaper.pdf) — **comprehensive system + proposal whitepaper** (architecture, SOT layer, deception model, GUI stack, v0.2.0 Illumos heirlooms)
+- [docs/manual.pdf](docs/manual.pdf) — full user / developer manual
+- [docs/sotos-architecture.pdf](docs/sotos-architecture.pdf) — kernel architecture deep-dive
+- [docs/paper.pdf](docs/paper.pdf) — research paper writeup
+- [docs/MEMORY_BUDGET.md](docs/MEMORY_BUDGET.md) — kernel static memory inventory
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/SOT_SPEC.md](docs/SOT_SPEC.md), [docs/DECEPTION_MODEL.md](docs/DECEPTION_MODEL.md), [docs/FORMAL_MODEL.md](docs/FORMAL_MODEL.md), [docs/RUMP_ADAPTATION.md](docs/RUMP_ADAPTATION.md), [docs/ABI_v0.1.0.md](docs/ABI_v0.1.0.md)
+- [docs/SPRINT1_STATUS.md](docs/SPRINT1_STATUS.md), [docs/SPRINT2_STATUS.md](docs/SPRINT2_STATUS.md), [docs/SPRINT3_STATUS.md](docs/SPRINT3_STATUS.md)
+
 ## Roadmap
 
-See [TODO.md](TODO.md) for the full tier roadmap, finished items, and
-parked follow-ups (real OpenZFS link, rump_init scheduler bisect,
-multi-tx Atomicity fix, real-HW perf comparison vs seL4/L4, LTP run).
-See [docs/MEMORY_BUDGET.md](docs/MEMORY_BUDGET.md) for the kernel static memory inventory.
+See [TODO.md](TODO.md) for the full tier roadmap, finished items, the
+v0.2.0+ "Illumos Heirlooms" wave (SMF / Crossbow / FMA / GUI renewal /
+init splits / CI strict / hygiene), and parked follow-ups (real OpenZFS
+link, `rump_init` scheduler bisect, multi-tx Atomicity fix, real-HW perf
+comparison vs seL4/L4, LTP run).
 
 ## License
 
