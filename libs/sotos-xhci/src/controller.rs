@@ -4,35 +4,65 @@ use crate::regs;
 use crate::trb::{self, Trb, TrbRing, EventRing, ErstEntry};
 
 /// DMA memory layout provided by the service process.
+///
+/// The driver is allocation-free: the wrapping userspace service
+/// hands in every physical page the controller will touch (DCBAA,
+/// command/event rings, ERST, scratchpad, the first device's context
+/// and EP0 transfer ring, plus one scratch data buffer).
 pub struct XhciDma {
+    /// Device Context Base Address Array virtual address (4 KiB, page-aligned).
     pub dcbaa_virt: *mut u8,
+    /// Device Context Base Address Array physical address.
     pub dcbaa_phys: u64,
+    /// Command Ring virtual base (4 KiB, 64-byte aligned).
     pub cmd_ring_virt: *mut u8,
+    /// Command Ring physical base (programmed into `CRCR`).
     pub cmd_ring_phys: u64,
+    /// Event Ring segment virtual base (4 KiB).
     pub evt_ring_virt: *mut u8,
+    /// Event Ring segment physical base.
     pub evt_ring_phys: u64,
+    /// Event Ring Segment Table virtual base (single-entry here).
     pub erst_virt: *mut u8,
+    /// Event Ring Segment Table physical base (programmed into `ERSTBA`).
     pub erst_phys: u64,
+    /// Scratchpad Buffer Array virtual base.
     pub scratch_arr_virt: *mut u8,
+    /// Scratchpad Buffer Array physical base (first DCBAA slot).
     pub scratch_arr_phys: u64,
+    /// Physical addresses of up to 16 scratchpad buffers.
     pub scratch_buf_phys: [u64; 16],
+    /// Input Context virtual base (64-byte aligned, used during Address Device).
     pub input_ctx_virt: *mut u8,
+    /// Input Context physical base.
     pub input_ctx_phys: u64,
+    /// Device Context virtual base for the first tracked device.
     pub device_ctx_virt: *mut u8,
+    /// Device Context physical base for the first tracked device.
     pub device_ctx_phys: u64,
+    /// EP0 Transfer Ring virtual base for the first tracked device.
     pub ep0_ring_virt: *mut u8,
+    /// EP0 Transfer Ring physical base.
     pub ep0_ring_phys: u64,
+    /// Scratch data buffer for `GET_DESCRIPTOR` / control responses.
     pub data_buf_virt: *mut u8,
+    /// Scratch data buffer physical address.
     pub data_buf_phys: u64,
 }
 
+/// Wait callback — called while polling hardware state changes so
+/// the driver can yield back to the service event loop.
 pub type WaitFn = fn();
 
 /// Result of controller initialization.
 pub struct XhciInitResult {
+    /// HCIVERSION major byte (e.g. `0x01` for xHCI 1.x).
     pub version_major: u8,
+    /// HCIVERSION minor byte (e.g. `0x20` for xHCI 1.2).
     pub version_minor: u8,
+    /// Maximum device slots supported by the host controller (`HCSPARAMS1`).
     pub max_slots: u8,
+    /// Number of root-hub ports reported by the controller.
     pub max_ports: u8,
 }
 
@@ -65,6 +95,8 @@ pub struct UsbDevice {
 }
 
 impl UsbDevice {
+    /// All-zeros placeholder used to pre-populate the `devices` array.
+    /// `const` so it can be used in static initialisers.
     pub const fn empty() -> Self {
         UsbDevice {
             slot_id: 0,
@@ -80,11 +112,19 @@ impl UsbDevice {
         }
     }
 
+    /// A slot is considered active once `Enable Slot` has assigned it a
+    /// non-zero slot ID.
     pub fn is_active(&self) -> bool {
         self.slot_id != 0
     }
 }
 
+/// xHCI host-controller driver state.
+///
+/// Caches the MMIO sub-base pointers (operational, doorbell, runtime)
+/// derived from the capability-header length byte, owns the command
+/// and event rings, and tracks every `UsbDevice` the driver has
+/// successfully addressed. Single instance per controller.
 pub struct XhciController {
     mmio_base: *mut u8,
     op_base: *mut u8,
@@ -92,7 +132,9 @@ pub struct XhciController {
     rt_base: *mut u8,
     cmd_ring: TrbRing,
     evt_ring: EventRing,
+    /// Number of root-hub ports (`HCSPARAMS1.MaxPorts`).
     pub max_ports: u8,
+    /// Maximum device slots supported (`HCSPARAMS1.MaxSlots`).
     pub max_slots: u8,
     /// Array of tracked USB devices (index 0..15).
     pub devices: [Option<UsbDevice>; MAX_DEVICES],

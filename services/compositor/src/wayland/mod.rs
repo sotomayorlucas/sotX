@@ -20,6 +20,7 @@ pub mod shm;
 pub mod shell;
 pub mod seat;
 pub mod xdg_popup;
+pub mod layer_shell;
 
 use sotos_common::IpcMsg;
 
@@ -197,6 +198,7 @@ pub const WL_COMPOSITOR_INTERFACE: &[u8] = b"wl_compositor";
 pub const WL_SHM_INTERFACE: &[u8] = b"wl_shm";
 pub const XDG_WM_BASE_INTERFACE: &[u8] = b"xdg_wm_base";
 pub const WL_SEAT_INTERFACE: &[u8] = b"wl_seat";
+pub const ZWLR_LAYER_SHELL_V1_INTERFACE: &[u8] = b"zwlr_layer_shell_v1";
 
 /// Next-object-ID allocator for server-created objects.
 pub struct ObjectIdAlloc {
@@ -339,9 +341,15 @@ pub struct ClientObjects {
     pub seat_id: u32,
     pub pointer_id: u32,
     pub keyboard_id: u32,
+    pub layer_shell_id: u32,
     pub xdg_surfaces: [XdgSurfaceBinding; MAX_XDG_SURFACES],
     pub xdg_toplevels: [XdgToplevelBinding; MAX_XDG_TOPLEVELS],
     pub shm_pool_ids: [u32; MAX_SHM_POOLS],
+    /// Client-allocated `zwlr_layer_surface_v1` object IDs owned by
+    /// this client. 0 = free slot. Tracked here so the dispatcher can
+    /// route layer_surface opcodes back to the correct compositor pool
+    /// entry.
+    pub layer_surface_ids: [u32; layer_shell::MAX_LAYER_SURFACES],
 }
 
 impl ClientObjects {
@@ -354,9 +362,11 @@ impl ClientObjects {
             seat_id: 0,
             pointer_id: 0,
             keyboard_id: 0,
+            layer_shell_id: 0,
             xdg_surfaces: [const { XdgSurfaceBinding::empty() }; MAX_XDG_SURFACES],
             xdg_toplevels: [const { XdgToplevelBinding::empty() }; MAX_XDG_TOPLEVELS],
             shm_pool_ids: [0u32; MAX_SHM_POOLS],
+            layer_surface_ids: [0u32; layer_shell::MAX_LAYER_SURFACES],
         }
     }
 
@@ -440,6 +450,31 @@ impl ClientObjects {
         }
         0
     }
+
+    /// Register a client-allocated `zwlr_layer_surface_v1` object ID.
+    pub fn add_layer_surface(&mut self, object_id: u32) {
+        for slot in &mut self.layer_surface_ids {
+            if *slot == 0 {
+                *slot = object_id;
+                return;
+            }
+        }
+    }
+
+    /// Drop a `zwlr_layer_surface_v1` object ID on destroy.
+    pub fn remove_layer_surface(&mut self, object_id: u32) {
+        for slot in &mut self.layer_surface_ids {
+            if *slot == object_id {
+                *slot = 0;
+                return;
+            }
+        }
+    }
+
+    /// Is this object ID a registered layer_surface for this client?
+    pub fn is_layer_surface(&self, object_id: u32) -> bool {
+        self.layer_surface_ids.iter().any(|&id| id != 0 && id == object_id)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -476,6 +511,13 @@ pub struct DispatchResult {
     pub popup_destroyed: u32,
     /// object id of a popup whose reposition was dispatched (0 if none).
     pub popup_repositioned: u32,
+    /// If a new zwlr_layer_surface_v1 was created via get_layer_surface:
+    /// (layer_surface_object_id, wl_surface_id, layer_as_u32). 0 means none.
+    pub new_layer_surface: (u32, u32, u32),
+    /// Set by layer_shell opcodes that change geometry (size, anchor,
+    /// margin, exclusive_zone, destroy). Tells the compose loop to
+    /// re-run `layer_shell::layout_all`.
+    pub layer_layout_dirty: bool,
 }
 
 impl DispatchResult {
@@ -495,6 +537,8 @@ impl DispatchResult {
             new_popup_xdg_surface: 0,
             popup_destroyed: 0,
             popup_repositioned: 0,
+            new_layer_surface: (0, 0, 0),
+            layer_layout_dirty: false,
         }
     }
 }
@@ -575,6 +619,9 @@ pub fn dispatch_message(
                         &mut result.events,
                         &mut result.event_count,
                     );
+                }
+                5 => {
+                    objs.layer_shell_id = bound.client_id;
                 }
                 _ => {}
             }
@@ -706,7 +753,50 @@ pub fn dispatch_message(
         return result;
     }
 
-    // 10. wl_surface (client-allocated IDs, checked via surface existence)
+    // 10. zwlr_layer_shell_v1
+    if id == objs.layer_shell_id && objs.layer_shell_id != 0 {
+        if let Some(gls) = layer_shell::handle_shell_request(msg) {
+            if let Some(slot) = layer_shell::allocate() {
+                if let Some(ls) = layer_shell::get_mut_by_slot(slot) {
+                    ls.object_id = gls.object_id;
+                    ls.surface_id = gls.surface_id;
+                    ls.layer = gls.layer;
+                }
+                objs.add_layer_surface(gls.object_id);
+                result.new_layer_surface = (gls.object_id, gls.surface_id, gls.layer.as_u32());
+                result.layer_layout_dirty = true;
+
+                // Send initial configure(serial, 0, 0) so the client
+                // can ack and commit its first buffer.
+                let serial = *configure_serial;
+                *configure_serial += 1;
+                layer_shell::send_configure(
+                    gls.object_id,
+                    serial,
+                    0,
+                    0,
+                    &mut result.events,
+                    &mut result.event_count,
+                );
+            }
+        }
+        return result;
+    }
+
+    // 11. zwlr_layer_surface_v1 (client-allocated IDs)
+    if objs.is_layer_surface(id) {
+        let dirty = layer_shell::handle_surface_request(msg);
+        if dirty {
+            result.layer_layout_dirty = true;
+            result.damage = true;
+        }
+        if msg.opcode == layer_shell::LAYER_SURFACE_DESTROY {
+            objs.remove_layer_surface(id);
+        }
+        return result;
+    }
+
+    // 12. wl_surface (client-allocated IDs, checked via surface existence)
     // wl_surface opcodes: 1=attach, 2=damage, 3=frame, 6=commit
     // These are identified by matching against known surface IDs in
     // the global SURFACES table. The caller checks this after dispatch

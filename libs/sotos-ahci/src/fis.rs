@@ -378,6 +378,8 @@ pub struct ReceivedFis {
 const _: () = assert!(core::mem::size_of::<ReceivedFis>() == 256);
 
 impl ReceivedFis {
+    /// All-zeros 256-byte Received FIS area — use to initialize the
+    /// backing page before handing it to the HBA.
     pub const fn zeroed() -> Self {
         Self {
             dma_setup: [0; 32],
