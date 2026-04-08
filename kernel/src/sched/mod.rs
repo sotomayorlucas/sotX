@@ -13,16 +13,16 @@
 pub mod domain;
 pub mod thread;
 
-pub use thread::{ComputeTarget, IpcRole, ThreadId, ThreadState};
 use thread::Thread;
+pub use thread::{ComputeTarget, IpcRole, ThreadId, ThreadState};
 
-use alloc::collections::VecDeque;
-use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use crate::arch::x86_64::percpu;
 use crate::ipc::endpoint::Message;
 use crate::pool::{Pool, PoolHandle};
 use crate::sync::ticket::TicketMutex;
+use alloc::collections::VecDeque;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crate::kdebug;
 use domain::{DomainState, SchedDomain};
@@ -101,8 +101,8 @@ core::arch::global_asm!(
     "    push r13",
     "    push r14",
     "    push r15",
-    "    mov [rdi], rsp",    // save old RSP
-    "    mov rsp, rsi",      // load new RSP
+    "    mov [rdi], rsp", // save old RSP
+    "    mov rsp, rsi",   // load new RSP
     "    pop r15",
     "    pop r14",
     "    pop r13",
@@ -146,7 +146,9 @@ unsafe extern "C" fn user_thread_trampoline() -> ! {
 extern "C" fn finish_switch_and_enter_kernel(entry: u64) -> ! {
     let entry: fn() -> ! = unsafe { core::mem::transmute(entry) };
     finish_switch();
-    unsafe { core::arch::asm!("sti", options(nomem, nostack)); }
+    unsafe {
+        core::arch::asm!("sti", options(nomem, nostack));
+    }
     entry()
 }
 
@@ -306,7 +308,9 @@ fn dequeue_non_depleted(my_cpu: usize, sched: &mut Scheduler) -> Option<usize> {
         let idx = dequeue_from_any(my_cpu)?;
 
         // Skip non-CPU compute targets (GPU/NPU threads wait for offload).
-        let compute_target = sched.threads.get_by_index(idx as u32)
+        let compute_target = sched
+            .threads
+            .get_by_index(idx as u32)
             .map(|t| t.compute_target);
         if compute_target != Some(ComputeTarget::Cpu) && compute_target.is_some() {
             // Re-enqueue: this thread targets a different compute unit.
@@ -314,13 +318,17 @@ fn dequeue_non_depleted(my_cpu: usize, sched: &mut Scheduler) -> Option<usize> {
             continue;
         }
 
-        let domain_idx = sched.threads.get_by_index(idx as u32)
+        let domain_idx = sched
+            .threads
+            .get_by_index(idx as u32)
             .and_then(|t| t.domain_idx);
 
         match domain_idx {
             None => return Some(idx), // No domain — always runnable
             Some(dom_idx) => {
-                let is_active = sched.domains.get_by_index(dom_idx)
+                let is_active = sched
+                    .domains
+                    .get_by_index(dom_idx)
                     .map_or(true, |d| d.state == DomainState::Active);
                 if is_active {
                     return Some(idx);
@@ -380,9 +388,15 @@ static TID_TO_SLOT: [AtomicU32; MAX_THREADS] = {
 
 /// Lock-free TID → slot lookup. Returns None if TID is unmapped.
 pub fn tid_to_slot_external(tid: ThreadId) -> Option<u32> {
-    if (tid.0 as usize) >= MAX_THREADS { return None; }
+    if (tid.0 as usize) >= MAX_THREADS {
+        return None;
+    }
     let slot = TID_TO_SLOT[tid.0 as usize].load(Ordering::Acquire);
-    if slot == 0xFFFF_FFFF { None } else { Some(slot) }
+    if slot == 0xFFFF_FFFF {
+        None
+    } else {
+        Some(slot)
+    }
 }
 
 pub struct Scheduler {
@@ -407,7 +421,9 @@ impl Scheduler {
     /// queue if the thread has no CPU affinity (Graham's list scheduling).
     /// Uses the thread's priority to select the correct multi-level queue.
     pub fn enqueue(&self, idx: usize) {
-        let (target_cpu, pri_class, has_affinity) = self.threads.get_by_index(idx as u32)
+        let (target_cpu, pri_class, has_affinity) = self
+            .threads
+            .get_by_index(idx as u32)
             .map(|t| {
                 let has_aff = t.preferred_cpu.is_some();
                 let cpu = t.preferred_cpu.unwrap_or(0) as usize;
@@ -611,12 +627,22 @@ pub fn spawn_user_with_redirect(user_rip: u64, user_rsp: u64, cr3: u64, ep_id: u
 /// set atomically before enqueue. Prevents the race where the thread
 /// faults before signal_entry() is called.
 pub fn spawn_user_with_redirect_and_signal(
-    user_rip: u64, user_rsp: u64, cr3: u64, ep_id: u32, signal_tramp: u64,
+    user_rip: u64,
+    user_rsp: u64,
+    cr3: u64,
+    ep_id: u32,
+    signal_tramp: u64,
 ) -> ThreadId {
     spawn_user_opt(user_rip, user_rsp, cr3, Some(ep_id), signal_tramp)
 }
 
-fn spawn_user_opt(user_rip: u64, user_rsp: u64, cr3: u64, redirect_ep: Option<u32>, signal_tramp: u64) -> ThreadId {
+fn spawn_user_opt(
+    user_rip: u64,
+    user_rsp: u64,
+    cr3: u64,
+    redirect_ep: Option<u32>,
+    signal_tramp: u64,
+) -> ThreadId {
     let mut sched = SCHEDULER.lock();
     let id = sched.next_id;
     sched.next_id += 1;
@@ -649,7 +675,11 @@ struct ThreadNotifyEntry {
 
 impl ThreadNotifyEntry {
     const fn empty() -> Self {
-        Self { in_use: false, tid: 0, notify_handle: 0 }
+        Self {
+            in_use: false,
+            tid: 0,
+            notify_handle: 0,
+        }
     }
 }
 
@@ -716,10 +746,7 @@ pub fn register_thread_notify(
         // Claim the entry ourselves to prevent a double fire.
         let mut tbl = THREAD_NOTIFY.lock();
         for slot in tbl.iter_mut() {
-            if slot.in_use
-                && slot.tid == tid.0
-                && slot.notify_handle == notify_handle.raw()
-            {
+            if slot.in_use && slot.tid == tid.0 && slot.notify_handle == notify_handle.raw() {
                 slot.in_use = false;
                 drop(tbl);
                 let _ = crate::ipc::notify::signal(notify_handle);
@@ -767,7 +794,9 @@ pub fn exit_current() -> ! {
         let idx = percpu.current_thread;
         if idx != usize::MAX {
             let sched = SCHEDULER.lock();
-            let rep = sched.threads.get_by_index(idx as u32)
+            let rep = sched
+                .threads
+                .get_by_index(idx as u32)
                 .and_then(|t| t.redirect_ep);
             rep
         } else {
@@ -777,23 +806,31 @@ pub fn exit_current() -> ! {
     // Diagnostic: log thread death (lock-free serial write)
     {
         use crate::arch::serial;
-        for b in b"EXIT-T " { serial::write_byte(*b); }
+        for b in b"EXIT-T " {
+            serial::write_byte(*b);
+        }
         let percpu = percpu::current_percpu();
         let idx = percpu.current_thread as u64;
         // Write index as decimal
-        if idx >= 10 { serial::write_byte(b'0' + ((idx / 10) % 10) as u8); }
+        if idx >= 10 {
+            serial::write_byte(b'0' + ((idx / 10) % 10) as u8);
+        }
         serial::write_byte(b'0' + (idx % 10) as u8);
         if redirect_ep.is_some() {
-            for b in b" redir=Y\n" { serial::write_byte(*b); }
+            for b in b" redir=Y\n" {
+                serial::write_byte(*b);
+            }
         } else {
-            for b in b" redir=N\n" { serial::write_byte(*b); }
+            for b in b" redir=N\n" {
+                serial::write_byte(*b);
+            }
         }
     }
     // Send synthetic SYS_EXIT_GROUP to the handler so it can clean up
     // (pipe refs, memory, etc.) instead of blocking on recv forever.
     if let Some(ep_raw) = redirect_ep {
         let exit_msg = crate::ipc::endpoint::Message {
-            tag: 231, // SYS_EXIT_GROUP
+            tag: 231,                         // SYS_EXIT_GROUP
             regs: [139, 0, 0, 0, 0, 0, 0, 0], // status=139 (SIGSEGV-like)
             cap_transfer: None,
         };
@@ -1043,7 +1080,14 @@ pub fn thread_info(idx: u32) -> Option<(u32, u8, u8, u64, u32, bool)> {
             ThreadState::Faulted => 3,
             ThreadState::Dead => 4,
         };
-        (t.id.0, state_byte, t.priority, t.cpu_ticks, t.mem_pages, t.is_user)
+        (
+            t.id.0,
+            state_byte,
+            t.priority,
+            t.cpu_ticks,
+            t.mem_pages,
+            t.is_user,
+        )
     })
 }
 
@@ -1051,7 +1095,9 @@ pub fn thread_info(idx: u32) -> Option<(u32, u8, u8, u64, u32, bool)> {
 pub fn track_mem_alloc() -> bool {
     let percpu = percpu::current_percpu();
     let idx = percpu.current_thread;
-    if idx == usize::MAX { return true; }
+    if idx == usize::MAX {
+        return true;
+    }
     let mut sched = SCHEDULER.lock();
     if let Some(t) = sched.threads.get_mut_by_index(idx as u32) {
         if t.mem_page_limit > 0 && t.mem_pages >= t.mem_page_limit {
@@ -1066,7 +1112,9 @@ pub fn track_mem_alloc() -> bool {
 pub fn track_mem_free() {
     let percpu = percpu::current_percpu();
     let idx = percpu.current_thread;
-    if idx == usize::MAX { return; }
+    if idx == usize::MAX {
+        return;
+    }
     let mut sched = SCHEDULER.lock();
     if let Some(t) = sched.threads.get_mut_by_index(idx as u32) {
         if t.mem_pages > 0 {
@@ -1097,7 +1145,12 @@ pub fn set_deadline(tid: ThreadId, deadline: u64, period: u64) {
         if let Some(t) = sched.threads.get_mut_by_index(slot) {
             t.deadline_ticks = deadline;
             t.period_ticks = period;
-            kdebug!("  sched: tid {} deadline={} period={}", tid.0, deadline, period);
+            kdebug!(
+                "  sched: tid {} deadline={} period={}",
+                tid.0,
+                deadline,
+                period
+            );
         }
     }
 }
@@ -1137,16 +1190,16 @@ pub fn get_current_redirect_ep() -> Option<u32> {
 pub fn prepare_redirect(frame: &TrapFrame, user_rsp: u64) -> Option<(u32, ThreadId)> {
     let percpu = percpu::current_percpu();
     let idx = percpu.current_thread;
-    if idx == usize::MAX { return None; }
+    if idx == usize::MAX {
+        return None;
+    }
     let mut sched = SCHEDULER.lock();
     let t = sched.threads.get_mut_by_index(idx as u32)?;
     let ep = t.redirect_ep?;
     // Save full register state so LUCAS can read via SYS_GET_THREAD_REGS
     t.redirect_saved_regs = [
-        frame.rax, frame.rbx, frame.rcx, frame.rdx,
-        frame.rsi, frame.rdi, frame.rbp, frame.r8,
-        frame.r9,  frame.r10, frame.r11, frame.r12,
-        frame.r13, frame.r14, frame.r15, user_rsp,
+        frame.rax, frame.rbx, frame.rcx, frame.rdx, frame.rsi, frame.rdi, frame.rbp, frame.r8,
+        frame.r9, frame.r10, frame.r11, frame.r12, frame.r13, frame.r14, frame.r15, user_rsp,
         t.fs_base, t.gs_base,
     ];
     Some((ep, t.id))
@@ -1256,14 +1309,14 @@ use crate::arch::x86_64::syscall::TrapFrame;
 pub fn save_current_redirect_regs(frame: &TrapFrame, user_rsp: u64) {
     let percpu = percpu::current_percpu();
     let idx = percpu.current_thread;
-    if idx == usize::MAX { return; }
+    if idx == usize::MAX {
+        return;
+    }
     let mut sched = SCHEDULER.lock();
     if let Some(t) = sched.threads.get_mut_by_index(idx as u32) {
         t.redirect_saved_regs = [
-            frame.rax, frame.rbx, frame.rcx, frame.rdx,
-            frame.rsi, frame.rdi, frame.rbp, frame.r8,
-            frame.r9,  frame.r10, frame.r11, frame.r12,
-            frame.r13, frame.r14, frame.r15, user_rsp,
+            frame.rax, frame.rbx, frame.rcx, frame.rdx, frame.rsi, frame.rdi, frame.rbp, frame.r8,
+            frame.r9, frame.r10, frame.r11, frame.r12, frame.r13, frame.r14, frame.r15, user_rsp,
             t.fs_base, t.gs_base,
         ];
     }
@@ -1298,7 +1351,7 @@ pub fn get_thread_signal_regs(tid: ThreadId) -> Option<[u64; 20]> {
                 // Override regs[17] with kernel_signal.
                 regs[17] = t.kernel_signal;
                 t.kernel_signal = 0; // Consume: only deliver once
-                // Real RIP/RFLAGS from interrupt frame (not clobbered by SYSCALL)
+                                     // Real RIP/RFLAGS from interrupt frame (not clobbered by SYSCALL)
                 regs[18] = t.signal_saved_rip;
                 regs[19] = t.signal_saved_rflags;
                 // Auto-clear: context consumed. Next timer interrupt can save
@@ -1368,7 +1421,9 @@ pub fn set_last_fault_rip_by_idx(idx: u32, rip: u64) {
 /// Set a pending signal bit on a thread.
 /// Signal 0 is rejected (not a real signal).
 pub fn set_pending_signal(tid: ThreadId, sig: u64) {
-    if sig == 0 || sig >= 64 { return; }
+    if sig == 0 || sig >= 64 {
+        return;
+    }
     let mut sched = SCHEDULER.lock();
     if let Some(slot) = sched.slot_of(tid) {
         if let Some(t) = sched.threads.get_mut_by_index(slot) {
@@ -1401,7 +1456,9 @@ pub fn clear_pending_signal_by_idx(idx: u32, sig: u64) {
 pub fn save_signal_context_current(gprs: &[u64; 15], rip: u64, rsp: u64, rflags: u64) -> bool {
     let percpu = percpu::current_percpu();
     let idx = percpu.current_thread;
-    if idx == usize::MAX { return false; }
+    if idx == usize::MAX {
+        return false;
+    }
     let mut sched = SCHEDULER.lock();
     if let Some(t) = sched.threads.get_mut_by_index(idx as u32) {
         // If #PF handler already saved context, don't overwrite
@@ -1409,10 +1466,10 @@ pub fn save_signal_context_current(gprs: &[u64; 15], rip: u64, rsp: u64, rflags:
             return false;
         }
         t.signal_saved_regs = [
-            gprs[0],  gprs[1],  gprs[2],  gprs[3],   // rax, rbx, rcx, rdx
-            gprs[4],  gprs[5],  gprs[6],  gprs[7],   // rsi, rdi, rbp, r8
-            gprs[8],  gprs[9],  gprs[10], gprs[11],  // r9, r10, r11, r12
-            gprs[12], gprs[13], gprs[14], rsp,        // r13, r14, r15, rsp
+            gprs[0], gprs[1], gprs[2], gprs[3], // rax, rbx, rcx, rdx
+            gprs[4], gprs[5], gprs[6], gprs[7], // rsi, rdi, rbp, r8
+            gprs[8], gprs[9], gprs[10], gprs[11], // r9, r10, r11, r12
+            gprs[12], gprs[13], gprs[14], rsp, // r13, r14, r15, rsp
             t.fs_base, t.gs_base,
         ];
         // Store the real user RIP/RFLAGS separately — do NOT clobber the
@@ -1429,7 +1486,9 @@ pub fn save_signal_context_current(gprs: &[u64; 15], rip: u64, rsp: u64, rflags:
 pub fn set_kernel_signal_current(sig: u64) {
     let percpu = percpu::current_percpu();
     let idx = percpu.current_thread;
-    if idx == usize::MAX { return; }
+    if idx == usize::MAX {
+        return;
+    }
     let mut sched = SCHEDULER.lock();
     if let Some(t) = sched.threads.get_mut_by_index(idx as u32) {
         t.kernel_signal = sig;
@@ -1441,7 +1500,9 @@ pub fn set_kernel_signal_current(sig: u64) {
 pub fn set_fault_info_current(addr: u64, code: u64) {
     let percpu = percpu::current_percpu();
     let idx = percpu.current_thread;
-    if idx == usize::MAX { return; }
+    if idx == usize::MAX {
+        return;
+    }
     let mut sched = SCHEDULER.lock();
     if let Some(t) = sched.threads.get_mut_by_index(idx as u32) {
         t.fault_addr = addr;
@@ -1453,7 +1514,9 @@ pub fn set_fault_info_current(addr: u64, code: u64) {
 pub fn is_current_user_thread() -> bool {
     let percpu = percpu::current_percpu();
     let idx = percpu.current_thread;
-    if idx == usize::MAX { return false; }
+    if idx == usize::MAX {
+        return false;
+    }
     let sched = SCHEDULER.lock();
     if let Some(t) = sched.threads.get_by_index(idx as u32) {
         t.is_user
@@ -1470,14 +1533,11 @@ pub fn is_current_user_thread() -> bool {
 /// set caller IPC state, block caller.
 /// Uses per-thread IPC locks for message access, SCHEDULER.lock() only for
 /// run-queue mutation (wake + block). Replaces 5 separate lock acquisitions.
-pub fn call_fused_preblock_rendezvous(
-    recv_tid: ThreadId, msg: Message, ep_raw: u32,
-) {
+pub fn call_fused_preblock_rendezvous(recv_tid: ThreadId, msg: Message, ep_raw: u32) {
     let caller_slot = percpu::current_percpu().current_thread;
     let recv_slot = tid_to_slot_external(recv_tid)
-        .unwrap_or_else(|| {
-            SCHEDULER.lock().slot_of(recv_tid).unwrap_or(0)
-        }) as usize;
+        .unwrap_or_else(|| SCHEDULER.lock().slot_of(recv_tid).unwrap_or(0))
+        as usize;
 
     // Step 1: Write message to receiver (per-thread lock, zero cross-thread contention)
     {
@@ -1562,28 +1622,48 @@ pub fn create_domain(quantum_ticks: u32, period_ticks: u32) -> Option<PoolHandle
     let dom = SchedDomain::new(quantum_ticks, period_ticks, global_now);
     let mut sched = SCHEDULER.lock();
     let handle = sched.domains.alloc(dom);
-    kdebug!("  domain: created (quantum={} period={} ticks)", quantum_ticks, period_ticks);
+    kdebug!(
+        "  domain: created (quantum={} period={} ticks)",
+        quantum_ticks,
+        period_ticks
+    );
     Some(handle)
 }
 
 /// Attach a thread to a domain.
-pub fn attach_to_domain(domain_handle: PoolHandle, tid: ThreadId) -> Result<(), sotos_common::SysError> {
+pub fn attach_to_domain(
+    domain_handle: PoolHandle,
+    tid: ThreadId,
+) -> Result<(), sotos_common::SysError> {
     let mut sched = SCHEDULER.lock();
-    let slot = sched.slot_of(tid).ok_or(sotos_common::SysError::InvalidArg)?;
-    let dom = sched.domains.get_mut(domain_handle).ok_or(sotos_common::SysError::InvalidArg)?;
+    let slot = sched
+        .slot_of(tid)
+        .ok_or(sotos_common::SysError::InvalidArg)?;
+    let dom = sched
+        .domains
+        .get_mut(domain_handle)
+        .ok_or(sotos_common::SysError::InvalidArg)?;
     if !dom.add_member(slot) {
         return Err(sotos_common::SysError::OutOfResources);
     }
     let dom_idx = domain_handle.index() as u32;
-    let t = sched.threads.get_mut_by_index(slot).ok_or(sotos_common::SysError::InvalidArg)?;
+    let t = sched
+        .threads
+        .get_mut_by_index(slot)
+        .ok_or(sotos_common::SysError::InvalidArg)?;
     t.domain_idx = Some(dom_idx);
     Ok(())
 }
 
 /// Detach a thread from a domain.
-pub fn detach_from_domain(domain_handle: PoolHandle, tid: ThreadId) -> Result<(), sotos_common::SysError> {
+pub fn detach_from_domain(
+    domain_handle: PoolHandle,
+    tid: ThreadId,
+) -> Result<(), sotos_common::SysError> {
     let mut sched = SCHEDULER.lock();
-    let slot = sched.slot_of(tid).ok_or(sotos_common::SysError::InvalidArg)?;
+    let slot = sched
+        .slot_of(tid)
+        .ok_or(sotos_common::SysError::InvalidArg)?;
     let dom_idx = domain_handle.index() as u32;
 
     // Remove from suspended list and re-enqueue if needed.
@@ -1598,7 +1678,10 @@ pub fn detach_from_domain(domain_handle: PoolHandle, tid: ThreadId) -> Result<()
         return Err(sotos_common::SysError::InvalidArg);
     }
 
-    let t = sched.threads.get_mut_by_index(slot).ok_or(sotos_common::SysError::InvalidArg)?;
+    let t = sched
+        .threads
+        .get_mut_by_index(slot)
+        .ok_or(sotos_common::SysError::InvalidArg)?;
     if t.domain_idx == Some(dom_idx) {
         t.domain_idx = None;
     }
@@ -1611,9 +1694,15 @@ pub fn detach_from_domain(domain_handle: PoolHandle, tid: ThreadId) -> Result<()
 }
 
 /// Adjust a domain's quantum.
-pub fn adjust_domain(domain_handle: PoolHandle, new_quantum: u32) -> Result<(), sotos_common::SysError> {
+pub fn adjust_domain(
+    domain_handle: PoolHandle,
+    new_quantum: u32,
+) -> Result<(), sotos_common::SysError> {
     let mut sched = SCHEDULER.lock();
-    let dom = sched.domains.get_mut(domain_handle).ok_or(sotos_common::SysError::InvalidArg)?;
+    let dom = sched
+        .domains
+        .get_mut(domain_handle)
+        .ok_or(sotos_common::SysError::InvalidArg)?;
     dom.quantum_ticks = new_quantum;
     Ok(())
 }
@@ -1704,9 +1793,15 @@ pub fn tick() {
                 if let Some(dom_idx) = t.domain_idx {
                     if let Some(dom) = sched.domains.get_mut_by_index(dom_idx) {
                         dom.consumed_ticks += 1;
-                        if dom.consumed_ticks >= dom.quantum_ticks && dom.state == DomainState::Active {
+                        if dom.consumed_ticks >= dom.quantum_ticks
+                            && dom.state == DomainState::Active
+                        {
                             dom.state = DomainState::Depleted;
-                            kdebug!("  domain: depleted (consumed={}/{})", dom.consumed_ticks, dom.quantum_ticks);
+                            kdebug!(
+                                "  domain: depleted (consumed={}/{})",
+                                dom.consumed_ticks,
+                                dom.quantum_ticks
+                            );
                             resched = true;
                         }
                     }
@@ -1758,7 +1853,10 @@ fn check_domain_refills(sched: &mut Scheduler, global_now: u64) {
                 // Drain suspended list.
                 let suspended: Vec<usize> = dom.suspended.drain(..).collect();
                 if !suspended.is_empty() {
-                    kdebug!("  domain: refilled, {} threads re-enqueued", suspended.len());
+                    kdebug!(
+                        "  domain: refilled, {} threads re-enqueued",
+                        suspended.len()
+                    );
                 }
                 Some(suspended)
             } else {
@@ -1799,7 +1897,9 @@ fn check_domain_refills(sched: &mut Scheduler, global_now: u64) {
 pub fn try_schedule() {
     let percpu = percpu::current_percpu();
     let old_idx = percpu.current_thread;
-    if old_idx == usize::MAX { return; }
+    if old_idx == usize::MAX {
+        return;
+    }
 
     // Only proceed if we can get the lock without spinning.
     // If contended, bail — the timer tick will call schedule() with the
@@ -1871,7 +1971,9 @@ pub fn schedule() {
                             match t.domain_idx {
                                 None => true,
                                 Some(di) => {
-                                    let is_active = sched.domains.get_by_index(di)
+                                    let is_active = sched
+                                        .domains
+                                        .get_by_index(di)
                                         .map_or(true, |d| d.state == DomainState::Active);
                                     if !is_active {
                                         if let Some(dom) = sched.domains.get_mut_by_index(di) {
@@ -1889,8 +1991,11 @@ pub fn schedule() {
                 idx
             } else {
                 // Invalid candidate. Re-enqueue if not suspended.
-                let was_suspended = sched.threads.get_by_index(idx as u32)
-                    .and_then(|t| t.domain_idx).is_some();
+                let was_suspended = sched
+                    .threads
+                    .get_by_index(idx as u32)
+                    .and_then(|t| t.domain_idx)
+                    .is_some();
                 if !was_suspended {
                     sched.enqueue(idx);
                 }
@@ -1904,7 +2009,9 @@ pub fn schedule() {
                     return;
                 }
                 let idle_idx = percpu.idle_thread;
-                if old_idx == idle_idx { return; }
+                if old_idx == idle_idx {
+                    return;
+                }
                 idle_idx
             }
         } else {
@@ -1941,7 +2048,9 @@ pub fn schedule() {
         }
 
         // Handle old thread state.
-        let old_is_dead = sched.threads.get_by_index(old_idx as u32)
+        let old_is_dead = sched
+            .threads
+            .get_by_index(old_idx as u32)
             .map_or(false, |t| t.state == ThreadState::Dead);
 
         let old_rsp_ptr = if old_is_dead {
@@ -1962,7 +2071,12 @@ pub fn schedule() {
             percpu.switch_old_idx = usize::MAX;
             &mut discard_rsp as *mut u64
         } else {
-            let old_rsp_ptr = &mut sched.threads.get_mut_by_index(old_idx as u32).unwrap().context.rsp as *mut u64;
+            let old_rsp_ptr = &mut sched
+                .threads
+                .get_mut_by_index(old_idx as u32)
+                .unwrap()
+                .context
+                .rsp as *mut u64;
             let is_idle = old_idx == percpu.idle_thread;
             if let Some(old_t) = sched.threads.get_mut_by_index(old_idx as u32) {
                 if old_t.state == ThreadState::Running && !is_idle {
@@ -2027,7 +2141,10 @@ pub fn schedule() {
                             }
                         }
                     }
-                    crate::kprintln!("SCHED: repaired PML4 high entries for cr3={:#x}", target_cr3);
+                    crate::kprintln!(
+                        "SCHED: repaired PML4 high entries for cr3={:#x}",
+                        target_cr3
+                    );
                 }
                 unsafe {
                     core::arch::asm!(

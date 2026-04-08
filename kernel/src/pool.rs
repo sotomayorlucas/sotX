@@ -141,7 +141,8 @@ impl<T> Pool<T> {
     /// Iterate over occupied slots as `(PoolHandle, &T)`.
     pub fn iter(&self) -> impl Iterator<Item = (PoolHandle, &T)> {
         self.slots.iter().enumerate().filter_map(|(i, slot)| {
-            slot.as_ref().map(|val| (PoolHandle::pack(i, self.generations[i]), val))
+            slot.as_ref()
+                .map(|val| (PoolHandle::pack(i, self.generations[i]), val))
         })
     }
 }

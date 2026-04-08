@@ -4,8 +4,8 @@
 //! Uses LRU eviction when full. Dirty entries can be flushed via a
 //! caller-provided callback.
 
-use crate::sync::ticket::TicketMutex;
 use crate::kdebug;
+use crate::sync::ticket::TicketMutex;
 
 /// Sector size in bytes.
 pub const SECTOR_SIZE: usize = 512;

@@ -16,21 +16,19 @@ pub fn handle(frame: &mut TrapFrame, nr: u64) -> bool {
     match nr {
         // SYS_FAULT_RECV — pop next fault from queue
         // Returns: rdi=addr, rsi=code, rdx=tid, r8=cr3, r9=as_cap_id (or WouldBlock)
-        SYS_FAULT_RECV => {
-            match crate::fault::pop_fault() {
-                Some(info) => {
-                    frame.rax = 0;
-                    frame.rdi = info.addr;
-                    frame.rsi = info.code;
-                    frame.rdx = info.tid as u64;
-                    frame.r8 = info.cr3;
-                    frame.r9 = info.as_cap_id as u64;
-                }
-                None => {
-                    frame.rax = SysError::WouldBlock as i64 as u64;
-                }
+        SYS_FAULT_RECV => match crate::fault::pop_fault() {
+            Some(info) => {
+                frame.rax = 0;
+                frame.rdi = info.addr;
+                frame.rsi = info.code;
+                frame.rdx = info.tid as u64;
+                frame.r8 = info.cr3;
+                frame.r9 = info.as_cap_id as u64;
             }
-        }
+            None => {
+                frame.rax = SysError::WouldBlock as i64 as u64;
+            }
+        },
 
         // SYS_GET_FAULT_INFO (176) — get fault addr/code for a thread's last kernel signal.
         // rdi = thread_id (raw), returns: rax = fault_addr, rdx = fault_code.

@@ -154,7 +154,6 @@ pub struct Thread {
     pub gs_base: u64,
 
     // --- Signal delivery support ---
-
     /// Saved user-mode register state from the last syscall redirect.
     /// Layout: [rax, rbx, rcx, rdx, rsi, rdi, rbp, r8, r9, r10, r11, r12, r13, r14, r15, rsp, rip_placeholder, rflags_placeholder]
     /// rcx = user RIP (saved by SYSCALL), r11 = user RFLAGS (saved by SYSCALL),
@@ -217,7 +216,12 @@ impl Thread {
     /// will pop callee-saved registers and `ret` into `trampoline`, which reads
     /// the entry function from r12 and calls it.
     #[allow(dead_code)]
-    pub fn new(id: u32, entry: fn() -> !, priority: u8, trampoline: unsafe extern "C" fn() -> !) -> Self {
+    pub fn new(
+        id: u32,
+        entry: fn() -> !,
+        priority: u8,
+        trampoline: unsafe extern "C" fn() -> !,
+    ) -> Self {
         let (stack_virt, stack_top) = alloc_kernel_stack();
 
         // Build initial stack frame (grows downward).
@@ -225,12 +229,12 @@ impl Thread {
         unsafe {
             let top = stack_top as *mut u64;
             top.offset(-1).write(trampoline as u64); // return address
-            top.offset(-2).write(0);                  // rbp
-            top.offset(-3).write(0);                  // rbx
-            top.offset(-4).write(entry as u64);       // r12
-            top.offset(-5).write(0);                  // r13
-            top.offset(-6).write(0);                  // r14
-            top.offset(-7).write(0);                  // r15
+            top.offset(-2).write(0); // rbp
+            top.offset(-3).write(0); // rbx
+            top.offset(-4).write(entry as u64); // r12
+            top.offset(-5).write(0); // r13
+            top.offset(-6).write(0); // r14
+            top.offset(-7).write(0); // r15
         }
 
         Self {
@@ -298,12 +302,12 @@ impl Thread {
         unsafe {
             let top = stack_top as *mut u64;
             top.offset(-1).write(trampoline as u64); // return address
-            top.offset(-2).write(0);                  // rbp
-            top.offset(-3).write(0);                  // rbx
-            top.offset(-4).write(user_rip);           // r12 → user RIP
-            top.offset(-5).write(user_rsp);           // r13 → user RSP
-            top.offset(-6).write(cr3);                // r14 → CR3
-            top.offset(-7).write(0);                  // r15
+            top.offset(-2).write(0); // rbp
+            top.offset(-3).write(0); // rbx
+            top.offset(-4).write(user_rip); // r12 → user RIP
+            top.offset(-5).write(user_rsp); // r13 → user RSP
+            top.offset(-6).write(cr3); // r14 → CR3
+            top.offset(-7).write(0); // r15
         }
 
         Self {

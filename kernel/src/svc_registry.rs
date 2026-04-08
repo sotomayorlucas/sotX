@@ -4,8 +4,8 @@
 //! chicken-and-egg problem of a userspace nameserver: processes
 //! can register and look up services without needing IPC first.
 
-use spin::Mutex;
 use sotos_common::SysError;
+use spin::Mutex;
 
 const MAX_SERVICES: usize = 32;
 const MAX_NAME_LEN: usize = 31;
@@ -50,7 +50,8 @@ impl Registry {
 
         // Check for duplicate name.
         for entry in self.entries.iter() {
-            if entry.active && entry.name_len as usize == name.len()
+            if entry.active
+                && entry.name_len as usize == name.len()
                 && &entry.name[..name.len()] == name
             {
                 return Err(SysError::InvalidArg);
@@ -78,7 +79,8 @@ impl Registry {
         }
 
         for entry in self.entries.iter() {
-            if entry.active && entry.name_len as usize == name.len()
+            if entry.active
+                && entry.name_len as usize == name.len()
                 && &entry.name[..name.len()] == name
             {
                 return Ok(entry.ep_id);

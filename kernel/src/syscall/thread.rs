@@ -7,10 +7,8 @@ use crate::sched::{self, ThreadId};
 use sotos_common::SysError;
 
 use super::{
-    USER_ADDR_LIMIT,
-    SYS_THREAD_CREATE, SYS_THREAD_EXIT, SYS_THREAD_RESUME,
-    SYS_THREAD_INFO, SYS_THREAD_COUNT, SYS_RESOURCE_LIMIT,
-    SYS_SET_FSBASE, SYS_GET_FSBASE,
+    SYS_GET_FSBASE, SYS_RESOURCE_LIMIT, SYS_SET_FSBASE, SYS_THREAD_COUNT, SYS_THREAD_CREATE,
+    SYS_THREAD_EXIT, SYS_THREAD_INFO, SYS_THREAD_RESUME, USER_ADDR_LIMIT,
 };
 
 /// Syscall number — set FS_BASE for a target thread (by thread cap).
@@ -121,16 +119,14 @@ pub fn handle(frame: &mut TrapFrame, nr: u64) -> bool {
 
         // SYS_SET_THREAD_FSBASE (162) — set FS_BASE for a target thread (by thread cap)
         // rdi = thread_cap (WRITE), rsi = new FS base address
-        SYS_SET_THREAD_FSBASE => {
-            match cap::validate(frame.rdi as u32, Rights::WRITE) {
-                Ok(CapObject::Thread { id: tid }) => {
-                    sched::set_thread_fs_base(ThreadId(tid), frame.rsi);
-                    frame.rax = 0;
-                }
-                Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
-                Err(e) => frame.rax = e as i64 as u64,
+        SYS_SET_THREAD_FSBASE => match cap::validate(frame.rdi as u32, Rights::WRITE) {
+            Ok(CapObject::Thread { id: tid }) => {
+                sched::set_thread_fs_base(ThreadId(tid), frame.rsi);
+                frame.rax = 0;
             }
-        }
+            Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
+            Err(e) => frame.rax = e as i64 as u64,
+        },
 
         // SYS_GET_THREAD_REGS (172) — read saved user registers of a blocked thread.
         // Used by LUCAS for signal frame construction.
@@ -162,16 +158,14 @@ pub fn handle(frame: &mut TrapFrame, nr: u64) -> bool {
 
         // SYS_SIGNAL_ENTRY (173) — set the async signal trampoline address for a thread.
         // rdi = thread_cap (WRITE), rsi = trampoline address in child's address space.
-        sotos_common::SYS_SIGNAL_ENTRY => {
-            match cap::validate(frame.rdi as u32, Rights::WRITE) {
-                Ok(CapObject::Thread { id: tid }) => {
-                    sched::set_signal_trampoline(ThreadId(tid), frame.rsi);
-                    frame.rax = 0;
-                }
-                Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
-                Err(e) => frame.rax = e as i64 as u64,
+        sotos_common::SYS_SIGNAL_ENTRY => match cap::validate(frame.rdi as u32, Rights::WRITE) {
+            Ok(CapObject::Thread { id: tid }) => {
+                sched::set_signal_trampoline(ThreadId(tid), frame.rsi);
+                frame.rax = 0;
             }
-        }
+            Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
+            Err(e) => frame.rax = e as i64 as u64,
+        },
 
         // SYS_SIGNAL_INJECT (174) — inject an async signal into a thread.
         // rdi = thread_id (raw), rsi = signal number (1..31).

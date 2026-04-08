@@ -64,17 +64,14 @@ pub struct Vnic {
 /// to *every* output byte: `mix = (domain.wrapping_mul(0x9E37_79B9_7F4A_7C15))
 /// ^ tsc.rotate_left(17) ^ (domain.rotate_left(31))`. This means
 /// adjacent domain ids produce visibly different MACs (the test
-/// `mac_changes_when_domain_changes` exercises this) and revoking
-/// + re-provisioning the same domain in the same nanosecond still
-/// yields a fresh address as long as the TSC has advanced.
+/// `mac_changes_when_domain_changes` exercises this) and revoking and
+/// re-provisioning the same domain in the same nanosecond still yields
+/// a fresh address as long as the TSC has advanced.
 pub fn mac_for_domain(domain: DomainId, tsc: u64) -> [u8; 6] {
     // Knuth's golden-ratio multiplier spreads single-bit input
     // changes across all 64 output bits.
     const GOLDEN: u64 = 0x9E37_79B9_7F4A_7C15;
-    let mix = domain
-        .wrapping_mul(GOLDEN)
-        ^ tsc.rotate_left(17)
-        ^ domain.rotate_left(31);
+    let mix = domain.wrapping_mul(GOLDEN) ^ tsc.rotate_left(17) ^ domain.rotate_left(31);
     let b0 = (((mix >> 2) as u8) & 0xFC) | 0x02;
     [
         b0,

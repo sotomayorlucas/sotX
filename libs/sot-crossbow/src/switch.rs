@@ -68,11 +68,7 @@ impl VirtualSwitch {
     ///
     /// Returns the port index on success, or
     /// `CrossbowError::PortsExhausted` if every slot is in use.
-    pub fn provision(
-        &mut self,
-        domain: DomainId,
-        bw_kbps: u32,
-    ) -> Result<u8, CrossbowError> {
+    pub fn provision(&mut self, domain: DomainId, bw_kbps: u32) -> Result<u8, CrossbowError> {
         let tsc = read_tsc();
         for i in 0..MAX_VSWITCH_PORTS {
             if self.ports[i].is_none() {
@@ -102,12 +98,7 @@ impl VirtualSwitch {
     /// `now_tsc` is the current TSC reading; the caller passes it in
     /// (instead of the switch reading it itself) so unit tests can
     /// drive the rate limiter deterministically without RDTSC.
-    pub fn route(
-        &mut self,
-        src_port: u8,
-        pkt_len: usize,
-        now_tsc: u64,
-    ) -> SwitchDecision {
+    pub fn route(&mut self, src_port: u8, pkt_len: usize, now_tsc: u64) -> SwitchDecision {
         let p = src_port as usize;
         if p >= MAX_VSWITCH_PORTS {
             return SwitchDecision::Drop;
@@ -308,7 +299,9 @@ mod tests {
         let mut macs: [[u8; 6]; MAX_VSWITCH_PORTS] = [[0; 6]; MAX_VSWITCH_PORTS];
         for i in 0..MAX_VSWITCH_PORTS {
             // Spread the domains apart so the seed is not all zero.
-            let p = sw.provision(0xA000 + i as DomainId, DEFAULT_BW_LIMIT_KBPS).unwrap();
+            let p = sw
+                .provision(0xA000 + i as DomainId, DEFAULT_BW_LIMIT_KBPS)
+                .unwrap();
             macs[p as usize] = sw.vnic(p).unwrap().mac;
         }
         for i in 0..MAX_VSWITCH_PORTS {

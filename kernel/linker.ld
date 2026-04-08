@@ -31,6 +31,12 @@ SECTIONS
 
     .data : {
         *(.data .data.*)
+        /* Static kernel binary -- `.got` is empty in practice but rust-lld
+         * still emits a placeholder section. Folding it into `.data`
+         * gives it a well-defined load address instead of colliding with
+         * `.text` at 0xFFFF_FFFF_8000_0000. */
+        *(.got .got.*)
+        *(.got.plt .got.plt.*)
 
         /* Limine request sections — must be inside .data */
         KEEP(*(.requests_start_marker))

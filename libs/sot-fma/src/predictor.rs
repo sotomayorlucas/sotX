@@ -32,10 +32,7 @@ pub const THERMAL_ANOMALY_THRESHOLD: u32 = 10;
 /// Evaluate every rule in priority order and return the strongest
 /// recommendation. `history` is the slot array; `prov_anomalies` is
 /// the behavioural counter from the provenance ingest pipeline.
-pub fn predict(
-    history: &[Option<HwFault>],
-    prov_anomalies: u32,
-) -> MigrationRecommendation {
+pub fn predict(history: &[Option<HwFault>], prov_anomalies: u32) -> MigrationRecommendation {
     // Rule 1: ECC uncorrectable -- single occurrence is enough.
     if any_of(history, HwFaultClass::EccUncorrectable) {
         return MigrationRecommendation::MigrateNow {
@@ -109,12 +106,10 @@ fn clustered_location(
         }
         // Skip duplicates we've already evaluated earlier in the pass.
         let mut seen_earlier = false;
-        for prev in &history[..i] {
-            if let Some(p) = prev {
-                if p.class == class && p.location == f.location {
-                    seen_earlier = true;
-                    break;
-                }
+        for p in history[..i].iter().flatten() {
+            if p.class == class && p.location == f.location {
+                seen_earlier = true;
+                break;
             }
         }
         if seen_earlier {
@@ -157,7 +152,9 @@ mod tests {
         h[0] = Some(fault(HwFaultClass::EccUncorrectable, 0xCAFE, 1));
         assert_eq!(
             predict(&h, 0),
-            MigrationRecommendation::MigrateNow { reason: "ecc uncorrectable" }
+            MigrationRecommendation::MigrateNow {
+                reason: "ecc uncorrectable"
+            }
         );
     }
 
@@ -169,7 +166,9 @@ mod tests {
         }
         assert_eq!(
             predict(&h, 0),
-            MigrationRecommendation::MigrateNow { reason: "disk read retries" }
+            MigrationRecommendation::MigrateNow {
+                reason: "disk read retries"
+            }
         );
     }
 
@@ -205,7 +204,9 @@ mod tests {
         }
         assert_eq!(
             predict(&h, 0),
-            MigrationRecommendation::MigrateNow { reason: "ecc soft errors clustering" }
+            MigrationRecommendation::MigrateNow {
+                reason: "ecc soft errors clustering"
+            }
         );
     }
 
@@ -238,7 +239,9 @@ mod tests {
         h[0] = Some(fault(HwFaultClass::ThermalWarn, 0, 1));
         assert_eq!(
             predict(&h, 11),
-            MigrationRecommendation::MigrateNow { reason: "thermal + behavioral anomaly" }
+            MigrationRecommendation::MigrateNow {
+                reason: "thermal + behavioral anomaly"
+            }
         );
     }
 
@@ -264,7 +267,9 @@ mod tests {
         h[5] = Some(fault(HwFaultClass::EccUncorrectable, 0, 200));
         assert_eq!(
             predict(&h, 0),
-            MigrationRecommendation::MigrateNow { reason: "ecc uncorrectable" }
+            MigrationRecommendation::MigrateNow {
+                reason: "ecc uncorrectable"
+            }
         );
     }
 

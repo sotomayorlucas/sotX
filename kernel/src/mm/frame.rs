@@ -100,7 +100,9 @@ impl BitmapAllocator {
                 let bit = idx % 8;
                 for b_off in bit..8 {
                     let frame_idx = byte * 8 + b_off;
-                    if frame_idx >= end { break; }
+                    if frame_idx >= end {
+                        break;
+                    }
                     if (b >> b_off) & 1 == 0 {
                         self.set(frame_idx);
                         self.free_frames -= 1;
@@ -115,9 +117,13 @@ impl BitmapAllocator {
     }
 
     fn allocate_contiguous(&mut self, count: usize) -> Option<PhysFrame> {
-        if count == 0 { return None; }
+        if count == 0 {
+            return None;
+        }
         let total = self.total_frames;
-        if count > total { return None; }
+        if count > total {
+            return None;
+        }
         let limit = total - count + 1;
         let hint = self.search_hint.min(limit);
         // Two passes: hint..limit, then 0..hint
@@ -260,5 +266,9 @@ pub fn free_frame(frame: PhysFrame) {
 
 /// Return the number of currently free frames.
 pub fn free_count() -> usize {
-    ALLOCATOR.lock().as_ref().map(|a| a.free_frames).unwrap_or(0)
+    ALLOCATOR
+        .lock()
+        .as_ref()
+        .map(|a| a.free_frames)
+        .unwrap_or(0)
 }

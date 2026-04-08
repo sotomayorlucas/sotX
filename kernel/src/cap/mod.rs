@@ -9,9 +9,9 @@
 
 pub mod table;
 
-pub use table::{CapId, CapObject, CapabilityTable, Rights};
 use crate::kdebug;
 use sotos_common::SysError;
+pub use table::{CapId, CapObject, CapabilityTable, Rights};
 
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
@@ -33,7 +33,10 @@ pub fn init() {
             let _ = table.insert(CapObject::Null, Rights::ALL, None, 0);
         }
     }
-    kdebug!("  capability table ready (dynamic pool, generation-checked, KARL burn={})", burn);
+    kdebug!(
+        "  capability table ready (dynamic pool, generation-checked, KARL burn={})",
+        burn
+    );
 }
 
 /// Insert a new capability and return its ID.

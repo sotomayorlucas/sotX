@@ -59,7 +59,7 @@ mod test_sync {
 }
 
 pub use switch::{CrossbowError, SwitchDecision, VirtualSwitch};
-pub use vnic::{Vnic, mac_for_domain, set_tsc_hz, tsc_hz};
+pub use vnic::{mac_for_domain, set_tsc_hz, tsc_hz, Vnic};
 
 /// The domain identifier used by the rest of the BSD personality
 /// (currently a `u64` to stay compatible with

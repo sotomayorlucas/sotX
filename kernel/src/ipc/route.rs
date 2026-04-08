@@ -135,7 +135,11 @@ impl WireMessage {
         Message {
             tag: self.tag,
             regs: self.regs,
-            cap_transfer: if self.flags & 1 != 0 { Some(self.cap_transfer) } else { None },
+            cap_transfer: if self.flags & 1 != 0 {
+                Some(self.cap_transfer)
+            } else {
+                None
+            },
         }
     }
 
@@ -185,7 +189,9 @@ pub fn node_id() -> u16 {
 /// `local_proxy` is a local endpoint handle that acts as a proxy.
 /// Messages sent to this proxy will be forwarded to `node_id:remote_ep`.
 pub fn add_route(local_proxy: u32, node_id: u16, remote_ep: u32) -> bool {
-    ROUTE_TABLE.lock().add_route(local_proxy, node_id, remote_ep)
+    ROUTE_TABLE
+        .lock()
+        .add_route(local_proxy, node_id, remote_ep)
 }
 
 /// Look up whether an endpoint has a remote route.

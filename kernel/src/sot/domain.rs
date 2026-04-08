@@ -241,7 +241,11 @@ pub fn domain_create(
     let mut table = DOMAINS.lock();
 
     // Find a free slot.
-    let slot_idx = table.slots.iter().position(|s| s.is_none()).ok_or(DomainError::Full)?;
+    let slot_idx = table
+        .slots
+        .iter()
+        .position(|s| s.is_none())
+        .ok_or(DomainError::Full)?;
 
     let id = table.next_id;
     table.next_id = id.wrapping_add(1);
@@ -266,7 +270,10 @@ pub fn domain_create(
 /// Check whether a domain with the given ID exists in the table.
 pub fn domain_lookup(id: u32) -> bool {
     let table = DOMAINS.lock();
-    table.slots.iter().any(|s| s.as_ref().map_or(false, |d| d.id == id))
+    table
+        .slots
+        .iter()
+        .any(|s| s.as_ref().map_or(false, |d| d.id == id))
 }
 
 /// Get the entry capability for a domain (its IPC endpoint).

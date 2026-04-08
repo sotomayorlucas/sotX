@@ -170,7 +170,8 @@ impl FaultManagement {
         self.prov_window_anomalies = self.prov_window_anomalies.saturating_add(bumps);
         // Refresh the cached recommendation so an immutable
         // `predict_failure()` call always sees the latest state.
-        self.last_recommendation = predictor::predict(&self.fault_history, self.prov_window_anomalies);
+        self.last_recommendation =
+            predictor::predict(&self.fault_history, self.prov_window_anomalies);
     }
 
     /// Inject a hardware fault sample into the history ring. Oldest
@@ -178,7 +179,8 @@ impl FaultManagement {
     pub fn ingest_hw_fault(&mut self, fault: HwFault) {
         self.fault_history[self.fault_idx] = Some(fault);
         self.fault_idx = (self.fault_idx + 1) % FMA_FAULT_HISTORY;
-        self.last_recommendation = predictor::predict(&self.fault_history, self.prov_window_anomalies);
+        self.last_recommendation =
+            predictor::predict(&self.fault_history, self.prov_window_anomalies);
     }
 
     /// Run the correlation rules and return the resulting
@@ -190,12 +192,7 @@ impl FaultManagement {
 
     /// Count faults of a given class within `[now_tsc - window_tsc, now_tsc]`.
     /// Used by the rule engine and useful for diagnostics / unit tests.
-    pub fn fault_count(
-        &self,
-        class: HwFaultClass,
-        window_tsc: u64,
-        now_tsc: u64,
-    ) -> usize {
+    pub fn fault_count(&self, class: HwFaultClass, window_tsc: u64, now_tsc: u64) -> usize {
         correlator::count_in_window(&self.fault_history, class, window_tsc, now_tsc)
     }
 
@@ -203,7 +200,8 @@ impl FaultManagement {
     /// scheduler has acted on (or aged out) the previous window.
     pub fn reset_anomaly_window(&mut self) {
         self.prov_window_anomalies = 0;
-        self.last_recommendation = predictor::predict(&self.fault_history, self.prov_window_anomalies);
+        self.last_recommendation =
+            predictor::predict(&self.fault_history, self.prov_window_anomalies);
     }
 
     /// Read-only accessor for the anomaly counter (tests / diagnostics).
@@ -253,14 +251,22 @@ mod tests {
         }
         assert_eq!(
             fma.predict_failure(),
-            MigrationRecommendation::MigrateNow { reason: "disk read retries" }
+            MigrationRecommendation::MigrateNow {
+                reason: "disk read retries"
+            }
         );
     }
 
     #[test]
     fn ingest_provenance_counts_revokes_only() {
         let mut fma = FaultManagement::new();
-        let mixed = [entry(1), entry(OP_REVOKE), entry(2), entry(OP_REVOKE), entry(OP_REVOKE)];
+        let mixed = [
+            entry(1),
+            entry(OP_REVOKE),
+            entry(2),
+            entry(OP_REVOKE),
+            entry(OP_REVOKE),
+        ];
         fma.ingest_provenance(&mixed);
         assert_eq!(fma.anomaly_count(), 3);
     }

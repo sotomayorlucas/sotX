@@ -180,12 +180,7 @@ impl CapabilityTable {
     /// The returned cap has an `Interposed` object wrapping the original
     /// handle, the proxy domain id, and the interposition policy byte.
     /// Rights and epoch are copied from the original.
-    pub fn interpose(
-        &mut self,
-        id: CapId,
-        proxy_domain: u32,
-        policy: u8,
-    ) -> Option<CapId> {
+    pub fn interpose(&mut self, id: CapId, proxy_domain: u32, policy: u8) -> Option<CapId> {
         // Validate the policy byte.
         let _policy = InterpositionPolicy::from_u8(policy)?;
         let entry = *self.entries.get(id.handle())?;

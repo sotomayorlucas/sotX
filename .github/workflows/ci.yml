@@ -119,6 +119,47 @@ jobs:
         run: cargo clippy --package sotos-kernel -- -D warnings
         continue-on-error: true
 
+  lint-strict-core:
+    # Hard-fail fmt + clippy gate for the core kernel + stable libraries.
+    # Unlike the legacy `clippy-strict` / workspace-wide fmt above, this
+    # job runs WITHOUT `continue-on-error`. Scope is intentionally
+    # narrow: kernel + shared ABI + linker + FMA + crossbow. Services
+    # and personality crates stay on the non-blocking workspace jobs.
+    name: fmt+clippy (strict — kernel/core libs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: x86_64-unknown-none
+          components: rust-src, rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lint-strict-core
+
+      - name: cargo fmt --check (kernel + core libs)
+        run: |
+          cargo fmt --check \
+            -p sotos-kernel \
+            -p sotos-common \
+            -p sot-fma \
+            -p sot-crossbow \
+            -p sotos-ld
+
+      - name: cargo clippy -D warnings (kernel + core libs)
+        run: |
+          cargo clippy \
+            -p sotos-kernel \
+            -p sotos-common \
+            -p sot-fma \
+            -p sot-crossbow \
+            -p sotos-ld \
+            --target x86_64-unknown-none \
+            -- -D warnings
+
   python-scripts:
     name: python script smoke
     runs-on: ubuntu-latest

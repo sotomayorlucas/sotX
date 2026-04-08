@@ -14,8 +14,8 @@
 //! - `init()`: early boot (before heap). Uses static Lazy GDT+TSS.
 //! - `init_percpu()`: after heap init. Heap-allocates per-CPU GDT+TSS.
 
-use core::cell::UnsafeCell;
 use alloc::boxed::Box;
+use core::cell::UnsafeCell;
 use spin::Lazy;
 use x86_64::instructions::segmentation::{Segment, CS, DS, ES, SS};
 use x86_64::instructions::tables::load_tss;
@@ -169,29 +169,29 @@ pub fn init_percpu(percpu: &mut PerCpu) {
 
     // Allocate double-fault IST stack via frame allocator (too large for slab).
     let df_frames = DF_STACK_SIZE / 4096;
-    let df_base = crate::mm::alloc_contiguous(df_frames)
-        .expect("out of frames for double-fault stack");
+    let df_base =
+        crate::mm::alloc_contiguous(df_frames).expect("out of frames for double-fault stack");
     let df_virt = df_base.addr() + crate::mm::hhdm_offset();
     let df_stack_top = VirtAddr::new(df_virt + DF_STACK_SIZE as u64);
     tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = df_stack_top;
 
     // Allocate page-fault IST stack.
-    let pf_base = crate::mm::alloc_contiguous(df_frames)
-        .expect("out of frames for page-fault IST stack");
+    let pf_base =
+        crate::mm::alloc_contiguous(df_frames).expect("out of frames for page-fault IST stack");
     let pf_virt = pf_base.addr() + crate::mm::hhdm_offset();
     let pf_stack_top = VirtAddr::new(pf_virt + DF_STACK_SIZE as u64);
     tss.interrupt_stack_table[PAGE_FAULT_IST_INDEX as usize] = pf_stack_top;
 
     // Allocate GP-fault IST stack.
-    let gp_base = crate::mm::alloc_contiguous(df_frames)
-        .expect("out of frames for GP-fault IST stack");
+    let gp_base =
+        crate::mm::alloc_contiguous(df_frames).expect("out of frames for GP-fault IST stack");
     let gp_virt = gp_base.addr() + crate::mm::hhdm_offset();
     let gp_stack_top = VirtAddr::new(gp_virt + DF_STACK_SIZE as u64);
     tss.interrupt_stack_table[GP_FAULT_IST_INDEX as usize] = gp_stack_top;
 
     // Allocate misc-fault IST stack (shared for #DE, #UD, #NM, #TS, #NP, #SS, #AC).
-    let misc_base = crate::mm::alloc_contiguous(df_frames)
-        .expect("out of frames for misc-fault IST stack");
+    let misc_base =
+        crate::mm::alloc_contiguous(df_frames).expect("out of frames for misc-fault IST stack");
     let misc_virt = misc_base.addr() + crate::mm::hhdm_offset();
     let misc_stack_top = VirtAddr::new(misc_virt + DF_STACK_SIZE as u64);
     tss.interrupt_stack_table[MISC_FAULT_IST_INDEX as usize] = misc_stack_top;

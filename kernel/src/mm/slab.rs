@@ -15,8 +15,8 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use spin::Mutex;
 
-use super::{alloc_frame, alloc_contiguous, free_frame, hhdm_offset};
 use super::frame::{PhysFrame, FRAME_SIZE};
+use super::{alloc_contiguous, alloc_frame, free_frame, hhdm_offset};
 
 const PAGE_SIZE: usize = FRAME_SIZE;
 const NUM_CLASSES: usize = 8;
@@ -274,6 +274,11 @@ pub fn init() {
     for cache in CPU_CACHES.iter() {
         cache.lock().init();
     }
-    kdebug!("  slab: {} size classes ({}..{}), per-CPU caches ({} CPUs), multi-page for >4096",
-        NUM_CLASSES, SIZE_CLASSES[0], SIZE_CLASSES[NUM_CLASSES - 1], MAX_CPUS);
+    kdebug!(
+        "  slab: {} size classes ({}..{}), per-CPU caches ({} CPUs), multi-page for >4096",
+        NUM_CLASSES,
+        SIZE_CLASSES[0],
+        SIZE_CLASSES[NUM_CLASSES - 1],
+        MAX_CPUS
+    );
 }

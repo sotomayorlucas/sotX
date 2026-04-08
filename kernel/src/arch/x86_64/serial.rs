@@ -1,9 +1,9 @@
 //! Minimal 16550 UART serial driver for early kernel output.
 //! COM1 at I/O port 0x3F8.
 
+use super::io::{inb, outb};
 use core::fmt;
 use spin::Mutex;
-use super::io::{inb, outb};
 
 /// Lock protecting serial output from concurrent access on multiple CPUs.
 static SERIAL_LOCK: Mutex<()> = Mutex::new(());
