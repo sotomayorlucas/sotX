@@ -3,6 +3,12 @@ name = "sotos-xhci-svc"
 version = "0.1.0"
 edition = "2021"
 
+# Standalone (not part of any cargo workspace). Required when building
+# inside a git worktree, where the parent .claude/worktrees/.../Cargo.toml
+# excludes services/xhci. Without this block, cargo walks up to the main
+# repo's Cargo.toml and reports a path mismatch.
+[workspace]
+
 [dependencies]
 sotos-common = { path = "../../libs/sotos-common" }
 sotos-pci = { path = "../../libs/sotos-pci" }

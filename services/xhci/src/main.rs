@@ -3,13 +3,27 @@
 //! Drives an xHCI USB 3.x controller via MMIO (BAR0 pre-mapped by kernel).
 //! Implements HID boot protocol keyboard support — converts USB HID reports
 //! to PS/2 scancodes and writes them to the shared KB ring buffer.
+//!
+//! Architecture (U4 defer-to-worker fix):
+//! The main thread performs minimum boot-critical setup (PCI, DMA, controller
+//! reset, No-Op verification) then SPAWNS a dedicated worker thread that owns
+//! the USB enumeration sequence (~8 blocking control transfers on TCG). While
+//! the worker enumerates, the main thread drops into an IPC poll loop — it
+//! registers the service under the name "xhci" and responds to any incoming
+//! call with ENXIO until `XHCI_ENUM_READY` flips. This way the boot cannot
+//! stall waiting for xhci to come up; any other service that does
+//! `svc_lookup("xhci")` gets a prompt answer even during enumeration.
 
 #![no_std]
 #![no_main]
 
+use core::cell::UnsafeCell;
+use core::mem::MaybeUninit;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
 use sotos_common::sys;
 use sotos_common::KB_RING_ADDR;
-use sotos_common::{BootInfo, BOOT_INFO_ADDR};
+use sotos_common::{BootInfo, BOOT_INFO_ADDR, IpcMsg};
 use sotos_pci::PciBus;
 use sotos_xhci::controller::{XhciController, XhciDma};
 use sotos_xhci::{trb, port, usb, hid, regs};
@@ -39,6 +53,88 @@ const INT_BUF_VADDR: u64 = 0xD31000;   // Interrupt IN data buffer (HID reports)
 
 const SCRATCH_BUF_PAGES: usize = 16;
 // KB_RING_ADDR imported from sotos_common
+
+// Worker thread stack. The main xhci thread uses the process stack at
+// PROCESS_STACK_BASE (0x900000) allocated by the kernel loader. The worker
+// needs its own independent stack, which we allocate at a VA that does not
+// collide with MMIO (0xC00000), DMA (0xD00000..), or the shared KB ring
+// (0x510000). 16 KiB / 4 pages is enough headroom for the enumeration's
+// nested control-transfer call chain.
+const WORKER_STACK_BASE: u64 = 0xA00000;
+const WORKER_STACK_PAGES: u64 = 4;
+const WORKER_STACK_TOP: u64 = WORKER_STACK_BASE + WORKER_STACK_PAGES * 0x1000;
+
+// IPC "not ready yet" reply code. Any consumer that calls svc_lookup("xhci")
+// and then IPC-calls the endpoint before enumeration is complete gets this.
+// -6 = ENXIO in the Linux-compatible numbering used throughout the tree.
+const ERR_NOT_READY: i64 = -6;
+
+// ---------------------------------------------------------------------------
+// Worker handoff state (main thread → enumeration worker)
+// ---------------------------------------------------------------------------
+
+/// Flipped to `true` by the worker after the USB enumeration sequence
+/// (Enable Slot, Address Device, GET_DESCRIPTOR, Configure Endpoint,
+/// SET_CONFIGURATION, SET_PROTOCOL, SET_IDLE, initial interrupt TRBs)
+/// has completed. Consumers can poll this to know when it is safe to
+/// interact with the xhci service.
+pub static XHCI_ENUM_READY: AtomicBool = AtomicBool::new(false);
+
+/// Shared context handed from the main thread to the enumeration worker.
+///
+/// SAFETY: single-writer/single-reader handoff — the main thread fully
+/// populates every field and sets `WORKER_CTX_READY` before spawning the
+/// worker, and the worker reads the values only after its first instruction
+/// observes `WORKER_CTX_READY == true`. After handoff, the main thread never
+/// touches the controller again; the worker owns it for the lifetime of the
+/// process. This pattern sidesteps the lack of an `arg` parameter on
+/// `sys::thread_create(rip, rsp)` without introducing a lock.
+struct WorkerCtx {
+    /// Fully-initialized XhciController (ownership transferred to worker).
+    ctrl: UnsafeCell<MaybeUninit<XhciController>>,
+    /// DMA descriptor table — Copy, so the worker can read it directly.
+    dma: UnsafeCell<MaybeUninit<XhciDma>>,
+    /// IRQ acknowledgement cap passed from BootInfo.
+    irq_cap: AtomicU64,
+    /// IRQ notification cap (worker blocks on this in the event loop).
+    notify_cap: AtomicU64,
+    /// Physical address of the interrupt-IN data buffer (HID reports).
+    int_buf_phys: AtomicU64,
+    /// Physical address of the interrupt-IN transfer ring.
+    int_ring_phys: AtomicU64,
+    /// Physical address of the input context (for Address Device / Configure EP).
+    input_ctx_phys: AtomicU64,
+    /// Physical address of the device context.
+    device_ctx_phys: AtomicU64,
+    /// Physical address of the EP0 transfer ring.
+    ep0_ring_phys: AtomicU64,
+    /// Physical address of the scratch data buffer for descriptors.
+    data_buf_phys: AtomicU64,
+}
+
+// SAFETY: This is a single-AS userspace process. Thread creation within the
+// same address space (`sys::thread_create`) preserves data visibility for
+// statics; the protocol is enforced by `WORKER_CTX_READY` below.
+unsafe impl Sync for WorkerCtx {}
+
+static WORKER_CTX: WorkerCtx = WorkerCtx {
+    ctrl: UnsafeCell::new(MaybeUninit::uninit()),
+    dma: UnsafeCell::new(MaybeUninit::uninit()),
+    irq_cap: AtomicU64::new(0),
+    notify_cap: AtomicU64::new(0),
+    int_buf_phys: AtomicU64::new(0),
+    int_ring_phys: AtomicU64::new(0),
+    input_ctx_phys: AtomicU64::new(0),
+    device_ctx_phys: AtomicU64::new(0),
+    ep0_ring_phys: AtomicU64::new(0),
+    data_buf_phys: AtomicU64::new(0),
+};
+
+/// Synchronization flag ensuring the worker thread reads WORKER_CTX only
+/// after the main thread finishes writing every field. Uses SeqCst for
+/// a full happens-before ordering between the stores on the main thread
+/// and the load on the worker.
+static WORKER_CTX_READY: AtomicBool = AtomicBool::new(false);
 
 fn print(s: &[u8]) {
     for &b in s { sys::debug_print(b); }
@@ -210,8 +306,157 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
+    // ---------------------------------------------------------------
+    // Publish the fully-initialized controller into the worker context
+    // and spawn the enumeration worker thread.
+    //
+    // Everything from here down — port scan, reset, Enable Slot,
+    // Address Device, GET_DESCRIPTOR, Configure Endpoint,
+    // SET_CONFIGURATION, SET_PROTOCOL, SET_IDLE, initial interrupt
+    // TRBs and the subsequent HID event loop — happens in the worker
+    // so the main thread can promptly register its IPC service and
+    // stop blocking any consumer that wants to talk to xhci.
+    //
+    // SAFETY: the main thread transfers ownership of `ctrl` and `dma`
+    // into WORKER_CTX and never touches them again. Every field is
+    // stored before WORKER_CTX_READY is set (SeqCst), and the worker
+    // only reads the fields after observing WORKER_CTX_READY == true.
+    // ---------------------------------------------------------------
+    unsafe {
+        (*WORKER_CTX.ctrl.get()).write(ctrl);
+        (*WORKER_CTX.dma.get()).write(dma);
+    }
+    WORKER_CTX.irq_cap.store(irq_cap, Ordering::Relaxed);
+    WORKER_CTX.notify_cap.store(notify_cap, Ordering::Relaxed);
+    WORKER_CTX.int_buf_phys.store(int_buf_phys, Ordering::Relaxed);
+    WORKER_CTX.int_ring_phys.store(int_ring_phys, Ordering::Relaxed);
+    WORKER_CTX.input_ctx_phys.store(input_ctx_phys, Ordering::Relaxed);
+    WORKER_CTX.device_ctx_phys.store(device_ctx_phys, Ordering::Relaxed);
+    WORKER_CTX.ep0_ring_phys.store(ep0_ring_phys, Ordering::Relaxed);
+    WORKER_CTX.data_buf_phys.store(data_buf_phys, Ordering::Relaxed);
+    WORKER_CTX_READY.store(true, Ordering::SeqCst);
+
+    // Allocate and map the worker stack (4 pages = 16 KiB). Reuses the
+    // local `alloc_and_map` helper so the stack pages are zeroed and mapped
+    // writable with the same flags as every other DMA page above.
+    for i in 0..WORKER_STACK_PAGES {
+        let _ = alloc_and_map(WORKER_STACK_BASE + i * 0x1000, map_flags);
+    }
+
+    // Spawn the enumeration worker thread in the same address space.
+    // `sys::thread_create(rip, rsp)` starts it at `usb_enumerate_worker`
+    // with its own RSP — WORKER_CTX is read via statics on first entry.
+    match sys::thread_create(
+        usb_enumerate_worker as *const () as u64,
+        WORKER_STACK_TOP,
+    ) {
+        Ok(_) => print(b"xhci: enumeration deferred to worker thread\n"),
+        Err(_) => {
+            print(b"xhci: FATAL worker thread_create failed, running enum inline\n");
+            // Fallback: call worker entry on this thread. This matches the
+            // pre-U4 behavior. We diverge (never return), so main-thread IPC
+            // registration is skipped in this degraded mode.
+            usb_enumerate_worker();
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Main thread: IPC service loop.
+    //
+    // Create an endpoint, register under "xhci", and answer calls.
+    // While enumeration is in progress we return ERR_NOT_READY (ENXIO)
+    // so consumers see a prompt reply rather than blocking. Once the
+    // worker sets XHCI_ENUM_READY, the same loop answers with success.
+    // ---------------------------------------------------------------
+    let ep_cap = match sys::endpoint_create() {
+        Ok(c) => c,
+        Err(_) => {
+            print(b"xhci: endpoint_create failed, parking main thread\n");
+            loop { sys::yield_now(); }
+        }
+    };
+
+    let name = b"xhci";
+    match sys::svc_register(name.as_ptr() as u64, name.len() as u64, ep_cap) {
+        Ok(()) => print(b"xhci: registered as 'xhci' service\n"),
+        Err(_) => print(b"xhci: svc_register failed (non-fatal)\n"),
+    }
+
+    ipc_main_loop(ep_cap);
+}
+
+// ---------------------------------------------------------------------------
+// Main-thread IPC loop
+// ---------------------------------------------------------------------------
+
+/// Serve IPC calls on the xhci endpoint forever. Answers with ERR_NOT_READY
+/// until the worker flips XHCI_ENUM_READY, and with success (0) after.
+///
+/// The minimal ABI today is "ping" — any caller learns whether the
+/// controller has finished enumeration and therefore whether HID keyboard
+/// reports are flowing into the shared KB ring. Future commands can be
+/// dispatched by inspecting `msg.tag` without touching the worker.
+fn ipc_main_loop(ep_cap: u64) -> ! {
+    loop {
+        // The incoming message is ignored today — the minimal ABI is "ping"
+        // to discover enumeration status. Future commands can dispatch on
+        // `_msg.tag` without touching the worker.
+        if sys::recv(ep_cap).is_err() {
+            sys::yield_now();
+            continue;
+        }
+
+        let ready = XHCI_ENUM_READY.load(Ordering::Acquire);
+        let reply_code: i64 = if ready { 0 } else { ERR_NOT_READY };
+
+        // reply.tag carries the status code (0 = ready, ERR_NOT_READY otherwise)
+        // and reply.regs[0] mirrors it as a boolean ready bit. regs[1..7]
+        // are reserved for future command responses.
+        let reply = IpcMsg {
+            tag: reply_code as u64,
+            regs: [ready as u64, 0, 0, 0, 0, 0, 0, 0],
+        };
+        let _ = sys::send(ep_cap, &reply);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// USB enumeration worker thread (runs everything after XhciController::init)
+// ---------------------------------------------------------------------------
+
+/// Real USB enumeration worker. Runs the full post-init sequence
+/// (port scan/reset, Enable Slot, Address Device, descriptors, Configure
+/// Endpoint, SET_CONFIGURATION, SET_PROTOCOL, SET_IDLE, initial interrupt
+/// TRBs) and then drops into the HID keyboard event loop forever.
+///
+/// Takes no explicit argument — reads its context from `WORKER_CTX`, which
+/// the main thread fully populates before spawn. Emits the exact same boot
+/// log messages as the pre-U4 inline enumeration so external log watchers
+/// (and the test harness) keep seeing familiar output.
+extern "C" fn usb_enumerate_worker() -> ! {
+    // Wait for the main thread's setup to become visible. In practice this
+    // is already true because main sets the flag before calling thread_create,
+    // but the acquire load establishes happens-before regardless of
+    // scheduler order.
+    while !WORKER_CTX_READY.load(Ordering::Acquire) {
+        sys::yield_now();
+    }
+
+    // SAFETY: WORKER_CTX_READY is true and the main thread has surrendered
+    // ownership of ctrl/dma to this worker. We are the only reader.
+    let ctrl: &mut XhciController = unsafe { (*WORKER_CTX.ctrl.get()).assume_init_mut() };
+    let dma: &XhciDma = unsafe { (*WORKER_CTX.dma.get()).assume_init_ref() };
+    let irq_cap = WORKER_CTX.irq_cap.load(Ordering::Relaxed);
+    let notify_cap = WORKER_CTX.notify_cap.load(Ordering::Relaxed);
+    let int_buf_phys = WORKER_CTX.int_buf_phys.load(Ordering::Relaxed);
+    let int_ring_phys = WORKER_CTX.int_ring_phys.load(Ordering::Relaxed);
+    let input_ctx_phys = WORKER_CTX.input_ctx_phys.load(Ordering::Relaxed);
+    let device_ctx_phys = WORKER_CTX.device_ctx_phys.load(Ordering::Relaxed);
+    let ep0_ring_phys = WORKER_CTX.ep0_ring_phys.load(Ordering::Relaxed);
+    let data_buf_phys = WORKER_CTX.data_buf_phys.load(Ordering::Relaxed);
+
     // --- Find connected port ---
-    let connected = unsafe { port::connected_ports(&ctrl) };
+    let connected = unsafe { port::connected_ports(ctrl) };
     let mut first_port: u8 = 0;
     for p in 1..=ctrl.max_ports {
         if connected & (1 << p) != 0 {
@@ -220,10 +465,13 @@ pub extern "C" fn _start() -> ! {
         }
     }
     if first_port == 0 {
-        print(b"xhci: no connected ports, parking on notify_wait\n");
+        print(b"xhci: no connected ports, parking worker on notify_wait\n");
+        // Still mark enum ready so IPC consumers don't wait forever — the
+        // controller is up, there's simply nothing plugged in. The main
+        // thread's IPC loop can distinguish via a future "has_device" bit.
+        XHCI_ENUM_READY.store(true, Ordering::SeqCst);
         // TCG fix (run-full deadlock U2): sleep on notify instead of
-        // busy-yielding so the kernel scheduler doesn't round-robin
-        // this thread against init's main thread forever.
+        // busy-yielding so the kernel scheduler doesn't round-robin.
         loop { sys::notify_wait(notify_cap); }
     }
 
@@ -237,10 +485,11 @@ pub extern "C" fn _start() -> ! {
     sys::debug_print(b'\n');
 
     // --- Port reset ---
-    unsafe { port::reset_port(&ctrl, first_port); }
-    if !unsafe { port::wait_port_reset(&ctrl, first_port, xhci_wait) } {
+    unsafe { port::reset_port(ctrl, first_port); }
+    if !unsafe { port::wait_port_reset(ctrl, first_port, xhci_wait) } {
         print(b"xhci: port reset timeout\n");
-        loop { sys::yield_now(); }
+        XHCI_ENUM_READY.store(true, Ordering::SeqCst);
+        loop { sys::notify_wait(notify_cap); }
     }
     // Re-read speed after reset (may change).
     let portsc = unsafe { ctrl.portsc(first_port) };
@@ -257,12 +506,13 @@ pub extern "C" fn _start() -> ! {
         }
         _ => {
             print(b"xhci: Enable Slot failed\n");
-            loop { sys::yield_now(); }
+            XHCI_ENUM_READY.store(true, Ordering::SeqCst);
+            loop { sys::notify_wait(notify_cap); }
         }
     };
 
     // --- Address Device ---
-    unsafe { ctrl.set_dcbaa_entry(&dma, slot_id, device_ctx_phys); }
+    unsafe { ctrl.set_dcbaa_entry(dma, slot_id, device_ctx_phys); }
     let mut ep0_ring = unsafe { trb::TrbRing::init(EP0_RING_VADDR as *mut u8, ep0_ring_phys) };
 
     unsafe {
@@ -279,13 +529,15 @@ pub extern "C" fn _start() -> ! {
             print(b"xhci: Address Device failed, code=");
             print_u32(evt.completion_code() as u32);
             sys::debug_print(b'\n');
-            loop { sys::yield_now(); }
+            XHCI_ENUM_READY.store(true, Ordering::SeqCst);
+            loop { sys::notify_wait(notify_cap); }
         }
         Err(msg) => {
             print(b"xhci: Address Device error: ");
             print(msg.as_bytes());
             sys::debug_print(b'\n');
-            loop { sys::yield_now(); }
+            XHCI_ENUM_READY.store(true, Ordering::SeqCst);
+            loop { sys::notify_wait(notify_cap); }
         }
     }
 
@@ -307,7 +559,7 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
-    // --- GET_DESCRIPTOR(Configuration) — first 9 bytes to get wTotalLength ---
+    // --- GET_DESCRIPTOR(Configuration) — first 64 bytes to get wTotalLength ---
     let setup = usb::get_config_descriptor(64);
     match unsafe { ctrl.control_transfer_in(slot_id, &mut ep0_ring, setup, data_buf_phys, 64, xhci_wait) } {
         Ok(evt) if evt.completion_code() == trb::CC_SUCCESS || evt.completion_code() == 13 => {
@@ -339,7 +591,7 @@ pub extern "C" fn _start() -> ! {
         print(b" maxpkt=");
         print_u32(ms_info.max_packet_in as u32);
         sys::debug_print(b'\n');
-        // TODO: setup bulk endpoints, run SCSI INQUIRY, expose block device via IPC
+        // Future: setup bulk endpoints, SCSI INQUIRY, expose block device via IPC.
         print(b"xhci: mass storage detected (bulk transfer not yet implemented)\n");
     }
 
@@ -358,7 +610,8 @@ pub extern "C" fn _start() -> ! {
         }
         None => {
             print(b"xhci: no HID keyboard in config descriptor\n");
-            loop { sys::yield_now(); }
+            XHCI_ENUM_READY.store(true, Ordering::SeqCst);
+            loop { sys::notify_wait(notify_cap); }
         }
     };
 
@@ -393,13 +646,15 @@ pub extern "C" fn _start() -> ! {
             print(b"xhci: Configure Endpoint code=");
             print_u32(evt.completion_code() as u32);
             sys::debug_print(b'\n');
-            loop { sys::yield_now(); }
+            XHCI_ENUM_READY.store(true, Ordering::SeqCst);
+            loop { sys::notify_wait(notify_cap); }
         }
         Err(msg) => {
             print(b"xhci: Configure Endpoint error: ");
             print(msg.as_bytes());
             sys::debug_print(b'\n');
-            loop { sys::yield_now(); }
+            XHCI_ENUM_READY.store(true, Ordering::SeqCst);
+            loop { sys::notify_wait(notify_cap); }
         }
     }
 
@@ -441,13 +696,14 @@ pub extern "C" fn _start() -> ! {
     // Post several Normal TRBs to keep the HC busy.
     let report_size = core::cmp::min(hid_info.max_packet, 8) as u16;
     for i in 0..4u64 {
-        let buf = int_buf_phys + i * 64; // use different 64-byte offsets within the page
+        let buf = int_buf_phys + i * 64; // 64-byte slots within the interrupt buffer page
         unsafe { int_ring.enqueue(trb::trb_normal(buf, report_size)); }
     }
     // Ring the interrupt endpoint doorbell.
     unsafe { ctrl.ring_ep_doorbell(slot_id, ep_dci); }
 
     print(b"xhci: HID keyboard ready, entering event loop\n");
+    XHCI_ENUM_READY.store(true, Ordering::SeqCst);
 
     // --- Event loop ---
     let mut prev_report = hid::BootReport::empty();
@@ -464,56 +720,34 @@ pub extern "C" fn _start() -> ! {
                 None => break,
             };
 
-            if evt.trb_type() == trb::TRB_XFER_EVENT && evt.endpoint_id() == ep_dci {
-                if evt.completion_code() == trb::CC_SUCCESS || evt.completion_code() == 13 {
-                    // Determine which buffer this TRB pointed to.
-                    // TRB param = physical address of the original TRB.
-                    // We use a rotating buffer within the interrupt buffer page.
-                    // For simplicity, always read from the base of int_buf.
-                    // The HC writes the report into the buffer specified in the Normal TRB.
-                    // Our TRBs point to int_buf_phys + (idx * 64).
-                    // The TRB pointer in param tells us which TRB completed.
-                    // Calculate which buffer offset this corresponds to.
-                    let buf_idx = if pending_trbs > 0 { pending_trbs - 1 } else { 0 };
-                    let _ = buf_idx; // We just read the rotating buffer
-                    // Since we post TRBs with increasing offsets (0, 64, 128, 192),
-                    // we can figure out the buffer from the TRB pointer.
-                    // But for simplicity, we track pending_trbs as a counter.
-                    // Each completed TRB means one report is available.
-                    // The report is at the buffer address we gave to the TRB.
-                    // Since the TRB param (in Transfer Event) = phys addr of the TRB itself,
-                    // not the data buffer... we need another approach.
-                    //
-                    // Simplest: just use a single rotating index.
-                    // We posted TRBs 0..3 with buffers at offsets 0, 64, 128, 192.
-                    // After processing, re-post one more.
-                    pending_trbs = pending_trbs.saturating_sub(1);
+            if evt.trb_type() == trb::TRB_XFER_EVENT && evt.endpoint_id() == ep_dci
+                && (evt.completion_code() == trb::CC_SUCCESS || evt.completion_code() == 13)
+            {
+                // Each completed TRB means one report is available. We
+                // use a simple rotating read pointer over the 4 x 64-byte
+                // slots we posted into the interrupt buffer page.
+                pending_trbs = pending_trbs.saturating_sub(1);
+                let read_offset = (3 - pending_trbs) as u64 * 64;
+                let report_buf = unsafe {
+                    core::slice::from_raw_parts(
+                        (INT_BUF_VADDR + read_offset) as *const u8,
+                        8,
+                    )
+                };
+                let curr_report = hid::BootReport::from_bytes(report_buf);
 
-                    // Read the most recently written report from the first buffer slot.
-                    // Since QEMU processes TRBs in order, the first one completes first.
-                    // We use a simple rotating read pointer.
-                    let read_offset = (3 - pending_trbs) as u64 * 64;
-                    let report_buf = unsafe {
-                        core::slice::from_raw_parts(
-                            (INT_BUF_VADDR + read_offset) as *const u8,
-                            8,
-                        )
-                    };
-                    let curr_report = hid::BootReport::from_bytes(report_buf);
+                // Convert HID report to PS/2 scancodes.
+                hid::process_report(&prev_report, &curr_report, &mut |scancode| {
+                    unsafe { kb_ring_write(scancode); }
+                });
 
-                    // Convert HID report to PS/2 scancodes.
-                    hid::process_report(&prev_report, &curr_report, &mut |scancode| {
-                        unsafe { kb_ring_write(scancode); }
-                    });
+                prev_report = curr_report;
 
-                    prev_report = curr_report;
-
-                    // Re-post a Normal TRB for the next report.
-                    let next_buf = int_buf_phys + ((3 - pending_trbs) as u64 % 4) * 64;
-                    unsafe { int_ring.enqueue(trb::trb_normal(next_buf, report_size)); }
-                    unsafe { ctrl.ring_ep_doorbell(slot_id, ep_dci); }
-                    pending_trbs += 1;
-                }
+                // Re-post a Normal TRB for the next report.
+                let next_buf = int_buf_phys + ((3 - pending_trbs) as u64 % 4) * 64;
+                unsafe { int_ring.enqueue(trb::trb_normal(next_buf, report_size)); }
+                unsafe { ctrl.ring_ep_doorbell(slot_id, ep_dci); }
+                pending_trbs += 1;
             }
             // Ignore other event types (port status, etc.)
         }
