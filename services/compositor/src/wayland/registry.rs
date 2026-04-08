@@ -29,14 +29,19 @@ pub struct GlobalEntry {
 ///   3 = xdg_wm_base
 ///   4 = wl_seat
 ///   5 = zwlr_layer_shell_v1            (PR #69, merged)
-///   6 = wp_fractional_scale_manager_v1 (PR #60)
+///   6 = wp_fractional_scale_manager_v1 (PR #60, merged)
 ///   7 = wl_output                      (this PR)
-pub static GLOBALS: [GlobalEntry; 6] = [
+pub static GLOBALS: [GlobalEntry; 7] = [
     GlobalEntry { name: 1, interface: super::WL_COMPOSITOR_INTERFACE, version: 4 },
     GlobalEntry { name: 2, interface: super::WL_SHM_INTERFACE, version: 1 },
     GlobalEntry { name: 3, interface: super::XDG_WM_BASE_INTERFACE, version: 2 },
     GlobalEntry { name: 4, interface: super::WL_SEAT_INTERFACE, version: 5 },
     GlobalEntry { name: 5, interface: super::ZWLR_LAYER_SHELL_V1_INTERFACE, version: 4 },
+    GlobalEntry {
+        name: 6,
+        interface: super::WP_FRACTIONAL_SCALE_MANAGER_V1_INTERFACE,
+        version: super::fractional_scale::FRACTIONAL_SCALE_VERSION,
+    },
     GlobalEntry { name: 7, interface: WL_OUTPUT_INTERFACE, version: WL_OUTPUT_VERSION },
 ];
 

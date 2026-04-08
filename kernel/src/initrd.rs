@@ -62,14 +62,18 @@ pub fn find<'a>(data: &'a [u8], name: &str) -> Option<&'a [u8]> {
         }
 
         // Verify magic "070701" — compare byte-by-byte to avoid memcmp UB checks.
-        let magic_ok = data[pos] == b'0' && data[pos+1] == b'7' && data[pos+2] == b'0'
-            && data[pos+3] == b'7' && data[pos+4] == b'0' && data[pos+5] == b'1';
+        let magic_ok = data[pos] == b'0'
+            && data[pos + 1] == b'7'
+            && data[pos + 2] == b'0'
+            && data[pos + 3] == b'7'
+            && data[pos + 4] == b'0'
+            && data[pos + 5] == b'1';
         if !magic_ok {
             return None;
         }
 
         let namesize = parse_hex8(data, pos + 94) as usize; // offset 94: namesize
-        let filesize = parse_hex8(data, pos + 54) as usize;  // offset 54: filesize
+        let filesize = parse_hex8(data, pos + 54) as usize; // offset 54: filesize
 
         // Name starts right after the 110-byte header.
         let name_start = pos + 110;
@@ -90,11 +94,16 @@ pub fn find<'a>(data: &'a [u8], name: &str) -> Option<&'a [u8]> {
 
         // Check for trailer sentinel — byte-by-byte.
         if entry_name.len() == 10
-            && entry_name[0] == b'T' && entry_name[1] == b'R'
-            && entry_name[2] == b'A' && entry_name[3] == b'I'
-            && entry_name[4] == b'L' && entry_name[5] == b'E'
-            && entry_name[6] == b'R' && entry_name[7] == b'!'
-            && entry_name[8] == b'!' && entry_name[9] == b'!'
+            && entry_name[0] == b'T'
+            && entry_name[1] == b'R'
+            && entry_name[2] == b'A'
+            && entry_name[3] == b'I'
+            && entry_name[4] == b'L'
+            && entry_name[5] == b'E'
+            && entry_name[6] == b'R'
+            && entry_name[7] == b'!'
+            && entry_name[8] == b'!'
+            && entry_name[9] == b'!'
         {
             return None;
         }
@@ -132,41 +141,62 @@ pub fn find_all<'a, const N: usize>(data: &'a [u8], names: &[&str; N]) -> [Optio
     let mut pos = 0;
 
     loop {
-        if found_count == N { break; }
-        if pos + 110 > data.len() { break; }
+        if found_count == N {
+            break;
+        }
+        if pos + 110 > data.len() {
+            break;
+        }
 
         // Verify magic "070701" byte-by-byte.
-        let magic_ok = data[pos] == b'0' && data[pos+1] == b'7' && data[pos+2] == b'0'
-            && data[pos+3] == b'7' && data[pos+4] == b'0' && data[pos+5] == b'1';
-        if !magic_ok { break; }
+        let magic_ok = data[pos] == b'0'
+            && data[pos + 1] == b'7'
+            && data[pos + 2] == b'0'
+            && data[pos + 3] == b'7'
+            && data[pos + 4] == b'0'
+            && data[pos + 5] == b'1';
+        if !magic_ok {
+            break;
+        }
 
         let namesize = parse_hex8(data, pos + 94) as usize;
         let filesize = parse_hex8(data, pos + 54) as usize;
 
         let name_start = pos + 110;
         let name_end = name_start + namesize;
-        if name_end > data.len() { break; }
+        if name_end > data.len() {
+            break;
+        }
 
         let entry_name = &data[name_start..name_end - 1]; // strip NUL
 
         let data_start = align4(name_end);
         let data_end = data_start + filesize;
-        if data_end > data.len() { break; }
+        if data_end > data.len() {
+            break;
+        }
 
         // Check for trailer — byte-by-byte.
         if entry_name.len() == 10
-            && entry_name[0] == b'T' && entry_name[1] == b'R'
-            && entry_name[2] == b'A' && entry_name[3] == b'I'
-            && entry_name[4] == b'L' && entry_name[5] == b'E'
-            && entry_name[6] == b'R' && entry_name[7] == b'!'
-            && entry_name[8] == b'!' && entry_name[9] == b'!'
+            && entry_name[0] == b'T'
+            && entry_name[1] == b'R'
+            && entry_name[2] == b'A'
+            && entry_name[3] == b'I'
+            && entry_name[4] == b'L'
+            && entry_name[5] == b'E'
+            && entry_name[6] == b'R'
+            && entry_name[7] == b'!'
+            && entry_name[8] == b'!'
+            && entry_name[9] == b'!'
         {
             break;
         }
 
         // Check against all target names.
         for i in 0..N {
-            if results[i].is_some() { continue; }
+            if results[i].is_some() {
+                continue;
+            }
             let target = names[i].as_bytes();
             if entry_name.len() == target.len() {
                 let mut eq = true;

@@ -26,8 +26,10 @@ static BOOT_CR3: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::
 use core::sync::atomic::{AtomicU64, Ordering};
 
 static WX_RELAXED: [AtomicU64; 4] = [
-    AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
 ];
 
 pub fn set_wx_relaxed(cr3: u64, relaxed: bool) {
@@ -134,7 +136,9 @@ pub struct AddressSpace {
 impl AddressSpace {
     /// Reconstruct an AddressSpace from a CR3 value.
     pub fn from_cr3(cr3: u64) -> Self {
-        Self { pml4_phys: cr3 & !0xFFF }
+        Self {
+            pml4_phys: cr3 & !0xFFF,
+        }
     }
 
     /// Create a new user address space.
@@ -161,7 +165,12 @@ impl AddressSpace {
 
         // Verify kernel code is mapped (PML4[511] must be present).
         let entry_511 = unsafe { *(pml4_virt as *const u64).add(511) };
-        debug_assert!(entry_511 & 1 != 0, "new_user: PML4[511] not present after copy! boot_cr3={:#x} pml4={:#x}", boot, pml4_phys);
+        debug_assert!(
+            entry_511 & 1 != 0,
+            "new_user: PML4[511] not present after copy! boot_cr3={:#x} pml4={:#x}",
+            boot,
+            pml4_phys
+        );
 
         Self { pml4_phys }
     }
@@ -296,22 +305,30 @@ impl AddressSpace {
 
         let pml4 = (self.pml4_phys + hhdm) as *const u64;
         let pml4e = unsafe { *pml4.add(pml4_index(virt)) };
-        if pml4e & PAGE_PRESENT == 0 { return None; }
+        if pml4e & PAGE_PRESENT == 0 {
+            return None;
+        }
         let pdp_phys = pml4e & 0x000F_FFFF_FFFF_F000;
 
         let pdp = (pdp_phys + hhdm) as *const u64;
         let pdpe = unsafe { *pdp.add(pdp_index(virt)) };
-        if pdpe & PAGE_PRESENT == 0 { return None; }
+        if pdpe & PAGE_PRESENT == 0 {
+            return None;
+        }
         let pd_phys = pdpe & 0x000F_FFFF_FFFF_F000;
 
         let pd = (pd_phys + hhdm) as *const u64;
         let pde = unsafe { *pd.add(pd_index(virt)) };
-        if pde & PAGE_PRESENT == 0 { return None; }
+        if pde & PAGE_PRESENT == 0 {
+            return None;
+        }
         let pt_phys = pde & 0x000F_FFFF_FFFF_F000;
 
         let pt = (pt_phys + hhdm) as *const u64;
         let pte = unsafe { *pt.add(pt_index(virt)) };
-        if pte & PAGE_PRESENT == 0 { return None; }
+        if pte & PAGE_PRESENT == 0 {
+            return None;
+        }
         let phys = pte & 0x000F_FFFF_FFFF_F000;
         let flags = pte & !0x000F_FFFF_FFFF_F000;
         Some((phys, flags))
@@ -324,23 +341,31 @@ impl AddressSpace {
 
         let pml4 = (self.pml4_phys + hhdm) as *const u64;
         let pml4e = unsafe { *pml4.add(pml4_index(virt)) };
-        if pml4e & PAGE_PRESENT == 0 { return None; }
+        if pml4e & PAGE_PRESENT == 0 {
+            return None;
+        }
         let pdp_phys = pml4e & 0x000F_FFFF_FFFF_F000;
 
         let pdp = (pdp_phys + hhdm) as *const u64;
         let pdpe = unsafe { *pdp.add(pdp_index(virt)) };
-        if pdpe & PAGE_PRESENT == 0 { return None; }
+        if pdpe & PAGE_PRESENT == 0 {
+            return None;
+        }
         let pd_phys = pdpe & 0x000F_FFFF_FFFF_F000;
 
         let pd = (pd_phys + hhdm) as *const u64;
         let pde = unsafe { *pd.add(pd_index(virt)) };
-        if pde & PAGE_PRESENT == 0 { return None; }
+        if pde & PAGE_PRESENT == 0 {
+            return None;
+        }
         let pt_phys = pde & 0x000F_FFFF_FFFF_F000;
 
         let pt = (pt_phys + hhdm) as *mut u64;
         let pte_ptr = unsafe { pt.add(pt_index(virt)) };
         let pte = unsafe { *pte_ptr };
-        if pte & PAGE_PRESENT == 0 { return None; }
+        if pte & PAGE_PRESENT == 0 {
+            return None;
+        }
         Some(pte_ptr)
     }
 
@@ -392,58 +417,76 @@ impl AddressSpace {
         // Walk user-half (entries 0..256) and clone with CoW
         for pml4_i in 0..256usize {
             let pml4e = unsafe { *src_pml4.add(pml4_i) };
-            if pml4e & PAGE_PRESENT == 0 { continue; }
+            if pml4e & PAGE_PRESENT == 0 {
+                continue;
+            }
             let pdp_phys = pml4e & 0x000F_FFFF_FFFF_F000;
 
             // Allocate new PDP for child
             let new_pdp_phys = alloc_table_frame();
-            unsafe { *new_pml4.add(pml4_i) = new_pdp_phys | table_flags; }
+            unsafe {
+                *new_pml4.add(pml4_i) = new_pdp_phys | table_flags;
+            }
 
             let src_pdp = (pdp_phys + hhdm) as *mut u64;
             let new_pdp = (new_pdp_phys + hhdm) as *mut u64;
 
             for pdp_i in 0..512usize {
                 let pdpe = unsafe { *src_pdp.add(pdp_i) };
-                if pdpe & PAGE_PRESENT == 0 { continue; }
+                if pdpe & PAGE_PRESENT == 0 {
+                    continue;
+                }
                 let pd_phys = pdpe & 0x000F_FFFF_FFFF_F000;
 
                 // Allocate new PD for child
                 let new_pd_phys = alloc_table_frame();
-                unsafe { *new_pdp.add(pdp_i) = new_pd_phys | table_flags; }
+                unsafe {
+                    *new_pdp.add(pdp_i) = new_pd_phys | table_flags;
+                }
 
                 let src_pd = (pd_phys + hhdm) as *mut u64;
                 let new_pd = (new_pd_phys + hhdm) as *mut u64;
 
                 for pd_i in 0..512usize {
                     let pde = unsafe { *src_pd.add(pd_i) };
-                    if pde & PAGE_PRESENT == 0 { continue; }
+                    if pde & PAGE_PRESENT == 0 {
+                        continue;
+                    }
                     let pt_phys = pde & 0x000F_FFFF_FFFF_F000;
 
                     // Allocate new PT for child
                     let new_pt_phys = alloc_table_frame();
-                    unsafe { *new_pd.add(pd_i) = new_pt_phys | table_flags; }
+                    unsafe {
+                        *new_pd.add(pd_i) = new_pt_phys | table_flags;
+                    }
                     let src_pt = (pt_phys + hhdm) as *mut u64;
                     let new_pt = (new_pt_phys + hhdm) as *mut u64;
 
                     for pt_i in 0..512usize {
                         let pte = unsafe { *src_pt.add(pt_i) };
-                        if pte & PAGE_PRESENT == 0 { continue; }
+                        if pte & PAGE_PRESENT == 0 {
+                            continue;
+                        }
 
                         let phys = pte & 0x000F_FFFF_FFFF_F000;
 
                         // Child gets read-only PTE (CoW on write).
                         let child_pte = pte & !PAGE_WRITABLE;
-                        unsafe { *new_pt.add(pt_i) = child_pte; }
+                        unsafe {
+                            *new_pt.add(pt_i) = child_pte;
+                        }
 
                         // Symmetric CoW: also mark parent read-only, unless
                         // the page is UC/MMIO or in init's service regions.
                         if pte & PAGE_WRITABLE != 0 && pte & PAGE_CACHE_DISABLE == 0 {
                             let virt = ((pml4_i as u64) << 39)
-                                     | ((pdp_i as u64) << 30)
-                                     | ((pd_i as u64) << 21)
-                                     | ((pt_i as u64) << 12);
+                                | ((pdp_i as u64) << 30)
+                                | ((pd_i as u64) << 21)
+                                | ((pt_i as u64) << 12);
                             if !Self::is_init_service_region(virt) {
-                                unsafe { *src_pt.add(pt_i) = pte & !PAGE_WRITABLE; }
+                                unsafe {
+                                    *src_pt.add(pt_i) = pte & !PAGE_WRITABLE;
+                                }
                             }
                         }
 
@@ -463,7 +506,9 @@ impl AddressSpace {
             }
         }
 
-        Self { pml4_phys: new_pml4_phys }
+        Self {
+            pml4_phys: new_pml4_phys,
+        }
     }
 
     /// Update the flags of an already-mapped page (mprotect-like).

@@ -8,23 +8,23 @@
 //! `handle(frame, nr) -> bool` function that returns true if it
 //! handled the syscall number.
 
-mod ipc;
-mod memory;
-mod thread;
 mod cap;
-mod irq;
-mod notify;
-mod fault;
+mod debug;
 mod domain;
+mod fault;
+mod ipc;
+mod irq;
+mod memory;
+mod notify;
 mod service;
 mod shm;
-mod debug;
 mod sot;
+mod thread;
 
-use crate::kdebug;
 use crate::arch::x86_64::syscall::TrapFrame;
 use crate::cap::{self as cap_mod, CapObject, Rights};
 use crate::ipc::endpoint::{self, Message};
+use crate::kdebug;
 use crate::mm::paging;
 use crate::pool::PoolHandle;
 use crate::sched;
@@ -190,14 +190,7 @@ pub(super) fn msg_from_frame(frame: &TrapFrame) -> Message {
     Message {
         tag: raw_tag & 0xFFFF_FFFF,
         regs: [
-            frame.rdx,
-            frame.r8,
-            frame.r9,
-            frame.r10,
-            frame.r12,
-            frame.r13,
-            frame.r14,
-            frame.r15,
+            frame.rdx, frame.r8, frame.r9, frame.r10, frame.r12, frame.r13, frame.r14, frame.r15,
         ],
         cap_transfer: if cap_xfer != 0 { Some(cap_xfer) } else { None },
     }
@@ -221,11 +214,16 @@ pub(super) fn msg_to_frame(frame: &mut TrapFrame, msg: &Message) {
 /// the user stack. Factored out of syscall_dispatch to keep its stack frame
 /// small enough not to overflow the kernel stack canary in debug builds.
 #[inline(never)]
-unsafe fn restore_ucontext(frame: &mut TrapFrame, ucontext_ptr: u64,
-                           rip: &mut u64, rsp: &mut u64, rflags: &mut u64) {
+unsafe fn restore_ucontext(
+    frame: &mut TrapFrame,
+    ucontext_ptr: u64,
+    rip: &mut u64,
+    rsp: &mut u64,
+    rflags: &mut u64,
+) {
     let gregs = (ucontext_ptr + 40) as *const u64;
-    let uc_rip    = core::ptr::read_volatile(gregs.add(16));
-    let uc_rsp    = core::ptr::read_volatile(gregs.add(15));
+    let uc_rip = core::ptr::read_volatile(gregs.add(16));
+    let uc_rsp = core::ptr::read_volatile(gregs.add(15));
     let uc_rflags = core::ptr::read_volatile(gregs.add(17));
     let uc_trapno = core::ptr::read_volatile(gregs.add(20));
     let uc_rax = core::ptr::read_volatile(gregs.add(13));
@@ -234,29 +232,61 @@ unsafe fn restore_ucontext(frame: &mut TrapFrame, ucontext_ptr: u64,
     let uc_rbx = core::ptr::read_volatile(gregs.add(11));
     let uc_rbp = core::ptr::read_volatile(gregs.add(10));
     let uc_r11_val = core::ptr::read_volatile(gregs.add(3));
-    kdebug!("rt_sigreturn: uc_ptr={:#x} frame_rip={:#x} uc_rip={:#x} uc_rsp={:#x} uc_trapno={}", ucontext_ptr, *rip, uc_rip, uc_rsp, uc_trapno);
-    kdebug!("  uc_gregs: rax={:#x} rbx={:#x} rcx={:#x} rdx={:#x} rbp={:#x} r11={:#x}", uc_rax, uc_rbx, uc_rcx, uc_rdx, uc_rbp, uc_r11_val);
+    kdebug!(
+        "rt_sigreturn: uc_ptr={:#x} frame_rip={:#x} uc_rip={:#x} uc_rsp={:#x} uc_trapno={}",
+        ucontext_ptr,
+        *rip,
+        uc_rip,
+        uc_rsp,
+        uc_trapno
+    );
+    kdebug!(
+        "  uc_gregs: rax={:#x} rbx={:#x} rcx={:#x} rdx={:#x} rbp={:#x} r11={:#x}",
+        uc_rax,
+        uc_rbx,
+        uc_rcx,
+        uc_rdx,
+        uc_rbp,
+        uc_r11_val
+    );
     if uc_trapno == 14 {
         let uc_rdi = core::ptr::read_volatile(gregs.add(8));
         let uc_rsi = core::ptr::read_volatile(gregs.add(9));
-        let uc_r8  = core::ptr::read_volatile(gregs.add(0));
-        let uc_r9  = core::ptr::read_volatile(gregs.add(1));
+        let uc_r8 = core::ptr::read_volatile(gregs.add(0));
+        let uc_r9 = core::ptr::read_volatile(gregs.add(1));
         let uc_r10 = core::ptr::read_volatile(gregs.add(2));
         let uc_r12 = core::ptr::read_volatile(gregs.add(4));
         let uc_r13 = core::ptr::read_volatile(gregs.add(5));
         let uc_r14 = core::ptr::read_volatile(gregs.add(6));
         let uc_r15 = core::ptr::read_volatile(gregs.add(7));
-        kdebug!("  uc_extra: rdi={:#x} rsi={:#x} r8={:#x} r9={:#x} r10={:#x}",
-            uc_rdi, uc_rsi, uc_r8, uc_r9, uc_r10);
-        kdebug!("  uc_extra: r12={:#x} r13={:#x} r14={:#x} r15={:#x}",
-            uc_r12, uc_r13, uc_r14, uc_r15);
+        kdebug!(
+            "  uc_extra: rdi={:#x} rsi={:#x} r8={:#x} r9={:#x} r10={:#x}",
+            uc_rdi,
+            uc_rsi,
+            uc_r8,
+            uc_r9,
+            uc_r10
+        );
+        kdebug!(
+            "  uc_extra: r12={:#x} r13={:#x} r14={:#x} r15={:#x}",
+            uc_r12,
+            uc_r13,
+            uc_r14,
+            uc_r15
+        );
     }
-    if uc_rip != 0 { *rip = uc_rip; }
-    if uc_rsp != 0 { *rsp = uc_rsp; }
-    if uc_rflags != 0 { *rflags = uc_rflags; }
+    if uc_rip != 0 {
+        *rip = uc_rip;
+    }
+    if uc_rsp != 0 {
+        *rsp = uc_rsp;
+    }
+    if uc_rflags != 0 {
+        *rflags = uc_rflags;
+    }
     // Restore GPRs from ucontext
-    frame.r8  = core::ptr::read_volatile(gregs.add(0));
-    frame.r9  = core::ptr::read_volatile(gregs.add(1));
+    frame.r8 = core::ptr::read_volatile(gregs.add(0));
+    frame.r9 = core::ptr::read_volatile(gregs.add(1));
     frame.r10 = core::ptr::read_volatile(gregs.add(2));
     frame.r12 = core::ptr::read_volatile(gregs.add(4));
     frame.r13 = core::ptr::read_volatile(gregs.add(5));
@@ -291,18 +321,22 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
         // Linux syscall 158 = arch_prctl: rdi = subcommand, rsi = addr.
         if frame.rax == 158 {
             match frame.rdi {
-                0x1001 => { // ARCH_SET_GS
+                0x1001 => {
+                    // ARCH_SET_GS
                     sched::set_current_gs_base(frame.rsi);
                     frame.rax = 0;
                 }
-                0x1002 => { // ARCH_SET_FS
+                0x1002 => {
+                    // ARCH_SET_FS
                     sched::set_current_fs_base(frame.rsi);
                     frame.rax = 0;
                 }
-                0x1003 => { // ARCH_GET_FS
+                0x1003 => {
+                    // ARCH_GET_FS
                     frame.rax = sched::get_current_fs_base();
                 }
-                0x1004 => { // ARCH_GET_GS
+                0x1004 => {
+                    // ARCH_GET_GS
                     frame.rax = sched::get_current_gs_base();
                 }
                 _ => {
@@ -320,26 +354,26 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
                 unsafe {
                     // SignalFrame layout: [restorer, signo, rax..r15, rip, rsp, rflags, fs_base, old_sigmask]
                     let _restorer = core::ptr::read_volatile(frame_ptr);
-                    let _signo    = core::ptr::read_volatile(frame_ptr.add(1));
-                    frame.rax     = core::ptr::read_volatile(frame_ptr.add(2));
-                    frame.rbx     = core::ptr::read_volatile(frame_ptr.add(3));
-                    frame.rcx     = core::ptr::read_volatile(frame_ptr.add(4));
-                    frame.rdx     = core::ptr::read_volatile(frame_ptr.add(5));
-                    frame.rsi     = core::ptr::read_volatile(frame_ptr.add(6));
-                    frame.rdi     = core::ptr::read_volatile(frame_ptr.add(7));
-                    frame.rbp     = core::ptr::read_volatile(frame_ptr.add(8));
-                    frame.r8      = core::ptr::read_volatile(frame_ptr.add(9));
-                    frame.r9      = core::ptr::read_volatile(frame_ptr.add(10));
-                    frame.r10     = core::ptr::read_volatile(frame_ptr.add(11));
-                    frame.r11     = core::ptr::read_volatile(frame_ptr.add(12));
-                    frame.r12     = core::ptr::read_volatile(frame_ptr.add(13));
-                    frame.r13     = core::ptr::read_volatile(frame_ptr.add(14));
-                    frame.r14     = core::ptr::read_volatile(frame_ptr.add(15));
-                    frame.r15     = core::ptr::read_volatile(frame_ptr.add(16));
-                    let mut rip       = core::ptr::read_volatile(frame_ptr.add(17));
-                    let mut rsp       = core::ptr::read_volatile(frame_ptr.add(18));
-                    let mut rflags    = core::ptr::read_volatile(frame_ptr.add(19));
-                    let fs_base   = core::ptr::read_volatile(frame_ptr.add(20));
+                    let _signo = core::ptr::read_volatile(frame_ptr.add(1));
+                    frame.rax = core::ptr::read_volatile(frame_ptr.add(2));
+                    frame.rbx = core::ptr::read_volatile(frame_ptr.add(3));
+                    frame.rcx = core::ptr::read_volatile(frame_ptr.add(4));
+                    frame.rdx = core::ptr::read_volatile(frame_ptr.add(5));
+                    frame.rsi = core::ptr::read_volatile(frame_ptr.add(6));
+                    frame.rdi = core::ptr::read_volatile(frame_ptr.add(7));
+                    frame.rbp = core::ptr::read_volatile(frame_ptr.add(8));
+                    frame.r8 = core::ptr::read_volatile(frame_ptr.add(9));
+                    frame.r9 = core::ptr::read_volatile(frame_ptr.add(10));
+                    frame.r10 = core::ptr::read_volatile(frame_ptr.add(11));
+                    frame.r11 = core::ptr::read_volatile(frame_ptr.add(12));
+                    frame.r12 = core::ptr::read_volatile(frame_ptr.add(13));
+                    frame.r13 = core::ptr::read_volatile(frame_ptr.add(14));
+                    frame.r14 = core::ptr::read_volatile(frame_ptr.add(15));
+                    frame.r15 = core::ptr::read_volatile(frame_ptr.add(16));
+                    let mut rip = core::ptr::read_volatile(frame_ptr.add(17));
+                    let mut rsp = core::ptr::read_volatile(frame_ptr.add(18));
+                    let mut rflags = core::ptr::read_volatile(frame_ptr.add(19));
+                    let fs_base = core::ptr::read_volatile(frame_ptr.add(20));
                     let ucontext_ptr = core::ptr::read_volatile(frame_ptr.add(22));
 
                     if ucontext_ptr != 0 && ucontext_ptr < USER_ADDR_LIMIT {
@@ -356,7 +390,11 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
 
                     sched::clear_signal_ctx(caller_tid);
                 }
-                kdebug!("rt_sigreturn: restored context, rip={:#x} rsp={:#x}", frame.rcx, saved_user_rsp);
+                kdebug!(
+                    "rt_sigreturn: restored context, rip={:#x} rsp={:#x}",
+                    frame.rcx,
+                    saved_user_rsp
+                );
             } else {
                 frame.rax = (-22i64) as u64; // -EINVAL
             }
@@ -377,16 +415,28 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
         // Periodic HLT so QEMU TCG can process its event loop (virtio TX/RX,
         // timers). Without this, non-pipe syscall loops starve QEMU's I/O backend.
         {
-            static REDIRECT_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+            static REDIRECT_COUNT: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
             let n = REDIRECT_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             if n & 255 == 0 {
-                unsafe { core::arch::asm!("sti; hlt", options(nomem, nostack)); }
+                unsafe {
+                    core::arch::asm!("sti; hlt", options(nomem, nostack));
+                }
             }
         }
 
         let msg = Message {
             tag: frame.rax, // Linux syscall number
-            regs: [frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9, tid, saved_user_rsp],
+            regs: [
+                frame.rdi,
+                frame.rsi,
+                frame.rdx,
+                frame.r10,
+                frame.r8,
+                frame.r9,
+                tid,
+                saved_user_rsp,
+            ],
             cap_transfer: None,
         };
 
@@ -399,7 +449,9 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
                         retries += 1;
                         sched::schedule();
                         if retries & 4095 == 0 {
-                            unsafe { core::arch::asm!("sti; hlt", options(nomem, nostack)); }
+                            unsafe {
+                                core::arch::asm!("sti; hlt", options(nomem, nostack));
+                            }
                         }
                         continue;
                     } else if reply.tag == sotos_common::SIG_REDIRECT_TAG {
@@ -410,7 +462,12 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
                         saved_user_rsp = reply.regs[4];
                         frame.rax = reply.regs[5];
                         frame.r11 = 0x202;
-                        kdebug!("SIG_REDIRECT: handler={:#x} signo={} rsp={:#x}", reply.regs[0], reply.regs[1], reply.regs[4]);
+                        kdebug!(
+                            "SIG_REDIRECT: handler={:#x} signo={} rsp={:#x}",
+                            reply.regs[0],
+                            reply.regs[1],
+                            reply.regs[4]
+                        );
                         break;
                     } else {
                         frame.rax = reply.regs[0];
@@ -482,43 +539,48 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
         // rdi = as_cap (WRITE), rsi = rip, rdx = rsp, r8 = redirect_ep_cap (0 = none)
         // r10 = signal_trampoline (0 = none) — set atomically before enqueue
         // Kept in mod.rs because it needs saved_user_rsp for early return.
-        SYS_THREAD_CREATE_IN => {
-            match cap_mod::validate(frame.rdi as u32, Rights::WRITE) {
-                Ok(CapObject::AddrSpace { cr3 }) => {
-                    let rip = frame.rsi;
-                    let rsp = frame.rdx;
-                    let redirect_cap = frame.r8;
-                    let signal_tramp = frame.r10;
-                    if rip == 0 || rsp == 0 || rip >= USER_ADDR_LIMIT || rsp >= USER_ADDR_LIMIT {
-                        frame.rax = SysError::InvalidArg as i64 as u64;
-                    } else {
-                        let redirect_ep = if redirect_cap != 0 {
-                            match cap_mod::validate(redirect_cap as u32, Rights::READ.or(Rights::WRITE)) {
-                                Ok(CapObject::Endpoint { id: ep_id }) => Some(ep_id),
-                                _ => {
-                                    frame.rax = SysError::InvalidCap as i64 as u64;
-                                    percpu::current_percpu().user_rsp_save = saved_user_rsp;
-                                    return;
-                                }
+        SYS_THREAD_CREATE_IN => match cap_mod::validate(frame.rdi as u32, Rights::WRITE) {
+            Ok(CapObject::AddrSpace { cr3 }) => {
+                let rip = frame.rsi;
+                let rsp = frame.rdx;
+                let redirect_cap = frame.r8;
+                let signal_tramp = frame.r10;
+                if rip == 0 || rsp == 0 || rip >= USER_ADDR_LIMIT || rsp >= USER_ADDR_LIMIT {
+                    frame.rax = SysError::InvalidArg as i64 as u64;
+                } else {
+                    let redirect_ep = if redirect_cap != 0 {
+                        match cap_mod::validate(redirect_cap as u32, Rights::READ.or(Rights::WRITE))
+                        {
+                            Ok(CapObject::Endpoint { id: ep_id }) => Some(ep_id),
+                            _ => {
+                                frame.rax = SysError::InvalidCap as i64 as u64;
+                                percpu::current_percpu().user_rsp_save = saved_user_rsp;
+                                return;
                             }
-                        } else {
-                            None
-                        };
-                        let tid = if let Some(ep_id) = redirect_ep {
-                            sched::spawn_user_with_redirect_and_signal(rip, rsp, cr3, ep_id, signal_tramp)
-                        } else {
-                            sched::spawn_user(rip, rsp, cr3)
-                        };
-                        match cap_mod::insert(CapObject::Thread { id: tid.0 }, Rights::ALL, None) {
-                            Some(cap_id) => frame.rax = cap_id.raw() as u64,
-                            None => frame.rax = SysError::OutOfResources as i64 as u64,
                         }
+                    } else {
+                        None
+                    };
+                    let tid = if let Some(ep_id) = redirect_ep {
+                        sched::spawn_user_with_redirect_and_signal(
+                            rip,
+                            rsp,
+                            cr3,
+                            ep_id,
+                            signal_tramp,
+                        )
+                    } else {
+                        sched::spawn_user(rip, rsp, cr3)
+                    };
+                    match cap_mod::insert(CapObject::Thread { id: tid.0 }, Rights::ALL, None) {
+                        Some(cap_id) => frame.rax = cap_id.raw() as u64,
+                        None => frame.rax = SysError::OutOfResources as i64 as u64,
                     }
                 }
-                Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
-                Err(e) => frame.rax = e as i64 as u64,
             }
-        }
+            Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
+            Err(e) => frame.rax = e as i64 as u64,
+        },
 
         // Dispatch to submodule handlers
         _ if ipc::handle(frame, nr) => {}

@@ -8,9 +8,8 @@ use crate::sched::{self, ThreadId};
 use sotos_common::SysError;
 
 use super::{
+    SYS_BOOTINFO_WRITE, SYS_INITRD_READ, SYS_REDIRECT_SET, SYS_SVC_LOOKUP, SYS_SVC_REGISTER,
     USER_ADDR_LIMIT,
-    SYS_SVC_REGISTER, SYS_SVC_LOOKUP, SYS_INITRD_READ,
-    SYS_BOOTINFO_WRITE, SYS_REDIRECT_SET,
 };
 
 /// Handle service registry and process spawning syscalls. Returns `true` if handled.
@@ -92,7 +91,9 @@ pub fn handle(frame: &mut TrapFrame, nr: u64) -> bool {
             let buf_ptr = frame.rdx;
             let buf_len = frame.r8 as usize;
 
-            if name_len == 0 || name_len > 63 || name_ptr >= USER_ADDR_LIMIT
+            if name_len == 0
+                || name_len > 63
+                || name_ptr >= USER_ADDR_LIMIT
                 || buf_ptr >= USER_ADDR_LIMIT
             {
                 frame.rax = SysError::InvalidArg as i64 as u64;
@@ -204,22 +205,20 @@ pub fn handle(frame: &mut TrapFrame, nr: u64) -> bool {
 
         // SYS_REDIRECT_SET — set syscall redirect endpoint on a thread (LUCAS)
         // rdi = thread_cap (WRITE), rsi = endpoint_cap (READ|WRITE)
-        SYS_REDIRECT_SET => {
-            match cap::validate(frame.rdi as u32, Rights::WRITE) {
-                Ok(CapObject::Thread { id: tid }) => {
-                    match cap::validate(frame.rsi as u32, Rights::READ.or(Rights::WRITE)) {
-                        Ok(CapObject::Endpoint { id: ep_id }) => {
-                            sched::set_thread_redirect_ep(ThreadId(tid), ep_id);
-                            frame.rax = 0;
-                        }
-                        Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
-                        Err(e) => frame.rax = e as i64 as u64,
+        SYS_REDIRECT_SET => match cap::validate(frame.rdi as u32, Rights::WRITE) {
+            Ok(CapObject::Thread { id: tid }) => {
+                match cap::validate(frame.rsi as u32, Rights::READ.or(Rights::WRITE)) {
+                    Ok(CapObject::Endpoint { id: ep_id }) => {
+                        sched::set_thread_redirect_ep(ThreadId(tid), ep_id);
+                        frame.rax = 0;
                     }
+                    Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
+                    Err(e) => frame.rax = e as i64 as u64,
                 }
-                Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
-                Err(e) => frame.rax = e as i64 as u64,
             }
-        }
+            Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
+            Err(e) => frame.rax = e as i64 as u64,
+        },
 
         _ => return false,
     }

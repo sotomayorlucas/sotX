@@ -4,7 +4,7 @@
 //! `kprint!`/`kprintln!` serial output. Filters use `Ordering::Relaxed`
 //! atomics — cheap to read, no memory fences needed for diagnostic output.
 
-use core::sync::atomic::{AtomicU8, AtomicU16, Ordering};
+use core::sync::atomic::{AtomicU16, AtomicU8, Ordering};
 
 /// Runtime trace level threshold (default: Debug=3 to show everything in dev).
 pub static TRACE_LEVEL: AtomicU8 = AtomicU8::new(3);

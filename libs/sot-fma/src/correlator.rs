@@ -17,11 +17,9 @@ pub fn count_in_window(
 ) -> usize {
     let lower = now_tsc.saturating_sub(window_tsc);
     let mut n = 0;
-    for slot in history.iter() {
-        if let Some(f) = slot {
-            if f.class == class && f.timestamp_tsc >= lower && f.timestamp_tsc <= now_tsc {
-                n += 1;
-            }
+    for f in history.iter().flatten() {
+        if f.class == class && f.timestamp_tsc >= lower && f.timestamp_tsc <= now_tsc {
+            n += 1;
         }
     }
     n
@@ -38,15 +36,13 @@ pub fn count_at_location(
 ) -> usize {
     let lower = now_tsc.saturating_sub(window_tsc);
     let mut n = 0;
-    for slot in history.iter() {
-        if let Some(f) = slot {
-            if f.class == class
-                && f.location == location
-                && f.timestamp_tsc >= lower
-                && f.timestamp_tsc <= now_tsc
-            {
-                n += 1;
-            }
+    for f in history.iter().flatten() {
+        if f.class == class
+            && f.location == location
+            && f.timestamp_tsc >= lower
+            && f.timestamp_tsc <= now_tsc
+        {
+            n += 1;
         }
     }
     n
@@ -66,11 +62,9 @@ pub fn any_of(history: &[Option<HwFault>], class: HwFaultClass) -> bool {
 /// dedicated TSC source.
 pub fn newest_timestamp(history: &[Option<HwFault>]) -> u64 {
     let mut newest = 0;
-    for slot in history.iter() {
-        if let Some(f) = slot {
-            if f.timestamp_tsc > newest {
-                newest = f.timestamp_tsc;
-            }
+    for f in history.iter().flatten() {
+        if f.timestamp_tsc > newest {
+            newest = f.timestamp_tsc;
         }
     }
     newest
@@ -97,7 +91,10 @@ mod tests {
             None,
         ];
         // Window covers ts 10..30 -> two hits.
-        assert_eq!(count_in_window(&history, HwFaultClass::DiskReadRetry, 25, 30), 2);
+        assert_eq!(
+            count_in_window(&history, HwFaultClass::DiskReadRetry, 25, 30),
+            2
+        );
         // Window covers ts 999_990..1_000_010 -> one hit.
         assert_eq!(
             count_in_window(&history, HwFaultClass::DiskReadRetry, 20, 1_000_000),
@@ -111,7 +108,10 @@ mod tests {
             make(HwFaultClass::EccCorrectable, 0, 10),
             make(HwFaultClass::DiskReadRetry, 0, 11),
         ];
-        assert_eq!(count_in_window(&history, HwFaultClass::EccCorrectable, 100, 100), 1);
+        assert_eq!(
+            count_in_window(&history, HwFaultClass::EccCorrectable, 100, 100),
+            1
+        );
     }
 
     #[test]
@@ -133,11 +133,7 @@ mod tests {
 
     #[test]
     fn any_of_finds_single_event() {
-        let history = [
-            None,
-            make(HwFaultClass::EccUncorrectable, 1, 1),
-            None,
-        ];
+        let history = [None, make(HwFaultClass::EccUncorrectable, 1, 1), None];
         assert!(any_of(&history, HwFaultClass::EccUncorrectable));
         assert!(!any_of(&history, HwFaultClass::ThermalWarn));
     }
@@ -157,6 +153,9 @@ mod tests {
     fn saturating_sub_handles_window_larger_than_now() {
         let history = [make(HwFaultClass::DiskReadRetry, 0, 5)];
         // window > now_tsc; lower bound clamps to 0, so the entry counts.
-        assert_eq!(count_in_window(&history, HwFaultClass::DiskReadRetry, u64::MAX, 5), 1);
+        assert_eq!(
+            count_in_window(&history, HwFaultClass::DiskReadRetry, u64::MAX, 5),
+            1
+        );
     }
 }

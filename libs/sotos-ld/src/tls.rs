@@ -53,7 +53,13 @@ pub struct TlsBlock {
 impl TlsBlock {
     /// Empty (zero-sized) block — used when an ELF has no PT_TLS.
     pub const fn empty() -> Self {
-        Self { base: 0, size: 0, align: 1, tp: 0, pages: 0 }
+        Self {
+            base: 0,
+            size: 0,
+            align: 1,
+            tp: 0,
+            pages: 0,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -83,12 +89,8 @@ fn reserve_tls_slot(pages: u64) -> u64 {
     loop {
         let aligned = align_up_u64(prev, 4096);
         let next = aligned + pages * 0x1000;
-        match NEXT_TLS_BASE.compare_exchange_weak(
-            prev,
-            next,
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        ) {
+        match NEXT_TLS_BASE.compare_exchange_weak(prev, next, Ordering::Relaxed, Ordering::Relaxed)
+        {
             Ok(_) => return aligned,
             Err(actual) => prev = actual,
         }
@@ -112,7 +114,7 @@ pub fn init_tls(elf_data: &[u8], pt_tls: &PtTls) -> Result<TlsBlock, &'static st
 
     let align = (pt_tls.align as usize).max(1);
     let static_size = align_up(pt_tls.memsz, align);
-    let pages = ((static_size + 4095) / 4096) as u64;
+    let pages = static_size.div_ceil(4096) as u64;
     if pages == 0 {
         return Ok(TlsBlock::empty());
     }
@@ -125,8 +127,7 @@ pub fn init_tls(elf_data: &[u8], pt_tls: &PtTls) -> Result<TlsBlock, &'static st
 
     for i in 0..pages {
         let frame_cap = sys::frame_alloc().map_err(|_| "tls: frame_alloc failed")?;
-        sys::map(base + i * 0x1000, frame_cap, MAP_WRITABLE)
-            .map_err(|_| "tls: map failed")?;
+        sys::map(base + i * 0x1000, frame_cap, MAP_WRITABLE).map_err(|_| "tls: map failed")?;
         unsafe {
             core::ptr::write_bytes((base + i * 0x1000) as *mut u8, 0, 4096);
         }
@@ -134,7 +135,9 @@ pub fn init_tls(elf_data: &[u8], pt_tls: &PtTls) -> Result<TlsBlock, &'static st
 
     // Copy .tdata into the start of the static area.
     if pt_tls.filesz > 0 {
-        let end = pt_tls.offset.checked_add(pt_tls.filesz)
+        let end = pt_tls
+            .offset
+            .checked_add(pt_tls.filesz)
             .ok_or("tls: filesz overflow")?;
         if end > elf_data.len() {
             return Err("tls: tdata out of range");

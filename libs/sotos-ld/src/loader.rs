@@ -70,14 +70,14 @@ pub fn load_segments(
         let seg_start = seg_vaddr & !0xFFF;
         let seg_end = (seg_vaddr + seg.memsz as u64 + 0xFFF) & !0xFFF;
         let num_pages = (seg_end - seg_start) / 0x1000;
-        let is_writable = (seg.flags & 2) != 0;
 
-        // Allocate and map pages.
+        // All segments are initially mapped writable so we can copy file
+        // data into them; `protect_segments` below drops the write bit
+        // on non-writable segments once loading is done.
         let mut page = seg_start;
         while page < seg_end {
             let frame_cap = sys::frame_alloc().map_err(|_| "frame_alloc failed")?;
-            let flags = if is_writable { MAP_WRITABLE } else { MAP_WRITABLE }; // Need writable to copy data
-            sys::map(page, frame_cap, flags).map_err(|_| "map failed")?;
+            sys::map(page, frame_cap, MAP_WRITABLE).map_err(|_| "map failed")?;
 
             // Zero the page.
             unsafe {
@@ -125,16 +125,13 @@ pub fn load_segments(
 
 /// After loading and relocations, change code segment pages from RW to R+X.
 /// This calls SYS_PROTECT on each page of segments that have PF_X but not PF_W.
-pub fn protect_segments(
-    segments: &[LoadSegment],
-    base: u64,
-) {
+pub fn protect_segments(segments: &[LoadSegment], base: u64) {
     for seg in segments {
         if seg.memsz == 0 {
             continue;
         }
-        let is_exec = (seg.flags & 1) != 0;   // PF_X
-        let is_write = (seg.flags & 2) != 0;   // PF_W
+        let is_exec = (seg.flags & 1) != 0; // PF_X
+        let is_write = (seg.flags & 2) != 0; // PF_W
         if !is_exec || is_write {
             // Data segments stay RW (already correct), skip.
             continue;

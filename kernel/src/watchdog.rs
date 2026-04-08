@@ -4,9 +4,9 @@
 //! A periodic `check()` call detects CPUs that haven't reported a
 //! heartbeat within the timeout window (default: 500 ticks).
 
-use core::sync::atomic::{AtomicU64, Ordering};
 use crate::kdebug;
 use crate::kprintln;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use sotos_common::MAX_CPUS;
 

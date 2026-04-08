@@ -5,9 +5,9 @@
 //! page fault handler calls `handle_fault` to allocate and map the page
 //! on demand.
 
+use crate::kdebug;
 use crate::mm::{self, frame::PhysFrame};
 use crate::sync::ticket::TicketMutex;
-use crate::kdebug;
 
 /// Maximum number of lazy-mapped regions tracked globally.
 const MAX_DEMAND_ENTRIES: usize = 256;

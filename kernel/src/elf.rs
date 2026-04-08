@@ -3,20 +3,19 @@
 //! Uses the `elf` crate for validated parsing. Maps PT_LOAD segments
 //! into a user address space with W^X enforcement.
 
+use crate::mm::paging::{AddressSpace, PAGE_NO_EXECUTE, PAGE_PRESENT, PAGE_USER, PAGE_WRITABLE};
 use crate::mm::{self, hhdm_offset};
-use crate::mm::paging::{AddressSpace, PAGE_PRESENT, PAGE_USER, PAGE_WRITABLE, PAGE_NO_EXECUTE};
 
-use elf::ElfBytes;
-use elf::endian::LittleEndian;
 use elf::abi;
+use elf::endian::LittleEndian;
+use elf::ElfBytes;
 
 /// Load an ELF64 ET_EXEC binary into the given address space.
 ///
 /// Maps each PT_LOAD segment, copying file data and zeroing BSS regions.
 /// Returns the entry point address on success.
 pub fn load(data: &[u8], addr_space: &AddressSpace) -> Result<u64, &'static str> {
-    let file = ElfBytes::<LittleEndian>::minimal_parse(data)
-        .map_err(|_| "ELF parse error")?;
+    let file = ElfBytes::<LittleEndian>::minimal_parse(data).map_err(|_| "ELF parse error")?;
 
     if file.ehdr.e_type != abi::ET_EXEC {
         return Err("not ET_EXEC");

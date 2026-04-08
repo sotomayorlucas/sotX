@@ -10,8 +10,8 @@
 //!   182 SHM_UNMAP  — unmap shared region from a target address space
 //!   183 SHM_DESTROY — destroy handle, free frames when refcount=0
 
-use crate::mm::{self, PhysFrame};
 use crate::mm::paging::{AddressSpace, PAGE_PRESENT, PAGE_USER, PAGE_WRITABLE};
+use crate::mm::{self, PhysFrame};
 use spin::Mutex;
 
 /// Maximum pages per shared memory object (256 pages = 1 MiB).
@@ -44,9 +44,8 @@ impl ShmObject {
 }
 
 /// Global shared memory table.
-static SHM_TABLE: Mutex<[ShmObject; SHM_TABLE_SIZE]> = Mutex::new(
-    [const { ShmObject::empty() }; SHM_TABLE_SIZE]
-);
+static SHM_TABLE: Mutex<[ShmObject; SHM_TABLE_SIZE]> =
+    Mutex::new([const { ShmObject::empty() }; SHM_TABLE_SIZE]);
 
 /// Create a shared memory object with `num_pages` physical frames.
 /// Returns the handle (index) on success, or negative error.

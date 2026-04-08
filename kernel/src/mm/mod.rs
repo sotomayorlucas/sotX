@@ -11,7 +11,7 @@ pub mod page_cache;
 pub mod paging;
 pub mod slab;
 
-pub use frame::{alloc_frame, alloc_contiguous, free_frame, PhysFrame};
+pub use frame::{alloc_contiguous, alloc_frame, free_frame, PhysFrame};
 
 use core::sync::atomic::{AtomicU64, Ordering};
 use limine::response::MemoryMapResponse;
@@ -86,9 +86,13 @@ pub fn random_u64() -> u64 {
         // Seed from RDTSC.
         let lo: u32;
         let hi: u32;
-        unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi, options(nomem, nostack)); }
+        unsafe {
+            core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi, options(nomem, nostack));
+        }
         s = ((hi as u64) << 32) | (lo as u64);
-        if s == 0 { s = 1; }
+        if s == 0 {
+            s = 1;
+        }
     }
     // xorshift64
     s ^= s << 13;

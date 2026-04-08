@@ -140,6 +140,9 @@ fn send_ipi_to_core(target_core: usize) {
     // Only send IPI if target is a different core and we're past early boot.
     let my_core = current_core();
     if target_core != my_core && crate::mm::slab::is_percpu_ready() {
-        crate::arch::x86_64::lapic::send_ipi(target_core as u32, crate::arch::x86_64::lapic::RESCHEDULE_VECTOR);
+        crate::arch::x86_64::lapic::send_ipi(
+            target_core as u32,
+            crate::arch::x86_64::lapic::RESCHEDULE_VECTOR,
+        );
     }
 }

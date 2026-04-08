@@ -22,6 +22,7 @@ pub mod seat;
 pub mod xdg_popup;
 pub mod layer_shell;
 pub mod output;
+pub mod fractional_scale;
 
 use sotos_common::IpcMsg;
 
@@ -200,6 +201,7 @@ pub const WL_SHM_INTERFACE: &[u8] = b"wl_shm";
 pub const XDG_WM_BASE_INTERFACE: &[u8] = b"xdg_wm_base";
 pub const WL_SEAT_INTERFACE: &[u8] = b"wl_seat";
 pub const ZWLR_LAYER_SHELL_V1_INTERFACE: &[u8] = b"zwlr_layer_shell_v1";
+pub const WP_FRACTIONAL_SCALE_MANAGER_V1_INTERFACE: &[u8] = b"wp_fractional_scale_manager_v1";
 
 /// Next-object-ID allocator for server-created objects.
 pub struct ObjectIdAlloc {
@@ -333,6 +335,9 @@ impl XdgToplevelBinding {
     }
 }
 
+/// Maximum fractional_scale object IDs tracked per client.
+pub const MAX_CLIENT_FRACTIONAL_SCALES: usize = 16;
+
 /// Per-client object ID tracking for dispatch.
 pub struct ClientObjects {
     pub registry_id: u32,
@@ -344,6 +349,7 @@ pub struct ClientObjects {
     pub keyboard_id: u32,
     pub layer_shell_id: u32,
     pub output_id: u32,
+    pub fractional_scale_mgr_id: u32,
     pub xdg_surfaces: [XdgSurfaceBinding; MAX_XDG_SURFACES],
     pub xdg_toplevels: [XdgToplevelBinding; MAX_XDG_TOPLEVELS],
     pub shm_pool_ids: [u32; MAX_SHM_POOLS],
@@ -352,6 +358,7 @@ pub struct ClientObjects {
     /// route layer_surface opcodes back to the correct compositor pool
     /// entry.
     pub layer_surface_ids: [u32; layer_shell::MAX_LAYER_SURFACES],
+    pub fractional_scale_ids: [u32; MAX_CLIENT_FRACTIONAL_SCALES],
 }
 
 impl ClientObjects {
@@ -366,11 +373,43 @@ impl ClientObjects {
             keyboard_id: 0,
             layer_shell_id: 0,
             output_id: 0,
+            fractional_scale_mgr_id: 0,
             xdg_surfaces: [const { XdgSurfaceBinding::empty() }; MAX_XDG_SURFACES],
             xdg_toplevels: [const { XdgToplevelBinding::empty() }; MAX_XDG_TOPLEVELS],
             shm_pool_ids: [0u32; MAX_SHM_POOLS],
             layer_surface_ids: [0u32; layer_shell::MAX_LAYER_SURFACES],
+            fractional_scale_ids: [0u32; MAX_CLIENT_FRACTIONAL_SCALES],
         }
+    }
+
+    /// Track a new wp_fractional_scale_v1 object ID for this client.
+    pub fn add_fractional_scale(&mut self, obj_id: u32) {
+        for slot in &mut self.fractional_scale_ids {
+            if *slot == 0 {
+                *slot = obj_id;
+                return;
+            }
+        }
+    }
+
+    /// Forget a wp_fractional_scale_v1 object ID (on destroy).
+    pub fn remove_fractional_scale(&mut self, obj_id: u32) {
+        for slot in &mut self.fractional_scale_ids {
+            if *slot == obj_id {
+                *slot = 0;
+                return;
+            }
+        }
+    }
+
+    /// Is this ID a known wp_fractional_scale_v1?
+    pub fn is_fractional_scale(&self, id: u32) -> bool {
+        for &fid in &self.fractional_scale_ids {
+            if fid != 0 && fid == id {
+                return true;
+            }
+        }
+        false
     }
 
     pub fn is_xdg_surface(&self, id: u32) -> bool {
@@ -626,6 +665,12 @@ pub fn dispatch_message(
                 5 => {
                     objs.layer_shell_id = bound.client_id;
                 }
+                6 => {
+                    // wp_fractional_scale_manager_v1 is a pure stub: no
+                    // events are sent at bind time. The client will issue
+                    // get_fractional_scale later.
+                    objs.fractional_scale_mgr_id = bound.client_id;
+                }
                 7 => {
                     objs.output_id = bound.client_id;
                     output::send_init_events(
@@ -799,7 +844,32 @@ pub fn dispatch_message(
         return result;
     }
 
-    // 11. zwlr_layer_surface_v1 (client-allocated IDs)
+    // 11. wp_fractional_scale_manager_v1
+    //   opcode 0 = destroy        (no-op; manager global stays bound)
+    //   opcode 1 = get_fractional_scale(id: new_id, surface: object)
+    if id == objs.fractional_scale_mgr_id && objs.fractional_scale_mgr_id != 0 {
+        match msg.opcode {
+            0 => { /* destroy: no-op */ }
+            1 => {
+                let new_id = msg.arg_u32(0);
+                let surface_id = msg.arg_u32(4);
+                if new_id != 0 {
+                    let _ = fractional_scale::allocate(new_id, surface_id);
+                    objs.add_fractional_scale(new_id);
+                    fractional_scale::send_preferred_scale(
+                        new_id,
+                        fractional_scale::SCALE_120FIXED_1X,
+                        &mut result.events,
+                        &mut result.event_count,
+                    );
+                }
+            }
+            _ => {}
+        }
+        return result;
+    }
+
+    // 12. zwlr_layer_surface_v1 (client-allocated IDs)
     if objs.is_layer_surface(id) {
         let dirty = layer_shell::handle_surface_request(msg);
         if dirty {
@@ -812,7 +882,17 @@ pub fn dispatch_message(
         return result;
     }
 
-    // 12. wl_surface (client-allocated IDs, checked via surface existence)
+    // 13. wp_fractional_scale_v1 (per-surface object)
+    //   opcode 0 = destroy
+    if objs.is_fractional_scale(id) {
+        if msg.opcode == 0 {
+            fractional_scale::destroy(id);
+            objs.remove_fractional_scale(id);
+        }
+        return result;
+    }
+
+    // 14. wl_surface (client-allocated IDs, checked via surface existence)
     // wl_surface opcodes: 1=attach, 2=damage, 3=frame, 6=commit
     // These are identified by matching against known surface IDs in
     // the global SURFACES table. The caller checks this after dispatch

@@ -4,7 +4,7 @@ use crate::arch::x86_64::syscall::TrapFrame;
 use crate::cap::{self, CapObject, Rights};
 use sotos_common::SysError;
 
-use super::{SYS_SHM_CREATE, SYS_SHM_MAP, SYS_SHM_UNMAP, SYS_SHM_DESTROY};
+use super::{SYS_SHM_CREATE, SYS_SHM_DESTROY, SYS_SHM_MAP, SYS_SHM_UNMAP};
 
 /// Handle shared memory syscalls. Returns `true` if the syscall was handled.
 pub fn handle(frame: &mut TrapFrame, nr: u64) -> bool {

@@ -44,7 +44,9 @@ pub fn handle(frame: &mut TrapFrame, nr: u64) -> bool {
                         DEBUG_PROFILE_CR3.store(cr3, core::sync::atomic::Ordering::Release);
                         frame.rax = 0;
                     }
-                    _ => { frame.rax = SysError::InvalidCap as i64 as u64; }
+                    _ => {
+                        frame.rax = SysError::InvalidCap as i64 as u64;
+                    }
                 }
             }
         }

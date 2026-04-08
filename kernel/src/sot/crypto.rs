@@ -35,10 +35,14 @@ const SIGMA: [u32; 4] = [
 ///   c = PLUS(c,d); b = ROTATE(XOR(b,c), 7);
 macro_rules! quarter_round {
     ($x:expr, $a:expr, $b:expr, $c:expr, $d:expr) => {
-        $x[$a] = $x[$a].wrapping_add($x[$b]); $x[$d] = ($x[$d] ^ $x[$a]).rotate_left(16);
-        $x[$c] = $x[$c].wrapping_add($x[$d]); $x[$b] = ($x[$b] ^ $x[$c]).rotate_left(12);
-        $x[$a] = $x[$a].wrapping_add($x[$b]); $x[$d] = ($x[$d] ^ $x[$a]).rotate_left(8);
-        $x[$c] = $x[$c].wrapping_add($x[$d]); $x[$b] = ($x[$b] ^ $x[$c]).rotate_left(7);
+        $x[$a] = $x[$a].wrapping_add($x[$b]);
+        $x[$d] = ($x[$d] ^ $x[$a]).rotate_left(16);
+        $x[$c] = $x[$c].wrapping_add($x[$d]);
+        $x[$b] = ($x[$b] ^ $x[$c]).rotate_left(12);
+        $x[$a] = $x[$a].wrapping_add($x[$b]);
+        $x[$d] = ($x[$d] ^ $x[$a]).rotate_left(8);
+        $x[$c] = $x[$c].wrapping_add($x[$d]);
+        $x[$b] = ($x[$b] ^ $x[$c]).rotate_left(7);
     };
 }
 
@@ -91,15 +95,15 @@ fn chacha_keystream_block(state: &mut [u32; 16], out: &mut [u8; 64]) {
     // 20 rounds (10 double-rounds), matching the OpenBSD source
     for _ in (0..20).step_by(2) {
         // Column rounds
-        quarter_round!(x,  0,  4,  8, 12);
-        quarter_round!(x,  1,  5,  9, 13);
-        quarter_round!(x,  2,  6, 10, 14);
-        quarter_round!(x,  3,  7, 11, 15);
+        quarter_round!(x, 0, 4, 8, 12);
+        quarter_round!(x, 1, 5, 9, 13);
+        quarter_round!(x, 2, 6, 10, 14);
+        quarter_round!(x, 3, 7, 11, 15);
         // Diagonal rounds
-        quarter_round!(x,  0,  5, 10, 15);
-        quarter_round!(x,  1,  6, 11, 12);
-        quarter_round!(x,  2,  7,  8, 13);
-        quarter_round!(x,  3,  4,  9, 14);
+        quarter_round!(x, 0, 5, 10, 15);
+        quarter_round!(x, 1, 6, 11, 12);
+        quarter_round!(x, 2, 7, 8, 13);
+        quarter_round!(x, 3, 4, 9, 14);
     }
 
     // Add original state (j0..j15 in the C source)
@@ -226,7 +230,7 @@ fn getentropy(buf: &mut [u8]) {
 /// Reseeds automatically after `REKEY_BASE` bytes of output, with the reseed
 /// interval itself randomized for unpredictability (matching OpenBSD behavior).
 pub struct SotRandom {
-    state: [u32; 16],     // ChaCha20 state
+    state: [u32; 16],      // ChaCha20 state
     buffer: [u8; RSBUFSZ], // Output buffer (keystream blocks)
     have: usize,           // Valid bytes at end of buffer
     count: usize,          // Bytes until next reseed
@@ -295,7 +299,11 @@ impl SotRandom {
 
         // Mix in optional extra data
         if let Some(dat) = extra {
-            let m = if dat.len() < KEYSZ + IVSZ { dat.len() } else { KEYSZ + IVSZ };
+            let m = if dat.len() < KEYSZ + IVSZ {
+                dat.len()
+            } else {
+                KEYSZ + IVSZ
+            };
             for i in 0..m {
                 self.buffer[i] ^= dat[i];
             }
@@ -355,7 +363,11 @@ impl SotRandom {
 
         while remaining > 0 {
             if self.have > 0 {
-                let m = if remaining < self.have { remaining } else { self.have };
+                let m = if remaining < self.have {
+                    remaining
+                } else {
+                    self.have
+                };
                 let keystream_start = RSBUFSZ - self.have;
                 buf[offset..offset + m]
                     .copy_from_slice(&self.buffer[keystream_start..keystream_start + m]);

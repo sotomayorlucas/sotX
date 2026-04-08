@@ -10,6 +10,65 @@
 #![no_std]
 #![no_main]
 #![feature(abi_x86_interrupt)]
+// Many subsystems (EFI shim, chacha RNG, fast-IPC scaffolding, demand-paging,
+// CHERI/NUMA/GPU placeholders, migrate/snapshot, W^X enforcer, BSD user
+// table, etc.) are landed ahead of their wiring. Their symbols are
+// intentionally unused today but must stay in-tree so the cleanup PR cost
+// doesn't spike when they come online. Targeted allows — no blanket
+// `allow(warnings)`.
+#![allow(dead_code)]
+#![allow(unused_imports)]
+#![allow(unused_variables)]
+// Style-only clippy lints that fire widely on kernel code where the
+// "more idiomatic" rewrite costs readability or requires per-CPU
+// arrays to be iterator-sourced. Each is opt-in and targeted, not a
+// blanket `allow(warnings)` or `allow(clippy::all)`.
+//
+// * needless_range_loop — many `for i in 0..MAX_CPUS` loops index into
+//   per-CPU static arrays where the index itself is meaningful.
+// * manual_div_ceil — `.div_ceil()` is nightly-unstable on const fns
+//   in older toolchains; existing `(x + N - 1) / N` is the audited form.
+// * declare_interior_mutable_const — `const INIT: TicketMutex<_>` is
+//   the standard pattern for `static [Mutex; N]` array initialization
+//   and is correct here (each array slot gets its own instance).
+// * manual_is_multiple_of — `x % N == 0` is clearer than the proposed
+//   nightly `.is_multiple_of(N)` for alignment math in the kernel.
+// * manual_find / manual_flatten / manual_contains — rewriting tight
+//   hot loops over fixed-size arrays into iterator chains obscures the
+//   fast-path without changing the generated code.
+// * manual_checked_ops — explicit `if denom > 0` is intentional and
+//   kept for symmetry with the watchdog/stats counters.
+// * unnecessary_cast — cross-ABI register loads where the cast
+//   documents the user/kernel boundary width.
+// * unnecessary_map_or — `map_or(false, ...)` reads clearer than
+//   `is_some_and` in places that pair with `Option::map`.
+// * if_same_then_else, collapsible_if, collapsible_match — kept
+//   expanded for branch-specific kprintln! tracing.
+// * wrong_self_convention — kernel FFI structs mirror hardware layout.
+// * fn_to_numeric_cast — trampolines deliberately expose function
+//   addresses as raw u64 for IDT/LAPIC setup.
+// * identity_op, doc_lazy_continuation, vec_init_then_push,
+//   question_mark — very small one-off occurrences where the existing
+//   form matches surrounding code.
+#![allow(clippy::needless_range_loop)]
+#![allow(clippy::manual_div_ceil)]
+#![allow(clippy::declare_interior_mutable_const)]
+#![allow(clippy::manual_is_multiple_of)]
+#![allow(clippy::manual_find)]
+#![allow(clippy::manual_flatten)]
+#![allow(clippy::manual_contains)]
+#![allow(clippy::manual_checked_ops)]
+#![allow(clippy::unnecessary_cast)]
+#![allow(clippy::unnecessary_map_or)]
+#![allow(clippy::if_same_then_else)]
+#![allow(clippy::collapsible_if)]
+#![allow(clippy::collapsible_match)]
+#![allow(clippy::wrong_self_convention)]
+#![allow(clippy::fn_to_numeric_cast)]
+#![allow(clippy::identity_op)]
+#![allow(clippy::doc_lazy_continuation)]
+#![allow(clippy::vec_init_then_push)]
+#![allow(clippy::question_mark)]
 
 extern crate alloc;
 
@@ -20,8 +79,8 @@ mod elf;
 mod fault;
 mod initrd;
 mod ipc;
-mod karl;
 mod irq;
+mod karl;
 mod migrate;
 mod mm;
 mod panic;
@@ -63,8 +122,11 @@ pub extern "C" fn __stack_chk_fail() -> ! {
     arch::halt_loop()
 }
 
+use limine::request::{
+    FramebufferRequest, HhdmRequest, MemoryMapRequest, ModuleRequest, MpRequest, RequestsEndMarker,
+    RequestsStartMarker,
+};
 use limine::BaseRevision;
-use limine::request::{FramebufferRequest, HhdmRequest, MemoryMapRequest, ModuleRequest, MpRequest, RequestsEndMarker, RequestsStartMarker};
 
 #[used]
 #[link_section = ".requests_start_marker"]
@@ -162,9 +224,7 @@ extern "C" fn kmain() -> ! {
     let mmap_response = MEMORY_MAP_REQUEST
         .get_response()
         .expect("bootloader: no memory map");
-    let hhdm_response = HHDM_REQUEST
-        .get_response()
-        .expect("bootloader: no HHDM");
+    let hhdm_response = HHDM_REQUEST.get_response().expect("bootloader: no HHDM");
 
     mm::init(mmap_response, hhdm_response.offset());
     kinfo!(sotos_common::trace::cat::MM, "[ok] Frame allocator");
@@ -179,7 +239,10 @@ extern "C" fn kmain() -> ! {
 
     // Per-CPU GDT + TSS (replaces early-boot static GDT).
     arch::gdt::init_percpu(bsp_percpu);
-    kinfo!(sotos_common::trace::cat::PROCESS, "[ok] Per-CPU GDT+TSS (BSP)");
+    kinfo!(
+        sotos_common::trace::cat::PROCESS,
+        "[ok] Per-CPU GDT+TSS (BSP)"
+    );
 
     // Smoke test: prove alloc works.
     {
@@ -221,7 +284,11 @@ extern "C" fn kmain() -> ! {
     kinfo!(sotos_common::trace::cat::PROCESS, "[ok] LAPIC");
 
     let lapic_ticks = arch::lapic::calibrate();
-    kinfo!(sotos_common::trace::cat::PROCESS, "[ok] LAPIC calibrated ({} ticks/10ms)", lapic_ticks);
+    kinfo!(
+        sotos_common::trace::cat::PROCESS,
+        "[ok] LAPIC calibrated ({} ticks/10ms)",
+        lapic_ticks
+    );
 
     // Spawn init process (first userspace code).
     let user_cr3 = spawn_init_process();
@@ -276,7 +343,11 @@ fn boot_aps() {
         kdebug!("  smp: BSP only (LAPIC ID {})", bsp_lapic_id);
         return;
     }
-    kdebug!("  smp: {} CPUs detected, booting {} APs...", cpus.len(), ap_count);
+    kdebug!(
+        "  smp: {} CPUs detected, booting {} APs...",
+        cpus.len(),
+        ap_count
+    );
 
     let mut cpu_index: u32 = 1; // BSP is 0
     for cpu in cpus.iter() {
@@ -306,7 +377,9 @@ fn boot_aps() {
     let tsc_start = {
         let lo: u32;
         let hi: u32;
-        unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi, options(nomem, nostack)); }
+        unsafe {
+            core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi, options(nomem, nostack));
+        }
         ((hi as u64) << 32) | (lo as u64)
     };
     const TSC_TIMEOUT: u64 = 500_000_000; // ~250ms at 2 GHz
@@ -317,7 +390,9 @@ fn boot_aps() {
         let tsc_now = {
             let lo: u32;
             let hi: u32;
-            unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi, options(nomem, nostack)); }
+            unsafe {
+                core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi, options(nomem, nostack));
+            }
             ((hi as u64) << 32) | (lo as u64)
         };
         if tsc_now.wrapping_sub(tsc_start) > TSC_TIMEOUT {
@@ -328,7 +403,12 @@ fn boot_aps() {
         core::hint::spin_loop();
     }
     let online = APS_READY.load(Ordering::Acquire);
-    kdebug!("  smp: {} CPUs online ({} BSP + {} APs)", online + 1, 1, online);
+    kdebug!(
+        "  smp: {} CPUs online ({} BSP + {} APs)",
+        online + 1,
+        1,
+        online
+    );
 }
 
 /// Entry point for Application Processors, called by Limine after goto_address.write().
@@ -362,7 +442,11 @@ unsafe extern "C" fn ap_entry(cpu: &limine::mp::Cpu) -> ! {
     // Signal BSP that this AP is ready.
     APS_READY.fetch_add(1, Ordering::Release);
 
-    kdebug!("  CPU {} online (LAPIC {})", percpu.cpu_index, percpu.lapic_id);
+    kdebug!(
+        "  CPU {} online (LAPIC {})",
+        percpu.cpu_index,
+        percpu.lapic_id
+    );
 
     // Enable interrupts and enter idle HLT loop.
     x86_64::instructions::interrupts::enable();
@@ -371,8 +455,8 @@ unsafe extern "C" fn ap_entry(cpu: &limine::mp::Cpu) -> ! {
     }
 }
 
+use sotos_common::{ASLR_JITTER_PAGES, BAR0_VIRT_BASE, FB_USER_BASE, PROCESS_STACK_BASE};
 use sotos_common::{KB_RING_ADDR as KB_RING_PAGE, MOUSE_RING_ADDR as MOUSE_RING_PAGE};
-use sotos_common::{PROCESS_STACK_BASE, ASLR_JITTER_PAGES, BAR0_VIRT_BASE, FB_USER_BASE};
 
 // ---------------------------------------------------------------------------
 // Process loading helpers — shared by all load_*_process() functions
@@ -383,11 +467,7 @@ const PCI_DATA_PORT: u16 = 0xCFC;
 
 /// Allocate a user stack with ASLR jitter and a guard page.
 /// Returns `stack_top` (the initial RSP value for the new thread).
-fn allocate_user_stack(
-    addr_space: &mm::paging::AddressSpace,
-    stack_pages: u64,
-    name: &str,
-) -> u64 {
+fn allocate_user_stack(addr_space: &mm::paging::AddressSpace, stack_pages: u64, name: &str) -> u64 {
     use mm::paging::{PAGE_PRESENT, PAGE_USER, PAGE_WRITABLE};
     let hhdm = mm::hhdm_offset();
 
@@ -395,20 +475,30 @@ fn allocate_user_stack(
     let stack_base = PROCESS_STACK_BASE + stack_rand;
 
     // Guard page: present but not user-accessible — triggers fault on overflow.
-    let guard_frame = mm::alloc_frame().unwrap_or_else(|| panic!("no frame for {} stack guard", name));
+    let guard_frame =
+        mm::alloc_frame().unwrap_or_else(|| panic!("no frame for {} stack guard", name));
     addr_space.map_page(stack_base - 0x1000, guard_frame.addr(), PAGE_PRESENT);
 
     for i in 0..stack_pages {
         let sf = mm::alloc_frame().unwrap_or_else(|| panic!("no frame for {} stack", name));
-        unsafe { core::ptr::write_bytes((sf.addr() + hhdm) as *mut u8, 0, 4096); }
+        unsafe {
+            core::ptr::write_bytes((sf.addr() + hhdm) as *mut u8, 0, 4096);
+        }
         addr_space.map_page(
-            stack_base + i * 0x1000, sf.addr(),
+            stack_base + i * 0x1000,
+            sf.addr(),
             PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER,
         );
     }
 
     let stack_top = stack_base + stack_pages * 0x1000;
-    kdebug!("  {}: stack = {:#x}..{:#x} (ASLR offset {:#x})", name, stack_base, stack_top, stack_rand);
+    kdebug!(
+        "  {}: stack = {:#x}..{:#x} (ASLR offset {:#x})",
+        name,
+        stack_base,
+        stack_top,
+        stack_rand
+    );
     stack_top
 }
 
@@ -421,7 +511,9 @@ fn alloc_bootinfo_page(addr_space: &mm::paging::AddressSpace, name: &str) -> u64
 
     let frame = mm::alloc_frame().unwrap_or_else(|| panic!("no frame for {} BootInfo", name));
     let phys = frame.addr();
-    unsafe { core::ptr::write_bytes((phys + hhdm) as *mut u8, 0, 4096); }
+    unsafe {
+        core::ptr::write_bytes((phys + hhdm) as *mut u8, 0, 4096);
+    }
     addr_space.map_page(BOOT_INFO_ADDR, phys, PAGE_PRESENT | PAGE_USER);
     phys
 }
@@ -452,7 +544,9 @@ fn load_elf_into(data: &[u8], addr_space: &mm::paging::AddressSpace, name: &str)
 
 /// Map framebuffer into a user address space and fill BootInfo fb fields.
 fn map_framebuffer(addr_space: &mm::paging::AddressSpace, info: &mut sotos_common::BootInfo) {
-    use mm::paging::{PAGE_PRESENT, PAGE_USER, PAGE_WRITABLE, PAGE_CACHE_DISABLE, PAGE_WRITE_THROUGH};
+    use mm::paging::{
+        PAGE_CACHE_DISABLE, PAGE_PRESENT, PAGE_USER, PAGE_WRITABLE, PAGE_WRITE_THROUGH,
+    };
     let hhdm = mm::hhdm_offset();
 
     if let Some(fb_response) = FRAMEBUFFER_REQUEST.get_response() {
@@ -470,8 +564,11 @@ fn map_framebuffer(addr_space: &mm::paging::AddressSpace, info: &mut sotos_commo
                 addr_space.map_page(
                     FB_USER_BASE + i * 0x1000,
                     fb_phys + i * 0x1000,
-                    PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER
-                        | PAGE_CACHE_DISABLE | PAGE_WRITE_THROUGH,
+                    PAGE_PRESENT
+                        | PAGE_WRITABLE
+                        | PAGE_USER
+                        | PAGE_CACHE_DISABLE
+                        | PAGE_WRITE_THROUGH,
                 );
             }
 
@@ -480,7 +577,14 @@ fn map_framebuffer(addr_space: &mm::paging::AddressSpace, info: &mut sotos_commo
             info.fb_height = height;
             info.fb_pitch = pitch;
             info.fb_bpp = bpp;
-            kdebug!("  fb: {}x{} bpp={} phys=0x{:x} ({} pages)", width, height, bpp, fb_phys, fb_pages);
+            kdebug!(
+                "  fb: {}x{} bpp={} phys=0x{:x} ({} pages)",
+                width,
+                height,
+                bpp,
+                fb_phys,
+                fb_pages
+            );
         }
     }
 }
@@ -511,7 +615,12 @@ fn load_service(spec: &ProcessSpec) -> Option<LoadedProcess> {
     let cr3 = addr_space.cr3();
     let entry = load_elf_into(spec.data, &addr_space, spec.name)?;
     let stack_top = allocate_user_stack(&addr_space, spec.stack_pages, spec.name);
-    Some(LoadedProcess { addr_space, cr3, entry, stack_top })
+    Some(LoadedProcess {
+        addr_space,
+        cr3,
+        entry,
+        stack_top,
+    })
 }
 
 impl LoadedProcess {
@@ -519,9 +628,11 @@ impl LoadedProcess {
     fn map_shared_ring(&self, init_cr3: u64, ring_addr: u64) {
         use mm::paging::{AddressSpace, PAGE_PRESENT, PAGE_USER, PAGE_WRITABLE};
         let init_as = AddressSpace::from_cr3(init_cr3);
-        let phys = init_as.lookup_phys(ring_addr)
+        let phys = init_as
+            .lookup_phys(ring_addr)
             .unwrap_or_else(|| panic!("ring page {:#x} not mapped in init", ring_addr));
-        self.addr_space.map_page(ring_addr, phys, PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
+        self.addr_space
+            .map_page(ring_addr, phys, PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
     }
 
     /// Spawn the process thread.
@@ -532,7 +643,9 @@ impl LoadedProcess {
 
 /// Pre-map device BAR0 MMIO pages (uncacheable) at BAR0_VIRT_BASE.
 fn map_bar0_mmio(addr_space: &mm::paging::AddressSpace, bar0_phys: u64, pages: u64, name: &str) {
-    use mm::paging::{PAGE_PRESENT, PAGE_USER, PAGE_WRITABLE, PAGE_CACHE_DISABLE, PAGE_WRITE_THROUGH};
+    use mm::paging::{
+        PAGE_CACHE_DISABLE, PAGE_PRESENT, PAGE_USER, PAGE_WRITABLE, PAGE_WRITE_THROUGH,
+    };
     for i in 0..pages {
         addr_space.map_page(
             BAR0_VIRT_BASE + i * 0x1000,
@@ -540,13 +653,24 @@ fn map_bar0_mmio(addr_space: &mm::paging::AddressSpace, bar0_phys: u64, pages: u
             PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER | PAGE_CACHE_DISABLE | PAGE_WRITE_THROUGH,
         );
     }
-    kdebug!("  {}: BAR0 {:#x} mapped at {:#x} ({}p, UC)", name, bar0_phys, BAR0_VIRT_BASE, pages);
+    kdebug!(
+        "  {}: BAR0 {:#x} mapped at {:#x} ({}p, UC)",
+        name,
+        bar0_phys,
+        BAR0_VIRT_BASE,
+        pages
+    );
 }
 
 /// Scan PCI bus 0 for a device matching the given class/subclass (and optional prog_if).
 /// Returns (BAR0 physical address, IRQ line) if found.
 /// Enables bus mastering + memory space in the PCI command register.
-fn scan_pci_for_device(class: u8, subclass: u8, prog_if: Option<u8>, name: &str) -> Option<(u64, u8)> {
+fn scan_pci_for_device(
+    class: u8,
+    subclass: u8,
+    prog_if: Option<u8>,
+    name: &str,
+) -> Option<(u64, u8)> {
     use x86_64::instructions::port::Port;
 
     let mut addr_port = Port::<u32>::new(PCI_CONFIG_PORT);
@@ -556,14 +680,18 @@ fn scan_pci_for_device(class: u8, subclass: u8, prog_if: Option<u8>, name: &str)
         let address: u32 = (1 << 31) | ((dev as u32) << 11);
 
         // Read vendor/device (offset 0x00).
-        unsafe { addr_port.write(address); }
+        unsafe {
+            addr_port.write(address);
+        }
         let vendor_device = unsafe { data_port.read() };
         if (vendor_device & 0xFFFF) == 0xFFFF {
             continue;
         }
 
         // Read class/subclass/prog_if (offset 0x08).
-        unsafe { addr_port.write(address | 0x08); }
+        unsafe {
+            addr_port.write(address | 0x08);
+        }
         let class_rev = unsafe { data_port.read() };
         let dev_class = (class_rev >> 24) as u8;
         let dev_subclass = ((class_rev >> 16) & 0xFF) as u8;
@@ -579,7 +707,9 @@ fn scan_pci_for_device(class: u8, subclass: u8, prog_if: Option<u8>, name: &str)
         }
 
         // Device found. Read BAR0 (offset 0x10).
-        unsafe { addr_port.write(address | 0x10); }
+        unsafe {
+            addr_port.write(address | 0x10);
+        }
         let bar0 = unsafe { data_port.read() };
         if bar0 & 1 != 0 {
             continue; // I/O port BAR, skip
@@ -588,7 +718,9 @@ fn scan_pci_for_device(class: u8, subclass: u8, prog_if: Option<u8>, name: &str)
         let base_lo = (bar0 & !0xF) as u64;
         let bar0_phys = if bar_type == 2 {
             // 64-bit BAR: read BAR1 (offset 0x14).
-            unsafe { addr_port.write(address | 0x14); }
+            unsafe {
+                addr_port.write(address | 0x14);
+            }
             let bar1 = unsafe { data_port.read() };
             base_lo | ((bar1 as u64) << 32)
         } else {
@@ -596,17 +728,31 @@ fn scan_pci_for_device(class: u8, subclass: u8, prog_if: Option<u8>, name: &str)
         };
 
         // Read IRQ line (offset 0x3C).
-        unsafe { addr_port.write(address | 0x3C); }
+        unsafe {
+            addr_port.write(address | 0x3C);
+        }
         let irq_reg = unsafe { data_port.read() };
         let irq_line = (irq_reg & 0xFF) as u8;
 
         // Enable bus mastering (bit 2) + memory space (bit 1).
-        unsafe { addr_port.write(address | 0x04); }
+        unsafe {
+            addr_port.write(address | 0x04);
+        }
         let cmd = unsafe { data_port.read() };
-        unsafe { addr_port.write(address | 0x04); }
-        unsafe { data_port.write(cmd | (1 << 1) | (1 << 2)); }
+        unsafe {
+            addr_port.write(address | 0x04);
+        }
+        unsafe {
+            data_port.write(cmd | (1 << 1) | (1 << 2));
+        }
 
-        kdebug!("  {}: PCI dev={} BAR0={:#x} IRQ={}", name, dev, bar0_phys, irq_line);
+        kdebug!(
+            "  {}: PCI dev={} BAR0={:#x} IRQ={}",
+            name,
+            dev,
+            bar0_phys,
+            irq_line
+        );
         return Some((bar0_phys, irq_line));
     }
     None
@@ -615,10 +761,19 @@ fn scan_pci_for_device(class: u8, subclass: u8, prog_if: Option<u8>, name: &str)
 /// Create a PCI config I/O port capability (0xCF8-0xCFF).
 fn create_pci_cap(name: &str) -> cap::CapId {
     let pci_cap = cap::insert(
-        cap::CapObject::IoPort { base: PCI_CONFIG_PORT, count: 8 },
-        cap::Rights::ALL, None,
-    ).unwrap_or_else(|| panic!("failed to create {} PCI ioport cap", name));
-    kdebug!("  {} cap {}: port 0xCF8-0xCFF (PCI config)", name, pci_cap.raw());
+        cap::CapObject::IoPort {
+            base: PCI_CONFIG_PORT,
+            count: 8,
+        },
+        cap::Rights::ALL,
+        None,
+    )
+    .unwrap_or_else(|| panic!("failed to create {} PCI ioport cap", name));
+    kdebug!(
+        "  {} cap {}: port 0xCF8-0xCFF (PCI config)",
+        name,
+        pci_cap.raw()
+    );
     pci_cap
 }
 
@@ -642,14 +797,26 @@ fn spawn_init_process() -> u64 {
     // Map KB ring buffer page at 0x510000 (shared between KB driver + LUCAS handler).
     let kb_ring_frame = mm::alloc_frame().expect("no frame for KB ring");
     let kb_ring_phys = kb_ring_frame.addr();
-    unsafe { core::ptr::write_bytes((kb_ring_phys + hhdm) as *mut u8, 0, 4096); }
-    addr_space.map_page(KB_RING_PAGE, kb_ring_phys, PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
+    unsafe {
+        core::ptr::write_bytes((kb_ring_phys + hhdm) as *mut u8, 0, 4096);
+    }
+    addr_space.map_page(
+        KB_RING_PAGE,
+        kb_ring_phys,
+        PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER,
+    );
 
     // Map mouse ring buffer page at 0x520000 (shared between mouse driver + desktop).
     let mouse_ring_frame = mm::alloc_frame().expect("no frame for mouse ring");
     let mouse_ring_phys = mouse_ring_frame.addr();
-    unsafe { core::ptr::write_bytes((mouse_ring_phys + hhdm) as *mut u8, 0, 4096); }
-    addr_space.map_page(MOUSE_RING_PAGE, mouse_ring_phys, PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
+    unsafe {
+        core::ptr::write_bytes((mouse_ring_phys + hhdm) as *mut u8, 0, 4096);
+    }
+    addr_space.map_page(
+        MOUSE_RING_PAGE,
+        mouse_ring_phys,
+        PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER,
+    );
 
     // Create root capabilities.
     create_init_caps();
@@ -679,9 +846,7 @@ fn load_initrd(cr3: u64) {
     }
 
     let module = modules[0];
-    let module_data = unsafe {
-        core::slice::from_raw_parts(module.addr(), module.size() as usize)
-    };
+    let module_data = unsafe { core::slice::from_raw_parts(module.addr(), module.size() as usize) };
     kdebug!("  initrd: {} bytes", module.size());
 
     // Save initrd location for userspace InitrdRead syscall.
@@ -690,7 +855,17 @@ fn load_initrd(cr3: u64) {
     initrd::set_initrd(initrd_phys, module.size());
 
     // Single-pass CPIO scan for all service binaries (matroid optimization).
-    let names = ["init", "shell", "vmm", "kbd", "net", "nvme", "xhci", "compositor", "hello-gui"];
+    let names = [
+        "init",
+        "shell",
+        "vmm",
+        "kbd",
+        "net",
+        "nvme",
+        "xhci",
+        "compositor",
+        "hello-gui",
+    ];
     let found = initrd::find_all(module_data, &names);
     // Indices: 0=init, 1=shell, 2=vmm, 3=kbd, 4=net, 5=nvme, 6=xhci, 7=compositor, 8=hello-gui
 
@@ -785,7 +960,7 @@ fn write_boot_info(
     stack_top: u64,
     self_as_cap: u64,
 ) {
-    use sotos_common::{BOOT_INFO_ADDR, BOOT_INFO_MAGIC, BootInfo};
+    use sotos_common::{BootInfo, BOOT_INFO_ADDR, BOOT_INFO_MAGIC};
 
     let hhdm = mm::hhdm_offset();
     let phys = alloc_bootinfo_page(addr_space, "init");
@@ -818,7 +993,11 @@ fn write_boot_info(
 
 /// Load the VMM as a separate process. Must be spawned BEFORE init.
 fn load_vmm_process(vmm_data: &[u8], init_cr3: u64) {
-    let proc = match load_service(&ProcessSpec { name: "vmm", data: vmm_data, stack_pages: 4 }) {
+    let proc = match load_service(&ProcessSpec {
+        name: "vmm",
+        data: vmm_data,
+        stack_pages: 4,
+    }) {
         Some(p) => p,
         None => return,
     };
@@ -832,24 +1011,36 @@ fn load_vmm_process(vmm_data: &[u8], init_cr3: u64) {
 /// Creates fresh capabilities for VMM:
 ///   Cap 0: Notification (fault delivery)
 ///   Cap 1: AddrSpace (init's CR3) — for fault_register_as + map_into
-fn write_vmm_boot_info(
-    vmm_as: &mm::paging::AddressSpace,
-    init_cr3: u64,
-) {
-    use sotos_common::{BOOT_INFO_ADDR, BOOT_INFO_MAGIC, BootInfo};
+fn write_vmm_boot_info(vmm_as: &mm::paging::AddressSpace, init_cr3: u64) {
+    use sotos_common::{BootInfo, BOOT_INFO_ADDR, BOOT_INFO_MAGIC};
 
     let phys = alloc_bootinfo_page(vmm_as, "vmm");
 
     // Cap 0: VMM notification (fault delivery).
     let n_vmm = ipc::notify::create().expect("failed to create vmm notification");
-    let n_vmm_cap = cap::insert(cap::CapObject::Notification { id: n_vmm.0.raw() }, cap::Rights::ALL, None)
-        .expect("failed to create vmm notification cap");
-    kdebug!("  vmm cap {}: notification (fault delivery)", n_vmm_cap.raw());
+    let n_vmm_cap = cap::insert(
+        cap::CapObject::Notification { id: n_vmm.0.raw() },
+        cap::Rights::ALL,
+        None,
+    )
+    .expect("failed to create vmm notification cap");
+    kdebug!(
+        "  vmm cap {}: notification (fault delivery)",
+        n_vmm_cap.raw()
+    );
 
     // Cap 1: AddrSpace for init's CR3 (allows fault_register_as + map_into).
-    let init_as_cap = cap::insert(cap::CapObject::AddrSpace { cr3: init_cr3 }, cap::Rights::ALL, None)
-        .expect("failed to create init AS cap");
-    kdebug!("  vmm cap {}: addr_space (init cr3={:#x})", init_as_cap.raw(), init_cr3);
+    let init_as_cap = cap::insert(
+        cap::CapObject::AddrSpace { cr3: init_cr3 },
+        cap::Rights::ALL,
+        None,
+    )
+    .expect("failed to create init AS cap");
+    kdebug!(
+        "  vmm cap {}: addr_space (init cr3={:#x})",
+        init_as_cap.raw(),
+        init_cr3
+    );
 
     let mut info = BootInfo::empty();
     info.magic = BOOT_INFO_MAGIC;
@@ -863,7 +1054,11 @@ fn write_vmm_boot_info(
 
 /// Load the keyboard driver as a separate process.
 fn load_kbd_process(kbd_data: &[u8], init_cr3: u64) {
-    let proc = match load_service(&ProcessSpec { name: "kbd", data: kbd_data, stack_pages: 4 }) {
+    let proc = match load_service(&ProcessSpec {
+        name: "kbd",
+        data: kbd_data,
+        stack_pages: 4,
+    }) {
         Some(p) => p,
         None => return,
     };
@@ -881,11 +1076,8 @@ fn load_kbd_process(kbd_data: &[u8], init_cr3: u64) {
 ///   Cap 1: I/O port 0x60–0x64 (PS/2 data + command)
 ///   Cap 2: Notification (KB+mouse IRQ delivery)
 ///   Cap 3: IRQ 12 (mouse)
-fn write_kbd_boot_info(
-    _kbd_cr3: u64,
-    kbd_as: &mm::paging::AddressSpace,
-) {
-    use sotos_common::{BOOT_INFO_ADDR, BOOT_INFO_MAGIC, BootInfo};
+fn write_kbd_boot_info(_kbd_cr3: u64, kbd_as: &mm::paging::AddressSpace) {
+    use sotos_common::{BootInfo, BOOT_INFO_ADDR, BOOT_INFO_MAGIC};
 
     let phys = alloc_bootinfo_page(kbd_as, "kbd");
 
@@ -894,13 +1086,24 @@ fn write_kbd_boot_info(
         .expect("failed to create kbd irq cap");
     kdebug!("  kbd cap {}: IRQ 1 (keyboard)", irq_cap.raw());
 
-    let port_cap = cap::insert(cap::CapObject::IoPort { base: 0x60, count: 5 }, cap::Rights::ALL, None)
-        .expect("failed to create kbd ioport cap");
+    let port_cap = cap::insert(
+        cap::CapObject::IoPort {
+            base: 0x60,
+            count: 5,
+        },
+        cap::Rights::ALL,
+        None,
+    )
+    .expect("failed to create kbd ioport cap");
     kdebug!("  kbd cap {}: port 0x60-0x64", port_cap.raw());
 
     let n_kb = ipc::notify::create().expect("failed to create kbd notification");
-    let n_kb_cap = cap::insert(cap::CapObject::Notification { id: n_kb.0.raw() }, cap::Rights::ALL, None)
-        .expect("failed to create kbd notification cap");
+    let n_kb_cap = cap::insert(
+        cap::CapObject::Notification { id: n_kb.0.raw() },
+        cap::Rights::ALL,
+        None,
+    )
+    .expect("failed to create kbd notification cap");
     kdebug!("  kbd cap {}: notification (KB+mouse IRQ)", n_kb_cap.raw());
 
     let mouse_irq_cap = cap::insert(cap::CapObject::Irq { line: 12 }, cap::Rights::ALL, None)
@@ -922,7 +1125,11 @@ fn write_kbd_boot_info(
 
 /// Load the network driver as a separate process (16-page stack for DHCP+smoltcp).
 fn load_net_process(net_data: &[u8]) {
-    let proc = match load_service(&ProcessSpec { name: "net", data: net_data, stack_pages: 16 }) {
+    let proc = match load_service(&ProcessSpec {
+        name: "net",
+        data: net_data,
+        stack_pages: 16,
+    }) {
         Some(p) => p,
         None => return,
     };
@@ -935,11 +1142,8 @@ fn load_net_process(net_data: &[u8]) {
 ///
 /// Creates fresh capabilities for net:
 ///   Cap 0: I/O port 0xCF8-0xCFF (PCI config)
-fn write_net_boot_info(
-    _net_cr3: u64,
-    net_as: &mm::paging::AddressSpace,
-) {
-    use sotos_common::{BOOT_INFO_ADDR, BOOT_INFO_MAGIC, BootInfo};
+fn write_net_boot_info(_net_cr3: u64, net_as: &mm::paging::AddressSpace) {
+    use sotos_common::{BootInfo, BOOT_INFO_ADDR, BOOT_INFO_MAGIC};
 
     let phys = alloc_bootinfo_page(net_as, "net");
     let pci_cap = create_pci_cap("net");
@@ -971,7 +1175,11 @@ fn load_nvme_process(nvme_data: &[u8]) {
             return;
         }
     };
-    let proc = match load_service(&ProcessSpec { name: "nvme", data: nvme_data, stack_pages: 4 }) {
+    let proc = match load_service(&ProcessSpec {
+        name: "nvme",
+        data: nvme_data,
+        stack_pages: 4,
+    }) {
         Some(p) => p,
         None => return,
     };
@@ -986,7 +1194,7 @@ fn load_nvme_process(nvme_data: &[u8]) {
 /// Creates fresh capabilities:
 ///   Cap 0: I/O port 0xCF8-0xCFF (PCI config)
 fn write_nvme_boot_info(nvme_as: &mm::paging::AddressSpace) {
-    use sotos_common::{BOOT_INFO_ADDR, BOOT_INFO_MAGIC, BootInfo};
+    use sotos_common::{BootInfo, BOOT_INFO_ADDR, BOOT_INFO_MAGIC};
 
     let phys = alloc_bootinfo_page(nvme_as, "nvme");
     let pci_cap = create_pci_cap("nvme");
@@ -1018,7 +1226,11 @@ fn load_xhci_process(xhci_data: &[u8], init_cr3: u64) {
             return;
         }
     };
-    let proc = match load_service(&ProcessSpec { name: "xhci", data: xhci_data, stack_pages: 4 }) {
+    let proc = match load_service(&ProcessSpec {
+        name: "xhci",
+        data: xhci_data,
+        stack_pages: 4,
+    }) {
         Some(p) => p,
         None => return,
     };
@@ -1036,19 +1248,32 @@ fn load_xhci_process(xhci_data: &[u8], init_cr3: u64) {
 ///   Cap 1: IRQ (xHCI interrupt line)
 ///   Cap 2: Notification (IRQ delivery)
 fn write_xhci_boot_info(xhci_as: &mm::paging::AddressSpace, irq_line: u8) {
-    use sotos_common::{BOOT_INFO_ADDR, BOOT_INFO_MAGIC, BootInfo};
+    use sotos_common::{BootInfo, BOOT_INFO_ADDR, BOOT_INFO_MAGIC};
 
     let phys = alloc_bootinfo_page(xhci_as, "xhci");
     let pci_cap = create_pci_cap("xhci");
 
-    let irq_cap = cap::insert(cap::CapObject::Irq { line: irq_line as u32 }, cap::Rights::ALL, None)
-        .expect("failed to create xhci IRQ cap");
+    let irq_cap = cap::insert(
+        cap::CapObject::Irq {
+            line: irq_line as u32,
+        },
+        cap::Rights::ALL,
+        None,
+    )
+    .expect("failed to create xhci IRQ cap");
     kdebug!("  xhci cap {}: IRQ {}", irq_cap.raw(), irq_line);
 
     let n_xhci = ipc::notify::create().expect("failed to create xhci notification");
-    let n_xhci_cap = cap::insert(cap::CapObject::Notification { id: n_xhci.0.raw() }, cap::Rights::ALL, None)
-        .expect("failed to create xhci notification cap");
-    kdebug!("  xhci cap {}: notification (IRQ delivery)", n_xhci_cap.raw());
+    let n_xhci_cap = cap::insert(
+        cap::CapObject::Notification { id: n_xhci.0.raw() },
+        cap::Rights::ALL,
+        None,
+    )
+    .expect("failed to create xhci notification cap");
+    kdebug!(
+        "  xhci cap {}: notification (IRQ delivery)",
+        n_xhci_cap.raw()
+    );
 
     let mut info = BootInfo::empty();
     info.magic = BOOT_INFO_MAGIC;
@@ -1067,7 +1292,11 @@ fn write_xhci_boot_info(xhci_as: &mm::paging::AddressSpace, irq_line: u8) {
 
 /// Load the Wayland compositor as a separate process.
 fn load_compositor_process(comp_data: &[u8], init_cr3: u64) {
-    let proc = match load_service(&ProcessSpec { name: "compositor", data: comp_data, stack_pages: 4 }) {
+    let proc = match load_service(&ProcessSpec {
+        name: "compositor",
+        data: comp_data,
+        stack_pages: 4,
+    }) {
         Some(p) => p,
         None => return,
     };
@@ -1084,23 +1313,34 @@ fn load_compositor_process(comp_data: &[u8], init_cr3: u64) {
 /// Cap 1: AddrSpace (compositor's own CR3) -- for shm_map into self.
 /// Also maps framebuffer if available.
 fn write_compositor_boot_info(comp_as: &mm::paging::AddressSpace) {
-    use sotos_common::{BOOT_INFO_ADDR, BOOT_INFO_MAGIC, BootInfo};
+    use sotos_common::{BootInfo, BOOT_INFO_ADDR, BOOT_INFO_MAGIC};
 
     let phys = alloc_bootinfo_page(comp_as, "compositor");
 
     let ep = ipc::endpoint::create().expect("failed to create compositor endpoint");
     let ep_cap = cap::insert(
         cap::CapObject::Endpoint { id: ep.0.raw() },
-        cap::Rights::ALL, None,
-    ).expect("failed to create compositor endpoint cap");
-    kdebug!("  compositor cap {}: endpoint (client connections)", ep_cap.raw());
+        cap::Rights::ALL,
+        None,
+    )
+    .expect("failed to create compositor endpoint cap");
+    kdebug!(
+        "  compositor cap {}: endpoint (client connections)",
+        ep_cap.raw()
+    );
 
     // Cap 1: AddrSpace for compositor's own CR3 (needed for shm_map into self).
     let comp_as_cap = cap::insert(
         cap::CapObject::AddrSpace { cr3: comp_as.cr3() },
-        cap::Rights::ALL, None,
-    ).expect("failed to create compositor AS cap");
-    kdebug!("  compositor cap {}: addr_space (self, cr3={:#x})", comp_as_cap.raw(), comp_as.cr3());
+        cap::Rights::ALL,
+        None,
+    )
+    .expect("failed to create compositor AS cap");
+    kdebug!(
+        "  compositor cap {}: addr_space (self, cr3={:#x})",
+        comp_as_cap.raw(),
+        comp_as.cr3()
+    );
 
     let mut info = BootInfo::empty();
     info.magic = BOOT_INFO_MAGIC;
@@ -1117,7 +1357,11 @@ fn write_compositor_boot_info(comp_as: &mm::paging::AddressSpace) {
 
 /// Load the hello-gui Wayland test client as a separate process.
 fn load_hello_gui_process(gui_data: &[u8]) {
-    let proc = match load_service(&ProcessSpec { name: "hello-gui", data: gui_data, stack_pages: 4 }) {
+    let proc = match load_service(&ProcessSpec {
+        name: "hello-gui",
+        data: gui_data,
+        stack_pages: 4,
+    }) {
         Some(p) => p,
         None => return,
     };
@@ -1131,16 +1375,22 @@ fn load_hello_gui_process(gui_data: &[u8]) {
 /// Cap 0: AddrSpace (hello-gui's own CR3) -- for shm_map into self.
 /// No IPC endpoint needed (it looks up the compositor via svc_lookup).
 fn write_hello_gui_boot_info(gui_as: &mm::paging::AddressSpace) {
-    use sotos_common::{BOOT_INFO_ADDR, BOOT_INFO_MAGIC, BootInfo};
+    use sotos_common::{BootInfo, BOOT_INFO_ADDR, BOOT_INFO_MAGIC};
 
     let phys = alloc_bootinfo_page(gui_as, "hello-gui");
 
     // Cap 0: AddrSpace for hello-gui's own CR3 (needed for shm_map).
     let gui_as_cap = cap::insert(
         cap::CapObject::AddrSpace { cr3: gui_as.cr3() },
-        cap::Rights::ALL, None,
-    ).expect("failed to create hello-gui AS cap");
-    kdebug!("  hello-gui cap {}: addr_space (self, cr3={:#x})", gui_as_cap.raw(), gui_as.cr3());
+        cap::Rights::ALL,
+        None,
+    )
+    .expect("failed to create hello-gui AS cap");
+    kdebug!(
+        "  hello-gui cap {}: addr_space (self, cr3={:#x})",
+        gui_as_cap.raw(),
+        gui_as.cr3()
+    );
 
     let mut info = BootInfo::empty();
     info.magic = BOOT_INFO_MAGIC;

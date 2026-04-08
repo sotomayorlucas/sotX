@@ -16,12 +16,12 @@ const PAGE_SIZE: u64 = 0x1000;
 const USER_MAX: u64 = 0x7FFF_FFFF_F000;
 
 /// Default randomization entropy (bits of jitter per region).
-const CODE_JITTER_PAGES: u64 = 256;     // 1 MiB range
-const DATA_JITTER_PAGES: u64 = 256;     // 1 MiB range
-const HEAP_JITTER_PAGES: u64 = 512;     // 2 MiB range
-const STACK_JITTER_PAGES: u64 = 1024;   // 4 MiB range
-const MMAP_JITTER_PAGES: u64 = 4096;    // 16 MiB range
-const VDSO_JITTER_PAGES: u64 = 256;     // 1 MiB range
+const CODE_JITTER_PAGES: u64 = 256; // 1 MiB range
+const DATA_JITTER_PAGES: u64 = 256; // 1 MiB range
+const HEAP_JITTER_PAGES: u64 = 512; // 2 MiB range
+const STACK_JITTER_PAGES: u64 = 1024; // 4 MiB range
+const MMAP_JITTER_PAGES: u64 = 4096; // 16 MiB range
+const VDSO_JITTER_PAGES: u64 = 256; // 1 MiB range
 
 /// Randomized memory layout for a new domain.
 ///

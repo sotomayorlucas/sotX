@@ -9,7 +9,7 @@
 //! without the process being aware of the migration.
 
 use crate::mm::paging::{self, AddressSpace};
-use crate::sched::{self, SCHEDULER, ThreadState};
+use crate::sched::{self, ThreadState, SCHEDULER};
 
 /// Maximum number of memory regions in a checkpoint.
 pub const MAX_REGIONS: usize = 32;
@@ -419,10 +419,8 @@ fn enumerate_regions(cr3: u64, regions: &mut [MemRegion; MAX_REGIONS]) -> usize 
 
                 for pt_idx in 0..512u64 {
                     let entry = pt[pt_idx as usize];
-                    let vaddr = (pml4_idx << 39)
-                        | (pdpt_idx << 30)
-                        | (pd_idx << 21)
-                        | (pt_idx << 12);
+                    let vaddr =
+                        (pml4_idx << 39) | (pdpt_idx << 30) | (pd_idx << 21) | (pt_idx << 12);
 
                     if entry & paging::PAGE_PRESENT != 0 {
                         let flags = entry & 0x8000_0000_0000_001F; // P, W, U, WT, CD, NX

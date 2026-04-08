@@ -6,9 +6,9 @@
 /// Elf64_Sym size.
 const SYM_SIZE: u64 = 24;
 // Elf64_Sym field offsets.
-const ST_NAME: u64 = 0;   // u32: offset into strtab
-const ST_INFO: u64 = 4;   // u8: binding + type
-const ST_VALUE: u64 = 8;  // u64: symbol value
+const ST_NAME: u64 = 0; // u32: offset into strtab
+const ST_INFO: u64 = 4; // u8: binding + type
+const ST_VALUE: u64 = 8; // u64: symbol value
 
 fn read_u32(addr: u64) -> u32 {
     unsafe { core::ptr::read(addr as *const u32) }
@@ -61,7 +61,8 @@ pub fn find_symbol(
     base: u64,
 ) -> Option<u64> {
     if gnu_hash_addr != 0 {
-        if let Some(val) = find_symbol_gnu_hash(name, symtab_addr, strtab_addr, gnu_hash_addr, base) {
+        if let Some(val) = find_symbol_gnu_hash(name, symtab_addr, strtab_addr, gnu_hash_addr, base)
+        {
             return Some(val);
         }
     }
@@ -80,7 +81,11 @@ fn find_symbol_linear(
     base: u64,
 ) -> Option<u64> {
     // Estimate max symbols from strtab size (conservative upper bound).
-    let max_syms = if strsz > 0 { (strsz / 2).min(4096) } else { 256 };
+    let max_syms = if strsz > 0 {
+        (strsz / 2).min(4096)
+    } else {
+        256
+    };
 
     for i in 1..max_syms {
         let sym = symtab_addr + i * SYM_SIZE;

@@ -29,7 +29,10 @@ struct AdjList {
 
 impl AdjList {
     const fn new() -> Self {
-        Self { neighbors: [0; MAX_NODES], count: 0 }
+        Self {
+            neighbors: [0; MAX_NODES],
+            count: 0,
+        }
     }
     fn add(&mut self, n: u32) {
         if self.count < MAX_NODES && !self.contains(n) {
@@ -39,7 +42,9 @@ impl AdjList {
     }
     fn contains(&self, n: u32) -> bool {
         for i in 0..self.count {
-            if self.neighbors[i] == n { return true; }
+            if self.neighbors[i] == n {
+                return true;
+            }
         }
         false
     }
@@ -75,7 +80,9 @@ impl IpcGraph {
 
     fn ensure_node(&mut self, tid: u32) -> usize {
         for i in 0..self.node_count {
-            if self.nodes[i] == tid { return i; }
+            if self.nodes[i] == tid {
+                return i;
+            }
         }
         if self.node_count < MAX_NODES {
             self.nodes[self.node_count] = tid;
@@ -96,7 +103,11 @@ impl IpcGraph {
             }
         }
         if self.edge_count < MAX_EDGES {
-            self.edges[self.edge_count] = Some(Edge { sender, receiver, endpoint });
+            self.edges[self.edge_count] = Some(Edge {
+                sender,
+                receiver,
+                endpoint,
+            });
             self.edge_count += 1;
         }
     }
@@ -121,8 +132,12 @@ impl IpcGraph {
                 if e.sender == src_tid {
                     let dst = self.node_index(e.receiver);
                     if let Some(d) = dst {
-                        if color[d] == 1 { return true; } // back edge = cycle
-                        if color[d] == 0 && self.dfs_visit(d, color) { return true; }
+                        if color[d] == 1 {
+                            return true;
+                        } // back edge = cycle
+                        if color[d] == 0 && self.dfs_visit(d, color) {
+                            return true;
+                        }
                     }
                 }
             }
@@ -133,7 +148,9 @@ impl IpcGraph {
 
     fn node_index(&self, tid: u32) -> Option<usize> {
         for i in 0..self.node_count {
-            if self.nodes[i] == tid { return Some(i); }
+            if self.nodes[i] == tid {
+                return Some(i);
+            }
         }
         None
     }
@@ -141,16 +158,21 @@ impl IpcGraph {
     /// Greedy elimination treewidth estimate.
     /// Removes minimum-degree vertex, tracks max degree at removal.
     fn estimate_treewidth(&self) -> u32 {
-        if self.node_count == 0 { return 0; }
+        if self.node_count == 0 {
+            return 0;
+        }
 
         // Build undirected adjacency (ignoring directions for treewidth).
         let mut adj: [[bool; MAX_NODES]; MAX_NODES] = [[false; MAX_NODES]; MAX_NODES];
         let mut alive = [false; MAX_NODES];
 
-        for i in 0..self.node_count { alive[i] = true; }
+        for i in 0..self.node_count {
+            alive[i] = true;
+        }
         for i in 0..self.edge_count {
             if let Some(e) = &self.edges[i] {
-                if let (Some(s), Some(r)) = (self.node_index(e.sender), self.node_index(e.receiver)) {
+                if let (Some(s), Some(r)) = (self.node_index(e.sender), self.node_index(e.receiver))
+                {
                     adj[s][r] = true;
                     adj[r][s] = true;
                 }
@@ -163,7 +185,9 @@ impl IpcGraph {
             let mut min_deg = u32::MAX;
             let mut min_v = 0;
             for v in 0..self.node_count {
-                if !alive[v] { continue; }
+                if !alive[v] {
+                    continue;
+                }
                 let deg = (0..self.node_count)
                     .filter(|&u| alive[u] && adj[v][u])
                     .count() as u32;
@@ -172,8 +196,12 @@ impl IpcGraph {
                     min_v = v;
                 }
             }
-            if min_deg == u32::MAX { break; }
-            if min_deg > max_degree { max_degree = min_deg; }
+            if min_deg == u32::MAX {
+                break;
+            }
+            if min_deg > max_degree {
+                max_degree = min_deg;
+            }
 
             // Connect neighbors of min_v (fill-in).
             let nbrs: [usize; MAX_NODES] = {
@@ -187,9 +215,11 @@ impl IpcGraph {
                 }
                 n
             };
-            let nbr_count = (0..self.node_count).filter(|&u| alive[u] && adj[min_v][u]).count();
+            let nbr_count = (0..self.node_count)
+                .filter(|&u| alive[u] && adj[min_v][u])
+                .count();
             for i in 0..nbr_count {
-                for j in (i+1)..nbr_count {
+                for j in (i + 1)..nbr_count {
                     adj[nbrs[i]][nbrs[j]] = true;
                     adj[nbrs[j]][nbrs[i]] = true;
                 }
