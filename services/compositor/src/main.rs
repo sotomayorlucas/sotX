@@ -17,6 +17,8 @@ mod wayland;
 mod render;
 mod input;
 mod cursor;
+#[cfg(feature = "skia")]
+mod skia_render;
 
 use sotos_common::sys;
 use sotos_common::{BootInfo, IpcMsg, BOOT_INFO_ADDR, SyncUnsafeCell};
@@ -822,8 +824,16 @@ fn apply_dispatch_result(client_idx: usize, result: &DispatchResult) {
         }
     }
 
-    // Damage reported?
-    if result.damage {
+    if result.new_layer_surface.0 != 0 {
+        print(b"compositor: new layer_surface ");
+        print_u32_dec(result.new_layer_surface.0);
+        print(b"\n");
+    }
+
+    // Layer-layout is recomputed unconditionally at the top of every
+    // `compose()` call, so a dirty flag only needs to trigger a
+    // redraw here.
+    if result.layer_layout_dirty || result.damage {
         mark_damage();
     }
 }
@@ -1136,6 +1146,40 @@ fn handle_mouse(packet: input::MousePacket) {
 // Compositing
 // ---------------------------------------------------------------------------
 
+/// Blit a layer_surface's wl_surface buffer to the framebuffer, or a
+/// placeholder fill if the client hasn't committed a buffer yet. Used
+/// once per layer tier in the compose pass.
+fn draw_layer_surface(
+    fb: &render::Framebuffer,
+    ls: &wayland::layer_shell::LayerSurface,
+    surfaces: &[Surface; MAX_SURFACES],
+    buffers: &[wayland::shm::ShmBuffer; MAX_BUFFERS],
+    pools: &[wayland::shm::ShmPool; MAX_POOLS],
+    placeholder: u32,
+) {
+    let mut drew_buffer = false;
+    for si in 0..MAX_SURFACES {
+        let surf = &surfaces[si];
+        if !surf.active || surf.surface_id != ls.surface_id { continue; }
+        if !surf.committed { continue; }
+        if let Some(buf_idx) = surf.buffer_idx {
+            let buf = &buffers[buf_idx];
+            if !buf.active { continue; }
+            let pool_idx = buf.pool_idx;
+            if pool_idx < MAX_POOLS && pools[pool_idx].active {
+                let pool = &pools[pool_idx];
+                let src = (pool.mapped_vaddr + buf.offset as u64) as *const u32;
+                fb.blit(ls.x, ls.y, buf.width, buf.height, src, buf.stride);
+                drew_buffer = true;
+            }
+        }
+        break;
+    }
+    if !drew_buffer && ls.computed_width > 0 && ls.computed_height > 0 {
+        fb.fill_rect(ls.x, ls.y, ls.computed_width, ls.computed_height, placeholder);
+    }
+}
+
 fn compose() {
     unsafe {
         let fb = &mut *FB.get();
@@ -1148,29 +1192,64 @@ fn compose() {
         // Clear background (needed since we only redraw on damage).
         fb.clear(BG_COLOR);
 
+        // Re-run layer layout so any window-size / hot-plug change
+        // propagates to layer surfaces before we read their positions.
+        let insets = wayland::layer_shell::layout_all(fb.width, fb.height);
+
+        // ── Z-order: Background → Bottom → toplevels → Top → cursor → Overlay ──
+
+        // Background layer (wallpapers).
+        for ls in wayland::layer_shell::iter_layer(wayland::layer_shell::Layer::Background) {
+            draw_layer_surface(fb, ls, surfaces, buffers, pools, 0xFF1A1A2A);
+        }
+
+        // Bottom layer (docks that should sit beneath windows).
+        for ls in wayland::layer_shell::iter_layer(wayland::layer_shell::Layer::Bottom) {
+            draw_layer_surface(fb, ls, surfaces, buffers, pools, 0xFF2A2A3A);
+        }
+
+        // Clamp toplevels into the area left free by exclusive zones.
+        // This is a minimal enforcement: we push any toplevel whose
+        // title bar would overlap a reserved strip, and trim bottom
+        // overflow. Horizontal clamp is symmetric.
+        let avail_top = insets.top as i32;
+        let avail_bottom_limit = fb.height as i32 - insets.bottom as i32;
+        let avail_left = insets.left as i32;
+        let avail_right_limit = fb.width as i32 - insets.right as i32;
+
         // Draw all active toplevels.
         for i in 0..MAX_TOPLEVELS {
             let tl = &toplevels[i];
             if !tl.active { continue; }
 
+            // Effective top-left after inset clamping.
+            let title_top = (tl.y - TITLE_BAR_HEIGHT as i32).max(avail_top);
+            let eff_y = title_top + TITLE_BAR_HEIGHT as i32;
+            let eff_x = tl.x.max(avail_left);
+
+            // Clip the body height if it would overflow the usable area.
+            let eff_h_max = (avail_bottom_limit - eff_y).max(0) as u32;
+            let eff_h = tl.height.min(eff_h_max);
+            let eff_w_max = (avail_right_limit - eff_x).max(0) as u32;
+            let eff_w = tl.width.min(eff_w_max);
+
             // Title bar color: highlight focused toplevel.
             let bar_color = if i == focused_tl { 0xFF5577AA } else { 0xFF404040 };
             fb.fill_rect(
-                tl.x, tl.y - TITLE_BAR_HEIGHT as i32,
-                tl.width, TITLE_BAR_HEIGHT,
+                eff_x, title_top,
+                eff_w, TITLE_BAR_HEIGHT,
                 bar_color,
             );
             // Close button (top-right corner of title bar).
-            let close_x = tl.x + tl.width as i32 - 20;
-            let close_y = tl.y - TITLE_BAR_HEIGHT as i32 + 4;
+            let close_x = eff_x + eff_w as i32 - 20;
+            let close_y = title_top + 4;
             fb.fill_rect(close_x, close_y, 16, 16, 0xFFFF5555);
-            // "X" on close button
             fb.draw_text(close_x + 4, close_y + 4, b"x", 0xFFFFFFFF);
 
             // Title text in the title bar.
-            let text_x = tl.x + 6;
-            let text_y = tl.y - TITLE_BAR_HEIGHT as i32 + 8;
-            let max_chars = ((tl.width as i32 - 30) / 8).max(0) as usize;
+            let text_x = eff_x + 6;
+            let text_y = title_top + 8;
+            let max_chars = ((eff_w as i32 - 30) / 8).max(0) as usize;
             let len = tl.title_len.min(max_chars);
             if len > 0 {
                 fb.draw_text(text_x, text_y, &tl.title[..len], 0xFFEEEEEE);
@@ -1187,30 +1266,35 @@ fn compose() {
                     let buf = &buffers[buf_idx];
                     if !buf.active { continue; }
 
-                    // Find the pool and blit the buffer.
                     let pool_idx = buf.pool_idx;
                     if pool_idx < MAX_POOLS && pools[pool_idx].active {
                         let pool = &pools[pool_idx];
                         let src = (pool.mapped_vaddr + buf.offset as u64) as *const u32;
-
-                        // Blit directly from the shared pool memory.
-                        // With real SHM, the client writes pixels here and the
-                        // compositor reads them -- no test pattern needed.
-                        fb.blit(tl.x, tl.y, buf.width, buf.height, src, buf.stride);
+                        fb.blit(eff_x, eff_y, buf.width.min(eff_w), buf.height.min(eff_h), src, buf.stride);
                         found_buffer = true;
                     }
                 }
                 break;
             }
 
-            // If no buffer attached yet, draw a placeholder fill.
-            if !found_buffer {
-                fb.fill_rect(tl.x, tl.y, tl.width, tl.height, 0xFF333355);
+            if !found_buffer && eff_w > 0 && eff_h > 0 {
+                fb.fill_rect(eff_x, eff_y, eff_w, eff_h, 0xFF333355);
             }
         }
 
-        // Draw cursor on top of everything.
+        // Top layer (panels, bars).
+        for ls in wayland::layer_shell::iter_layer(wayland::layer_shell::Layer::Top) {
+            draw_layer_surface(fb, ls, surfaces, buffers, pools, 0xFF3A3A5A);
+        }
+
+        // Draw cursor above toplevels/top but below overlay (matches wlr behaviour).
         fb.draw_cursor(*CURSOR_X.get(), *CURSOR_Y.get());
+
+        // Overlay layer (notifications, lockscreens, OSDs). Drawn last so
+        // nothing can obscure critical UI.
+        for ls in wayland::layer_shell::iter_layer(wayland::layer_shell::Layer::Overlay) {
+            draw_layer_surface(fb, ls, surfaces, buffers, pools, 0xFF4A3A6A);
+        }
     }
 }
 
