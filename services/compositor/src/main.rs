@@ -16,6 +16,7 @@
 mod wayland;
 mod render;
 mod input;
+mod wallpaper;
 mod font;
 mod animation;
 mod cursor;
@@ -55,9 +56,6 @@ const POOL_BASE: u64 = 0x8000000;
 
 /// Maximum size per pool (1 MiB).
 const MAX_POOL_SIZE: usize = 1024 * 1024;
-
-/// Desktop background color (dark blue-gray).
-const BG_COLOR: u32 = 0xFF2D2D3D;
 
 /// Title bar height in pixels.
 const TITLE_BAR_HEIGHT: u32 = 24;
@@ -354,7 +352,8 @@ pub extern "C" fn _start() -> ! {
     // First client connected -- take over the framebuffer.
     unsafe {
         let fb = &mut *FB.get();
-        fb.clear(BG_COLOR);
+        wallpaper::init(fb.height as usize);
+        wallpaper::draw(fb, 0, 0, fb.width as i32, fb.height as i32);
         *CURSOR_X.get() = (fb.width / 2) as i32;
         *CURSOR_Y.get() = (fb.height / 2) as i32;
         let focus = &mut *FOCUS.get();
@@ -1191,8 +1190,8 @@ fn compose() {
         let pools = &*POOLS.get();
         let focused_tl = (*FOCUS.get()).focused_toplevel_idx;
 
-        // Clear background (needed since we only redraw on damage).
-        fb.clear(BG_COLOR);
+        // Repaint background (we redraw the whole frame on damage).
+        wallpaper::draw(fb, 0, 0, fb.width as i32, fb.height as i32);
 
         // Re-run layer layout so any window-size / hot-plug change
         // propagates to layer surfaces before we read their positions.
