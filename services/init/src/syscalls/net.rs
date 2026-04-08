@@ -588,13 +588,13 @@ pub(crate) fn sys_sendmsg(ctx: &mut SyscallContext, msg: &IpcMsg) {
     if ctx.child_fds[fd] == 33 {
         let mut hdr = [0u8; 56];
         ctx.guest_read(msghdr_ptr, &mut hdr);
-        let msg_iov = u64::from_le_bytes(hdr[16..24].try_into().unwrap());
-        let msg_iovlen = u64::from_le_bytes(hdr[24..32].try_into().unwrap()) as usize;
+        let msg_iov = u64::from_le_bytes(hdr[16..24].try_into().expect("invariant: 8-byte slice"));
+        let msg_iovlen = u64::from_le_bytes(hdr[24..32].try_into().expect("invariant: 8-byte slice")) as usize;
         if msg_iovlen > 0 {
             let mut iov_buf = [0u8; 16];
             ctx.guest_read(msg_iov, &mut iov_buf);
-            let iov_base = u64::from_le_bytes(iov_buf[0..8].try_into().unwrap());
-            let iov_len = u64::from_le_bytes(iov_buf[8..16].try_into().unwrap());
+            let iov_base = u64::from_le_bytes(iov_buf[0..8].try_into().expect("invariant: 8-byte slice"));
+            let iov_len = u64::from_le_bytes(iov_buf[8..16].try_into().expect("invariant: 8-byte slice"));
             let ret = crate::seatd::seatd_write(ctx, fd, iov_base, iov_len);
             reply_val(ep_cap, ret);
         } else {
@@ -687,8 +687,8 @@ pub(crate) fn sys_sendmsg(ctx: &mut SyscallContext, msg: &IpcMsg) {
             let mut written = 0usize;
             for vi in 0..iovcnt {
                 let off = vi * 16;
-                let iov_base = u64::from_le_bytes(iov_raw[off..off+8].try_into().unwrap());
-                let iov_len = u64::from_le_bytes(iov_raw[off+8..off+16].try_into().unwrap()) as usize;
+                let iov_base = u64::from_le_bytes(iov_raw[off..off+8].try_into().expect("invariant: 8-byte slice"));
+                let iov_len = u64::from_le_bytes(iov_raw[off+8..off+16].try_into().expect("invariant: 8-byte slice")) as usize;
                 if iov_base == 0 || iov_len == 0 { continue; }
                 // Write full iovec in 4096-byte chunks (blocking)
                 let mut iov_off = 0usize;
@@ -1029,15 +1029,15 @@ pub(crate) fn sys_recvmsg(ctx: &mut SyscallContext, msg: &IpcMsg) {
         let slot = ctx.sock_conn_id[fd] as usize;
         let mut hdr = [0u8; 56];
         ctx.guest_read(msghdr_ptr, &mut hdr);
-        let msg_iov = u64::from_le_bytes(hdr[16..24].try_into().unwrap());
-        let msg_iovlen = u64::from_le_bytes(hdr[24..32].try_into().unwrap()) as usize;
-        let msg_control = u64::from_le_bytes(hdr[32..40].try_into().unwrap());
-        let msg_controllen = u64::from_le_bytes(hdr[40..48].try_into().unwrap()) as usize;
+        let msg_iov = u64::from_le_bytes(hdr[16..24].try_into().expect("invariant: 8-byte slice"));
+        let msg_iovlen = u64::from_le_bytes(hdr[24..32].try_into().expect("invariant: 8-byte slice")) as usize;
+        let msg_control = u64::from_le_bytes(hdr[32..40].try_into().expect("invariant: 8-byte slice"));
+        let msg_controllen = u64::from_le_bytes(hdr[40..48].try_into().expect("invariant: 8-byte slice")) as usize;
         if msg_iovlen == 0 { reply_val(ep_cap, 0); return; }
         let mut iov_buf = [0u8; 16];
         ctx.guest_read(msg_iov, &mut iov_buf);
-        let iov_base = u64::from_le_bytes(iov_buf[0..8].try_into().unwrap());
-        let iov_len = u64::from_le_bytes(iov_buf[8..16].try_into().unwrap()) as usize;
+        let iov_base = u64::from_le_bytes(iov_buf[0..8].try_into().expect("invariant: 8-byte slice"));
+        let iov_len = u64::from_le_bytes(iov_buf[8..16].try_into().expect("invariant: 8-byte slice")) as usize;
 
         // Read seatd response into iovec buffer
         let ret = crate::seatd::seatd_read(ctx, fd, iov_base, iov_len as u64);
@@ -1905,12 +1905,13 @@ pub(crate) fn sys_socketpair(ctx: &mut SyscallContext, msg: &IpcMsg) {
     }
 
     // Allocate a proper AF_UNIX connection (two pipes for bidirectional I/O)
-    let conn = crate::fd::unix_conn_alloc();
-    if conn.is_none() {
-        reply_val(ep_cap, -ENOMEM);
-        return;
-    }
-    let (conn_slot, _pipe_a, _pipe_b) = conn.unwrap();
+    let (conn_slot, _pipe_a, _pipe_b) = match crate::fd::unix_conn_alloc() {
+        Some(c) => c,
+        None => {
+            reply_val(ep_cap, -ENOMEM);
+            return;
+        }
+    };
 
     let mut fd1 = None;
     let mut fd2 = None;

@@ -230,8 +230,8 @@ pub(crate) fn sys_prctl(ctx: &mut SyscallContext, msg: &IpcMsg) {
                 ctx.guest_read(buf, &mut raw);
                 // NUL-terminate at 15
                 raw[15] = 0;
-                let w0 = u64::from_le_bytes(raw[0..8].try_into().unwrap());
-                let w1 = u64::from_le_bytes(raw[8..16].try_into().unwrap());
+                let w0 = u64::from_le_bytes(raw[0..8].try_into().expect("invariant: 8-byte slice"));
+                let w1 = u64::from_le_bytes(raw[8..16].try_into().expect("invariant: 8-byte slice"));
                 PROCESSES[ctx.pid - 1].proc_name[0].store(w0, Ordering::Release);
                 PROCESSES[ctx.pid - 1].proc_name[1].store(w1, Ordering::Release);
             }
@@ -424,10 +424,10 @@ pub(crate) fn sys_timerfd_settime(ctx: &mut SyscallContext, msg: &IpcMsg) {
             if new_value_ptr != 0 {
                 let mut tv = [0u8; 32];
                 ctx.guest_read(new_value_ptr, &mut tv);
-                let int_sec = u64::from_le_bytes(tv[0..8].try_into().unwrap());
-                let int_ns = u64::from_le_bytes(tv[8..16].try_into().unwrap());
-                let val_sec = u64::from_le_bytes(tv[16..24].try_into().unwrap());
-                let val_ns = u64::from_le_bytes(tv[24..32].try_into().unwrap());
+                let int_sec = u64::from_le_bytes(tv[0..8].try_into().expect("invariant: 8-byte slice"));
+                let int_ns = u64::from_le_bytes(tv[8..16].try_into().expect("invariant: 8-byte slice"));
+                let val_sec = u64::from_le_bytes(tv[16..24].try_into().expect("invariant: 8-byte slice"));
+                let val_ns = u64::from_le_bytes(tv[24..32].try_into().expect("invariant: 8-byte slice"));
                 let interval_ns = int_sec * 1_000_000_000 + int_ns;
                 let value_ns = val_sec * 1_000_000_000 + val_ns;
                 ctx.timerfd_interval_ns[slot] = interval_ns;

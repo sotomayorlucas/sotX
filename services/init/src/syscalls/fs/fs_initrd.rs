@@ -47,8 +47,8 @@ pub(crate) fn readv_initrd(ctx: &mut SyscallContext, fd: usize, iov_ptr: u64, io
                 if entry + 16 > 0x0000_8000_0000_0000 { break; }
                 let mut iov_buf = [0u8; 16];
                 ctx.guest_read(entry, &mut iov_buf);
-                let base = u64::from_le_bytes(iov_buf[0..8].try_into().unwrap());
-                let len = u64::from_le_bytes(iov_buf[8..16].try_into().unwrap()) as usize;
+                let base = u64::from_le_bytes(iov_buf[0..8].try_into().expect("invariant: 8-byte slice"));
+                let len = u64::from_le_bytes(iov_buf[8..16].try_into().expect("invariant: 8-byte slice")) as usize;
                 if base == 0 || len == 0 { continue; }
                 let avail = if pos < file_size { (file_size - pos) as usize } else { 0 };
                 let to_read = len.min(avail);
