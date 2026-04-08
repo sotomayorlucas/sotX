@@ -143,6 +143,9 @@ fn try_rdrand(buf: &mut [u8]) -> bool {
     while i + 8 <= buf.len() {
         let val: u64;
         let success: u8;
+        // SAFETY: `rdrand` is an unprivileged instruction that clobbers only
+        // the named output registers; `nomem`/`nostack` hold because it reads
+        // no memory and does not touch the stack. CF indicates success.
         unsafe {
             core::arch::asm!(
                 "rdrand {val}",
@@ -164,6 +167,9 @@ fn try_rdrand(buf: &mut [u8]) -> bool {
     if ok && i < buf.len() {
         let val: u64;
         let success: u8;
+        // SAFETY: same as the loop above — `rdrand` is unprivileged, writes
+        // only into the named output registers, and has no memory/stack
+        // side-effects. CF reports whether the RNG delivered fresh entropy.
         unsafe {
             core::arch::asm!(
                 "rdrand {val}",
@@ -190,6 +196,9 @@ fn tsc_entropy(buf: &mut [u8]) {
     while i + 8 <= buf.len() {
         let lo: u32;
         let hi: u32;
+        // SAFETY: `rdtsc` is always available on x86_64 (CPUID.EDX.TSC=1
+        // guaranteed by the architecture baseline), clobbers only EAX/EDX
+        // which are declared as outputs, and has no memory/stack effects.
         unsafe {
             core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi, options(nomem, nostack));
         }
@@ -201,6 +210,9 @@ fn tsc_entropy(buf: &mut [u8]) {
     if i < buf.len() {
         let lo: u32;
         let hi: u32;
+        // SAFETY: same as above — `rdtsc` is architecturally available,
+        // writes only EAX/EDX (declared outputs), and does not touch memory
+        // or the stack (nomem, nostack).
         unsafe {
             core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi, options(nomem, nostack));
         }

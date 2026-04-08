@@ -191,6 +191,10 @@ pub fn free_pcid(pcid: u16) {
 #[inline]
 pub unsafe fn switch_pcid(cr3_base: u64, pcid: u16) {
     let new_cr3 = (cr3_base & !0xFFF) | (pcid as u64 & 0xFFF) | (1u64 << 63);
+    // SAFETY: caller guarantees `cr3_base` is a valid page-aligned PML4 phys
+    // address and `pcid` is allocated. Bit 63 set means "no global TLB
+    // flush"; nomem/nostack/preserves_flags hold because the instruction
+    // touches only CR3 and not memory or stack.
     core::arch::asm!(
         "mov cr3, {}",
         in(reg) new_cr3,
@@ -484,6 +488,10 @@ impl SharedMemoryRing {
 
         for (i, &byte) in data.iter().enumerate() {
             let offset = (h + i) & mask;
+            // SAFETY: caller guarantees `[phys_base..phys_base+size)` is HHDM
+            // mapped writable. `offset` is in range because `(h+i) & mask`
+            // is bounded by `size-1`. Single producer owns the slot until
+            // `head` is published below via Release store.
             core::ptr::write_volatile(virt_base.add(offset), byte);
         }
 
@@ -512,6 +520,10 @@ impl SharedMemoryRing {
 
         for i in 0..count {
             let offset = (t + i) & mask;
+            // SAFETY: caller guarantees the HHDM mapping is valid. `available()`
+            // proved the producer published these `count` bytes via Release on
+            // `head`, and we have an Acquire on `head` inside `available()`,
+            // so the byte at `offset` is initialised and stable.
             buf[i] = core::ptr::read_volatile(virt_base.add(offset));
         }
 
@@ -531,8 +543,10 @@ impl SharedMemoryRing {
     }
 }
 
-// Safety: the ring is designed for single-producer / single-consumer
-// across cores; atomics on head/tail provide the necessary ordering.
+// SAFETY: the ring is designed for single-producer / single-consumer across
+// cores; atomic Acquire/Release on head/tail provide the cross-core ordering
+// required to send/share the ring handle. The actual buffer bytes are
+// accessed via raw pointers under the safety contract of `push`/`pop`.
 unsafe impl Send for SharedMemoryRing {}
 unsafe impl Sync for SharedMemoryRing {}
 
@@ -630,6 +644,9 @@ pub fn flush_all_caches() {
 fn rdtsc() -> u64 {
     let lo: u32;
     let hi: u32;
+    // SAFETY: `rdtsc` is architecturally available on x86_64 (CPUID baseline),
+    // writes only EAX/EDX which are declared as outputs, and has no memory
+    // or stack side-effects (nomem, nostack).
     unsafe {
         core::arch::asm!(
             "rdtsc",

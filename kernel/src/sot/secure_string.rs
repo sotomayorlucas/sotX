@@ -15,6 +15,10 @@
 /// Ported from OpenBSD `explicit_bzero` (`vendor/openbsd-crypto/string/explicit_bzero.c`).
 pub fn explicit_bzero(buf: &mut [u8]) {
     for b in buf.iter_mut() {
+        // SAFETY: `b` is a valid `&mut u8` from the slice iterator, so the
+        // pointer is non-null, properly aligned, and exclusively owned for
+        // the duration of the write. `write_volatile` prevents the optimiser
+        // from eliding the secret-zeroing.
         unsafe { core::ptr::write_volatile(b, 0) };
     }
     core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
