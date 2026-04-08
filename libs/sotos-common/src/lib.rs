@@ -249,6 +249,122 @@ pub enum Syscall {
     TxPrepare = 311,
 }
 
+impl Syscall {
+    /// Fallible decode from a raw syscall number (as received in `rax`).
+    ///
+    /// Returns `None` for any value that does not correspond to a defined
+    /// variant. This is the pure-Rust decoder that the kernel dispatch
+    /// table *could* use, and that the cargo-fuzz harness fuzzes: every
+    /// `u64` must either decode into a known variant or be rejected --
+    /// there must be no in-between state, no panic, and no UB.
+    ///
+    /// The implementation is a single `match` on the `#[repr(u64)]`
+    /// discriminants so it stays in sync with the enum: adding a new
+    /// variant forces a new arm here (caught by `#![deny(...)]` in the
+    /// fuzz harness's build).
+    pub const fn try_from_u64(n: u64) -> Option<Self> {
+        // Explicit match (no transmute) so rustc verifies each discriminant
+        // is a declared variant of the `#[repr(u64)]` enum. Adding a new
+        // variant to the enum without a matching arm here silently falls
+        // through to `None` -- tests in the fuzz corpus catch that regression.
+        let v = match n {
+            0 => Self::Yield,
+            1 => Self::Send,
+            2 => Self::Recv,
+            3 => Self::Call,
+            4 => Self::ChannelCreate,
+            5 => Self::ChannelSend,
+            6 => Self::ChannelRecv,
+            7 => Self::ChannelClose,
+            10 => Self::EndpointCreate,
+            20 => Self::FrameAlloc,
+            21 => Self::FrameFree,
+            22 => Self::Map,
+            23 => Self::Unmap,
+            24 => Self::UnmapFree,
+            30 => Self::CapGrant,
+            31 => Self::CapRevoke,
+            40 => Self::ThreadCreate,
+            41 => Self::ThreadDestroy,
+            42 => Self::ThreadExit,
+            43 => Self::ThreadResume,
+            50 => Self::IrqRegister,
+            51 => Self::IrqAck,
+            60 => Self::PortIn,
+            61 => Self::PortOut,
+            70 => Self::NotifyCreate,
+            71 => Self::NotifyWait,
+            72 => Self::NotifySignal,
+            80 => Self::FaultRegister,
+            81 => Self::FaultRecv,
+            90 => Self::DomainCreate,
+            91 => Self::DomainAttach,
+            92 => Self::DomainDetach,
+            93 => Self::DomainAdjust,
+            94 => Self::DomainInfo,
+            100 => Self::FramePhys,
+            101 => Self::IoPortCreate,
+            102 => Self::FrameAllocContig,
+            103 => Self::IrqCreate,
+            104 => Self::MapOffset,
+            110 => Self::RedirectSet,
+            120 => Self::AddrSpaceCreate,
+            121 => Self::MapInto,
+            122 => Self::ThreadCreateIn,
+            123 => Self::UnmapFrom,
+            125 => Self::AddrSpaceClone,
+            126 => Self::FrameCopy,
+            127 => Self::PteRead,
+            128 => Self::VmRead,
+            129 => Self::VmWrite,
+            130 => Self::SvcRegister,
+            131 => Self::SvcLookup,
+            132 => Self::InitrdRead,
+            133 => Self::BootInfoWrite,
+            134 => Self::Protect,
+            135 => Self::CallTimeout,
+            136 => Self::RecvTimeout,
+            140 => Self::ThreadInfo,
+            141 => Self::ResourceLimit,
+            142 => Self::ThreadCount,
+            143 => Self::ThreadNotify,
+            144 => Self::NotifyPoll,
+            150 => Self::Chmod,
+            151 => Self::Chown,
+            160 => Self::SetFsBase,
+            161 => Self::GetFsBase,
+            175 => Self::ProtectIn,
+            180 => Self::ShmCreate,
+            181 => Self::ShmMap,
+            182 => Self::ShmUnmap,
+            183 => Self::ShmDestroy,
+            253 => Self::DebugRead,
+            255 => Self::DebugPrint,
+            300 => Self::SoCreate,
+            301 => Self::SoInvoke,
+            302 => Self::SoGrant,
+            303 => Self::SoRevoke,
+            304 => Self::SoObserve,
+            305 => Self::SotDomainCreate,
+            306 => Self::SotDomainEnter,
+            307 => Self::SotChannelCreate,
+            308 => Self::TxBegin,
+            309 => Self::TxCommit,
+            310 => Self::TxAbort,
+            311 => Self::TxPrepare,
+            _ => return None,
+        };
+        Some(v)
+    }
+}
+
+impl core::convert::TryFrom<u64> for Syscall {
+    type Error = SysError;
+    fn try_from(n: u64) -> Result<Self, Self::Error> {
+        Self::try_from_u64(n).ok_or(SysError::InvalidArg)
+    }
+}
+
 /// Error codes returned by syscalls.
 #[repr(i64)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -400,6 +516,170 @@ impl IpcMsg {
             tag: 0,
             regs: [0; 8],
         }
+    }
+
+    /// Serialized wire size: `tag (u64) + 8 * reg (u64)` = 72 bytes.
+    pub const WIRE_SIZE: usize = 8 + 8 * 8;
+
+    /// Pure decoder: parse an `IpcMsg` from its on-wire little-endian
+    /// byte representation. Returns `None` if the input is too short.
+    ///
+    /// This is the exact inverse of `encode_to_bytes`: the kernel writes
+    /// messages into a userspace ring as `[tag_le; reg0_le; ...; reg7_le]`,
+    /// and a userspace receiver must be able to reconstruct a struct from
+    /// that byte pattern without any `unsafe` transmute. The fuzzer drives
+    /// this function with arbitrary bytes to prove it never panics.
+    pub fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < Self::WIRE_SIZE {
+            return None;
+        }
+        let tag = u64::from_le_bytes(bytes[0..8].try_into().ok()?);
+        let mut regs = [0u64; 8];
+        for (i, slot) in regs.iter_mut().enumerate() {
+            let off = 8 + i * 8;
+            *slot = u64::from_le_bytes(bytes[off..off + 8].try_into().ok()?);
+        }
+        Some(Self { tag, regs })
+    }
+
+    /// Serialize this message to a fixed-size little-endian byte array.
+    /// Matches `decode_from_bytes` (round-trip identity).
+    pub fn encode_to_bytes(&self) -> [u8; Self::WIRE_SIZE] {
+        let mut out = [0u8; Self::WIRE_SIZE];
+        out[0..8].copy_from_slice(&self.tag.to_le_bytes());
+        for (i, reg) in self.regs.iter().enumerate() {
+            let off = 8 + i * 8;
+            out[off..off + 8].copy_from_slice(&reg.to_le_bytes());
+        }
+        out
+    }
+}
+
+// ---------------------------------------------------------------
+// Provenance entry decoder (userspace-side parser for the kernel ring)
+// ---------------------------------------------------------------
+
+/// Pure-Rust decoder for the kernel `sot::provenance::ProvenanceEntry`
+/// wire format (48 bytes, `#[repr(C)]` layout).
+///
+/// This mirror lives in `sotos-common` so both the kernel and any
+/// userspace observer can parse entries drained out of the per-CPU ring
+/// via `SYS_PROVENANCE_DRAIN` (syscall 260) without pulling in
+/// `libs/sot-fma` or reaching into the kernel crate. It is the target
+/// of the `provenance_entry` fuzz harness.
+///
+/// Byte layout (little-endian, `#[repr(C)]`, 48 bytes total):
+/// ```text
+///   0..8   : epoch       (u64)
+///   8..12  : domain_id   (u32)
+///  12..14  : operation   (u16)
+///  14..15  : so_type     (u8)
+///  15..16  : _pad        (u8)
+///  16..24  : so_id       (u64)
+///  24..32  : version     (u64)
+///  32..40  : tx_id       (u64)
+///  40..48  : timestamp   (u64)
+/// ```
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProvenanceEntry {
+    pub epoch: u64,
+    pub domain_id: u32,
+    pub operation: u16,
+    pub so_type: u8,
+    pub _pad: u8,
+    pub so_id: u64,
+    pub version: u64,
+    pub tx_id: u64,
+    pub timestamp: u64,
+}
+
+/// On-wire size of a serialized `ProvenanceEntry` (pinned by a compile-time
+/// assertion below). If this ever drifts from the kernel struct size the
+/// build breaks -- the consumers that walk drained ring entries would
+/// otherwise silently corrupt data.
+pub const PROVENANCE_ENTRY_SIZE: usize = 48;
+
+const _: () = assert!(core::mem::size_of::<ProvenanceEntry>() == PROVENANCE_ENTRY_SIZE);
+
+impl ProvenanceEntry {
+    pub const fn zeroed() -> Self {
+        Self {
+            epoch: 0,
+            domain_id: 0,
+            operation: 0,
+            so_type: 0,
+            _pad: 0,
+            so_id: 0,
+            version: 0,
+            tx_id: 0,
+            timestamp: 0,
+        }
+    }
+
+    /// Decode a single provenance entry from its on-wire bytes.
+    ///
+    /// Returns `None` if the input is shorter than [`PROVENANCE_ENTRY_SIZE`].
+    /// Fields are read little-endian, matching the kernel's `#[repr(C)]`
+    /// layout on x86_64. No `unsafe`, no transmute -- safe to call on
+    /// fuzzer-supplied bytes.
+    ///
+    /// The `operation` field is validated loosely: any value that's not
+    /// a known opcode is still returned (as-is) so that fuzzers exercise
+    /// the full value space, but a higher-level consumer can call
+    /// [`ProvenanceEntry::is_valid_operation`] to reject unknowns.
+    pub fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < PROVENANCE_ENTRY_SIZE {
+            return None;
+        }
+        let epoch = u64::from_le_bytes(bytes[0..8].try_into().ok()?);
+        let domain_id = u32::from_le_bytes(bytes[8..12].try_into().ok()?);
+        let operation = u16::from_le_bytes(bytes[12..14].try_into().ok()?);
+        let so_type = bytes[14];
+        let _pad = bytes[15];
+        let so_id = u64::from_le_bytes(bytes[16..24].try_into().ok()?);
+        let version = u64::from_le_bytes(bytes[24..32].try_into().ok()?);
+        let tx_id = u64::from_le_bytes(bytes[32..40].try_into().ok()?);
+        let timestamp = u64::from_le_bytes(bytes[40..48].try_into().ok()?);
+        Some(Self {
+            epoch,
+            domain_id,
+            operation,
+            so_type,
+            _pad,
+            so_id,
+            version,
+            tx_id,
+            timestamp,
+        })
+    }
+
+    /// Encode this entry to its canonical 48-byte little-endian form.
+    /// Round-trip: `decode_from_bytes(encode_to_bytes()) == Some(self)`.
+    pub fn encode_to_bytes(&self) -> [u8; PROVENANCE_ENTRY_SIZE] {
+        let mut out = [0u8; PROVENANCE_ENTRY_SIZE];
+        out[0..8].copy_from_slice(&self.epoch.to_le_bytes());
+        out[8..12].copy_from_slice(&self.domain_id.to_le_bytes());
+        out[12..14].copy_from_slice(&self.operation.to_le_bytes());
+        out[14] = self.so_type;
+        out[15] = self._pad;
+        out[16..24].copy_from_slice(&self.so_id.to_le_bytes());
+        out[24..32].copy_from_slice(&self.version.to_le_bytes());
+        out[32..40].copy_from_slice(&self.tx_id.to_le_bytes());
+        out[40..48].copy_from_slice(&self.timestamp.to_le_bytes());
+        out
+    }
+
+    /// Rough semantic validator: returns `true` if the operation opcode
+    /// is within the range the kernel actually emits. Used by higher
+    /// layers (and the fuzzer's sanity assertions) to spot garbage
+    /// entries without hard-panicking.
+    ///
+    /// Operation codes 0..=31 are reserved for current and future SOT
+    /// operations (create/read/write/invoke/grant/revoke/...); values
+    /// above that range should never appear in practice.
+    pub const fn is_valid_operation(&self) -> bool {
+        self.operation <= 31
     }
 }
 

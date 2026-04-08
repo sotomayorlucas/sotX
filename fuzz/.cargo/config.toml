@@ -1,0 +1,16 @@
+# Cargo-fuzz runs on the host (libFuzzer-linked), NOT the kernel target.
+# This file locally undoes the parent `.cargo/config.toml` that points
+# at `x86_64-unknown-none` + `build-std`, both of which are incompatible
+# with libFuzzer. We leave `[build] target` unset so cargo-fuzz can pick
+# the host triple (and its `--target` flag for the nightly sanitizer),
+# and we explicitly clear the rustflags used for kernel builds.
+
+[build]
+rustflags = []
+
+# Clear build-std: fuzz targets link against the host std + libFuzzer, not
+# the kernel's custom core build. The parent `[unstable]` block would
+# otherwise force cargo-fuzz to rebuild `core`/`alloc`/`compiler_builtins`
+# against host libc, which fails.
+[unstable]
+build-std = []

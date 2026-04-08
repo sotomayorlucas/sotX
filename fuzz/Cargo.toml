@@ -1,0 +1,62 @@
+[package]
+name = "sotos-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+# Explicit empty workspace table: this crate is *standalone* so that
+# cargo-fuzz does not try to attach it to whatever workspace happens to
+# sit above `fuzz/` in the filesystem (e.g. a parent git worktree's
+# `Cargo.toml`). Coupled with the repo-root `[workspace] exclude = ["fuzz"]`
+# this makes the fuzz crate fully independent of the kernel workspace.
+[workspace]
+
+# Notes for future maintainers:
+#
+# This crate is deliberately *excluded* from the sotOS workspace (see the
+# `[workspace] exclude = [...]` list at the repo root `Cargo.toml`). The
+# reason is that `libfuzzer-sys` drops linker flags that conflict with the
+# kernel target's `-Crelocation-model=static` / `x86_64-unknown-none`
+# pipeline: libFuzzer needs host linkage against libc/compiler-rt, which
+# the kernel's `build-std` tree cannot provide.
+#
+# Running from inside this directory (`cd fuzz && cargo +nightly fuzz run …`)
+# gives cargo-fuzz a clean environment where it picks up its own
+# `Cargo.toml`, builds on the host target, and links against libFuzzer.
+#
+# Keep `publish = false` so this crate never lands on crates.io and never
+# conflicts with the ABI-freeze sprint (Sprint 3) checks.
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+sotos-common = { path = "../libs/sotos-common" }
+
+[[bin]]
+name = "syscall_parse"
+path = "fuzz_targets/syscall_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ipc_decode"
+path = "fuzz_targets/ipc_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "provenance_entry"
+path = "fuzz_targets/provenance_entry.rs"
+test = false
+doc = false
+bench = false
+
+# Release profile tuned for libFuzzer: keep debug info so crash reports
+# symbolicate cleanly, but still let the optimizer inline the decoders
+# so coverage-guided mutation stays fast.
+[profile.release]
+debug = 1

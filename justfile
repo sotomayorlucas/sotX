@@ -546,6 +546,59 @@ check:
 lint:
     cargo clippy --package sotos-kernel -- -W clippy::all
 
+# ── U12: coverage-guided cargo-fuzz harness ──
+#
+# Pure-decoder fuzzing on the host (libFuzzer via `libfuzzer-sys`) for:
+#   - sotos_common::Syscall::try_from_u64      (target: syscall_parse)
+#   - sotos_common::IpcMsg::decode_from_bytes  (target: ipc_decode)
+#   - sotos_common::ProvenanceEntry::decode_from_bytes (target: provenance_entry)
+#
+# Prerequisite: `cargo install cargo-fuzz` (one-time; see PR description).
+#
+# Usage:
+#   just fuzz                           # 60s of syscall_parse
+#   just fuzz ipc_decode                # 60s of ipc_decode
+#   just fuzz provenance_entry 300      # 5 min of provenance_entry
+#
+# The `fuzz/` crate is a workspace EXCLUDE so this recipe does NOT
+# interfere with `just build`. We invoke cargo-fuzz from a path OUTSIDE
+# the repository (the system temp dir) so that cargo's `.cargo/config.toml`
+# walk does NOT pick up the kernel's `x86_64-unknown-none` + `build-std`
+# settings, which are incompatible with libFuzzer instrumentation on the
+# host target. `--fuzz-dir` still points back at the in-repo fuzz crate.
+#
+# On Windows, libFuzzer's AddressSanitizer instrumentation requires the
+# `clang_rt.asan_dynamic-x86_64.dll` runtime DLL to be on PATH. We try
+# MSVC's copy first, then fall back to LLVM's. On Linux, the recipe
+# skips the PATH prefix.
+
+# Run a cargo-fuzz target against sotos-common decoders (see comment block above).
+fuzz target='syscall_parse' duration='60':
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ "$(uname -s)" == MINGW* || "$(uname -s)" == MSYS* || "$(uname -s)" == CYGWIN* ]]; then
+        ASAN_DIR=""
+        for candidate in \
+            "/c/Program Files/Microsoft Visual Studio/18/Community/VC/Tools/MSVC/14.50.35717/bin/Hostx64/x64" \
+            "/c/Program Files/Microsoft Visual Studio/17/Community/VC/Tools/MSVC/14.42.34433/bin/Hostx64/x64" \
+            "/c/Program Files/LLVM/lib/clang/22/lib/windows" \
+            "/c/Program Files/LLVM/lib/clang/21/lib/windows" \
+            "/c/Program Files/LLVM/lib/clang/20/lib/windows" \
+            "/c/Program Files/LLVM/lib/clang/19/lib/windows"; do
+            if [[ -d "$candidate" ]] && ls "$candidate"/clang_rt.asan_dynamic-x86_64.dll >/dev/null 2>&1; then
+                ASAN_DIR="$candidate"
+                break
+            fi
+        done
+        if [[ -n "$ASAN_DIR" ]]; then
+            export PATH="$ASAN_DIR:$PATH"
+            echo "fuzz: using ASAN runtime from $ASAN_DIR"
+        else
+            echo "fuzz: WARN: clang_rt.asan_dynamic-x86_64.dll not found on PATH; libFuzzer may fail to start" >&2
+        fi
+    fi
+    cd "${TEMP:-/tmp}" && cargo +nightly fuzz run --fuzz-dir "{{justfile_directory()}}/fuzz" {{target}} -- -max_total_time={{duration}}
+
 # ── LKL (Linux Kernel Library) targets ──
 
 # Build LKL server (requires WSL2 with Ubuntu)

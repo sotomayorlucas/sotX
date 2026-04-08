@@ -57,6 +57,11 @@ exclude = [
     "tests/security",
     "tests/posix",
     "tests/deception",
+    # Coverage-guided cargo-fuzz harness. Excluded because libfuzzer-sys
+    # injects linker flags that conflict with the kernel's
+    # `-Crelocation-model=static` / `x86_64-unknown-none` target. Build
+    # and run from inside `fuzz/` via `just fuzz`.
+    "fuzz",
 ]
 
 [profile.dev]
