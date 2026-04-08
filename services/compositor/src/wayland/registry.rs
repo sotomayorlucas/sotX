@@ -16,11 +16,17 @@ pub struct GlobalEntry {
 }
 
 /// The globals we advertise.
-pub static GLOBALS: [GlobalEntry; 4] = [
+///
+/// Global `name` numbers are arbitrary per-server identifiers; we use
+/// small integers starting at 1. The dispatcher in `mod.rs` maps the
+/// name back to the bound-object slot on the client side when a
+/// `wl_registry::bind` arrives.
+pub static GLOBALS: [GlobalEntry; 5] = [
     GlobalEntry { name: 1, interface: super::WL_COMPOSITOR_INTERFACE, version: 4 },
     GlobalEntry { name: 2, interface: super::WL_SHM_INTERFACE, version: 1 },
     GlobalEntry { name: 3, interface: super::XDG_WM_BASE_INTERFACE, version: 2 },
     GlobalEntry { name: 4, interface: super::WL_SEAT_INTERFACE, version: 5 },
+    GlobalEntry { name: 5, interface: super::ZWLR_LAYER_SHELL_V1_INTERFACE, version: 4 },
 ];
 
 /// Send all global advertisements to a newly created registry.
