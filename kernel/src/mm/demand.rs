@@ -191,6 +191,10 @@ pub fn handle_fault(vaddr: u64, cr3: u64) -> Option<(PhysFrame, DemandFlags)> {
     // Zero the allocated frame for security (prevent information leaks).
     let hhdm = mm::hhdm_offset();
     let frame_virt = (frame.addr() + hhdm) as *mut u8;
+    // SAFETY: `frame` was just allocated by `alloc_frame()` and is not yet
+    // mapped into any AS, so we are the sole owner of the page. The HHDM
+    // mapping covers all physical RAM with R/W permissions, and 4096 bytes
+    // is exactly one frame, so the write is in bounds.
     unsafe {
         core::ptr::write_bytes(frame_virt, 0, 4096);
     }

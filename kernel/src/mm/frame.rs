@@ -61,12 +61,19 @@ impl BitmapAllocator {
     fn is_set(&self, idx: usize) -> bool {
         let byte = idx / 8;
         let bit = idx % 8;
+        // SAFETY: callers (allocate, free, allocate_contiguous) only pass `idx`
+        // values in `0..self.total_frames`, so `byte = idx/8 < bitmap_len`. The
+        // bitmap pointer was allocated by `init()` to cover `bitmap_len` bytes
+        // and is held under the `ALLOCATOR` Mutex (Send unsafe impl above).
         unsafe { (*self.bitmap.add(byte) >> bit) & 1 == 1 }
     }
 
     fn set(&mut self, idx: usize) {
         let byte = idx / 8;
         let bit = idx % 8;
+        // SAFETY: same as `is_set`. We hold `&mut self` so the ALLOCATOR Mutex
+        // is locked exclusively and no concurrent reader/writer exists. `byte`
+        // is bounds-checked by the caller's `idx < total_frames` invariant.
         unsafe {
             *self.bitmap.add(byte) |= 1 << bit;
         }
@@ -75,6 +82,8 @@ impl BitmapAllocator {
     fn clear(&mut self, idx: usize) {
         let byte = idx / 8;
         let bit = idx % 8;
+        // SAFETY: same as `set` — exclusive `&mut self` access via the
+        // ALLOCATOR Mutex; `byte` is in range because `idx < total_frames`.
         unsafe {
             *self.bitmap.add(byte) &= !(1 << bit);
         }
@@ -91,6 +100,8 @@ impl BitmapAllocator {
             while idx < end {
                 let byte = idx / 8;
                 // Fast skip: if entire byte is full (0xFF), skip 8 frames
+                // SAFETY: `idx < end <= total_frames`, so `byte < bitmap_len`.
+                // `&mut self` proves the ALLOCATOR mutex is locked.
                 let b = unsafe { *self.bitmap.add(byte) };
                 if b == 0xFF {
                     idx = (byte + 1) * 8;
@@ -133,6 +144,8 @@ impl BitmapAllocator {
             while idx < end {
                 // Fast skip full bytes
                 let byte = idx / 8;
+                // SAFETY: `idx < end <= limit <= total_frames - count + 1`, so
+                // `byte < bitmap_len`. Mutex held via `&mut self`.
                 let b = unsafe { *self.bitmap.add(byte) };
                 if b == 0xFF && idx % 8 == 0 {
                     idx += 8;
@@ -199,6 +212,11 @@ pub fn init(memory_map: &MemoryMapResponse, hhdm_offset: u64) {
     let bitmap_ptr = (bitmap_phys + hhdm_offset) as *mut u8;
 
     // Mark all frames as allocated initially.
+    // SAFETY: `bitmap_ptr = bitmap_phys + hhdm_offset`, where `bitmap_phys` was
+    // selected from the memmap as a USABLE region of length >= `bitmap_bytes`,
+    // and the HHDM mapping makes that physical range writable. No other code
+    // has touched this region yet (we are early in `init`), so the write of
+    // `bitmap_bytes` 0xFF bytes is exclusive and within bounds.
     unsafe {
         core::ptr::write_bytes(bitmap_ptr, 0xFF, bitmap_bytes);
     }

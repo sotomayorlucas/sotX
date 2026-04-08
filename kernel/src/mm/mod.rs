@@ -86,6 +86,9 @@ pub fn random_u64() -> u64 {
         // Seed from RDTSC.
         let lo: u32;
         let hi: u32;
+        // SAFETY: `rdtsc` is architecturally available on x86_64; writes only
+        // EAX/EDX (declared outputs), no memory or stack effects (nomem,
+        // nostack).
         unsafe {
             core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi, options(nomem, nostack));
         }

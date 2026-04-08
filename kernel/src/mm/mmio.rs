@@ -60,6 +60,10 @@ impl MmioRegion {
             offset,
             self.size
         );
+        // SAFETY: `MmioRegion::new` is unsafe, so its caller already promised
+        // that `[base..base+size)` is a valid HHDM-mapped MMIO region. The
+        // debug_assert above guarantees `offset + 4 <= size`. Volatile read
+        // prevents elision/reordering of the MMIO access.
         unsafe { ptr::read_volatile(self.vaddr(offset) as *const u32) }
     }
 
@@ -75,6 +79,8 @@ impl MmioRegion {
             offset,
             self.size
         );
+        // SAFETY: see `read32` — caller of `MmioRegion::new` guarantees the
+        // mapping is valid; the debug_assert bounds-checks the offset.
         unsafe { ptr::write_volatile(self.vaddr(offset) as *mut u32, val) }
     }
 
@@ -90,6 +96,7 @@ impl MmioRegion {
             offset,
             self.size
         );
+        // SAFETY: see `read32` — same safety contract, 8-byte width.
         unsafe { ptr::read_volatile(self.vaddr(offset) as *const u64) }
     }
 
@@ -105,6 +112,7 @@ impl MmioRegion {
             offset,
             self.size
         );
+        // SAFETY: see `read32` — same safety contract, 8-byte width.
         unsafe { ptr::write_volatile(self.vaddr(offset) as *mut u64, val) }
     }
 
@@ -120,6 +128,7 @@ impl MmioRegion {
             offset,
             self.size
         );
+        // SAFETY: see `read32` — same safety contract, 1-byte width.
         unsafe { ptr::read_volatile(self.vaddr(offset) as *const u8) }
     }
 
@@ -135,6 +144,7 @@ impl MmioRegion {
             offset,
             self.size
         );
+        // SAFETY: see `read32` — same safety contract, 1-byte width.
         unsafe { ptr::write_volatile(self.vaddr(offset) as *mut u8, val) }
     }
 
@@ -147,6 +157,7 @@ impl MmioRegion {
             offset,
             self.size
         );
+        // SAFETY: see `read32` — same safety contract, 2-byte width.
         unsafe { ptr::read_volatile(self.vaddr(offset) as *const u16) }
     }
 
@@ -159,6 +170,7 @@ impl MmioRegion {
             offset,
             self.size
         );
+        // SAFETY: see `read32` — same safety contract, 2-byte width.
         unsafe { ptr::write_volatile(self.vaddr(offset) as *mut u16, val) }
     }
 }

@@ -66,6 +66,9 @@ struct SlabAllocator {
     ready: bool,
 }
 
+// SAFETY: SlabAllocator only stores raw `*mut SlabHeader` pointers and is
+// always accessed under the per-CPU `Mutex<SlabAllocator>` in CPU_CACHES, so
+// the raw pointers cannot be shared concurrently.
 unsafe impl Send for SlabAllocator {}
 
 impl SlabAllocator {
@@ -129,6 +132,12 @@ impl SlabAllocator {
         let data_start = (header_size + obj_size - 1) & !(obj_size - 1);
         let count = (PAGE_SIZE - data_start) / obj_size;
 
+        // SAFETY: `page` is a freshly allocated 4 KiB page from
+        // `alloc_page()`, exclusively owned by this allocator (we are inside
+        // `&mut self` SlabAllocator). `header` aliases the start of the page,
+        // and the free-list nodes live in `[data_start..PAGE_SIZE)`, which is
+        // strictly within the page. `count` is computed so that
+        // `data_start + count * obj_size <= PAGE_SIZE`.
         unsafe {
             (*header).next = ptr::null_mut();
             (*header).obj_size = obj_size as u16;
@@ -177,6 +186,10 @@ impl SlabAllocator {
         }
 
         let slab = self.classes[idx].partial;
+        // SAFETY: `slab` was either pulled from `partial` (kept non-null and
+        // alive by the allocator) or just initialised by `init_slab()` above.
+        // We hold `&mut self` so no concurrent access exists. `obj` is a free
+        // node whose first 8 bytes encode the next pointer.
         unsafe {
             let obj = (*slab).free_list;
             debug_assert!(!obj.is_null());
@@ -215,6 +228,11 @@ impl SlabAllocator {
         // Find slab header: page-align the pointer
         let slab = (ptr as usize & !(PAGE_SIZE - 1)) as *mut SlabHeader;
 
+        // SAFETY: `ptr` was returned from a prior `allocate()` call, so
+        // page-aligning it gives the SlabHeader at the start of the same
+        // 4 KiB slab page. The header is alive for the lifetime of the slab
+        // (only freed when the slab is empty). `&mut self` excludes other
+        // mutators on this CPU's allocator.
         unsafe {
             let was_full = (*slab).free_list.is_null();
 
@@ -240,12 +258,20 @@ static CPU_CACHES: [Mutex<SlabAllocator>; MAX_CPUS] = {
 
 pub struct KernelAllocator;
 
+// SAFETY: KernelAllocator implements GlobalAlloc by delegating to per-CPU
+// `Mutex<SlabAllocator>` instances; each call locks before mutating, so the
+// thread-safety contract of GlobalAlloc holds.
 unsafe impl GlobalAlloc for KernelAllocator {
+    /// # Safety
+    /// Standard `GlobalAlloc::alloc` contract — `layout.size() > 0`.
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let cpu = current_cpu_index();
         CPU_CACHES[cpu].lock().allocate(layout, cpu as u8)
     }
 
+    /// # Safety
+    /// `ptr` must have been returned by a previous `alloc()` with the same
+    /// `layout` and not yet freed.
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         let size = layout.size().max(layout.align());
 
@@ -258,6 +284,8 @@ unsafe impl GlobalAlloc for KernelAllocator {
 
         // Determine owner CPU from slab header.
         let slab = (ptr as usize & !(PAGE_SIZE - 1)) as *mut SlabHeader;
+        // SAFETY: page-aligning a valid slab object pointer reaches its
+        // SlabHeader, which is alive as long as the object is allocated.
         let owner = unsafe { (*slab).cpu_owner } as usize;
 
         // Free to the owner's cache (may be remote).
