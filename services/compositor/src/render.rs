@@ -74,26 +74,16 @@ impl Framebuffer {
         }
     }
 
-    /// Draw a simple title bar for a window.
-    pub fn draw_title_bar(&self, x: i32, y: i32, w: u32, title: &[u8]) {
-        const BAR_HEIGHT: u32 = 24;
-        const BAR_COLOR: u32 = 0xFF404040;   // dark gray
-        const CLOSE_COLOR: u32 = 0xFFFF5555;  // red
-        const CLOSE_SIZE: u32 = 16;
-
-        self.fill_rect(x, y, w, BAR_HEIGHT, BAR_COLOR);
-
-        // Close button (top-right)
-        let close_x = x + w as i32 - CLOSE_SIZE as i32 - 4;
-        let close_y = y + 4;
-        self.fill_rect(close_x, close_y, CLOSE_SIZE, CLOSE_SIZE, CLOSE_COLOR);
-
-        // Title text
-        let text_x = x + 6;
-        let text_y = y + 8;
-        let max_chars = ((w as i32 - 30) / 8).max(0) as usize;
-        let len = title.len().min(max_chars);
-        self.draw_text(text_x, text_y, &title[..len], 0xFFEEEEEE);
+    /// Draw a title bar for a window.
+    ///
+    /// Thin forwarder to `crate::decorations::draw_title_bar`, which owns all
+    /// the Tokyo Night-styled chrome (gradient, shadow, traffic lights).
+    /// Kept on `Framebuffer` for backwards compatibility with older callers.
+    pub fn draw_title_bar(&mut self, x: i32, y: i32, w: u32, title: &[u8]) {
+        // Legacy callers pass raw bytes; treat them as UTF-8 best-effort so
+        // the decorations module can use the existing bitmap font draw_text.
+        let title_str = core::str::from_utf8(title).unwrap_or("");
+        crate::decorations::draw_title_bar(self, x, y, w as i32, true, title_str);
     }
 
     /// Draw text at (x, y) using a built-in 8x8 bitmap font.

@@ -16,6 +16,7 @@
 mod wayland;
 mod render;
 mod input;
+mod decorations;
 
 use sotos_common::sys;
 use sotos_common::{BootInfo, IpcMsg, BOOT_INFO_ADDR, SyncUnsafeCell};
@@ -54,8 +55,9 @@ const MAX_POOL_SIZE: usize = 1024 * 1024;
 /// Desktop background color (dark blue-gray).
 const BG_COLOR: u32 = 0xFF2D2D3D;
 
-/// Title bar height in pixels.
-const TITLE_BAR_HEIGHT: u32 = 24;
+/// Title bar height in pixels (re-exported from `decorations` for legacy
+/// call-sites that still reference it by the old name).
+use decorations::TITLE_BAR_HEIGHT;
 
 /// IPC recv_timeout in scheduler ticks (~10ms at 100Hz = 1 tick).
 const IPC_POLL_TICKS: u32 = 1;
@@ -586,7 +588,7 @@ fn apply_dispatch_result(client_idx: usize, result: &DispatchResult) {
                 toplevels[i].xdg_surface_id = xdg_id;
                 toplevels[i].wl_surface_id = wl_surf_id;
                 toplevels[i].x = 50 + (i as i32 * 30); // cascade
-                toplevels[i].y = 50 + (i as i32 * 30) + TITLE_BAR_HEIGHT as i32;
+                toplevels[i].y = 50 + (i as i32 * 30) + TITLE_BAR_HEIGHT;
                 toplevels[i].width = 640;
                 toplevels[i].height = 480;
                 print(b"compositor: new toplevel ");
@@ -838,7 +840,7 @@ fn handle_mouse(packet: input::MousePacket) {
         if !tl.active { continue; }
         // Toplevel bounds: (tl.x, tl.y - TITLE_BAR_HEIGHT) to (tl.x + width, tl.y + height).
         let x0 = tl.x;
-        let y0 = tl.y - TITLE_BAR_HEIGHT as i32;
+        let y0 = tl.y - TITLE_BAR_HEIGHT;
         let x1 = tl.x + tl.width as i32;
         let y1 = tl.y + tl.height as i32;
         if cursor_x >= x0 && cursor_x < x1 && cursor_y >= y0 && cursor_y < y1 {
@@ -874,11 +876,12 @@ fn handle_mouse(packet: input::MousePacket) {
     if hit_tl_idx < MAX_TOPLEVELS && left_pressed {
         let tl = &toplevels[hit_tl_idx];
 
-        // Check if click is on the close button (top-right 16x16 of title bar).
-        let close_x0 = tl.x + tl.width as i32 - 20;
-        let close_y0 = tl.y - TITLE_BAR_HEIGHT as i32 + 4;
-        if cursor_x >= close_x0 && cursor_x < close_x0 + 16
-            && cursor_y >= close_y0 && cursor_y < close_y0 + 16
+        // Check if click is on the LEFT-side close traffic-light.
+        let bar_y = tl.y - TITLE_BAR_HEIGHT;
+        let (cb_x, cb_y, cb_w, cb_h) =
+            decorations::close_button_rect(tl.x, bar_y, tl.width as i32);
+        if cursor_x >= cb_x && cursor_x < cb_x + cb_w
+            && cursor_y >= cb_y && cursor_y < cb_y + cb_h
         {
             // Close the toplevel.
             unsafe {
@@ -1065,28 +1068,18 @@ fn compose() {
             let tl = &toplevels[i];
             if !tl.active { continue; }
 
-            // Title bar color: highlight focused toplevel.
-            let bar_color = if i == focused_tl { 0xFF5577AA } else { 0xFF404040 };
-            fb.fill_rect(
-                tl.x, tl.y - TITLE_BAR_HEIGHT as i32,
-                tl.width, TITLE_BAR_HEIGHT,
-                bar_color,
+            // Tokyo Night-styled title bar (gradient + shadow + traffic lights).
+            let focused = i == focused_tl;
+            let title_bytes = &tl.title[..tl.title_len.min(tl.title.len())];
+            let title_str = core::str::from_utf8(title_bytes).unwrap_or("");
+            decorations::draw_title_bar(
+                fb,
+                tl.x,
+                tl.y - TITLE_BAR_HEIGHT,
+                tl.width as i32,
+                focused,
+                title_str,
             );
-            // Close button (top-right corner of title bar).
-            let close_x = tl.x + tl.width as i32 - 20;
-            let close_y = tl.y - TITLE_BAR_HEIGHT as i32 + 4;
-            fb.fill_rect(close_x, close_y, 16, 16, 0xFFFF5555);
-            // "X" on close button
-            fb.draw_text(close_x + 4, close_y + 4, b"x", 0xFFFFFFFF);
-
-            // Title text in the title bar.
-            let text_x = tl.x + 6;
-            let text_y = tl.y - TITLE_BAR_HEIGHT as i32 + 8;
-            let max_chars = ((tl.width as i32 - 30) / 8).max(0) as usize;
-            let len = tl.title_len.min(max_chars);
-            if len > 0 {
-                fb.draw_text(text_x, text_y, &tl.title[..len], 0xFFEEEEEE);
-            }
 
             // Find the surface and its buffer.
             let mut found_buffer = false;
