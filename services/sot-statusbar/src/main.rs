@@ -39,8 +39,14 @@ const BPP: u32 = 4;
 /// SHM pool size.
 const POOL_SIZE: u32 = BAR_W * BAR_H * BPP;
 
-/// Virtual address where we map the SHM pool.
-const CLIENT_POOL_BASE: u64 = 0x7000000;
+/// Virtual address where we map the SHM pool in sot-statusbar's own AS.
+///
+/// 0x9000000 sits in the documented gap above the interp load base
+/// (0x6000000) and below the interp buf base (0xA000000) -- see the
+/// address-space layout comment in services/init/src/main.rs. Avoids
+/// 0x7000000, which historically aliased CHILD_BRK and caused the
+/// nano-on-LUCAS GPF called out in MEMORY.md.
+const CLIENT_POOL_BASE: u64 = 0x9000000;
 
 // ---------------------------------------------------------------------------
 // Tokyo Night palette (XRGB8888)
@@ -79,6 +85,13 @@ const LAYER_SURFACE_ID: u32   = 9;
 
 // zwlr_layer_shell_v1 layer constants
 const ZWLR_LAYER_TOP: u32 = 2;
+
+// zwlr_layer_surface_v1 request opcodes we use.
+const LS_OP_SET_SIZE: u16 = 0;
+const LS_OP_SET_ANCHOR: u16 = 1;
+const LS_OP_SET_EXCLUSIVE_ZONE: u16 = 2;
+const LS_OP_ACK_CONFIGURE: u16 = 6;
+const LS_EVT_CONFIGURE_OPCODE: u16 = 0;
 
 // zwlr_layer_surface_v1 anchor bitmask: top | left | right
 const ANCHOR_TOP: u32 = 1;
@@ -243,6 +256,42 @@ fn reply_bytes(msg: &IpcMsg) -> ([u8; IPC_DATA_MAX], usize) {
         core::ptr::copy_nonoverlapping(src, buf.as_mut_ptr(), byte_count);
     }
     (buf, byte_count)
+}
+
+/// Walk the packed events in `buf[..len]` looking for a
+/// `zwlr_layer_surface_v1::configure(serial, width, height)` event
+/// targeted at `surface_object_id`. Returns Some(serial) if found.
+///
+/// The compositor sends this event immediately after `get_layer_surface`
+/// so the client can ack it and commit its first buffer (per the
+/// wlr-layer-shell-unstable-v1 spec). See
+/// services/compositor/src/wayland/layer_shell.rs (send_configure).
+fn find_layer_configure(buf: &[u8], len: usize, surface_object_id: u32) -> Option<u32> {
+    let mut off = 0usize;
+    while off + 8 <= len {
+        let obj = u32::from_ne_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]]);
+        let size_op = u32::from_ne_bytes([buf[off + 4], buf[off + 5], buf[off + 6], buf[off + 7]]);
+        let opcode = (size_op & 0xFFFF) as u16;
+        let size = (size_op >> 16) as usize;
+
+        if size < 8 || off + size > len {
+            return None;
+        }
+
+        // configure payload = serial(4) + width(4) + height(4), 20B incl header.
+        if obj == surface_object_id && opcode == LS_EVT_CONFIGURE_OPCODE && size >= 20 {
+            let serial = u32::from_ne_bytes([
+                buf[off + 8],
+                buf[off + 9],
+                buf[off + 10],
+                buf[off + 11],
+            ]);
+            return Some(serial);
+        }
+
+        off += size;
+    }
+    None
 }
 
 /// Walk the packed events in `buf[..len]` searching for a `global` event
@@ -458,34 +507,52 @@ pub extern "C" fn _start() -> ! {
     // -- Step 7: zwlr_layer_shell_v1::get_layer_surface (opcode 0) --
     //    args: id(new_id), surface(object), output(object, null=0),
     //          layer(uint), namespace(string)
-    {
+    //
+    // The compositor replies with the initial configure(serial, 0, 0)
+    // event packed into the IPC reply (see layer_shell::send_configure
+    // in services/compositor). We capture the reply, scan it for the
+    // configure event, and remember the serial for step 8b.
+    let initial_configure_serial: u32 = {
         let mut m = WireBuilder::new(LAYER_SHELL_ID, 0);
         m.put_u32(LAYER_SURFACE_ID);
         m.put_u32(SURFACE_ID);
         m.put_u32(0);              // output = null (default)
         m.put_u32(ZWLR_LAYER_TOP); // top layer
         m.put_string(b"sot-statusbar");
-        let _ = wl_call(comp_ep, &m.finish());
-    }
+        let reply = wl_call(comp_ep, &m.finish());
+        let (rbuf, rlen) = reply_bytes(&reply);
+        find_layer_configure(&rbuf, rlen, LAYER_SURFACE_ID).unwrap_or(0)
+    };
 
-    // -- Step 8: configure layer_surface (size, anchor, exclusive_zone) --
-    //    zwlr_layer_surface_v1::set_size          opcode 0
-    //    zwlr_layer_surface_v1::set_anchor        opcode 1
-    //    zwlr_layer_surface_v1::set_exclusive_zone opcode 2
+    // -- Step 8a: configure layer_surface (size, anchor, exclusive_zone) --
     {
-        let mut m = WireBuilder::new(LAYER_SURFACE_ID, 0);
+        let mut m = WireBuilder::new(LAYER_SURFACE_ID, LS_OP_SET_SIZE);
         m.put_u32(BAR_W);
         m.put_u32(BAR_H);
         let _ = wl_call(comp_ep, &m.finish());
     }
     {
-        let mut m = WireBuilder::new(LAYER_SURFACE_ID, 1);
+        let mut m = WireBuilder::new(LAYER_SURFACE_ID, LS_OP_SET_ANCHOR);
         m.put_u32(ANCHOR_TOP_FULL);
         let _ = wl_call(comp_ep, &m.finish());
     }
     {
-        let mut m = WireBuilder::new(LAYER_SURFACE_ID, 2);
+        let mut m = WireBuilder::new(LAYER_SURFACE_ID, LS_OP_SET_EXCLUSIVE_ZONE);
         m.put_i32(BAR_H as i32);
+        let _ = wl_call(comp_ep, &m.finish());
+    }
+
+    // -- Step 8b: ack_configure(serial) --
+    //
+    // Per wlr-layer-shell-unstable-v1 the layer surface is NOT mapped until
+    // the client acks the compositor's configure event; skipping this
+    // leaves the bar invisible even with a buffer attached. sotOS's
+    // compositor accepts any serial as an ack, so the fallback 0 in
+    // `initial_configure_serial` (when the event hadn't arrived yet) is
+    // safe.
+    {
+        let mut m = WireBuilder::new(LAYER_SURFACE_ID, LS_OP_ACK_CONFIGURE);
+        m.put_u32(initial_configure_serial);
         let _ = wl_call(comp_ep, &m.finish());
     }
 
@@ -583,8 +650,11 @@ fn setup_shm_pool(comp_ep: u64) -> Result<(), ()> {
         return Err(());
     }
 
-    // Map the shared pages into our own AS.
-    if sys::shm_map(shm_handle, self_as_cap, CLIENT_POOL_BASE, 1).is_err() {
+    // shm_map's 4th arg is a flags bitmap (bit 0 = writable), NOT a page
+    // count -- the kernel pulls page_count from the ShmObject itself
+    // (see kernel/src/shm.rs). All `pages` allocated above get mapped.
+    const SHM_MAP_WRITABLE: u64 = 1;
+    if sys::shm_map(shm_handle, self_as_cap, CLIENT_POOL_BASE, SHM_MAP_WRITABLE).is_err() {
         print(b"sot-statusbar: shm_map failed\n");
         return Err(());
     }
