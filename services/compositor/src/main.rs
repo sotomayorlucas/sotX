@@ -292,6 +292,37 @@ pub extern "C" fn _start() -> ! {
     print_hex(boot_info.fb_height as u64);
     print(b"\n");
 
+    // Publish the wl_output descriptor so registry binds can forward the
+    // advertised geometry/mode to Wayland clients. physical_width_mm is a
+    // rough 96-DPI heuristic (width_px / 96 * 25.4). Refresh is pinned to
+    // the compositor's 60 Hz frame cap.
+    {
+        use wayland::output::{
+            OutputDescriptor, FixedStr,
+            WL_OUTPUT_SUBPIXEL_UNKNOWN, WL_OUTPUT_TRANSFORM_NORMAL,
+        };
+        let w_px = boot_info.fb_width as i32;
+        let h_px = boot_info.fb_height as i32;
+        let phys_w_mm = ((w_px as i64) * 254 / 960) as i32;
+        let phys_h_mm = ((h_px as i64) * 254 / 960) as i32;
+        wayland::output::set_descriptor(OutputDescriptor {
+            x: 0,
+            y: 0,
+            physical_width_mm: phys_w_mm,
+            physical_height_mm: phys_h_mm,
+            subpixel: WL_OUTPUT_SUBPIXEL_UNKNOWN,
+            make: FixedStr::from_bytes(b"sotOS"),
+            model: FixedStr::from_bytes(b"Framebuffer"),
+            transform: WL_OUTPUT_TRANSFORM_NORMAL,
+            width: w_px,
+            height: h_px,
+            refresh_mhz: 60_000,
+            scale: 1,
+            name: FixedStr::from_bytes(b"HEADLESS-0"),
+            description: FixedStr::from_bytes(b"sotOS framebuffer output"),
+        });
+    }
+
     // Read self AS cap from BootInfo (cap[1]).
     let self_as_cap = boot_info.self_as_cap;
     if self_as_cap != 0 {

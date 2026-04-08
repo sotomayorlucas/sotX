@@ -21,6 +21,7 @@ pub mod shell;
 pub mod seat;
 pub mod xdg_popup;
 pub mod layer_shell;
+pub mod output;
 pub mod fractional_scale;
 
 use sotos_common::IpcMsg;
@@ -347,6 +348,7 @@ pub struct ClientObjects {
     pub pointer_id: u32,
     pub keyboard_id: u32,
     pub layer_shell_id: u32,
+    pub output_id: u32,
     pub fractional_scale_mgr_id: u32,
     pub xdg_surfaces: [XdgSurfaceBinding; MAX_XDG_SURFACES],
     pub xdg_toplevels: [XdgToplevelBinding; MAX_XDG_TOPLEVELS],
@@ -370,6 +372,7 @@ impl ClientObjects {
             pointer_id: 0,
             keyboard_id: 0,
             layer_shell_id: 0,
+            output_id: 0,
             fractional_scale_mgr_id: 0,
             xdg_surfaces: [const { XdgSurfaceBinding::empty() }; MAX_XDG_SURFACES],
             xdg_toplevels: [const { XdgToplevelBinding::empty() }; MAX_XDG_TOPLEVELS],
@@ -668,9 +671,22 @@ pub fn dispatch_message(
                     // get_fractional_scale later.
                     objs.fractional_scale_mgr_id = bound.client_id;
                 }
+                7 => {
+                    objs.output_id = bound.client_id;
+                    output::send_init_events(
+                        bound.client_id,
+                        &mut result.events,
+                        &mut result.event_count,
+                    );
+                }
                 _ => {}
             }
         }
+        return result;
+    }
+
+    // wl_output: only `release` (opcode 0) is defined; swallow silently.
+    if id == objs.output_id && objs.output_id != 0 {
         return result;
     }
 

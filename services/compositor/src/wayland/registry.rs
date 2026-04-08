@@ -7,6 +7,7 @@
 //!   0 = bind(name: uint, id: new_id) -- client binds a global
 
 use super::{WlEvent, WlMessage};
+use super::output::{WL_OUTPUT_INTERFACE, WL_OUTPUT_VERSION};
 
 /// Global interface entries advertised to clients.
 pub struct GlobalEntry {
@@ -21,7 +22,16 @@ pub struct GlobalEntry {
 /// small integers starting at 1. The dispatcher in `mod.rs` maps the
 /// name back to the bound-object slot on the client side when a
 /// `wl_registry::bind` arrives.
-pub static GLOBALS: [GlobalEntry; 6] = [
+///
+/// Name reservations across compositor PRs:
+///   1 = wl_compositor
+///   2 = wl_shm
+///   3 = xdg_wm_base
+///   4 = wl_seat
+///   5 = zwlr_layer_shell_v1            (PR #69, merged)
+///   6 = wp_fractional_scale_manager_v1 (PR #60, merged)
+///   7 = wl_output                      (this PR)
+pub static GLOBALS: [GlobalEntry; 7] = [
     GlobalEntry { name: 1, interface: super::WL_COMPOSITOR_INTERFACE, version: 4 },
     GlobalEntry { name: 2, interface: super::WL_SHM_INTERFACE, version: 1 },
     GlobalEntry { name: 3, interface: super::XDG_WM_BASE_INTERFACE, version: 2 },
@@ -32,6 +42,7 @@ pub static GLOBALS: [GlobalEntry; 6] = [
         interface: super::WP_FRACTIONAL_SCALE_MANAGER_V1_INTERFACE,
         version: super::fractional_scale::FRACTIONAL_SCALE_VERSION,
     },
+    GlobalEntry { name: 7, interface: WL_OUTPUT_INTERFACE, version: WL_OUTPUT_VERSION },
 ];
 
 /// Send all global advertisements to a newly created registry.
