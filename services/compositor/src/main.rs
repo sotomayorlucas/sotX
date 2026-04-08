@@ -16,6 +16,8 @@
 mod wayland;
 mod render;
 mod input;
+#[cfg(feature = "skia")]
+mod skia_render;
 
 use sotos_common::sys;
 use sotos_common::{BootInfo, IpcMsg, BOOT_INFO_ADDR, SyncUnsafeCell};
