@@ -302,6 +302,13 @@ pub extern "C" fn _start() -> ! {
     // --- Phase 6: Userspace process spawning ---
     spawn_process(b"hello");
 
+    // --- Phase 6a: Tokyo Night layer-shell status bar ---
+    // Compositor was spawned by the kernel (see kernel/src/main.rs), so it's
+    // already up by the time init reaches this point. The bar gracefully
+    // exits with `statusbar: no layer-shell` on compositors that haven't
+    // landed G7 (zwlr_layer_shell_v1) yet.
+    spawn_process(b"sot-statusbar");
+
     // --- Phase 6b: STYX exokernel syscall validation (Tier 1.2) ---
     // Validates SOT syscalls 300-310 from userspace. Output goes to serial.
     spawn_process(b"styx-test");
