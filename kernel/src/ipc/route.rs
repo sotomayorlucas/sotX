@@ -145,6 +145,10 @@ impl WireMessage {
 
     /// Serialize to raw bytes for network transmission.
     pub fn as_bytes(&self) -> &[u8] {
+        // SAFETY: WireMessage is #[repr(C)] + Copy with no padding holes and
+        // no internal references; reinterpreting it as a byte slice of exactly
+        // size_of::<Self>() bytes is valid. The returned slice borrows from
+        // &self, so the lifetime is bounded correctly.
         unsafe {
             core::slice::from_raw_parts(
                 self as *const Self as *const u8,
@@ -164,6 +168,10 @@ impl WireMessage {
             cap_transfer: 0,
             flags: 0,
         };
+        // SAFETY: length was bounds-checked above (`data.len() >= size_of::<Self>()`),
+        // `msg` is a freshly owned #[repr(C)] value on the stack (exclusive write
+        // access), src and dst ranges cannot overlap, and WireMessage is POD so any
+        // byte pattern is a valid inhabitant.
         unsafe {
             core::ptr::copy_nonoverlapping(
                 data.as_ptr(),
