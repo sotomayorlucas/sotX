@@ -29,14 +29,6 @@ SECTIONS
 
     . = ALIGN(CONSTANT(MAXPAGESIZE));
 
-    .got : {
-        *(.got .got.*)
-    } :data
-
-    .got.plt : {
-        *(.got.plt .got.plt.*)
-    } :data
-
     .data : {
         *(.data .data.*)
 

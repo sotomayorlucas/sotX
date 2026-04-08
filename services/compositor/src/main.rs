@@ -574,6 +574,45 @@ fn find_client(ep_cap: u64) -> usize {
     MAX_CLIENTS // sentinel: no client found
 }
 
+/// Screen-space origin of the toplevel whose `wl_surface_id` matches, or
+/// `(0, 0)` if no such toplevel exists.
+fn toplevel_origin(wl_surface_id: u32) -> (i32, i32) {
+    if wl_surface_id == 0 {
+        return (0, 0);
+    }
+    let toplevels = unsafe { &*TOPLEVELS.get() };
+    for tl in toplevels.iter() {
+        if tl.active && tl.wl_surface_id == wl_surface_id {
+            return (tl.x, tl.y);
+        }
+    }
+    (0, 0)
+}
+
+/// Re-run `place_popup` against the popup's current positioner after
+/// xdg_popup::reposition swapped it in.
+fn reposition_popup(popup_object_id: u32) {
+    let Some(popup_idx) = wayland::xdg_popup::find_popup_by_object(popup_object_id) else {
+        return;
+    };
+    let (parent_wl_surface, positioner_obj_id) =
+        match wayland::xdg_popup::get_popup_mut(popup_idx) {
+            Some(p) => (p.parent_surface_id, p.positioner_id),
+            None => return,
+        };
+    let Some(pos_idx) = wayland::xdg_popup::find_positioner_by_object(positioner_obj_id) else {
+        return;
+    };
+    let Some(positioner) = wayland::xdg_popup::get_positioner_mut(pos_idx) else {
+        return;
+    };
+    let snap = *positioner;
+    let (parent_x, parent_y) = toplevel_origin(parent_wl_surface);
+    if let Some(popup) = wayland::xdg_popup::get_popup_mut(popup_idx) {
+        wayland::xdg_popup::place_popup(popup, &snap, parent_x, parent_y);
+    }
+}
+
 /// Apply state changes from a dispatch result to the global compositor state.
 fn apply_dispatch_result(client_idx: usize, result: &DispatchResult) {
     // New surface created?
@@ -655,16 +694,7 @@ fn apply_dispatch_result(client_idx: usize, result: &DispatchResult) {
         let objs = &clients[client_idx].objects;
         let popup_wl_surface = objs.wl_surface_for_xdg(result.new_popup_xdg_surface);
         let parent_wl_surface = objs.wl_surface_for_xdg(birth.parent_xdg_surface);
-        let mut parent_origin = (0i32, 0i32);
-        if parent_wl_surface != 0 {
-            let toplevels = unsafe { &*TOPLEVELS.get() };
-            for tl in toplevels.iter() {
-                if tl.active && tl.wl_surface_id == parent_wl_surface {
-                    parent_origin = (tl.x, tl.y);
-                    break;
-                }
-            }
-        }
+        let parent_origin = toplevel_origin(parent_wl_surface);
         if wayland::shell::spawn_popup(
             birth,
             popup_wl_surface,
@@ -678,7 +708,15 @@ fn apply_dispatch_result(client_idx: usize, result: &DispatchResult) {
         }
     }
 
-    if result.popup_destroyed != 0 || result.popup_repositioned != 0 {
+    if result.popup_destroyed != 0 {
+        mark_damage();
+    }
+
+    // xdg_popup::reposition updated positioner_id in the pool, but the
+    // popup's absolute (x, y) is still stale. Recompute it now so the
+    // next compose pass draws it at the new location.
+    if result.popup_repositioned != 0 {
+        reposition_popup(result.popup_repositioned);
         mark_damage();
     }
 
