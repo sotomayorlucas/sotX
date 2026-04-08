@@ -226,6 +226,11 @@ impl Thread {
 
         // Build initial stack frame (grows downward).
         // context_switch pops: r15, r14, r13, r12, rbx, rbp, then ret.
+        // SAFETY: `stack_top` comes from `alloc_kernel_stack()` which returned
+        // STACK_SIZE (16 KiB) of freshly allocated, HHDM-mapped kernel memory
+        // owned exclusively by this new thread. Offsets -1..-7 write 7*8=56
+        // bytes immediately below `stack_top`, well within the allocation.
+        // No other code can observe this stack until `context.rsp` is published.
         unsafe {
             let top = stack_top as *mut u64;
             top.offset(-1).write(trampoline as u64); // return address
@@ -299,6 +304,10 @@ impl Thread {
 
         // Initial stack frame for context_switch:
         //   r15=0, r14=cr3, r13=user_rsp, r12=user_rip, rbx=0, rbp=0, ret=trampoline
+        // SAFETY: `stack_top` points at a freshly allocated 16 KiB kernel stack
+        // owned by this new user thread. Writing 7 u64s immediately below the
+        // top is within bounds. The thread has not yet been enqueued, so no
+        // other CPU can race on this memory.
         unsafe {
             let top = stack_top as *mut u64;
             top.offset(-1).write(trampoline as u64); // return address

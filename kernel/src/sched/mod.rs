@@ -38,6 +38,10 @@ const IA32_KERNEL_GS_BASE: u32 = 0xC000_0102;
 /// Write the IA32_FS_BASE MSR.
 #[inline]
 fn write_fs_base_msr(value: u64) {
+    // SAFETY: IA32_FS_BASE is a writable architectural MSR available on all
+    // long-mode CPUs; `wrmsr` with ecx=0xC000_0100 and a 64-bit value in
+    // edx:eax has no undefined behavior. The write only affects the current
+    // logical CPU's FS segment base and does not touch memory or the stack.
     unsafe {
         core::arch::asm!(
             "wrmsr",
@@ -52,6 +56,10 @@ fn write_fs_base_msr(value: u64) {
 /// Write the IA32_KERNEL_GS_BASE MSR (user's GS value while in kernel mode).
 #[inline]
 fn write_kernel_gs_base_msr(value: u64) {
+    // SAFETY: IA32_KERNEL_GS_BASE is writable on all long-mode CPUs. Wrmsr
+    // updates only the current CPU's shadow register used by swapgs on the
+    // next ring transition; it never faults for an arbitrary 64-bit value.
+    // No memory or stack is touched.
     unsafe {
         core::arch::asm!(
             "wrmsr",
@@ -118,6 +126,11 @@ core::arch::global_asm!(
 
 /// Trampoline for kernel threads. Called after context_switch pops regs.
 /// r12 = entry function pointer.
+///
+/// # Safety
+/// Must only be reached via `context_switch` returning into a stack frame
+/// built by `Thread::new`, where r12 holds a valid `fn() -> !` pointer.
+/// Any other entry is undefined behavior.
 #[allow(dead_code)]
 #[unsafe(naked)]
 unsafe extern "C" fn thread_trampoline() -> ! {
@@ -130,6 +143,13 @@ unsafe extern "C" fn thread_trampoline() -> ! {
 
 /// Trampoline for user threads. Called after context_switch pops regs.
 /// r12 = user RIP, r13 = user RSP, r14 = CR3.
+///
+/// # Safety
+/// Must only be reached via `context_switch` returning into a stack frame
+/// built by `Thread::new_user`, where r12/r13/r14 hold a valid user RIP,
+/// user RSP, and a physical CR3 pointing at a well-formed PML4. The CR3
+/// must keep kernel high-half entries mapped or the following interrupt
+/// will triple-fault.
 #[unsafe(naked)]
 unsafe extern "C" fn user_thread_trampoline() -> ! {
     core::arch::naked_asm!(
@@ -144,8 +164,16 @@ unsafe extern "C" fn user_thread_trampoline() -> ! {
 /// Post-switch handler for kernel threads: finish_switch, then sti + call entry.
 #[allow(dead_code)]
 extern "C" fn finish_switch_and_enter_kernel(entry: u64) -> ! {
+    // SAFETY: `entry` was seeded into r12 by `Thread::new` from a real
+    // `fn() -> !` pointer and preserved through context_switch. Transmuting
+    // the integer back to the original fn type is valid because the ABI and
+    // signature are identical.
     let entry: fn() -> ! = unsafe { core::mem::transmute(entry) };
     finish_switch();
+    // SAFETY: We just finished a context switch into a fresh kernel thread,
+    // running on the new thread's kernel stack with interrupts disabled. It
+    // is safe to re-enable interrupts here before handing control to the
+    // thread entry function. `sti` has no memory effects.
     unsafe {
         core::arch::asm!("sti", options(nomem, nostack));
     }
@@ -155,6 +183,13 @@ extern "C" fn finish_switch_and_enter_kernel(entry: u64) -> ! {
 /// Post-switch handler for user threads: finish_switch, then sysretq.
 extern "C" fn finish_switch_and_enter_user(user_rip: u64, user_rsp: u64, cr3: u64) -> ! {
     finish_switch();
+    // SAFETY: All three arguments come from a trusted stack frame built by
+    // `Thread::new_user`: `cr3` points at a well-formed PML4 with the kernel
+    // high half mapped, `user_rip` and `user_rsp` were validated when the
+    // user thread was created. We are running with interrupts disabled on a
+    // kernel stack, so mutating CR3/RSP and issuing `swapgs; sysretq` does
+    // not race with anything on this CPU. After `sysretq` we are in Ring 3
+    // and never return.
     unsafe {
         core::arch::asm!(
             "mov cr3, {cr3}",
@@ -2107,6 +2142,12 @@ pub fn schedule() {
         // Update kernel stack for TSS (Ring 3 → Ring 0 on interrupt)
         // and for SYSCALL entry via percpu.
         if new_kstack_top != 0 {
+            // SAFETY: `percpu.tss` is a raw pointer into the per-CPU TSS
+            // that was set up once during CPU bringup and lives for the
+            // lifetime of the CPU. We are inside the scheduler's critical
+            // section with SCHEDULER held, and per-CPU state is only ever
+            // written by the CPU that owns it, so no other thread can
+            // observe or mutate this TSS concurrently.
             unsafe {
                 (*percpu.tss).privilege_stack_table[0] = VirtAddr::new(new_kstack_top);
             }
@@ -2126,6 +2167,12 @@ pub fn schedule() {
                 // A missing entry causes a triple fault on the next interrupt.
                 let hhdm = crate::mm::hhdm_offset();
                 let pml4_ptr = (target_cr3 + hhdm) as *const u64;
+                // SAFETY: `target_cr3` is a physical frame returned by the
+                // frame allocator for a PML4; adding the HHDM offset gives a
+                // valid kernel-mapped virtual address. PML4 entry 511 is
+                // within the 512-entry (4 KiB) PML4 page, so `.add(511)` is
+                // in bounds. The read is aligned (u64) and volatile-safe
+                // (PML4 entries are CPU-owned but we hold SCHEDULER).
                 let entry_511 = unsafe { *pml4_ptr.add(511) };
                 if entry_511 & 1 == 0 {
                     // PML4[511] not present — kernel code would be unmapped!
@@ -2133,6 +2180,14 @@ pub fn schedule() {
                     let boot = crate::mm::paging::boot_cr3();
                     let boot_pml4 = (boot + hhdm) as *const u64;
                     let dst_pml4 = (target_cr3 + hhdm) as *mut u64;
+                    // SAFETY: Both `boot_pml4` and `dst_pml4` point at valid
+                    // 512-entry PML4 pages via the HHDM. The loop accesses
+                    // indices 256..512, all within the 4 KiB page. The
+                    // destination PML4 belongs to a process that is not
+                    // currently running on any CPU (we are about to switch
+                    // to it while holding SCHEDULER), so no other CPU can
+                    // be traversing it. Writes only repair missing high-half
+                    // entries from the authoritative boot CR3.
                     unsafe {
                         for i in 256..512 {
                             let src_val = *boot_pml4.add(i);
@@ -2146,6 +2201,12 @@ pub fn schedule() {
                         target_cr3
                     );
                 }
+                // SAFETY: `target_cr3` is a physical frame address pointing
+                // at a well-formed PML4 (we just validated entry 511 above
+                // and repaired any missing high-half entries). Loading it
+                // into CR3 flushes the TLB and activates the new address
+                // space. Interrupts are disabled inside schedule() so no
+                // intervening handler sees an inconsistent view.
                 unsafe {
                     core::arch::asm!(
                         "mov cr3, {}",
@@ -2179,6 +2240,21 @@ pub fn schedule() {
     // Lock is dropped here ^
 
     if let Some((old_rsp_ptr, new_rsp, old_fpu_idx, new_fpu)) = switch_info {
+        // SAFETY: The unsafe operations below all uphold scheduler invariants:
+        //   - `fxsave64` writes 512 bytes into `old_t.fpu_state.data`, which
+        //     is #[repr(C, align(16))] and exactly 512 bytes.
+        //   - `context_switch(old_rsp_ptr, new_rsp)` saves the current
+        //     callee-saved regs to the old thread's stack, stores RSP into
+        //     `*old_rsp_ptr`, loads `new_rsp`, restores callees, and returns
+        //     into the new thread. Both pointers come from live Thread slots
+        //     obtained while holding SCHEDULER just above. Interrupts are
+        //     disabled inside schedule() so no reentry can occur.
+        //   - After the switch we are a *different* thread; `new_fpu` was
+        //     captured as a raw ptr before the switch but points into the
+        //     new thread's Thread slot (same pool), which is still live and
+        //     pinned by the scheduler for the duration of the switch.
+        //   - `fxrstor64` reads 512 bytes from `new_fpu` (same layout as
+        //     above) or `fninit` initializes the FPU for a first run.
         unsafe {
             // Save current thread's FPU/SSE state before switching.
             // Re-acquire the old thread's fpu_state pointer from the pool.
