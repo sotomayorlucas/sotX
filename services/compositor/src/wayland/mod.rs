@@ -19,6 +19,7 @@ pub mod compositor;
 pub mod shm;
 pub mod shell;
 pub mod seat;
+pub mod xdg_popup;
 
 use sotos_common::IpcMsg;
 
@@ -467,6 +468,14 @@ pub struct DispatchResult {
     pub new_pool: (u32, u32, i32),
     /// If a new SHM buffer was created: the buffer + pool_object_id. buffer_id=0 means none.
     pub new_buffer: (shm::ShmBuffer, u32),
+    /// If a popup was born this round: parsed ids from xdg_surface::get_popup.
+    pub new_popup: shell::PopupBirth,
+    /// xdg_surface id whose get_popup spawned `new_popup` (0 if none).
+    pub new_popup_xdg_surface: u32,
+    /// object id of a popup whose destroy was dispatched (0 if none).
+    pub popup_destroyed: u32,
+    /// object id of a popup whose reposition was dispatched (0 if none).
+    pub popup_repositioned: u32,
 }
 
 impl DispatchResult {
@@ -482,6 +491,10 @@ impl DispatchResult {
             damage: false,
             new_pool: (0, 0, -1),
             new_buffer: (shm::ShmBuffer::empty(), 0),
+            new_popup: shell::PopupBirth { popup_id: 0, parent_xdg_surface: 0, positioner_id: 0 },
+            new_popup_xdg_surface: 0,
+            popup_destroyed: 0,
+            popup_repositioned: 0,
         }
     }
 }
@@ -602,14 +615,34 @@ pub fn dispatch_message(
 
     // 6. xdg_wm_base
     if id == objs.xdg_wm_base_id && objs.xdg_wm_base_id != 0 {
+        // opcode 1 = create_positioner (handled separately so it never
+        // flows into the get_xdg_surface path below).
+        if msg.opcode == 1 {
+            let _ = shell::handle_wm_base_create_positioner(msg);
+            return result;
+        }
         if let Some((xdg_surface_id, wl_surface_id)) = shell::handle_wm_base_request(msg) {
             objs.add_xdg_surface(xdg_surface_id, wl_surface_id);
         }
         return result;
     }
 
+    // 6b. xdg_positioner (routed by object id against the positioner pool)
+    if xdg_popup::find_positioner_by_object(id).is_some() {
+        shell::handle_positioner_request(msg);
+        return result;
+    }
+
     // 7. xdg_surface
     if objs.is_xdg_surface(id) {
+        // opcode 3 = get_popup — peel off before the toplevel path.
+        if msg.opcode == 3 {
+            if let Some(birth) = shell::handle_xdg_surface_get_popup(msg) {
+                result.new_popup = birth;
+                result.new_popup_xdg_surface = id;
+            }
+            return result;
+        }
         if let Some(toplevel_id) = shell::handle_xdg_surface_request(msg) {
             let wl_surface_id = objs.wl_surface_for_xdg(id);
             objs.add_xdg_toplevel(toplevel_id, id);
@@ -627,6 +660,17 @@ pub fn dispatch_message(
                 id, serial,
                 &mut result.events, &mut result.event_count,
             );
+        }
+        return result;
+    }
+
+    // 7b. xdg_popup (routed by object id against the popup pool)
+    if xdg_popup::find_popup_by_object(id).is_some() {
+        shell::handle_popup_request(msg);
+        if msg.opcode == 0 {
+            result.popup_destroyed = id;
+        } else if msg.opcode == 2 {
+            result.popup_repositioned = id;
         }
         return result;
     }

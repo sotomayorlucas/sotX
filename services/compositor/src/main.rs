@@ -648,6 +648,40 @@ fn apply_dispatch_result(client_idx: usize, result: &DispatchResult) {
         }
     }
 
+    // New popup? Resolve parent position and stash in the popup pool.
+    if result.new_popup.popup_id != 0 {
+        let birth = result.new_popup;
+        let clients = unsafe { &*CLIENTS.get() };
+        let objs = &clients[client_idx].objects;
+        let popup_wl_surface = objs.wl_surface_for_xdg(result.new_popup_xdg_surface);
+        let parent_wl_surface = objs.wl_surface_for_xdg(birth.parent_xdg_surface);
+        let mut parent_origin = (0i32, 0i32);
+        if parent_wl_surface != 0 {
+            let toplevels = unsafe { &*TOPLEVELS.get() };
+            for tl in toplevels.iter() {
+                if tl.active && tl.wl_surface_id == parent_wl_surface {
+                    parent_origin = (tl.x, tl.y);
+                    break;
+                }
+            }
+        }
+        if wayland::shell::spawn_popup(
+            birth,
+            popup_wl_surface,
+            parent_wl_surface,
+            parent_origin,
+        ).is_some() {
+            print(b"compositor: new popup ");
+            print_u32_dec(birth.popup_id);
+            print(b"\n");
+            mark_damage();
+        }
+    }
+
+    if result.popup_destroyed != 0 || result.popup_repositioned != 0 {
+        mark_damage();
+    }
+
     // Title update?
     let (title_tl_id, ref title_buf, title_len) = result.title_update;
     if title_tl_id != 0 && title_len > 0 {
