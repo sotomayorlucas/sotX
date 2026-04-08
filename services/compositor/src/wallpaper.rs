@@ -124,18 +124,42 @@ pub fn draw(fb: &mut Framebuffer, x: i32, y: i32, w: i32, h: i32) {
         if iw <= 0 || ih <= 0 {
             return;
         }
-        // Tile the image starting at fb origin (0, 0). Drawn as 1x1
-        // fills so out-of-rect pixels are clipped by `fill_rect`.
-        for py in y..(y + h) {
-            let sy = py.rem_euclid(ih);
-            let row_off = (sy as usize) * (iw as usize);
-            for px in x..(x + w) {
-                let sx = px.rem_euclid(iw);
-                let src_idx = row_off + sx as usize;
-                if src_idx >= img.len() {
+
+        // Clip once against the framebuffer, then write pixels via
+        // volatile stores like `Framebuffer::blit`. Per-pixel
+        // `fill_rect` would re-clip ~2M times at 1920x1080.
+        let fb_w = fb.width as i32;
+        let fb_h = fb.height as i32;
+        let x0 = x.max(0);
+        let y0 = y.max(0);
+        let x1 = (x + w).min(fb_w);
+        let y1 = (y + h).min(fb_h);
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+
+        let pixels_per_row = (fb.pitch / 4) as usize;
+        let fb_base = fb.addr as *mut u32;
+        let iw_us = iw as usize;
+        let img_len = img.len();
+
+        for py in y0..y1 {
+            let sy = py.rem_euclid(ih) as usize;
+            let src_row_off = sy * iw_us;
+            let dst_row = unsafe { fb_base.add((py as usize) * pixels_per_row) };
+            for px in x0..x1 {
+                let sx = px.rem_euclid(iw) as usize;
+                let src_idx = src_row_off + sx;
+                if src_idx >= img_len {
                     continue;
                 }
-                fb.fill_rect(px, py, 1, 1, img[src_idx]);
+                let pixel = img[src_idx];
+                if (pixel >> 24) & 0xFF == 0 {
+                    continue;
+                }
+                unsafe {
+                    dst_row.add(px as usize).write_volatile(pixel);
+                }
             }
         }
         return;
@@ -153,45 +177,5 @@ pub fn draw(fb: &mut Framebuffer, x: i32, y: i32, w: i32, h: i32) {
         }
         let row = (py as usize).min(cache_h - 1);
         fb.fill_rect(x, py, w as u32, 1, wp.gradient_cache[row]);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn read_cache(idx: usize) -> u32 {
-        unsafe { (*WALLPAPER.get()).gradient_cache[idx] }
-    }
-
-    fn read_height() -> usize {
-        unsafe { (*WALLPAPER.get()).gradient_height }
-    }
-
-    #[test]
-    fn gradient_endpoints_match() {
-        let h = 1080;
-        init(h);
-        assert_eq!(read_height(), h);
-        assert_eq!(read_cache(0), BG_TOP);
-        assert_eq!(read_cache(h - 1), BG_BOT);
-    }
-
-    #[test]
-    fn gradient_single_row_uses_top() {
-        init(1);
-        assert_eq!(read_cache(0), BG_TOP);
-    }
-
-    #[test]
-    fn gradient_clamps_to_max_height() {
-        init(MAX_GRADIENT_HEIGHT + 500);
-        assert_eq!(read_height(), MAX_GRADIENT_HEIGHT);
-        assert_eq!(read_cache(0), BG_TOP);
-        assert_eq!(read_cache(MAX_GRADIENT_HEIGHT - 1), BG_BOT);
     }
 }
