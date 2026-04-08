@@ -16,6 +16,7 @@
 mod wayland;
 mod render;
 mod input;
+mod cursor;
 #[cfg(feature = "skia")]
 mod skia_render;
 
@@ -128,6 +129,13 @@ static SELF_AS_CAP: SyncUnsafeCell<u64> = SyncUnsafeCell::new(0);
 /// Mouse cursor position.
 static CURSOR_X: SyncUnsafeCell<i32> = SyncUnsafeCell::new(0);
 static CURSOR_Y: SyncUnsafeCell<i32> = SyncUnsafeCell::new(0);
+
+/// Logical cursor shape. Set by future hover/drag logic; currently always
+/// `Default`. `compose()` reads this to pick the glyph drawn on top of the
+/// scene. Wiring it into per-region input is deliberately deferred.
+#[allow(dead_code)]
+static CURRENT_SHAPE: SyncUnsafeCell<cursor::CursorShape> =
+    SyncUnsafeCell::new(cursor::CursorShape::Default);
 
 /// Configure serial counter.
 static CONFIGURE_SERIAL: SyncUnsafeCell<u32> = SyncUnsafeCell::new(1);
