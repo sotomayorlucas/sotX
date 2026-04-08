@@ -199,6 +199,19 @@ static PER_CORE_ENDPOINTS: [TicketMutex<CoreEndpointPool>; MAX_CPUS] = {
     [INIT; MAX_CPUS]
 };
 
+/// Tier 5 KARL: seed every per-core pool's `next_scan` from the boot
+/// seed (mod MAX_EP_PER_CORE) so the first endpoint each core hands
+/// out lives at a per-boot offset. Free slots wrap, so the pool stays
+/// fully usable; only the FIRST slot index moves.
+pub fn init() {
+    let seed = crate::karl::boot_seed();
+    for core in 0..MAX_CPUS {
+        let mut pool = PER_CORE_ENDPOINTS[core].lock();
+        pool.next_scan =
+            ((seed.wrapping_add(core as u64 * 0x9E37_79B9)) as usize) % MAX_EP_PER_CORE;
+    }
+}
+
 /// Get the current CPU core index (0 during early boot).
 fn current_core() -> usize {
     if crate::mm::slab::is_percpu_ready() {

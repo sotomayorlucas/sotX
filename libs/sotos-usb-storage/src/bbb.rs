@@ -43,8 +43,10 @@ pub struct Cbw {
 
 const _: () = assert!(core::mem::size_of::<Cbw>() == CBW_SIZE);
 
-/// CBW direction flags.
+// CBW direction flags (USB MSC 1.0 §5.1).
+/// `bmCBWFlags` bit 7 set: data moves device-to-host (IN).
 pub const CBW_FLAG_DATA_IN: u8 = 0x80;
+/// `bmCBWFlags` bit 7 clear: data moves host-to-device (OUT).
 pub const CBW_FLAG_DATA_OUT: u8 = 0x00;
 
 impl Cbw {
@@ -133,9 +135,12 @@ pub const CSW_SIGNATURE: u32 = 0x53425355;
 /// CSW size in bytes.
 pub const CSW_SIZE: usize = 13;
 
-/// CSW Status values.
+// CSW Status values (USB MSC 1.0 §5.2).
+/// Command Passed (`bCSWStatus = 0x00`).
 pub const CSW_STATUS_PASSED: u8 = 0x00;
+/// Command Failed (`bCSWStatus = 0x01`).
 pub const CSW_STATUS_FAILED: u8 = 0x01;
+/// Phase Error (`bCSWStatus = 0x02`) — host must reset the device.
 pub const CSW_STATUS_PHASE_ERROR: u8 = 0x02;
 
 /// Command Status Wrapper — received from device on Bulk-IN.
@@ -221,16 +226,20 @@ pub enum CswError {
 /// bRequest = 0xFF.
 /// wValue = 0, wIndex = interface number, wLength = 0.
 pub const BOMSR_REQUEST_TYPE: u8 = 0x21;
+/// `bRequest` byte for Bulk-Only Mass Storage Reset.
 pub const BOMSR_REQUEST: u8 = 0xFF;
 
 /// USB standard request: Clear Feature (ENDPOINT_HALT).
 /// Used to clear a stalled bulk endpoint after an error.
 pub const CLEAR_FEATURE_REQUEST_TYPE: u8 = 0x02; // standard, endpoint, host-to-device
+/// `bRequest` byte for `CLEAR_FEATURE`.
 pub const CLEAR_FEATURE_REQUEST: u8 = 0x01;      // CLEAR_FEATURE
+/// `wValue` for clearing the `ENDPOINT_HALT` feature on a stalled bulk endpoint.
 pub const FEATURE_ENDPOINT_HALT: u16 = 0x0000;
 
 /// USB class-specific request: Get Max LUN.
 /// bmRequestType = 0xA1 (class, interface, device-to-host).
 /// bRequest = 0xFE.
 pub const GET_MAX_LUN_REQUEST_TYPE: u8 = 0xA1;
+/// `bRequest` byte for Get Max LUN.
 pub const GET_MAX_LUN_REQUEST: u8 = 0xFE;

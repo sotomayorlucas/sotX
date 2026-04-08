@@ -71,6 +71,10 @@ pub(crate) fn test_dynamic_linking() {
     print(b" bytes\n");
 
     // Step 3: Load and relocate the shared library.
+    // Reset the relocation counters so we can verify the loader applied
+    // every entry without skipping any (the new TLS / IRELATIVE / PC32 /
+    // PLT32 / GOTPCREL / DTPMOD64 / DTPOFF64 paths should all succeed).
+    sotos_ld::reset_counters();
     let elf_data = unsafe { core::slice::from_raw_parts(DL_BUF_BASE as *const u8, file_size) };
     let handle = match sotos_ld::dl_open(elf_data, DL_LOAD_BASE) {
         Ok(h) => h,
@@ -138,7 +142,56 @@ pub(crate) fn test_dynamic_linking() {
         }
     }
 
-    // Step 6: Cleanup.
+    // Step 6: TLS test — install the .so's static TLS block, then call
+    //          read_tls_counter() (TPOFF64-relocated) and verify it returns
+    //          the .tdata initialiser value (42). Bump_tls_counter() should
+    //          return 43 on the next call.
+    let saved_fs_base = sys::get_fs_base();
+    let mut tls_ok = false;
+    let mut tls_initial: i32 = 0;
+    let mut tls_bumped: i32 = 0;
+    if !handle.tls.is_empty() {
+        if sotos_ld::install_tls(&handle.tls).is_ok() {
+            if let Some(read_addr) = sotos_ld::dl_sym(&handle, b"read_tls_counter") {
+                let f: extern "C" fn() -> i32 = unsafe { core::mem::transmute(read_addr) };
+                tls_initial = f();
+            }
+            if let Some(bump_addr) = sotos_ld::dl_sym(&handle, b"bump_tls_counter") {
+                let f: extern "C" fn() -> i32 = unsafe { core::mem::transmute(bump_addr) };
+                tls_bumped = f();
+            }
+            tls_ok = tls_initial == 42 && tls_bumped == 43;
+        }
+        // Restore the parent thread's FS_BASE so later code (signal handlers,
+        // libc canary readers, …) doesn't observe the test's TLS.
+        let _ = sys::set_fs_base(saved_fs_base);
+    }
+
+    print(b"DLTEST: TLS counter initial = ");
+    print_u64(tls_initial as u64);
+    print(b", bumped = ");
+    print_u64(tls_bumped as u64);
+    print(b"\n");
+
+    // Step 7: Verify the relocation engine didn't skip any entries.
+    let skipped = sotos_ld::skipped_count();
+    let applied = sotos_ld::applied_count();
+    print(b"DLTEST: relocs applied=");
+    print_u64(applied);
+    print(b" skipped=");
+    print_u64(skipped);
+    print(b"\n");
+
+    // Pass if (a) every reloc was applied, and (b) the TLS sub-test
+    // either passed or was inapplicable (no PT_TLS in the .so).
+    let tls_pass = handle.tls.is_empty() || tls_ok;
+    if skipped == 0 && tls_pass {
+        print(b"=== sotos-ld reloc: PASS ===\n");
+    } else {
+        print(b"=== sotos-ld reloc: FAIL ===\n");
+    }
+
+    // Step 8: Cleanup.
     sotos_ld::dl_close(&handle);
     for i in 0..DL_BUF_PAGES {
         let _ = sys::unmap_free(DL_BUF_BASE + i * 0x1000);

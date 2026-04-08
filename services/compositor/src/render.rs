@@ -126,16 +126,13 @@ impl Framebuffer {
         }
     }
 
-    /// Draw a mouse cursor at (x, y).
+    /// Draw the default arrow cursor at (x, y).
+    ///
+    /// Thin forwarder to [`crate::cursor::draw`] with the `Default`
+    /// shape; kept on `Framebuffer` for compatibility with existing
+    /// call sites. Multi-shape rendering lives in `crate::cursor`.
     pub fn draw_cursor(&self, x: i32, y: i32) {
-        const CURSOR_COLOR: u32 = 0xFFFFFFFF; // white
-        const CURSOR_SIZE: i32 = 12;
-        // Simple arrow cursor
-        for i in 0..CURSOR_SIZE {
-            for j in 0..=i {
-                self.fill_rect(x + j, y + i, 1, 1, CURSOR_COLOR);
-            }
-        }
+        crate::cursor::draw(self, x, y, crate::cursor::CursorShape::Default);
     }
 }
 

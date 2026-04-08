@@ -81,9 +81,9 @@ pub(crate) fn sys_rt_sigaction(ctx: &mut SyscallContext, msg: &IpcMsg) {
     if act_ptr != 0 && act_ptr < 0x0000_8000_0000_0000 && signo > 0 && signo < 32 {
         let mut act_buf = [0u8; 24];
         ctx.guest_read(act_ptr, &mut act_buf);
-        let handler = u64::from_le_bytes(act_buf[0..8].try_into().unwrap());
-        let flags = u64::from_le_bytes(act_buf[8..16].try_into().unwrap());
-        let restorer = u64::from_le_bytes(act_buf[16..24].try_into().unwrap());
+        let handler = u64::from_le_bytes(act_buf[0..8].try_into().expect("invariant: 8-byte slice"));
+        let flags = u64::from_le_bytes(act_buf[8..16].try_into().expect("invariant: 8-byte slice"));
+        let restorer = u64::from_le_bytes(act_buf[16..24].try_into().expect("invariant: 8-byte slice"));
         PROCESSES[idx].sig_handler[signo].store(handler, Ordering::Release);
         PROCESSES[idx].sig_flags[signo].store(flags, Ordering::Release);
         PROCESSES[idx].sig_restorer[signo].store(restorer, Ordering::Release);
@@ -166,9 +166,9 @@ pub(crate) fn sys_sigaltstack(ctx: &mut SyscallContext, msg: &IpcMsg) {
 
         let mut ss_buf = [0u8; 24];
         ctx.guest_read(new_ss, &mut ss_buf);
-        let ss_sp = u64::from_le_bytes(ss_buf[0..8].try_into().unwrap());
-        let ss_flags = u64::from_le_bytes(ss_buf[8..16].try_into().unwrap());
-        let ss_size = u64::from_le_bytes(ss_buf[16..24].try_into().unwrap());
+        let ss_sp = u64::from_le_bytes(ss_buf[0..8].try_into().expect("invariant: 8-byte slice"));
+        let ss_flags = u64::from_le_bytes(ss_buf[8..16].try_into().expect("invariant: 8-byte slice"));
+        let ss_size = u64::from_le_bytes(ss_buf[16..24].try_into().expect("invariant: 8-byte slice"));
 
         if ss_flags & SS_DISABLE != 0 {
             // Disabling alt stack

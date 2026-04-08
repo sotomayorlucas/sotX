@@ -373,8 +373,8 @@ pub(crate) fn writev_pipe(ctx: &mut SyscallContext, fd: usize, iov_ptr: u64, iov
     }
     for i in 0..cnt {
         let off = i * 16;
-        let base = u64::from_le_bytes(iov_raw[off..off+8].try_into().unwrap());
-        let ilen = u64::from_le_bytes(iov_raw[off+8..off+16].try_into().unwrap()) as usize;
+        let base = u64::from_le_bytes(iov_raw[off..off+8].try_into().expect("invariant: 8-byte slice"));
+        let ilen = u64::from_le_bytes(iov_raw[off+8..off+16].try_into().expect("invariant: 8-byte slice")) as usize;
         if ilen == 0 || base == 0 { continue; }
         // Write full iovec in 4096-byte chunks (blocking).
         // Previous code truncated to 4096 -- Wine requests can be larger.
@@ -442,8 +442,8 @@ pub(crate) fn writev_unix_socket(ctx: &mut SyscallContext, fd: usize, iov_ptr: u
         }
         for i in 0..cnt {
             let off = i * 16;
-            let base = u64::from_le_bytes(iov_unix[off..off+8].try_into().unwrap());
-            let ilen = u64::from_le_bytes(iov_unix[off+8..off+16].try_into().unwrap()) as usize;
+            let base = u64::from_le_bytes(iov_unix[off..off+8].try_into().expect("invariant: 8-byte slice"));
+            let ilen = u64::from_le_bytes(iov_unix[off+8..off+16].try_into().expect("invariant: 8-byte slice")) as usize;
             if base == 0 || ilen == 0 { continue; }
             // Write full iovec (blocking)
             let mut iov_written = 0usize;
@@ -470,7 +470,7 @@ pub(crate) fn writev_unix_socket(ctx: &mut SyscallContext, fd: usize, iov_ptr: u
         let mut expected = 0usize;
         for i in 0..cnt {
             let off = i * 16;
-            let il = u64::from_le_bytes(iov_unix[off+8..off+16].try_into().unwrap()) as usize;
+            let il = u64::from_le_bytes(iov_unix[off+8..off+16].try_into().expect("invariant: 8-byte slice")) as usize;
             expected += il;
         }
         if total != expected && expected > 0 {

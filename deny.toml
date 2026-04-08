@@ -1,0 +1,131 @@
+[licenses]
+version = 2
+confidence-threshold = 0.93
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MPL-2.0",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "0BSD",
+]
+exceptions = []
+unused-allowed-license = "allow"
+
+# First-party (workspace) crates do not declare a license field because they
+# are never published to crates.io. Clarify them as MIT OR Apache-2.0 (the
+# default Rust ecosystem dual license) so cargo-deny does not treat them as
+# unlicensed third-party dependencies.
+[[licenses.clarify]]
+crate = "sotos-ahci"
+expression = "MIT OR Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "sotos-audio"
+expression = "MIT OR Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "sotos-common"
+expression = "MIT OR Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "sotos-gui"
+expression = "MIT OR Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "sotos-kernel"
+expression = "MIT OR Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "sotos-ld"
+expression = "MIT OR Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "sotos-lua"
+expression = "MIT OR Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "sotos-mouse"
+expression = "MIT OR Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "sotos-nvme"
+expression = "MIT OR Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "sotos-objstore"
+expression = "MIT OR Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "sotos-pci"
+expression = "MIT OR Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "sotos-pkg"
+expression = "MIT OR Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "sotos-usb-storage"
+expression = "MIT OR Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "sotos-virtio"
+expression = "MIT OR Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "sotos-wasm"
+expression = "MIT OR Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "sotos-xhci"
+expression = "MIT OR Apache-2.0"
+license-files = []
+
+[bans]
+multiple-versions = "warn"
+# wildcards: cargo-deny only honors `allow-wildcard-paths` for crates marked
+# `publish = false`. None of our workspace crates declare that yet, so a
+# strict `deny` here would block legitimate intra-workspace `path = "..."`
+# deps (which cargo-deny classifies as wildcards because they have no
+# version field). Demote to "warn" until every sotos-* crate sets
+# `publish = false` in its Cargo.toml; then restore this to "deny" so
+# external wildcard version specifiers are hard-failed.
+# TODO(ci/audit-deny): mark workspace crates `publish = false` and flip
+# this back to "deny".
+wildcards = "warn"
+allow-wildcard-paths = true
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = []

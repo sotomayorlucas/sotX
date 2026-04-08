@@ -1,0 +1,12 @@
+# The provenance crate is pure logic (no_std, no arch deps) and builds for
+# x86_64-unknown-none when included in sotOS.  For `cargo test`, omit the
+# --target flag so it uses the host toolchain's pre-built std.
+[build]
+target = "x86_64-unknown-none"
+
+[target.x86_64-unknown-none]
+rustflags = ["-C", "relocation-model=static"]
+
+[unstable]
+build-std = ["core", "compiler_builtins", "alloc"]
+build-std-features = ["compiler-builtins-mem"]

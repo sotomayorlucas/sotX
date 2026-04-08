@@ -46,6 +46,8 @@ pub struct PortInfo {
 }
 
 impl PortInfo {
+    /// All-zeros placeholder (with `sector_size = 512`) used when
+    /// pre-populating [`AhciController::ports`].
     pub const fn empty() -> Self {
         Self {
             port_num: 0,
@@ -74,8 +76,9 @@ pub struct AhciController {
 
 /// Result of controller initialization.
 pub struct AhciInitResult {
-    /// AHCI version (major.minor).
+    /// AHCI version major (from `VS` high word).
     pub version_major: u16,
+    /// AHCI version minor (from `VS` low word).
     pub version_minor: u16,
     /// Number of SATA devices found.
     pub device_count: usize,

@@ -1,0 +1,41 @@
+name: ABI Diff
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  abi-diff:
+    name: Compute ABI diff
+    runs-on: ubuntu-latest
+    # Informational only — never block the PR.
+    continue-on-error: true
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Run ABI diff
+        run: |
+          python scripts/abi_diff.py \
+            ${{ github.event.pull_request.base.sha }} \
+            ${{ github.event.pull_request.head.sha }} \
+            > /tmp/abi-diff.md
+          cat /tmp/abi-diff.md
+
+      - name: Post sticky comment
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: abi-diff
+          path: /tmp/abi-diff.md
