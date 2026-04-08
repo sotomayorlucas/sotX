@@ -105,11 +105,17 @@ pub fn handle(frame: &mut TrapFrame, nr: u64) -> bool {
             frame.rax = sched::thread_count() as u64;
         }
 
-        // SYS_SET_FSBASE — set FS_BASE MSR for current thread (TLS)
-        // rdi = new FS base address
+        // SYS_SET_FSBASE — set FS_BASE MSR for current thread (TLS).
+        // rdi = new FS base address. Must be canonical (bits 47..63 all
+        // equal to bit 47); WRMSR(IA32_FS_BASE, non-canonical) raises #GP
+        // on real CPUs and on KVM/WHPX.
         SYS_SET_FSBASE => {
-            sched::set_current_fs_base(frame.rdi);
-            frame.rax = 0;
+            if !super::is_canonical(frame.rdi) {
+                frame.rax = SysError::InvalidArg as i64 as u64;
+            } else {
+                sched::set_current_fs_base(frame.rdi);
+                frame.rax = 0;
+            }
         }
 
         // SYS_GET_FSBASE — get FS_BASE of current thread
@@ -118,15 +124,22 @@ pub fn handle(frame: &mut TrapFrame, nr: u64) -> bool {
         }
 
         // SYS_SET_THREAD_FSBASE (162) — set FS_BASE for a target thread (by thread cap)
-        // rdi = thread_cap (WRITE), rsi = new FS base address
-        SYS_SET_THREAD_FSBASE => match cap::validate(frame.rdi as u32, Rights::WRITE) {
-            Ok(CapObject::Thread { id: tid }) => {
-                sched::set_thread_fs_base(ThreadId(tid), frame.rsi);
-                frame.rax = 0;
+        // rdi = thread_cap (WRITE), rsi = new FS base address.
+        // Same canonical-address requirement as SYS_SET_FSBASE.
+        SYS_SET_THREAD_FSBASE => {
+            if !super::is_canonical(frame.rsi) {
+                frame.rax = SysError::InvalidArg as i64 as u64;
+            } else {
+                match cap::validate(frame.rdi as u32, Rights::WRITE) {
+                    Ok(CapObject::Thread { id: tid }) => {
+                        sched::set_thread_fs_base(ThreadId(tid), frame.rsi);
+                        frame.rax = 0;
+                    }
+                    Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
+                    Err(e) => frame.rax = e as i64 as u64,
+                }
             }
-            Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
-            Err(e) => frame.rax = e as i64 as u64,
-        },
+        }
 
         // SYS_GET_THREAD_REGS (172) — read saved user registers of a blocked thread.
         // Used by LUCAS for signal frame construction.

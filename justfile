@@ -209,6 +209,26 @@ tlc:
 tlc-mc:
     bash scripts/run_tlc.sh formal
 
+# Meta-test: verify that the sched_smp spec is *sensitive* to R1 by
+# running it under the legacy (buggy) config and checking that TLC
+# produces a NoLostWake counterexample. If TLC reports "no error" here,
+# the spec is vacuously true and not actually catching the bug.
+#
+# Run this in CI alongside `tlc-mc` to confirm the formal verification
+# is meaningful: tlc-mc verifies the patched scheduler is safe;
+# verify-r1-bug verifies the spec would have caught the original bug.
+verify-r1-bug:
+    cd formal && cp sched_smp.cfg sched_smp.cfg.bak && cp sched_smp_legacy.cfg sched_smp.cfg && \
+        java -Xss64m -XX:+UseParallelGC -cp ../tools/tlc.jar tlc2.TLC -workers auto sched_smp 2>&1 | tee /tmp/r1.log; \
+        mv sched_smp.cfg.bak sched_smp.cfg; \
+        rm -rf states sched_smp_TTrace_*.tla sched_smp_TTrace_*.bin 2>/dev/null; \
+        if grep -q 'Temporal property NoLostWake was violated' /tmp/r1.log; then \
+            echo 'verify-r1-bug: OK -- spec correctly flags R1 under legacy config'; \
+        else \
+            echo 'verify-r1-bug: FAIL -- spec is vacuously true, R1 not exhibited'; \
+            exit 1; \
+        fi
+
 # Tier 5 close: produce target/sigmanifest with SHA-256 hashes of the
 # Rust-built first-party binaries (init excluded -- chicken-and-egg).
 sigmanifest: build-shell build-kbd build-net build-nvme build-xhci build-vmm build-hello build-hello-linux build-drm-test build-net-test build-compositor build-styx-test build-rump-vfs build-attacker build-posix-test build-kernel-test build-sot-dtrace build-sot-pkg build-sot-carp build-sot-cheri build-sot-statusbar build-abi-fuzz
@@ -298,6 +318,29 @@ run-fast: image create-test-disk
         -display none \
         -no-reboot \
         -m 2048M
+
+# Run under KVM in WSL with nested VMX exposed.
+#
+# Required for the bhyve VT-x project (Phase B+) — WHPX does not expose
+# nested virtualization to its guests, so VMXON inside sotOS only works
+# under KVM (Linux) where nested VMX is supported by default.
+#
+# Boots the same target/sotos.img via WSL+QEMU, with `-cpu host,+vmx`
+# (full host CPU passthrough including VMX/EPT/VPID). Serial output is
+# captured to bootlog_kvm.txt in the workspace root via /mnt/c.
+#
+# Prerequisites: WSL2 distro with qemu-system-x86 installed, user in
+# the kvm group, /dev/kvm accessible.
+run-kvm: image
+    wsl -e bash -c "qemu-system-x86_64 \
+        -accel kvm \
+        -cpu host,+vmx \
+        -machine q35 \
+        -drive format=raw,file=/mnt/c/Users/sotom/sotOS/{{IMAGE}} \
+        -serial file:/mnt/c/Users/sotom/sotOS/bootlog_kvm.txt \
+        -display none \
+        -no-reboot \
+        -m 2048M"
 
 # Run with SMP (4 CPUs — may hang due to scheduler race, use for testing only)
 run-smp: image

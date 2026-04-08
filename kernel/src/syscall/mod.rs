@@ -30,6 +30,23 @@ use crate::pool::PoolHandle;
 use crate::sched;
 use sotos_common::SysError;
 
+/// Canonical-address check for x86_64.
+///
+/// A 64-bit virtual address is canonical iff bits 47..63 are all equal
+/// (sign-extension of bit 47). `WRMSR` to FS_BASE / GS_BASE / KERNEL_GS_BASE
+/// with a non-canonical value raises #GP on real CPUs (and on KVM/WHPX).
+/// TCG silently accepts non-canonical writes, which is why this check is
+/// only load-bearing under hardware acceleration.
+///
+/// Used by the FS_BASE / GS_BASE syscall entry points to reject bogus
+/// userspace input with `-EINVAL` instead of letting the value reach
+/// `wrmsr` and panic the kernel from a fuzzer's POV.
+#[inline]
+pub(super) fn is_canonical(addr: u64) -> bool {
+    let high = addr >> 47;
+    high == 0 || high == 0x1_FFFF
+}
+
 /// Syscall numbers — IPC (sync endpoints).
 pub(super) const SYS_SEND: u64 = 1;
 pub(super) const SYS_RECV: u64 = 2;
@@ -322,14 +339,22 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
         if frame.rax == 158 {
             match frame.rdi {
                 0x1001 => {
-                    // ARCH_SET_GS
-                    sched::set_current_gs_base(frame.rsi);
-                    frame.rax = 0;
+                    // ARCH_SET_GS — reject non-canonical addresses (#GP on real HW).
+                    if !is_canonical(frame.rsi) {
+                        frame.rax = (-22i64) as u64; // -EINVAL
+                    } else {
+                        sched::set_current_gs_base(frame.rsi);
+                        frame.rax = 0;
+                    }
                 }
                 0x1002 => {
-                    // ARCH_SET_FS
-                    sched::set_current_fs_base(frame.rsi);
-                    frame.rax = 0;
+                    // ARCH_SET_FS — reject non-canonical addresses (#GP on real HW).
+                    if !is_canonical(frame.rsi) {
+                        frame.rax = (-22i64) as u64; // -EINVAL
+                    } else {
+                        sched::set_current_fs_base(frame.rsi);
+                        frame.rax = 0;
+                    }
                 }
                 0x1003 => {
                     // ARCH_GET_FS
