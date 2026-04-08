@@ -1,21 +1,21 @@
 //! Memory management syscall handlers: frame allocation, mapping, VM operations.
 
-use crate::kdebug;
 use crate::arch::x86_64::syscall::TrapFrame;
 use crate::cap::{self, CapId, CapObject, Rights};
-use crate::mm::{self, PhysFrame};
-use crate::mm::paging::{self, AddressSpace, PAGE_PRESENT, PAGE_USER, PAGE_WRITABLE, PAGE_NO_EXECUTE};
-use crate::sched;
 use crate::fault;
+use crate::kdebug;
+use crate::mm::paging::{
+    self, AddressSpace, PAGE_NO_EXECUTE, PAGE_PRESENT, PAGE_USER, PAGE_WRITABLE,
+};
+use crate::mm::{self, PhysFrame};
+use crate::sched;
 use sotos_common::SysError;
 
 use super::{
-    USER_ADDR_LIMIT, USER_FLAG_MASK,
-    SYS_FRAME_ALLOC, SYS_FRAME_FREE, SYS_MAP, SYS_UNMAP, SYS_UNMAP_FREE,
-    SYS_FRAME_ALLOC_CONTIG, SYS_FRAME_PHYS, SYS_FRAME_COPY, SYS_PTE_READ,
-    SYS_VM_READ, SYS_VM_WRITE, SYS_MAP_INTO, SYS_UNMAP_FROM, SYS_AS_CLONE,
-    SYS_PROTECT, SYS_PROTECT_IN, SYS_WX_RELAX, SYS_MAP_OFFSET,
-    SYS_ADDR_SPACE_CREATE,
+    SYS_ADDR_SPACE_CREATE, SYS_AS_CLONE, SYS_FRAME_ALLOC, SYS_FRAME_ALLOC_CONTIG, SYS_FRAME_COPY,
+    SYS_FRAME_FREE, SYS_FRAME_PHYS, SYS_MAP, SYS_MAP_INTO, SYS_MAP_OFFSET, SYS_PROTECT,
+    SYS_PROTECT_IN, SYS_PTE_READ, SYS_UNMAP, SYS_UNMAP_FREE, SYS_UNMAP_FROM, SYS_VM_READ,
+    SYS_VM_WRITE, SYS_WX_RELAX, USER_ADDR_LIMIT, USER_FLAG_MASK,
 };
 
 /// Handle memory management syscalls. Returns `true` if the syscall was handled.
@@ -34,7 +34,14 @@ pub fn handle(frame: &mut TrapFrame, nr: u64) -> bool {
                         unsafe {
                             core::ptr::write_bytes((f.addr() + hhdm) as *mut u8, 0, 4096);
                         }
-                        match cap::insert(CapObject::Memory { base: f.addr(), size: 4096 }, Rights::ALL, None) {
+                        match cap::insert(
+                            CapObject::Memory {
+                                base: f.addr(),
+                                size: 4096,
+                            },
+                            Rights::ALL,
+                            None,
+                        ) {
                             Some(cap_id) => frame.rax = cap_id.raw() as u64,
                             None => {
                                 mm::free_frame(f);
@@ -52,17 +59,15 @@ pub fn handle(frame: &mut TrapFrame, nr: u64) -> bool {
         }
 
         // SYS_FRAME_FREE — free a physical frame (cap_id in rdi, requires WRITE)
-        SYS_FRAME_FREE => {
-            match cap::validate(frame.rdi as u32, Rights::WRITE) {
-                Ok(CapObject::Memory { base, .. }) => {
-                    mm::free_frame(PhysFrame::from_addr(base));
-                    cap::revoke(CapId::new(frame.rdi as u32));
-                    frame.rax = 0;
-                }
-                Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
-                Err(e) => frame.rax = e as i64 as u64,
+        SYS_FRAME_FREE => match cap::validate(frame.rdi as u32, Rights::WRITE) {
+            Ok(CapObject::Memory { base, .. }) => {
+                mm::free_frame(PhysFrame::from_addr(base));
+                cap::revoke(CapId::new(frame.rdi as u32));
+                frame.rax = 0;
             }
-        }
+            Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
+            Err(e) => frame.rax = e as i64 as u64,
+        },
 
         // SYS_MAP — map a frame into the caller's address space
         // rdi = vaddr, rsi = frame_cap_id, rdx = user_flags
@@ -80,7 +85,8 @@ pub fn handle(frame: &mut TrapFrame, nr: u64) -> bool {
                         let mut flags = PAGE_PRESENT | PAGE_USER | (user_flags & USER_FLAG_MASK);
                         let cr3 = paging::read_cr3();
                         // W^X: writable pages are never executable (unless relaxed)
-                        if flags & PAGE_WRITABLE != 0 && flags & PAGE_NO_EXECUTE == 0
+                        if flags & PAGE_WRITABLE != 0
+                            && flags & PAGE_NO_EXECUTE == 0
                             && !paging::is_wx_relaxed(cr3)
                         {
                             flags |= PAGE_NO_EXECUTE;
@@ -139,15 +145,13 @@ pub fn handle(frame: &mut TrapFrame, nr: u64) -> bool {
 
         // SYS_FRAME_PHYS — query physical address of a frame capability
         // rdi = frame_cap (requires READ); returns rax = physical address
-        SYS_FRAME_PHYS => {
-            match cap::validate(frame.rdi as u32, Rights::READ) {
-                Ok(CapObject::Memory { base, .. }) => {
-                    frame.rax = base;
-                }
-                Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
-                Err(e) => frame.rax = e as i64 as u64,
+        SYS_FRAME_PHYS => match cap::validate(frame.rdi as u32, Rights::READ) {
+            Ok(CapObject::Memory { base, .. }) => {
+                frame.rax = base;
             }
-        }
+            Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
+            Err(e) => frame.rax = e as i64 as u64,
+        },
 
         // SYS_FRAME_ALLOC_CONTIG — allocate N contiguous physical frames
         // rdi = count (1–16); returns rax = cap_id (Memory cap with size = count * 4096)
@@ -163,18 +167,23 @@ pub fn handle(frame: &mut TrapFrame, nr: u64) -> bool {
                         // before userspace (or device emulation) touches it.
                         let hhdm = mm::hhdm_offset();
                         unsafe {
-                            core::ptr::write_bytes(
-                                (f.addr() + hhdm) as *mut u8,
-                                0,
-                                size as usize,
-                            );
+                            core::ptr::write_bytes((f.addr() + hhdm) as *mut u8, 0, size as usize);
                         }
-                        match cap::insert(CapObject::Memory { base: f.addr(), size }, Rights::ALL, None) {
+                        match cap::insert(
+                            CapObject::Memory {
+                                base: f.addr(),
+                                size,
+                            },
+                            Rights::ALL,
+                            None,
+                        ) {
                             Some(cap_id) => frame.rax = cap_id.raw() as u64,
                             None => {
                                 // Free all frames on cap insert failure
                                 for i in 0..count {
-                                    mm::free_frame(PhysFrame::from_addr(f.addr() + (i as u64) * 4096));
+                                    mm::free_frame(PhysFrame::from_addr(
+                                        f.addr() + (i as u64) * 4096,
+                                    ));
                                 }
                                 frame.rax = SysError::OutOfResources as i64 as u64;
                             }
@@ -195,8 +204,10 @@ pub fn handle(frame: &mut TrapFrame, nr: u64) -> bool {
 
             match cap::validate(mem_cap, Rights::READ) {
                 Ok(CapObject::Memory { base, size }) => {
-                    if vaddr & 0xFFF != 0 || vaddr >= USER_ADDR_LIMIT
-                        || offset & 0xFFF != 0 || offset >= size
+                    if vaddr & 0xFFF != 0
+                        || vaddr >= USER_ADDR_LIMIT
+                        || offset & 0xFFF != 0
+                        || offset >= size
                     {
                         frame.rax = SysError::InvalidArg as i64 as u64;
                     } else {
@@ -204,7 +215,8 @@ pub fn handle(frame: &mut TrapFrame, nr: u64) -> bool {
                         let mut flags = PAGE_PRESENT | PAGE_USER | (user_flags & USER_FLAG_MASK);
                         let cr3 = paging::read_cr3();
                         // W^X: writable pages are never executable (unless relaxed)
-                        if flags & PAGE_WRITABLE != 0 && flags & PAGE_NO_EXECUTE == 0
+                        if flags & PAGE_WRITABLE != 0
+                            && flags & PAGE_NO_EXECUTE == 0
                             && !paging::is_wx_relaxed(cr3)
                         {
                             flags |= PAGE_NO_EXECUTE;
@@ -233,7 +245,8 @@ pub fn handle(frame: &mut TrapFrame, nr: u64) -> bool {
                 let mut flags = PAGE_PRESENT | PAGE_USER | (user_flags & USER_FLAG_MASK);
                 let cr3 = paging::read_cr3();
                 // W^X: writable pages are never executable (unless relaxed)
-                if flags & PAGE_WRITABLE != 0 && flags & PAGE_NO_EXECUTE == 0
+                if flags & PAGE_WRITABLE != 0
+                    && flags & PAGE_NO_EXECUTE == 0
                     && !paging::is_wx_relaxed(cr3)
                 {
                     flags |= PAGE_NO_EXECUTE;
@@ -261,7 +274,8 @@ pub fn handle(frame: &mut TrapFrame, nr: u64) -> bool {
                     } else {
                         let mut flags = PAGE_PRESENT | PAGE_USER | (user_flags & USER_FLAG_MASK);
                         // W^X: writable pages are never executable (unless relaxed)
-                        if flags & PAGE_WRITABLE != 0 && flags & PAGE_NO_EXECUTE == 0
+                        if flags & PAGE_WRITABLE != 0
+                            && flags & PAGE_NO_EXECUTE == 0
                             && !paging::is_wx_relaxed(cr3)
                         {
                             flags |= PAGE_NO_EXECUTE;
@@ -284,16 +298,14 @@ pub fn handle(frame: &mut TrapFrame, nr: u64) -> bool {
 
         // SYS_WX_RELAX — enable/disable W^X relaxation for an address space
         // rdi = as_cap (WRITE), rsi = 1 (relax) / 0 (enforce)
-        SYS_WX_RELAX => {
-            match cap::validate(frame.rdi as u32, Rights::WRITE) {
-                Ok(CapObject::AddrSpace { cr3 }) => {
-                    paging::set_wx_relaxed(cr3, frame.rsi != 0);
-                    frame.rax = 0;
-                }
-                Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
-                Err(e) => frame.rax = e as i64 as u64,
+        SYS_WX_RELAX => match cap::validate(frame.rdi as u32, Rights::WRITE) {
+            Ok(CapObject::AddrSpace { cr3 }) => {
+                paging::set_wx_relaxed(cr3, frame.rsi != 0);
+                frame.rax = 0;
             }
-        }
+            Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
+            Err(e) => frame.rax = e as i64 as u64,
+        },
 
         // SYS_ADDR_SPACE_CREATE — create a new empty user address space
         // Returns: rax = AS cap_id (or error)
@@ -322,9 +334,11 @@ pub fn handle(frame: &mut TrapFrame, nr: u64) -> bool {
                             if vaddr & 0xFFF != 0 || vaddr >= USER_ADDR_LIMIT {
                                 frame.rax = SysError::InvalidArg as i64 as u64;
                             } else {
-                                let mut flags = PAGE_PRESENT | PAGE_USER | (user_flags & USER_FLAG_MASK);
+                                let mut flags =
+                                    PAGE_PRESENT | PAGE_USER | (user_flags & USER_FLAG_MASK);
                                 // W^X: writable pages are never executable (unless relaxed)
-                                if flags & PAGE_WRITABLE != 0 && flags & PAGE_NO_EXECUTE == 0
+                                if flags & PAGE_WRITABLE != 0
+                                    && flags & PAGE_NO_EXECUTE == 0
                                     && !paging::is_wx_relaxed(cr3)
                                 {
                                     flags |= PAGE_NO_EXECUTE;
@@ -448,23 +462,21 @@ pub fn handle(frame: &mut TrapFrame, nr: u64) -> bool {
         // SYS_PTE_READ — read PTE (phys + flags) for a vaddr in an AS
         // rdi = as_cap (READ), rsi = vaddr
         // Returns: rax = phys_addr, rdi = flags (or error in rax)
-        SYS_PTE_READ => {
-            match cap::validate(frame.rdi as u32, Rights::READ) {
-                Ok(CapObject::AddrSpace { cr3 }) => {
-                    let vaddr = frame.rsi;
-                    let aspace = paging::AddressSpace::from_cr3(cr3);
-                    match aspace.lookup_pte(vaddr & !0xFFF) {
-                        Some((phys, flags)) => {
-                            frame.rax = phys;
-                            frame.rdi = flags;
-                        }
-                        None => frame.rax = SysError::NotFound as i64 as u64,
+        SYS_PTE_READ => match cap::validate(frame.rdi as u32, Rights::READ) {
+            Ok(CapObject::AddrSpace { cr3 }) => {
+                let vaddr = frame.rsi;
+                let aspace = paging::AddressSpace::from_cr3(cr3);
+                match aspace.lookup_pte(vaddr & !0xFFF) {
+                    Some((phys, flags)) => {
+                        frame.rax = phys;
+                        frame.rdi = flags;
                     }
+                    None => frame.rax = SysError::NotFound as i64 as u64,
                 }
-                Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
-                Err(e) => frame.rax = e as i64 as u64,
             }
-        }
+            Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
+            Err(e) => frame.rax = e as i64 as u64,
+        },
 
         // SYS_VM_READ — read bytes from a target AS into caller's buffer
         // rdi = as_cap, rsi = remote_vaddr, rdx = local_buf, r10 = len
@@ -497,10 +509,17 @@ pub fn handle(frame: &mut TrapFrame, nr: u64) -> bool {
                                     }
                                     done += chunk;
                                 }
-                                None => { ok = false; break; }
+                                None => {
+                                    ok = false;
+                                    break;
+                                }
                             }
                         }
-                        frame.rax = if ok { 0 } else { SysError::NotFound as i64 as u64 };
+                        frame.rax = if ok {
+                            0
+                        } else {
+                            SysError::NotFound as i64 as u64
+                        };
                     }
                     Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
                     Err(e) => frame.rax = e as i64 as u64,
@@ -539,7 +558,10 @@ pub fn handle(frame: &mut TrapFrame, nr: u64) -> bool {
                                         // CoW page: allocate new frame, copy old content, update PTE
                                         let new_frame = match mm::alloc_frame() {
                                             Some(f) => f.addr(),
-                                            None => { ok = false; break; }
+                                            None => {
+                                                ok = false;
+                                                break;
+                                            }
                                         };
                                         // Copy old page content to new frame
                                         unsafe {
@@ -551,7 +573,9 @@ pub fn handle(frame: &mut TrapFrame, nr: u64) -> bool {
                                         }
                                         // Update PTE to point to new frame with WRITABLE
                                         let new_pte = new_frame | (flags | paging::PAGE_WRITABLE);
-                                        unsafe { *pte_ptr = new_pte; }
+                                        unsafe {
+                                            *pte_ptr = new_pte;
+                                        }
                                         // Decrement refcount on old frame
                                         let rc = mm::frame_refcount_dec(old_phys);
                                         if rc == 0 {
@@ -571,10 +595,17 @@ pub fn handle(frame: &mut TrapFrame, nr: u64) -> bool {
                                     }
                                     done += chunk;
                                 }
-                                None => { ok = false; break; }
+                                None => {
+                                    ok = false;
+                                    break;
+                                }
                             }
                         }
-                        frame.rax = if ok { 0 } else { SysError::NotFound as i64 as u64 };
+                        frame.rax = if ok {
+                            0
+                        } else {
+                            SysError::NotFound as i64 as u64
+                        };
                     }
                     Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
                     Err(e) => frame.rax = e as i64 as u64,

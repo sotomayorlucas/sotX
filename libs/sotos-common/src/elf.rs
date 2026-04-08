@@ -111,11 +111,12 @@ pub fn parse_interp(data: &[u8], info: &ElfInfo) -> Option<InterpInfo> {
             let offset = read_u64(data, ph + P_OFFSET) as usize;
             let filesz = read_u64(data, ph + P_FILESZ) as usize;
             // Strip trailing NUL if present
-            let len = if filesz > 0 && offset + filesz <= data.len() && data[offset + filesz - 1] == 0 {
-                filesz - 1
-            } else {
-                filesz
-            };
+            let len =
+                if filesz > 0 && offset + filesz <= data.len() && data[offset + filesz - 1] == 0 {
+                    filesz - 1
+                } else {
+                    filesz
+                };
             return Some(InterpInfo { offset, len });
         }
     }
@@ -132,8 +133,14 @@ fn read_u32(data: &[u8], off: usize) -> u32 {
 
 fn read_u64(data: &[u8], off: usize) -> u64 {
     u64::from_le_bytes([
-        data[off], data[off + 1], data[off + 2], data[off + 3],
-        data[off + 4], data[off + 5], data[off + 6], data[off + 7],
+        data[off],
+        data[off + 1],
+        data[off + 2],
+        data[off + 3],
+        data[off + 4],
+        data[off + 5],
+        data[off + 6],
+        data[off + 7],
     ])
 }
 
@@ -173,7 +180,11 @@ pub const MAX_LOAD_SEGMENTS: usize = 8;
 
 /// Extract all PT_LOAD segments from a parsed ELF.
 /// Returns the number of segments written to `out`.
-pub fn load_segments(data: &[u8], info: &ElfInfo, out: &mut [LoadSegment; MAX_LOAD_SEGMENTS]) -> usize {
+pub fn load_segments(
+    data: &[u8],
+    info: &ElfInfo,
+    out: &mut [LoadSegment; MAX_LOAD_SEGMENTS],
+) -> usize {
     let mut count = 0;
     for i in 0..info.phnum {
         let ph = info.phoff + i * info.phentsize;
@@ -228,11 +239,17 @@ pub struct DynamicInfo {
 impl DynamicInfo {
     pub const fn empty() -> Self {
         Self {
-            rela: 0, relasz: 0, relaent: 0,
-            jmprel: 0, pltrelsz: 0,
-            symtab: 0, strtab: 0, strsz: 0,
+            rela: 0,
+            relasz: 0,
+            relaent: 0,
+            jmprel: 0,
+            pltrelsz: 0,
+            symtab: 0,
+            strtab: 0,
+            strsz: 0,
             gnu_hash: 0,
-            init_array: 0, init_arraysz: 0,
+            init_array: 0,
+            init_arraysz: 0,
         }
     }
 }

@@ -113,7 +113,13 @@ pub fn push_fault(tid: u32, addr: u64, code: u64, cr3: u64) -> bool {
         // Try per-AS handler first.
         if let Some(h) = state.find_handler_mut(cr3) {
             let handle = h.notify_handle;
-            h.queue.push_back(FaultInfo { tid, addr, code, cr3, as_cap_id });
+            h.queue.push_back(FaultInfo {
+                tid,
+                addr,
+                code,
+                cr3,
+                as_cap_id,
+            });
             drop(state);
             let _ = notify::signal(handle);
             return true;
@@ -122,7 +128,13 @@ pub fn push_fault(tid: u32, addr: u64, code: u64, cr3: u64) -> bool {
         // Fall back to global handler.
         match state.global_notify {
             Some(h) => {
-                state.global_queue.push_back(FaultInfo { tid, addr, code, cr3, as_cap_id });
+                state.global_queue.push_back(FaultInfo {
+                    tid,
+                    addr,
+                    code,
+                    cr3,
+                    as_cap_id,
+                });
                 h
             }
             None => return false,

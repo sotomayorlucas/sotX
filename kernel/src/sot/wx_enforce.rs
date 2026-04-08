@@ -138,7 +138,8 @@ impl WxEnforcer {
                     self.relaxed_base = aligned;
                 }
 
-                let offset_pages = ((aligned.wrapping_sub(self.relaxed_base)) >> PAGE_SHIFT) as usize;
+                let offset_pages =
+                    ((aligned.wrapping_sub(self.relaxed_base)) >> PAGE_SHIFT) as usize;
                 if offset_pages >= MAX_RELAXED_PAGES {
                     return Err(WxViolation::RelaxationLimitReached);
                 }

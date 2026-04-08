@@ -9,21 +9,21 @@
 //! interposed capabilities and routes invocations through a proxy
 //! domain according to the interposition policy.
 
-use crate::kdebug;
 use crate::arch::x86_64::syscall::TrapFrame;
 use crate::cap::{self, CapId, CapObject, Rights};
 use crate::ipc::endpoint::{self, Message};
+use crate::kdebug;
 use crate::pool::PoolHandle;
 use crate::sot::cap_epoch::InterpositionPolicy;
-use crate::sot::provenance::{self, ProvenanceEntry};
 use crate::sot::domain::{self, DomainPolicy};
+use crate::sot::provenance::{self, ProvenanceEntry};
 use crate::sot::tx::{TxId, TxTier, TX_MANAGER};
 use sotos_common::SysError;
 
 use super::{
-    SYS_SO_CREATE, SYS_SO_INVOKE, SYS_SO_GRANT, SYS_SO_REVOKE, SYS_SO_OBSERVE,
-    SYS_SOT_DOMAIN_CREATE, SYS_SOT_DOMAIN_ENTER, SYS_SOT_CHANNEL_CREATE,
-    SYS_TX_BEGIN, SYS_TX_COMMIT, SYS_TX_ABORT, SYS_TX_PREPARE,
+    SYS_SOT_CHANNEL_CREATE, SYS_SOT_DOMAIN_CREATE, SYS_SOT_DOMAIN_ENTER, SYS_SO_CREATE,
+    SYS_SO_GRANT, SYS_SO_INVOKE, SYS_SO_OBSERVE, SYS_SO_REVOKE, SYS_TX_ABORT, SYS_TX_BEGIN,
+    SYS_TX_COMMIT, SYS_TX_PREPARE,
 };
 
 // Provenance operation codes.
@@ -42,8 +42,8 @@ const OP_TX_ABORT: u16 = 0x51;
 const SOTYPE_TX_EVENT: u8 = 0xF0;
 
 /// IPC message tags for proxy domain communication.
-const PROXY_INSPECT_TAG: u64 = 0xDE_C0_0001;
-const PROXY_FABRICATE_TAG: u64 = 0xDE_C0_0003;
+const PROXY_INSPECT_TAG: u64 = 0xDEC0_0001;
+const PROXY_FABRICATE_TAG: u64 = 0xDEC0_0003;
 
 fn current_cpu() -> usize {
     if crate::mm::slab::is_percpu_ready() {
@@ -60,25 +60,28 @@ fn record_provenance(domain_id: u32, operation: u16, so_id: u64) {
 fn record_provenance_typed(domain_id: u32, operation: u16, so_type: u8, so_id: u64) {
     let cpu = current_cpu();
     let epoch = cap::current_epoch();
-    provenance::record(cpu, ProvenanceEntry {
-        epoch,
-        domain_id,
-        operation,
-        so_type,
-        _pad: 0,
-        so_id,
-        version: 0,
-        tx_id: 0,
-        timestamp: unsafe { core::arch::x86_64::_rdtsc() },
-    });
+    provenance::record(
+        cpu,
+        ProvenanceEntry {
+            epoch,
+            domain_id,
+            operation,
+            so_type,
+            _pad: 0,
+            so_id,
+            version: 0,
+            tx_id: 0,
+            timestamp: unsafe { core::arch::x86_64::_rdtsc() },
+        },
+    );
 }
 
 /// Write IPC reply registers back into the trap frame.
 fn write_reply_to_frame(frame: &mut TrapFrame, reply: &Message) {
     frame.rax = reply.regs[0];
     frame.rdx = reply.regs[1];
-    frame.r8  = reply.regs[2];
-    frame.r9  = reply.regs[3];
+    frame.r8 = reply.regs[2];
+    frame.r9 = reply.regs[3];
 }
 
 /// Resolve a domain's entry endpoint to a raw endpoint id.
@@ -110,18 +113,54 @@ fn call_proxy(frame: &mut TrapFrame, ep_raw: u32, msg: Message) {
 /// Handle SOT syscalls (300-310). Returns true if handled.
 pub fn handle(frame: &mut TrapFrame, nr: u64) -> bool {
     match nr {
-        SYS_SO_CREATE => { handle_so_create(frame); true }
-        SYS_SO_INVOKE => { handle_so_invoke(frame); true }
-        SYS_SO_GRANT => { handle_so_grant(frame); true }
-        SYS_SO_REVOKE => { handle_so_revoke(frame); true }
-        SYS_SO_OBSERVE => { handle_so_observe(frame); true }
-        SYS_SOT_DOMAIN_CREATE => { handle_domain_create(frame); true }
-        SYS_SOT_DOMAIN_ENTER => { handle_domain_enter(frame); true }
-        SYS_SOT_CHANNEL_CREATE => { handle_channel_create(frame); true }
-        SYS_TX_BEGIN => { handle_tx_begin(frame); true }
-        SYS_TX_COMMIT => { handle_tx_commit(frame); true }
-        SYS_TX_ABORT => { handle_tx_abort(frame); true }
-        SYS_TX_PREPARE => { handle_tx_prepare(frame); true }
+        SYS_SO_CREATE => {
+            handle_so_create(frame);
+            true
+        }
+        SYS_SO_INVOKE => {
+            handle_so_invoke(frame);
+            true
+        }
+        SYS_SO_GRANT => {
+            handle_so_grant(frame);
+            true
+        }
+        SYS_SO_REVOKE => {
+            handle_so_revoke(frame);
+            true
+        }
+        SYS_SO_OBSERVE => {
+            handle_so_observe(frame);
+            true
+        }
+        SYS_SOT_DOMAIN_CREATE => {
+            handle_domain_create(frame);
+            true
+        }
+        SYS_SOT_DOMAIN_ENTER => {
+            handle_domain_enter(frame);
+            true
+        }
+        SYS_SOT_CHANNEL_CREATE => {
+            handle_channel_create(frame);
+            true
+        }
+        SYS_TX_BEGIN => {
+            handle_tx_begin(frame);
+            true
+        }
+        SYS_TX_COMMIT => {
+            handle_tx_commit(frame);
+            true
+        }
+        SYS_TX_ABORT => {
+            handle_tx_abort(frame);
+            true
+        }
+        SYS_TX_PREPARE => {
+            handle_tx_prepare(frame);
+            true
+        }
         _ => false,
     }
 }
@@ -132,7 +171,12 @@ fn handle_so_create(frame: &mut TrapFrame) {
     let so_type = frame.rdi as u8;
     let owner_domain = frame.rdx as u32;
 
-    kdebug!("so_create: type={} policy_bits={:#x} owner={}", so_type, frame.rsi, owner_domain);
+    kdebug!(
+        "so_create: type={} policy_bits={:#x} owner={}",
+        so_type,
+        frame.rsi,
+        owner_domain
+    );
 
     let cap_obj = match so_type {
         // Generic SO types (0,1,3,4,5) collapse to a Memory cap (placeholder).
@@ -140,17 +184,29 @@ fn handle_so_create(frame: &mut TrapFrame) {
         0 | 1 | 3 | 4 | 5 => CapObject::Memory { base: 0, size: 0 },
         2 => match crate::ipc::channel::create() {
             Some(ch_id) => CapObject::Channel { id: ch_id.0.raw() },
-            None => { frame.rax = SysError::OutOfResources as i64 as u64; return; }
+            None => {
+                frame.rax = SysError::OutOfResources as i64 as u64;
+                return;
+            }
         },
         6 => match endpoint::create() {
             Some(ep_id) => CapObject::Endpoint { id: ep_id.0.raw() },
-            None => { frame.rax = SysError::OutOfResources as i64 as u64; return; }
+            None => {
+                frame.rax = SysError::OutOfResources as i64 as u64;
+                return;
+            }
         },
         8 => match crate::ipc::notify::create() {
             Some(n_id) => CapObject::Notification { id: n_id.0.raw() },
-            None => { frame.rax = SysError::OutOfResources as i64 as u64; return; }
+            None => {
+                frame.rax = SysError::OutOfResources as i64 as u64;
+                return;
+            }
         },
-        _ => { frame.rax = SysError::InvalidArg as i64 as u64; return; }
+        _ => {
+            frame.rax = SysError::InvalidArg as i64 as u64;
+            return;
+        }
     };
 
     match cap::insert(cap_obj, Rights::ALL, None) {
@@ -174,7 +230,10 @@ fn handle_so_invoke(frame: &mut TrapFrame) {
 
     let (obj, rights) = match cap::lookup(CapId::new(cap_id)) {
         Some(pair) => pair,
-        None => { frame.rax = SysError::InvalidCap as i64 as u64; return; }
+        None => {
+            frame.rax = SysError::InvalidCap as i64 as u64;
+            return;
+        }
     };
 
     if !rights.contains(Rights::READ) {
@@ -183,27 +242,29 @@ fn handle_so_invoke(frame: &mut TrapFrame) {
     }
 
     match obj {
-        CapObject::Interposed { original, proxy_domain, policy } => {
-            match InterpositionPolicy::from_u8(policy) {
-                Some(InterpositionPolicy::Passthrough) => {
-                    record_provenance(proxy_domain, OP_INVOKE_PASSTHROUGH, original as u64);
-                    invoke_original(frame, original, method);
-                }
-                Some(InterpositionPolicy::Inspect) => {
-                    record_provenance(proxy_domain, OP_INVOKE_INSPECT, original as u64);
-                    forward_to_proxy(frame, proxy_domain, original, method, PROXY_INSPECT_TAG);
-                }
-                Some(InterpositionPolicy::Redirect) => {
-                    record_provenance(proxy_domain, OP_INVOKE_REDIRECT, original as u64);
-                    redirect_to_proxy(frame, proxy_domain, method);
-                }
-                Some(InterpositionPolicy::Fabricate) => {
-                    record_provenance(proxy_domain, OP_INVOKE_FABRICATE, original as u64);
-                    forward_to_proxy(frame, proxy_domain, original, method, PROXY_FABRICATE_TAG);
-                }
-                None => frame.rax = SysError::InvalidArg as i64 as u64,
+        CapObject::Interposed {
+            original,
+            proxy_domain,
+            policy,
+        } => match InterpositionPolicy::from_u8(policy) {
+            Some(InterpositionPolicy::Passthrough) => {
+                record_provenance(proxy_domain, OP_INVOKE_PASSTHROUGH, original as u64);
+                invoke_original(frame, original, method);
             }
-        }
+            Some(InterpositionPolicy::Inspect) => {
+                record_provenance(proxy_domain, OP_INVOKE_INSPECT, original as u64);
+                forward_to_proxy(frame, proxy_domain, original, method, PROXY_INSPECT_TAG);
+            }
+            Some(InterpositionPolicy::Redirect) => {
+                record_provenance(proxy_domain, OP_INVOKE_REDIRECT, original as u64);
+                redirect_to_proxy(frame, proxy_domain, method);
+            }
+            Some(InterpositionPolicy::Fabricate) => {
+                record_provenance(proxy_domain, OP_INVOKE_FABRICATE, original as u64);
+                forward_to_proxy(frame, proxy_domain, original, method, PROXY_FABRICATE_TAG);
+            }
+            None => frame.rax = SysError::InvalidArg as i64 as u64,
+        },
         _ => {
             record_provenance(0, OP_INVOKE_DIRECT, cap_id as u64);
             invoke_direct(frame, obj, method);
@@ -215,7 +276,10 @@ fn handle_so_invoke(frame: &mut TrapFrame) {
 fn invoke_original(frame: &mut TrapFrame, original_cap: u32, method: u32) {
     let (obj, _rights) = match cap::lookup(CapId::new(original_cap)) {
         Some(pair) => pair,
-        None => { frame.rax = SysError::InvalidCap as i64 as u64; return; }
+        None => {
+            frame.rax = SysError::InvalidCap as i64 as u64;
+            return;
+        }
     };
     invoke_direct(frame, obj, method);
 }
@@ -266,13 +330,22 @@ fn invoke_direct(frame: &mut TrapFrame, obj: CapObject, method: u32) {
 ///
 /// The `tag` distinguishes the policy so the proxy knows whether to
 /// inspect-and-forward or fabricate a synthetic response.
-fn forward_to_proxy(frame: &mut TrapFrame, proxy_domain: u32, original_cap: u32, method: u32, tag: u64) {
+fn forward_to_proxy(
+    frame: &mut TrapFrame,
+    proxy_domain: u32,
+    original_cap: u32,
+    method: u32,
+    tag: u64,
+) {
     let ep_raw = match resolve_domain_endpoint(frame, proxy_domain) {
         Some(ep) => ep,
         None => {
             // No entry cap: Inspect falls back to direct; Fabricate returns NotFound.
             if tag == PROXY_INSPECT_TAG {
-                kdebug!("so_invoke: proxy domain {} has no entry cap, falling back to direct", proxy_domain);
+                kdebug!(
+                    "so_invoke: proxy domain {} has no entry cap, falling back to direct",
+                    proxy_domain
+                );
                 invoke_original(frame, original_cap, method);
             } else {
                 frame.rax = SysError::NotFound as i64 as u64;
@@ -284,7 +357,16 @@ fn forward_to_proxy(frame: &mut TrapFrame, proxy_domain: u32, original_cap: u32,
     let args = invoke_args(frame);
     let msg = Message {
         tag,
-        regs: [original_cap as u64, method as u64, args[0], args[1], args[2], args[3], 0, 0],
+        regs: [
+            original_cap as u64,
+            method as u64,
+            args[0],
+            args[1],
+            args[2],
+            args[3],
+            0,
+            0,
+        ],
         cap_transfer: None,
     };
     call_proxy(frame, ep_raw, msg);
@@ -296,7 +378,9 @@ fn redirect_to_proxy(frame: &mut TrapFrame, proxy_domain: u32, method: u32) {
     let ep_raw = match resolve_domain_endpoint(frame, proxy_domain) {
         Some(ep) => ep,
         None => {
-            if frame.rax == 0 { frame.rax = SysError::NotFound as i64 as u64; }
+            if frame.rax == 0 {
+                frame.rax = SysError::NotFound as i64 as u64;
+            }
             return;
         }
     };
@@ -318,7 +402,13 @@ fn handle_so_grant(frame: &mut TrapFrame) {
     let rights_mask = frame.rdx as u32;
     let interpose_policy = frame.rcx as u8;
 
-    kdebug!("so_grant: cap={} target={} rights={:#x} policy={}", cap_id, target_domain, rights_mask, interpose_policy);
+    kdebug!(
+        "so_grant: cap={} target={} rights={:#x} policy={}",
+        cap_id,
+        target_domain,
+        rights_mask,
+        interpose_policy
+    );
 
     if cap::validate(cap_id, Rights::GRANT).is_err() {
         frame.rax = SysError::NoRights as i64 as u64;
@@ -367,7 +457,10 @@ fn handle_so_observe(frame: &mut TrapFrame) {
 
     let (obj, rights) = match cap::lookup(CapId::new(cap_id)) {
         Some(pair) => pair,
-        None => { frame.rax = SysError::InvalidCap as i64 as u64; return; }
+        None => {
+            frame.rax = SysError::InvalidCap as i64 as u64;
+            return;
+        }
     };
 
     match query_id {
@@ -399,9 +492,18 @@ fn handle_so_observe(frame: &mut TrapFrame) {
 fn handle_domain_create(frame: &mut TrapFrame) {
     let budget = frame.rdi as u32;
     let period = frame.rsi as u32;
-    let parent = if frame.rdx == 0 { None } else { Some(frame.rdx as u32) };
+    let parent = if frame.rdx == 0 {
+        None
+    } else {
+        Some(frame.rdx as u32)
+    };
 
-    kdebug!("sot_domain_create: budget={} period={} parent={:?}", budget, period, parent);
+    kdebug!(
+        "sot_domain_create: budget={} period={} parent={:?}",
+        budget,
+        period,
+        parent
+    );
 
     let policy = DomainPolicy {
         quantum_ticks: budget,
@@ -474,8 +576,14 @@ fn handle_tx_begin(frame: &mut TrapFrame) {
     } else {
         match cap::validate(domain_cap, Rights::WRITE) {
             Ok(CapObject::Domain { id }) => id,
-            Ok(_) => { frame.rax = SysError::InvalidCap as i64 as u64; return; }
-            Err(e) => { frame.rax = e as i64 as u64; return; }
+            Ok(_) => {
+                frame.rax = SysError::InvalidCap as i64 as u64;
+                return;
+            }
+            Err(e) => {
+                frame.rax = e as i64 as u64;
+                return;
+            }
         }
     };
 
@@ -483,7 +591,10 @@ fn handle_tx_begin(frame: &mut TrapFrame) {
         0 => TxTier::ReadOnly,
         1 => TxTier::SingleObject,
         2 => TxTier::MultiObject,
-        _ => { frame.rax = SysError::InvalidArg as i64 as u64; return; }
+        _ => {
+            frame.rax = SysError::InvalidArg as i64 as u64;
+            return;
+        }
     };
 
     match TX_MANAGER.lock().tx_begin(domain_id, tier) {

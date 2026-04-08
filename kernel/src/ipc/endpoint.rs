@@ -531,7 +531,11 @@ pub fn call(ep_handle: PoolHandle, msg: Message) -> Result<Message, SysError> {
 /// Synchronous call with timeout: send a message, wait for reply up to `timeout_ticks`.
 /// Returns `Err(SysError::Timeout)` if the reply doesn't arrive in time.
 /// `timeout_ticks` is relative (number of ticks from now).
-pub fn call_timeout(ep_handle: PoolHandle, msg: Message, timeout_ticks: u64) -> Result<Message, SysError> {
+pub fn call_timeout(
+    ep_handle: PoolHandle,
+    msg: Message,
+    timeout_ticks: u64,
+) -> Result<Message, SysError> {
     let my_tid = sched::current_tid().ok_or(SysError::InvalidArg)?;
     let raw = ep_handle.raw();
     let (core_id, local) = decode_handle(raw);
@@ -636,7 +640,11 @@ fn cancel_caller(ep_raw: u32, tid: ThreadId) {
 /// Lock profile per syscall (rendezvous path):
 ///   1× endpoint pool lock, 2× per-thread IPC lock, 1× SCHEDULER.lock()
 /// vs. original call(): 1× endpoint + 7× SCHEDULER.lock()
-pub fn call_fused(ep_handle: PoolHandle, msg: Message, caller_tid: sched::ThreadId) -> Result<Message, SysError> {
+pub fn call_fused(
+    ep_handle: PoolHandle,
+    msg: Message,
+    caller_tid: sched::ThreadId,
+) -> Result<Message, SysError> {
     let raw = ep_handle.raw();
 
     // Check for remote routing first.
@@ -677,9 +685,7 @@ pub fn call_fused(ep_handle: PoolHandle, msg: Message, caller_tid: sched::Thread
         CallAction::RendezvousThenWait(recv_tid) => {
             #[cfg(feature = "ipc-audit")]
             crate::ipc::audit::record(caller_tid.0, recv_tid, raw);
-            sched::call_fused_preblock_rendezvous(
-                sched::ThreadId(recv_tid), msg, raw,
-            );
+            sched::call_fused_preblock_rendezvous(sched::ThreadId(recv_tid), msg, raw);
             Ok(sched::call_fused_postwake())
         }
         CallAction::Block => {

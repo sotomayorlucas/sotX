@@ -488,8 +488,7 @@ impl SharedMemoryRing {
         }
 
         // Publish the new head after all bytes are written.
-        self.head
-            .store((h + data.len()) as u64, Ordering::Release);
+        self.head.store((h + data.len()) as u64, Ordering::Release);
         Ok(())
     }
 

@@ -71,7 +71,6 @@ mod stack_canary {
     }
 }
 
-
 /// Syscall numbers. The kernel exposes exactly these operations.
 #[repr(u64)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -397,7 +396,10 @@ pub struct IpcMsg {
 
 impl IpcMsg {
     pub const fn empty() -> Self {
-        Self { tag: 0, regs: [0; 8] }
+        Self {
+            tag: 0,
+            regs: [0; 8],
+        }
     }
 }
 
@@ -623,13 +625,21 @@ pub mod sys {
     /// Check a raw syscall return: negative → Err, otherwise Ok(value).
     #[inline(always)]
     fn check_val(ret: u64) -> Result<u64, i64> {
-        if (ret as i64) < 0 { Err(ret as i64) } else { Ok(ret) }
+        if (ret as i64) < 0 {
+            Err(ret as i64)
+        } else {
+            Ok(ret)
+        }
     }
 
     /// Check a raw syscall return: negative → Err, otherwise Ok(()).
     #[inline(always)]
     fn check_unit(ret: u64) -> Result<(), i64> {
-        if (ret as i64) < 0 { Err(ret as i64) } else { Ok(()) }
+        if (ret as i64) < 0 {
+            Err(ret as i64)
+        } else {
+            Ok(())
+        }
     }
 
     /// Write a single byte to the kernel debug serial port.
@@ -647,7 +657,10 @@ pub mod sys {
     /// Drain up to `max` provenance entries from `cpu_id`'s ring into the
     /// caller-provided buffer at `dest`. Each slot is 48 bytes (matching
     /// kernel `ProvenanceEntry`). Returns the number of entries written.
-    /// SAFETY: caller must ensure `dest` points at writable storage of at
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure `dest` points at writable storage of at
     /// least `max * 48` bytes.
     #[inline(always)]
     pub unsafe fn provenance_drain(dest: *mut u8, max: u64, cpu_id: u64) -> u64 {
@@ -704,7 +717,11 @@ pub mod sys {
     #[inline(always)]
     pub fn debug_read() -> Option<u8> {
         let ret = syscall0(super::Syscall::DebugRead as u64);
-        if ret == u64::MAX { None } else { Some(ret as u8) }
+        if ret == u64::MAX {
+            None
+        } else {
+            Some(ret as u8)
+        }
     }
 
     /// Allocate a physical frame. Returns the frame capability ID.
@@ -717,7 +734,12 @@ pub mod sys {
     /// `flags`: bit 1 = WRITABLE, bit 63 = NO_EXECUTE.
     #[inline(always)]
     pub fn map(vaddr: u64, frame_cap: u64, flags: u64) -> Result<(), i64> {
-        check_unit(syscall3(super::Syscall::Map as u64, vaddr, frame_cap, flags))
+        check_unit(syscall3(
+            super::Syscall::Map as u64,
+            vaddr,
+            frame_cap,
+            flags,
+        ))
     }
 
     /// Create a notification object. Returns the notification capability ID.
@@ -748,7 +770,12 @@ pub mod sys {
     /// The redirect is set atomically before the thread is scheduled.
     #[inline(always)]
     pub fn thread_create_redirected(rip: u64, rsp: u64, ep_cap: u64) -> Result<u64, i64> {
-        check_val(syscall3(super::Syscall::ThreadCreate as u64, rip, rsp, ep_cap))
+        check_val(syscall3(
+            super::Syscall::ThreadCreate as u64,
+            rip,
+            rsp,
+            ep_cap,
+        ))
     }
 
     /// Terminate the current thread (never returns).
@@ -769,7 +796,8 @@ pub mod sys {
         ($name:ident, $width:expr, $ty:ty) => {
             #[inline(always)]
             pub fn $name(cap: u64, port: u64) -> Result<$ty, i64> {
-                check_val(syscall3(super::Syscall::PortIn as u64, cap, port, $width)).map(|v| v as $ty)
+                check_val(syscall3(super::Syscall::PortIn as u64, cap, port, $width))
+                    .map(|v| v as $ty)
             }
         };
     }
@@ -777,7 +805,13 @@ pub mod sys {
         ($name:ident, $width:expr, $ty:ty) => {
             #[inline(always)]
             pub fn $name(cap: u64, port: u64, value: $ty) -> Result<(), i64> {
-                check_unit(syscall4(super::Syscall::PortOut as u64, cap, port, value as u64, $width))
+                check_unit(syscall4(
+                    super::Syscall::PortOut as u64,
+                    cap,
+                    port,
+                    value as u64,
+                    $width,
+                ))
             }
         };
     }
@@ -835,8 +869,14 @@ pub mod sys {
     pub fn recv(ep_cap: u64) -> Result<super::IpcMsg, i64> {
         let ret: u64;
         let tag: u64;
-        let r0: u64; let r1: u64; let r2: u64; let r3: u64;
-        let r4: u64; let r5: u64; let r6: u64; let r7: u64;
+        let r0: u64;
+        let r1: u64;
+        let r2: u64;
+        let r3: u64;
+        let r4: u64;
+        let r5: u64;
+        let r6: u64;
+        let r7: u64;
         unsafe {
             core::arch::asm!(
                 "syscall",
@@ -856,7 +896,10 @@ pub mod sys {
                 options(nostack),
             );
         }
-        check_val(ret).map(|_| super::IpcMsg { tag, regs: [r0, r1, r2, r3, r4, r5, r6, r7] })
+        check_val(ret).map(|_| super::IpcMsg {
+            tag,
+            regs: [r0, r1, r2, r3, r4, r5, r6, r7],
+        })
     }
 
     /// Combined send+receive (call semantics) on a synchronous IPC endpoint.
@@ -864,8 +907,14 @@ pub mod sys {
     pub fn call(ep_cap: u64, msg: &super::IpcMsg) -> Result<super::IpcMsg, i64> {
         let ret: u64;
         let tag: u64;
-        let r0: u64; let r1: u64; let r2: u64; let r3: u64;
-        let r4: u64; let r5: u64; let r6: u64; let r7: u64;
+        let r0: u64;
+        let r1: u64;
+        let r2: u64;
+        let r3: u64;
+        let r4: u64;
+        let r5: u64;
+        let r6: u64;
+        let r7: u64;
         unsafe {
             core::arch::asm!(
                 "syscall",
@@ -885,20 +934,33 @@ pub mod sys {
                 options(nostack),
             );
         }
-        check_val(ret).map(|_| super::IpcMsg { tag, regs: [r0, r1, r2, r3, r4, r5, r6, r7] })
+        check_val(ret).map(|_| super::IpcMsg {
+            tag,
+            regs: [r0, r1, r2, r3, r4, r5, r6, r7],
+        })
     }
 
     /// Combined send+receive with timeout on a synchronous IPC endpoint.
     /// `timeout_ticks` is relative (number of scheduler ticks; 100 ticks ≈ 1s at 100Hz).
     /// Returns `Err(-7)` on timeout (SysError::Timeout).
     #[inline(always)]
-    pub fn call_timeout(ep_cap: u64, msg: &super::IpcMsg, timeout_ticks: u32) -> Result<super::IpcMsg, i64> {
+    pub fn call_timeout(
+        ep_cap: u64,
+        msg: &super::IpcMsg,
+        timeout_ticks: u32,
+    ) -> Result<super::IpcMsg, i64> {
         // Encode timeout in upper 32 bits of rdi.
         let rdi_val = (ep_cap & 0xFFFFFFFF) | ((timeout_ticks as u64) << 32);
         let ret: u64;
         let tag: u64;
-        let r0: u64; let r1: u64; let r2: u64; let r3: u64;
-        let r4: u64; let r5: u64; let r6: u64; let r7: u64;
+        let r0: u64;
+        let r1: u64;
+        let r2: u64;
+        let r3: u64;
+        let r4: u64;
+        let r5: u64;
+        let r6: u64;
+        let r7: u64;
         unsafe {
             core::arch::asm!(
                 "syscall",
@@ -918,7 +980,10 @@ pub mod sys {
                 options(nostack),
             );
         }
-        check_val(ret).map(|_| super::IpcMsg { tag, regs: [r0, r1, r2, r3, r4, r5, r6, r7] })
+        check_val(ret).map(|_| super::IpcMsg {
+            tag,
+            regs: [r0, r1, r2, r3, r4, r5, r6, r7],
+        })
     }
 
     /// Receive with timeout on a synchronous IPC endpoint.
@@ -929,8 +994,14 @@ pub mod sys {
         let rdi_val = (ep_cap & 0xFFFFFFFF) | ((timeout_ticks as u64) << 32);
         let ret: u64;
         let tag: u64;
-        let r0: u64; let r1: u64; let r2: u64; let r3: u64;
-        let r4: u64; let r5: u64; let r6: u64; let r7: u64;
+        let r0: u64;
+        let r1: u64;
+        let r2: u64;
+        let r3: u64;
+        let r4: u64;
+        let r5: u64;
+        let r6: u64;
+        let r7: u64;
         unsafe {
             core::arch::asm!(
                 "syscall",
@@ -950,7 +1021,10 @@ pub mod sys {
                 options(nostack),
             );
         }
-        check_val(ret).map(|_| super::IpcMsg { tag, regs: [r0, r1, r2, r3, r4, r5, r6, r7] })
+        check_val(ret).map(|_| super::IpcMsg {
+            tag,
+            regs: [r0, r1, r2, r3, r4, r5, r6, r7],
+        })
     }
 
     // ---------------------------------------------------------------
@@ -1019,7 +1093,11 @@ pub mod sys {
     /// Grant (delegate) a capability with restricted rights.
     #[inline(always)]
     pub fn cap_grant(source: u64, rights_mask: u64) -> Result<u64, i64> {
-        check_val(syscall2(super::Syscall::CapGrant as u64, source, rights_mask))
+        check_val(syscall2(
+            super::Syscall::CapGrant as u64,
+            source,
+            rights_mask,
+        ))
     }
 
     /// Revoke a capability and all its derivatives.
@@ -1067,7 +1145,11 @@ pub mod sys {
     /// Register an IRQ handler notification.
     #[inline(always)]
     pub fn irq_register(irq_cap: u64, notify_cap: u64) -> Result<(), i64> {
-        check_unit(syscall2(super::Syscall::IrqRegister as u64, irq_cap, notify_cap))
+        check_unit(syscall2(
+            super::Syscall::IrqRegister as u64,
+            irq_cap,
+            notify_cap,
+        ))
     }
 
     /// Acknowledge an IRQ (unmask the line).
@@ -1083,13 +1165,21 @@ pub mod sys {
     /// Register a notification for page fault delivery (caller's own AS).
     #[inline(always)]
     pub fn fault_register(notify_cap: u64) -> Result<(), i64> {
-        check_unit(syscall2(super::Syscall::FaultRegister as u64, notify_cap, 0))
+        check_unit(syscall2(
+            super::Syscall::FaultRegister as u64,
+            notify_cap,
+            0,
+        ))
     }
 
     /// Register a notification for page fault delivery in a specific address space.
     #[inline(always)]
     pub fn fault_register_as(notify_cap: u64, as_cap: u64) -> Result<(), i64> {
-        check_unit(syscall2(super::Syscall::FaultRegister as u64, notify_cap, as_cap))
+        check_unit(syscall2(
+            super::Syscall::FaultRegister as u64,
+            notify_cap,
+            as_cap,
+        ))
     }
 
     /// Receive the next pending page fault.
@@ -1115,7 +1205,13 @@ pub mod sys {
                 options(nostack),
             );
         }
-        check_val(ret).map(|_| super::FaultInfo { addr, code, tid: tid as u32, cr3, as_cap_id })
+        check_val(ret).map(|_| super::FaultInfo {
+            addr,
+            code,
+            tid: tid as u32,
+            cr3,
+            as_cap_id,
+        })
     }
 
     // ---------------------------------------------------------------
@@ -1126,25 +1222,41 @@ pub mod sys {
     /// Returns the domain capability ID.
     #[inline(always)]
     pub fn domain_create(quantum_ms: u64, period_ms: u64) -> Result<u64, i64> {
-        check_val(syscall2(super::Syscall::DomainCreate as u64, quantum_ms, period_ms))
+        check_val(syscall2(
+            super::Syscall::DomainCreate as u64,
+            quantum_ms,
+            period_ms,
+        ))
     }
 
     /// Attach a thread to a scheduling domain.
     #[inline(always)]
     pub fn domain_attach(domain_cap: u64, thread_cap: u64) -> Result<(), i64> {
-        check_unit(syscall2(super::Syscall::DomainAttach as u64, domain_cap, thread_cap))
+        check_unit(syscall2(
+            super::Syscall::DomainAttach as u64,
+            domain_cap,
+            thread_cap,
+        ))
     }
 
     /// Detach a thread from a scheduling domain.
     #[inline(always)]
     pub fn domain_detach(domain_cap: u64, thread_cap: u64) -> Result<(), i64> {
-        check_unit(syscall2(super::Syscall::DomainDetach as u64, domain_cap, thread_cap))
+        check_unit(syscall2(
+            super::Syscall::DomainDetach as u64,
+            domain_cap,
+            thread_cap,
+        ))
     }
 
     /// Adjust a domain's quantum (in ms).
     #[inline(always)]
     pub fn domain_adjust(domain_cap: u64, new_quantum_ms: u64) -> Result<(), i64> {
-        check_unit(syscall2(super::Syscall::DomainAdjust as u64, domain_cap, new_quantum_ms))
+        check_unit(syscall2(
+            super::Syscall::DomainAdjust as u64,
+            domain_cap,
+            new_quantum_ms,
+        ))
     }
 
     /// Query domain info. Returns (quantum_ticks, consumed_ticks, period_ticks).
@@ -1182,7 +1294,11 @@ pub mod sys {
     /// Create an I/O port capability dynamically. Returns cap_id.
     #[inline(always)]
     pub fn ioport_create(base: u16, count: u16) -> Result<u64, i64> {
-        check_val(syscall2(super::Syscall::IoPortCreate as u64, base as u64, count as u64))
+        check_val(syscall2(
+            super::Syscall::IoPortCreate as u64,
+            base as u64,
+            count as u64,
+        ))
     }
 
     /// Allocate N contiguous physical frames (1–16). Returns Memory cap_id.
@@ -1201,7 +1317,13 @@ pub mod sys {
     /// `flags`: bit 1 = WRITABLE, bit 63 = NO_EXECUTE.
     #[inline(always)]
     pub fn map_offset(vaddr: u64, mem_cap: u64, offset: u64, flags: u64) -> Result<(), i64> {
-        check_unit(syscall4(super::Syscall::MapOffset as u64, vaddr, mem_cap, offset, flags))
+        check_unit(syscall4(
+            super::Syscall::MapOffset as u64,
+            vaddr,
+            mem_cap,
+            offset,
+            flags,
+        ))
     }
 
     /// Set syscall redirect endpoint on a thread (LUCAS).
@@ -1209,7 +1331,11 @@ pub mod sys {
     /// to the specified endpoint.
     #[inline(always)]
     pub fn redirect_set(thread_cap: u64, ep_cap: u64) -> Result<(), i64> {
-        check_unit(syscall2(super::Syscall::RedirectSet as u64, thread_cap, ep_cap))
+        check_unit(syscall2(
+            super::Syscall::RedirectSet as u64,
+            thread_cap,
+            ep_cap,
+        ))
     }
 
     // ---------------------------------------------------------------
@@ -1225,20 +1351,44 @@ pub mod sys {
     /// Map a frame into a target address space (not the caller's).
     #[inline(always)]
     pub fn map_into(as_cap: u64, vaddr: u64, frame_cap: u64, flags: u64) -> Result<(), i64> {
-        check_unit(syscall4(super::Syscall::MapInto as u64, as_cap, vaddr, frame_cap, flags))
+        check_unit(syscall4(
+            super::Syscall::MapInto as u64,
+            as_cap,
+            vaddr,
+            frame_cap,
+            flags,
+        ))
     }
 
     /// Create a thread in a target address space. Returns thread cap ID.
     /// `redirect_ep_cap` = 0 means no redirect; non-zero = endpoint cap for syscall redirect.
     #[inline(always)]
-    pub fn thread_create_in(as_cap: u64, rip: u64, rsp: u64, redirect_ep_cap: u64) -> Result<u64, i64> {
+    pub fn thread_create_in(
+        as_cap: u64,
+        rip: u64,
+        rsp: u64,
+        redirect_ep_cap: u64,
+    ) -> Result<u64, i64> {
         thread_create_in_sig(as_cap, rip, rsp, redirect_ep_cap, 0)
     }
 
     /// Create a thread in a target AS with signal trampoline set atomically.
     /// Prevents the race where the thread faults before signal_entry() is called.
-    pub fn thread_create_in_sig(as_cap: u64, rip: u64, rsp: u64, redirect_ep_cap: u64, signal_tramp: u64) -> Result<u64, i64> {
-        check_val(syscall5(super::Syscall::ThreadCreateIn as u64, as_cap, rip, rsp, redirect_ep_cap, signal_tramp))
+    pub fn thread_create_in_sig(
+        as_cap: u64,
+        rip: u64,
+        rsp: u64,
+        redirect_ep_cap: u64,
+        signal_tramp: u64,
+    ) -> Result<u64, i64> {
+        check_val(syscall5(
+            super::Syscall::ThreadCreateIn as u64,
+            as_cap,
+            rip,
+            rsp,
+            redirect_ep_cap,
+            signal_tramp,
+        ))
     }
 
     /// Unmap a page from a target address space.
@@ -1263,7 +1413,12 @@ pub mod sys {
     /// Copy 4KiB from a page in src AS to a frame cap (via kernel HHDM).
     #[inline(always)]
     pub fn frame_copy(dst_frame_cap: u64, src_as_cap: u64, vaddr: u64) -> Result<(), i64> {
-        check_unit(syscall3(super::Syscall::FrameCopy as u64, dst_frame_cap, src_as_cap, vaddr))
+        check_unit(syscall3(
+            super::Syscall::FrameCopy as u64,
+            dst_frame_cap,
+            src_as_cap,
+            vaddr,
+        ))
     }
 
     /// Read PTE (phys + flags) for a vaddr in an AS.
@@ -1292,7 +1447,11 @@ pub mod sys {
                 options(nostack),
             );
         }
-        if (phys_or_err as i64) < 0 { Err(phys_or_err as i64) } else { Ok((phys_or_err, flags)) }
+        if (phys_or_err as i64) < 0 {
+            Err(phys_or_err as i64)
+        } else {
+            Ok((phys_or_err, flags))
+        }
     }
 
     // ---------------------------------------------------------------
@@ -1306,7 +1465,13 @@ pub mod sys {
     /// len: number of bytes to read (max 4096).
     #[inline(always)]
     pub fn vm_read(as_cap: u64, remote_vaddr: u64, local_buf: u64, len: u64) -> Result<(), i64> {
-        check_unit(syscall4(super::Syscall::VmRead as u64, as_cap, remote_vaddr, local_buf, len))
+        check_unit(syscall4(
+            super::Syscall::VmRead as u64,
+            as_cap,
+            remote_vaddr,
+            local_buf,
+            len,
+        ))
     }
 
     /// Write bytes from caller's buffer into a target address space.
@@ -1318,7 +1483,13 @@ pub mod sys {
     /// len: number of bytes to write (max 4096).
     #[inline(always)]
     pub fn vm_write(as_cap: u64, remote_vaddr: u64, local_buf: u64, len: u64) -> Result<(), i64> {
-        check_unit(syscall4(super::Syscall::VmWrite as u64, as_cap, remote_vaddr, local_buf, len))
+        check_unit(syscall4(
+            super::Syscall::VmWrite as u64,
+            as_cap,
+            remote_vaddr,
+            local_buf,
+            len,
+        ))
     }
 
     // ---------------------------------------------------------------
@@ -1329,13 +1500,22 @@ pub mod sys {
     /// `ep_cap` must be an Endpoint capability.
     #[inline(always)]
     pub fn svc_register(name_ptr: u64, name_len: u64, ep_cap: u64) -> Result<(), i64> {
-        check_unit(syscall3(super::Syscall::SvcRegister as u64, name_ptr, name_len, ep_cap))
+        check_unit(syscall3(
+            super::Syscall::SvcRegister as u64,
+            name_ptr,
+            name_len,
+            ep_cap,
+        ))
     }
 
     /// Look up a service by name. Returns a derived endpoint cap ID.
     #[inline(always)]
     pub fn svc_lookup(name_ptr: u64, name_len: u64) -> Result<u64, i64> {
-        check_val(syscall2(super::Syscall::SvcLookup as u64, name_ptr, name_len))
+        check_val(syscall2(
+            super::Syscall::SvcLookup as u64,
+            name_ptr,
+            name_len,
+        ))
     }
 
     // ---------------------------------------------------------------
@@ -1345,15 +1525,31 @@ pub mod sys {
     /// Read a file from the initrd CPIO archive into a userspace buffer.
     /// Returns the file size on success.
     #[inline(always)]
-    pub fn initrd_read(name_ptr: u64, name_len: u64, buf_ptr: u64, buf_len: u64) -> Result<u64, i64> {
-        check_val(syscall4(super::Syscall::InitrdRead as u64, name_ptr, name_len, buf_ptr, buf_len))
+    pub fn initrd_read(
+        name_ptr: u64,
+        name_len: u64,
+        buf_ptr: u64,
+        buf_len: u64,
+    ) -> Result<u64, i64> {
+        check_val(syscall4(
+            super::Syscall::InitrdRead as u64,
+            name_ptr,
+            name_len,
+            buf_ptr,
+            buf_len,
+        ))
     }
 
     /// Write a BootInfo page into a target address space at 0xB00000.
     /// `caps_ptr` points to an array of cap IDs, `cap_count` is the number.
     #[inline(always)]
     pub fn bootinfo_write(as_cap: u64, caps_ptr: u64, cap_count: u64) -> Result<(), i64> {
-        check_unit(syscall3(super::Syscall::BootInfoWrite as u64, as_cap, caps_ptr, cap_count))
+        check_unit(syscall3(
+            super::Syscall::BootInfoWrite as u64,
+            as_cap,
+            caps_ptr,
+            cap_count,
+        ))
     }
 
     /// Change page permissions (mprotect-like). W^X enforced by kernel.
@@ -1366,7 +1562,12 @@ pub mod sys {
     /// Change page permissions in a target address space.
     #[inline(always)]
     pub fn protect_in(as_cap: u64, vaddr: u64, flags: u64) -> Result<(), i64> {
-        check_unit(syscall3(super::Syscall::ProtectIn as u64, as_cap, vaddr, flags))
+        check_unit(syscall3(
+            super::Syscall::ProtectIn as u64,
+            as_cap,
+            vaddr,
+            flags,
+        ))
     }
 
     /// Enable/disable W^X relaxation for an address space.
@@ -1407,7 +1608,12 @@ pub mod sys {
     /// `mode`: Unix permission bits (e.g. 0o755).
     #[inline(always)]
     pub fn chmod(path_ptr: u64, path_len: u64, mode: u64) -> Result<(), i64> {
-        check_unit(syscall3(super::Syscall::Chmod as u64, path_ptr, path_len, mode))
+        check_unit(syscall3(
+            super::Syscall::Chmod as u64,
+            path_ptr,
+            path_len,
+            mode,
+        ))
     }
 
     /// Change file ownership (chown).
@@ -1415,7 +1621,13 @@ pub mod sys {
     /// `uid`: new owner user ID. `gid`: new owner group ID.
     #[inline(always)]
     pub fn chown(path_ptr: u64, path_len: u64, uid: u64, gid: u64) -> Result<(), i64> {
-        check_unit(syscall4(super::Syscall::Chown as u64, path_ptr, path_len, uid, gid))
+        check_unit(syscall4(
+            super::Syscall::Chown as u64,
+            path_ptr,
+            path_len,
+            uid,
+            gid,
+        ))
     }
 
     /// Get thread info by pool index.
@@ -1446,7 +1658,11 @@ pub mod sys {
     /// `notify_cap` must be a Notification capability with WRITE rights.
     #[inline(always)]
     pub fn thread_notify(thread_cap: u64, notify_cap: u64) -> Result<(), i64> {
-        check_unit(syscall2(super::Syscall::ThreadNotify as u64, thread_cap, notify_cap))
+        check_unit(syscall2(
+            super::Syscall::ThreadNotify as u64,
+            thread_cap,
+            notify_cap,
+        ))
     }
 
     /// Non-blocking poll of a notification's pending bit.
@@ -1487,7 +1703,11 @@ pub mod sys {
     /// When [18]/[19] are 0, use rcx/r11 as rip/rflags (SYSCALL convention).
     #[inline(always)]
     pub fn get_thread_regs(tid: u64, out_buf: &mut [u64; 20]) -> Result<(), i64> {
-        check_unit(syscall2(super::SYS_GET_THREAD_REGS, tid, out_buf.as_mut_ptr() as u64))
+        check_unit(syscall2(
+            super::SYS_GET_THREAD_REGS,
+            tid,
+            out_buf.as_mut_ptr() as u64,
+        ))
     }
 
     /// Get fault info (CR2 and error code) for a thread's last kernel signal.
@@ -1533,15 +1753,31 @@ pub mod sys {
     /// produces with a domain id so the GraphHunter can group operations.
     #[inline(always)]
     pub fn so_create_owned(type_id: u64, policy: u64, owner_domain: u64) -> Result<u64, i64> {
-        check_val(syscall3(super::Syscall::SoCreate as u64, type_id, policy, owner_domain))
+        check_val(syscall3(
+            super::Syscall::SoCreate as u64,
+            type_id,
+            policy,
+            owner_domain,
+        ))
     }
     #[inline(always)]
     pub fn so_invoke(cap: u64, method: u64, arg0: u64, arg1: u64) -> Result<u64, i64> {
-        check_val(syscall4(super::Syscall::SoInvoke as u64, cap, method, arg0, arg1))
+        check_val(syscall4(
+            super::Syscall::SoInvoke as u64,
+            cap,
+            method,
+            arg0,
+            arg1,
+        ))
     }
     #[inline(always)]
     pub fn so_grant(cap: u64, target_domain: u64, rights_mask: u64) -> Result<u64, i64> {
-        check_val(syscall3(super::Syscall::SoGrant as u64, cap, target_domain, rights_mask))
+        check_val(syscall3(
+            super::Syscall::SoGrant as u64,
+            cap,
+            target_domain,
+            rights_mask,
+        ))
     }
     #[inline(always)]
     pub fn so_revoke(cap: u64) -> Result<(), i64> {
@@ -1549,15 +1785,27 @@ pub mod sys {
     }
     #[inline(always)]
     pub fn so_observe(cap: u64, observer_cap: u64) -> Result<(), i64> {
-        check_unit(syscall2(super::Syscall::SoObserve as u64, cap, observer_cap))
+        check_unit(syscall2(
+            super::Syscall::SoObserve as u64,
+            cap,
+            observer_cap,
+        ))
     }
     #[inline(always)]
     pub fn sot_domain_create(policy: u64, cr3: u64) -> Result<u64, i64> {
-        check_val(syscall2(super::Syscall::SotDomainCreate as u64, policy, cr3))
+        check_val(syscall2(
+            super::Syscall::SotDomainCreate as u64,
+            policy,
+            cr3,
+        ))
     }
     #[inline(always)]
     pub fn sot_domain_enter(domain_cap: u64, entry_cap: u64) -> Result<(), i64> {
-        check_unit(syscall2(super::Syscall::SotDomainEnter as u64, domain_cap, entry_cap))
+        check_unit(syscall2(
+            super::Syscall::SotDomainEnter as u64,
+            domain_cap,
+            entry_cap,
+        ))
     }
     #[inline(always)]
     pub fn sot_channel_create(protocol: u64) -> Result<u64, i64> {

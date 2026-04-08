@@ -26,16 +26,16 @@ use sotos_common::elf::DynamicInfo;
 use crate::tls::{tp_offset, TlsBlock};
 
 // x86_64 relocation types (subset we implement).
-const R_X86_64_64:        u32 = 1;
-const R_X86_64_PC32:      u32 = 2;
-const R_X86_64_PLT32:     u32 = 4;
-const R_X86_64_GLOB_DAT:  u32 = 6;
+const R_X86_64_64: u32 = 1;
+const R_X86_64_PC32: u32 = 2;
+const R_X86_64_PLT32: u32 = 4;
+const R_X86_64_GLOB_DAT: u32 = 6;
 const R_X86_64_JUMP_SLOT: u32 = 7;
-const R_X86_64_RELATIVE:  u32 = 8;
-const R_X86_64_GOTPCREL:  u32 = 9;
-const R_X86_64_DTPMOD64:  u32 = 16;
-const R_X86_64_DTPOFF64:  u32 = 17;
-const R_X86_64_TPOFF64:   u32 = 18;
+const R_X86_64_RELATIVE: u32 = 8;
+const R_X86_64_GOTPCREL: u32 = 9;
+const R_X86_64_DTPMOD64: u32 = 16;
+const R_X86_64_DTPOFF64: u32 = 17;
+const R_X86_64_TPOFF64: u32 = 18;
 const R_X86_64_IRELATIVE: u32 = 37;
 
 /// Total relocations the engine encountered but did not know how to apply.
@@ -108,7 +108,13 @@ impl RelocCtx {
         self
     }
 
-    pub fn with_symtab(mut self, symtab_addr: u64, count: u64, strtab_addr: u64, strsz: u64) -> Self {
+    pub fn with_symtab(
+        mut self,
+        symtab_addr: u64,
+        count: u64,
+        strtab_addr: u64,
+        strsz: u64,
+    ) -> Self {
         self.symtab_addr = symtab_addr;
         self.symtab_count = count;
         self.strtab_addr = strtab_addr;
@@ -162,7 +168,10 @@ fn resolve_symbol(ctx: &RelocCtx, r_sym: u32) -> Option<ResolvedSymbol> {
     }
     let sym = ctx.symtab_addr + r_sym as u64 * SYM_SIZE;
     if read_u16(sym + ST_SHNDX) == 0 {
-        return Some(ResolvedSymbol { value: 0, undefined: true });
+        return Some(ResolvedSymbol {
+            value: 0,
+            undefined: true,
+        });
     }
     Some(ResolvedSymbol {
         value: ctx.base.wrapping_add(read_u64(sym + ST_VALUE)),
@@ -192,16 +201,30 @@ pub fn apply_relocations_ctx(
 ) -> Result<(), &'static str> {
     // Process .rela.dyn
     if dyn_info.rela != 0 && dyn_info.relasz > 0 {
-        let entry_size = if dyn_info.relaent > 0 { dyn_info.relaent } else { 24 };
+        let entry_size = if dyn_info.relaent > 0 {
+            dyn_info.relaent
+        } else {
+            24
+        };
         let count = dyn_info.relasz / entry_size;
-        process_rela(ctx, ctx.base + dyn_info.rela, count as usize, entry_size as usize)?;
+        process_rela(
+            ctx,
+            ctx.base + dyn_info.rela,
+            count as usize,
+            entry_size as usize,
+        )?;
     }
 
     // Process .rela.plt
     if dyn_info.jmprel != 0 && dyn_info.pltrelsz > 0 {
         let entry_size = 24; // Elf64_Rela is always 24 bytes.
         let count = dyn_info.pltrelsz / entry_size;
-        process_rela(ctx, ctx.base + dyn_info.jmprel, count as usize, entry_size as usize)?;
+        process_rela(
+            ctx,
+            ctx.base + dyn_info.jmprel,
+            count as usize,
+            entry_size as usize,
+        )?;
     }
 
     Ok(())
@@ -302,9 +325,8 @@ fn process_rela(
                     SKIPPED_RELOCS.fetch_add(1, Ordering::Relaxed);
                     continue;
                 }
-                let resolver: extern "C" fn() -> u64 = unsafe {
-                    core::mem::transmute(resolver_addr as usize)
-                };
+                let resolver: extern "C" fn() -> u64 =
+                    unsafe { core::mem::transmute(resolver_addr as usize) };
                 let resolved = resolver();
                 write_u64(target, resolved);
                 APPLIED_RELOCS.fetch_add(1, Ordering::Relaxed);

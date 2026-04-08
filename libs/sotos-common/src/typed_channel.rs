@@ -23,7 +23,7 @@ pub struct TypedReceiver<'a, T: Copy> {
 
 /// Number of u64 slots required to hold one T.
 const fn slots_per<T>() -> usize {
-    (mem::size_of::<T>() + 7) / 8
+    mem::size_of::<T>().div_ceil(8)
 }
 
 impl<'a, T: Copy> TypedSender<'a, T> {
@@ -31,7 +31,10 @@ impl<'a, T: Copy> TypedSender<'a, T> {
     pub fn new(ring: &'a SpscRing) -> Self {
         // Compile-time check: T must fit in u64 slots.
         const { assert!(mem::size_of::<T>() > 0, "zero-sized types not supported") };
-        Self { ring, _phantom: PhantomData }
+        Self {
+            ring,
+            _phantom: PhantomData,
+        }
     }
 
     /// Send a value, blocking if the ring is full.
@@ -93,7 +96,10 @@ impl<'a, T: Copy> TypedReceiver<'a, T> {
     /// Create a typed receiver wrapping an existing SPSC ring.
     pub fn new(ring: &'a SpscRing) -> Self {
         const { assert!(mem::size_of::<T>() > 0, "zero-sized types not supported") };
-        Self { ring, _phantom: PhantomData }
+        Self {
+            ring,
+            _phantom: PhantomData,
+        }
     }
 
     /// Receive a value, blocking if the ring is empty.
@@ -104,8 +110,8 @@ impl<'a, T: Copy> TypedReceiver<'a, T> {
             unsafe { *(&word as *const u64 as *const T) }
         } else {
             let mut buf = [0u64; 16]; // max 128 bytes
-            for i in 0..slots {
-                buf[i] = spsc::recv(self.ring);
+            for slot in buf.iter_mut().take(slots) {
+                *slot = spsc::recv(self.ring);
             }
             unsafe { *(buf.as_ptr() as *const T) }
         }
@@ -119,8 +125,8 @@ impl<'a, T: Copy> TypedReceiver<'a, T> {
             Some(unsafe { *(&word as *const u64 as *const T) })
         } else {
             let mut buf = [0u64; 16];
-            for i in 0..slots {
-                buf[i] = spsc::try_recv(self.ring)?;
+            for slot in buf.iter_mut().take(slots) {
+                *slot = spsc::try_recv(self.ring)?;
             }
             Some(unsafe { *(buf.as_ptr() as *const T) })
         }

@@ -20,7 +20,7 @@ pub fn init() {
     unsafe {
         // Channel 0, access lo/hi byte, mode 2 (rate generator), binary.
         outb(PIT_CMD, 0x34);
-        outb(PIT_CH0, divisor as u8);        // low byte
-        outb(PIT_CH0, (divisor >> 8) as u8);  // high byte
+        outb(PIT_CH0, divisor as u8); // low byte
+        outb(PIT_CH0, (divisor >> 8) as u8); // high byte
     }
 }

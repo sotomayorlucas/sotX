@@ -31,8 +31,13 @@ fn panic(info: &PanicInfo) -> ! {
     if thread_idx != usize::MAX {
         if let Some(sched) = crate::sched::SCHEDULER.try_lock() {
             if let Some(t) = sched.threads.get_by_index(thread_idx as u32) {
-                kprintln!("  thread: id={} pri={} user={} ticks={}",
-                    t.id.0, t.priority, t.is_user, t.cpu_ticks);
+                kprintln!(
+                    "  thread: id={} pri={} user={} ticks={}",
+                    t.id.0,
+                    t.priority,
+                    t.is_user,
+                    t.cpu_ticks
+                );
             }
         }
     }
@@ -40,7 +45,9 @@ fn panic(info: &PanicInfo) -> ! {
     // Attempt basic stack trace via frame pointer chain.
     kprintln!("--- stack trace ---");
     let mut rbp: u64;
-    unsafe { core::arch::asm!("mov {}, rbp", out(reg) rbp); }
+    unsafe {
+        core::arch::asm!("mov {}, rbp", out(reg) rbp);
+    }
     for i in 0..16 {
         if rbp == 0 || rbp < 0x1000 || rbp % 8 != 0 {
             break;

@@ -11,10 +11,10 @@ mod reloc;
 mod symbol;
 mod tls;
 
-pub use loader::{DlHandle, Mapping, MappedRegion, MAX_REGIONS};
+pub use loader::{DlHandle, MappedRegion, Mapping, MAX_REGIONS};
 pub use reloc::{
-    apply_relocations, apply_relocations_ctx, applied_count, reset_counters,
-    skipped_count, RelocCtx,
+    applied_count, apply_relocations, apply_relocations_ctx, reset_counters, skipped_count,
+    RelocCtx,
 };
 pub use tls::{
     init_tls, install_tls, tp_offset, unmap_tls, TlsBlock, MAX_TLS_BYTES, MAX_TLS_PAGES,
@@ -41,15 +41,22 @@ pub fn dl_open(elf_data: &[u8], base_addr: u64) -> Result<DlHandle, &'static str
     }
 
     // Extract load segments.
-    let mut segments = [const { LoadSegment { offset: 0, vaddr: 0, filesz: 0, memsz: 0, flags: 0 } }; MAX_LOAD_SEGMENTS];
+    let mut segments = [const {
+        LoadSegment {
+            offset: 0,
+            vaddr: 0,
+            filesz: 0,
+            memsz: 0,
+            flags: 0,
+        }
+    }; MAX_LOAD_SEGMENTS];
     let seg_count = elf::load_segments(elf_data, &info, &mut segments);
 
     // Load segments into memory at base_addr.
     let mapping = loader::load_segments(elf_data, &segments[..seg_count], base_addr)?;
 
     // Parse dynamic section.
-    let dyn_info = elf::parse_dynamic(elf_data, &info)
-        .ok_or("no PT_DYNAMIC")?;
+    let dyn_info = elf::parse_dynamic(elf_data, &info).ok_or("no PT_DYNAMIC")?;
 
     // Allocate static TLS BEFORE applying relocations: TPOFF64/DTPOFF64 need
     // the resolved tls_block.size to compute negative thread-pointer offsets.
@@ -59,11 +66,22 @@ pub fn dl_open(elf_data: &[u8], base_addr: u64) -> Result<DlHandle, &'static str
     };
 
     // Apply relocations with full context (TLS block + loaded symtab/strtab).
-    let symtab_addr = if dyn_info.symtab != 0 { base_addr + dyn_info.symtab } else { 0 };
-    let strtab_addr = if dyn_info.strtab != 0 { base_addr + dyn_info.strtab } else { 0 };
-    let ctx = RelocCtx::new(base_addr)
-        .with_tls(tls_block)
-        .with_symtab(symtab_addr, 0, strtab_addr, dyn_info.strsz);
+    let symtab_addr = if dyn_info.symtab != 0 {
+        base_addr + dyn_info.symtab
+    } else {
+        0
+    };
+    let strtab_addr = if dyn_info.strtab != 0 {
+        base_addr + dyn_info.strtab
+    } else {
+        0
+    };
+    let ctx = RelocCtx::new(base_addr).with_tls(tls_block).with_symtab(
+        symtab_addr,
+        0,
+        strtab_addr,
+        dyn_info.strsz,
+    );
     reloc::apply_relocations_ctx(&ctx, elf_data, &dyn_info)?;
 
     // W^X: change code pages from RW (needed for loading) to R+X.
@@ -97,7 +115,14 @@ pub fn dl_sym(handle: &DlHandle, name: &[u8]) -> Option<u64> {
         0
     };
 
-    symbol::find_symbol(name, symtab_addr, strtab_addr, handle.strsz, gnu_hash_addr, handle.base)
+    symbol::find_symbol(
+        name,
+        symtab_addr,
+        strtab_addr,
+        handle.strsz,
+        gnu_hash_addr,
+        handle.base,
+    )
 }
 
 /// Unmap a loaded shared library. After this, the handle is invalid.

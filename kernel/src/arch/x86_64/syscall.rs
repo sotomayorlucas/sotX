@@ -49,11 +49,9 @@ core::arch::global_asm!(
 
     // Swap user GS ↔ kernel GS (percpu) so we can access percpu via gs:xx
     "    swapgs",
-
     // Save user RSP to percpu.user_rsp_save (offset 16), load kernel stack
-    "    mov gs:[16], rsp",       // percpu.user_rsp_save
-    "    mov rsp, gs:[8]",        // percpu.kernel_stack_top
-
+    "    mov gs:[16], rsp", // percpu.user_rsp_save
+    "    mov rsp, gs:[8]",  // percpu.kernel_stack_top
     // Push trap frame (matches TrapFrame struct, low-to-high)
     "    push r15",
     "    push r14",
@@ -70,11 +68,9 @@ core::arch::global_asm!(
     "    push rcx", // user RIP
     "    push rbx",
     "    push rax", // syscall number
-
     // Call Rust dispatcher: syscall_dispatch(&mut TrapFrame)
     "    mov rdi, rsp",
     "    call syscall_dispatch",
-
     // Pop trap frame
     "    pop rax",
     "    pop rbx",
@@ -91,9 +87,8 @@ core::arch::global_asm!(
     "    pop r13",
     "    pop r14",
     "    pop r15",
-
     // Restore user RSP and return to Ring 3
-    "    mov rsp, gs:[16]",       // percpu.user_rsp_save
+    "    mov rsp, gs:[16]", // percpu.user_rsp_save
     // Swap kernel GS ↔ user GS before returning to user mode
     "    swapgs",
     "    sysretq",
@@ -119,8 +114,8 @@ pub fn init() {
 
     // STAR: segment selectors for SYSCALL (kernel) and SYSRET (user).
     Star::write(
-        SegmentSelector(gdt::USER_CS),  // cs_sysret  = 0x23
-        SegmentSelector(gdt::USER_DS),  // ss_sysret  = 0x1B
+        SegmentSelector(gdt::USER_CS),   // cs_sysret  = 0x23
+        SegmentSelector(gdt::USER_DS),   // ss_sysret  = 0x1B
         SegmentSelector(gdt::KERNEL_CS), // cs_syscall = 0x08
         SegmentSelector(gdt::KERNEL_DS), // ss_syscall = 0x10
     )

@@ -82,7 +82,7 @@ pub fn init() {
 /// Map a single 4K MMIO page into the current (boot) page tables.
 /// Uses PRESENT | WRITABLE | NO_CACHE | WRITE_THROUGH flags.
 fn map_mmio_page(phys: u64, virt: u64) {
-    use crate::mm::paging::{AddressSpace, PAGE_PRESENT, PAGE_WRITABLE, read_cr3};
+    use crate::mm::paging::{read_cr3, AddressSpace, PAGE_PRESENT, PAGE_WRITABLE};
 
     let cr3 = read_cr3();
     let aspace = AddressSpace::from_cr3(cr3);

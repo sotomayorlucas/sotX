@@ -9,8 +9,8 @@ use x86_64::registers::control::Cr2;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
 
 use super::gdt::DOUBLE_FAULT_IST_INDEX;
-use super::pic;
 use super::lapic;
+use super::pic;
 
 /// PIT timer interrupt vector (IRQ0 after PIC remap). Kept for PIC fallback.
 pub const PIT_TIMER_VECTOR: u8 = 32;
@@ -33,12 +33,16 @@ macro_rules! irq_handler {
             // If interrupted from user mode, swap GS so percpu is accessible.
             let from_user = frame.code_segment.0 & 3 != 0;
             if from_user {
-                unsafe { core::arch::asm!("swapgs", options(nomem, nostack, preserves_flags)); }
+                unsafe {
+                    core::arch::asm!("swapgs", options(nomem, nostack, preserves_flags));
+                }
             }
             if !super::percpu::current_percpu().is_bsp() {
                 lapic::eoi();
                 if from_user {
-                    unsafe { core::arch::asm!("swapgs", options(nomem, nostack, preserves_flags)); }
+                    unsafe {
+                        core::arch::asm!("swapgs", options(nomem, nostack, preserves_flags));
+                    }
                 }
                 return;
             }
@@ -46,21 +50,23 @@ macro_rules! irq_handler {
             pic::mask($irq);
             crate::irq::notify($irq);
             if from_user {
-                unsafe { core::arch::asm!("swapgs", options(nomem, nostack, preserves_flags)); }
+                unsafe {
+                    core::arch::asm!("swapgs", options(nomem, nostack, preserves_flags));
+                }
             }
         }
     };
 }
 
-irq_handler!(irq1_handler,  1);
-irq_handler!(irq2_handler,  2);
-irq_handler!(irq3_handler,  3);
-irq_handler!(irq4_handler,  4);
-irq_handler!(irq5_handler,  5);
-irq_handler!(irq6_handler,  6);
-irq_handler!(irq7_handler,  7);
-irq_handler!(irq8_handler,  8);
-irq_handler!(irq9_handler,  9);
+irq_handler!(irq1_handler, 1);
+irq_handler!(irq2_handler, 2);
+irq_handler!(irq3_handler, 3);
+irq_handler!(irq4_handler, 4);
+irq_handler!(irq5_handler, 5);
+irq_handler!(irq6_handler, 6);
+irq_handler!(irq7_handler, 7);
+irq_handler!(irq8_handler, 8);
+irq_handler!(irq9_handler, 9);
 irq_handler!(irq10_handler, 10);
 irq_handler!(irq11_handler, 11);
 irq_handler!(irq12_handler, 12);
@@ -83,9 +89,10 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
     // kernel stack (TSS RSP0). IST causes stack corruption when multiple threads fault.
     // Uses raw handler address for custom assembly that saves all 15 GPRs.
     unsafe {
-        idt.general_protection_fault.set_handler_addr(
-            x86_64::VirtAddr::new(general_protection_handler_asm as *const () as u64),
-        );
+        idt.general_protection_fault
+            .set_handler_addr(x86_64::VirtAddr::new(
+                general_protection_handler_asm as *const () as u64,
+            ));
     }
     // #PF does NOT use IST — user-mode faults use the per-thread kernel stack
     // (TSS RSP0), which is safe for context switching away faulted threads.
@@ -94,20 +101,22 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
     // Uses raw handler address (like LAPIC timer) because our custom assembly
     // entry saves all 15 GPRs for Wine's ucontext — not x86-interrupt ABI.
     unsafe {
-        idt.page_fault.set_handler_addr(x86_64::VirtAddr::new(page_fault_handler_asm as *const () as u64));
+        idt.page_fault.set_handler_addr(x86_64::VirtAddr::new(
+            page_fault_handler_asm as *const () as u64,
+        ));
     }
 
     // #DE and #UD: no IST, custom assembly handlers for signal delivery with real GPRs.
     // No error code pushed by CPU → assembly pushes dummy 0 to normalize layout.
     unsafe {
-        idt.divide_error.set_handler_addr(
-            x86_64::VirtAddr::new(divide_error_handler_asm as *const () as u64),
-        );
+        idt.divide_error.set_handler_addr(x86_64::VirtAddr::new(
+            divide_error_handler_asm as *const () as u64,
+        ));
     }
     unsafe {
-        idt.invalid_opcode.set_handler_addr(
-            x86_64::VirtAddr::new(invalid_opcode_handler_asm as *const () as u64),
-        );
+        idt.invalid_opcode.set_handler_addr(x86_64::VirtAddr::new(
+            invalid_opcode_handler_asm as *const () as u64,
+        ));
     }
     unsafe {
         idt.device_not_available
@@ -159,8 +168,9 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
     // Uses raw handler address instead of set_handler_fn because we need full
     // GPR access (x86-interrupt ABI doesn't expose general-purpose registers).
     unsafe {
-        idt[LAPIC_TIMER_VECTOR]
-            .set_handler_addr(x86_64::VirtAddr::new(lapic_timer_handler_asm as *const () as u64));
+        idt[LAPIC_TIMER_VECTOR].set_handler_addr(x86_64::VirtAddr::new(
+            lapic_timer_handler_asm as *const () as u64,
+        ));
     }
 
     // Reschedule IPI (vector 49)
@@ -193,7 +203,9 @@ extern "x86-interrupt" fn breakpoint_handler(frame: InterruptStackFrame) {
 extern "x86-interrupt" fn double_fault_handler(frame: InterruptStackFrame, _code: u64) -> ! {
     // If #DF arrived while in user mode (rare but possible), fix GS.
     if frame.code_segment.0 & 3 != 0 {
-        unsafe { core::arch::asm!("swapgs", options(nomem, nostack, preserves_flags)); }
+        unsafe {
+            core::arch::asm!("swapgs", options(nomem, nostack, preserves_flags));
+        }
     }
     let cr2 = Cr2::read_raw();
     let cr3 = crate::mm::paging::read_cr3();
@@ -222,17 +234,27 @@ extern "x86-interrupt" fn double_fault_handler(frame: InterruptStackFrame, _code
 /// `fault_addr`: address to store in fault_info (faulting RIP for #GP/#UD/#DE)
 /// `fault_code`: error code to store in fault_info
 #[inline(never)]
-fn deliver_fault_signal(gprs: *mut u64, iframe: *mut u64, signal: u64, fault_addr: u64, fault_code: u64) -> bool {
+fn deliver_fault_signal(
+    gprs: *mut u64,
+    iframe: *mut u64,
+    signal: u64,
+    fault_addr: u64,
+    fault_code: u64,
+) -> bool {
     let rip = unsafe { *iframe.add(1) };
     let rsp = unsafe { *iframe.add(4) };
     let rflags = unsafe { *iframe.add(3) };
 
     let percpu = super::percpu::current_percpu();
     let idx = percpu.current_thread;
-    if idx == usize::MAX { return false; }
+    if idx == usize::MAX {
+        return false;
+    }
 
     let tramp = crate::sched::get_signal_trampoline_by_idx(idx as u32);
-    if tramp == 0 { return false; }
+    if tramp == 0 {
+        return false;
+    }
 
     // Save real GPRs from assembly frame
     let mut real_gprs = [0u64; 15];
@@ -251,7 +273,9 @@ fn deliver_fault_signal(gprs: *mut u64, iframe: *mut u64, signal: u64, fault_add
     crate::sched::set_fault_info_current(fault_addr, fault_code);
 
     // Direct redirect: overwrite RIP in interrupt frame → iret goes to trampoline
-    unsafe { *iframe.add(1) = tramp; }
+    unsafe {
+        *iframe.add(1) = tramp;
+    }
     true
 }
 
@@ -266,7 +290,6 @@ core::arch::global_asm!(
     // Check if from user mode: CS at rsp+16 (after error code at rsp+0)
     "    test qword ptr [rsp + 16], 3",
     "    jz 2f",
-
     // === User-mode #GP ===
     "    swapgs",
     "    push r15",
@@ -284,11 +307,9 @@ core::arch::global_asm!(
     "    push rcx",
     "    push rbx",
     "    push rax",
-
     "    mov rdi, rsp",
     "    lea rsi, [rsp + 120]",
     "    call gp_fault_user_handler",
-
     "    pop rax",
     "    pop rbx",
     "    pop rcx",
@@ -304,10 +325,9 @@ core::arch::global_asm!(
     "    pop r13",
     "    pop r14",
     "    pop r15",
-    "    add rsp, 8",  // pop error code
+    "    add rsp, 8", // pop error code
     "    swapgs",
     "    iretq",
-
     // === Kernel-mode #GP: panic ===
     "2:",
     "    call gp_fault_kernel_handler",
@@ -329,8 +349,16 @@ extern "C" fn gp_fault_user_handler(gprs: *mut u64, iframe: *mut u64) {
             let rax = unsafe { *gprs };
             let rcx = unsafe { *gprs.add(2) };
             let rdx = unsafe { *gprs.add(3) };
-            kprintln!("#GP(user) #{} rip={:#x} rsp={:#x} code={:#x} rax={:#x} rcx={:#x} rdx={:#x}",
-                n, rip, rsp, error_code, rax, rcx, rdx);
+            kprintln!(
+                "#GP(user) #{} rip={:#x} rsp={:#x} code={:#x} rax={:#x} rcx={:#x} rdx={:#x}",
+                n,
+                rip,
+                rsp,
+                error_code,
+                rax,
+                rcx,
+                rdx
+            );
         }
     }
 
@@ -362,10 +390,9 @@ core::arch::global_asm!(
     // No error code pushed by CPU. Check CS at rsp+8 (no error code offset).
     "    test qword ptr [rsp + 8], 3",
     "    jz 2f",
-
     // === User-mode #UD ===
     "    swapgs",
-    "    push 0",      // dummy error code to normalize layout
+    "    push 0", // dummy error code to normalize layout
     "    push r15",
     "    push r14",
     "    push r13",
@@ -381,11 +408,9 @@ core::arch::global_asm!(
     "    push rcx",
     "    push rbx",
     "    push rax",
-
     "    mov rdi, rsp",
-    "    lea rsi, [rsp + 120]",   // 15*8=120 → iframe starts at [error_code, rip, ...]
+    "    lea rsi, [rsp + 120]", // 15*8=120 → iframe starts at [error_code, rip, ...]
     "    call ud_fault_user_handler",
-
     "    pop rax",
     "    pop rbx",
     "    pop rcx",
@@ -401,10 +426,9 @@ core::arch::global_asm!(
     "    pop r13",
     "    pop r14",
     "    pop r15",
-    "    add rsp, 8",  // pop dummy error code
+    "    add rsp, 8", // pop dummy error code
     "    swapgs",
     "    iretq",
-
     // === Kernel-mode #UD: panic ===
     "2:",
     "    call ud_fault_kernel_handler",
@@ -453,10 +477,9 @@ core::arch::global_asm!(
     // No error code. Check CS at rsp+8.
     "    test qword ptr [rsp + 8], 3",
     "    jz 2f",
-
     // === User-mode #DE ===
     "    swapgs",
-    "    push 0",      // dummy error code
+    "    push 0", // dummy error code
     "    push r15",
     "    push r14",
     "    push r13",
@@ -472,11 +495,9 @@ core::arch::global_asm!(
     "    push rcx",
     "    push rbx",
     "    push rax",
-
     "    mov rdi, rsp",
     "    lea rsi, [rsp + 120]",
     "    call de_fault_user_handler",
-
     "    pop rax",
     "    pop rbx",
     "    pop rcx",
@@ -492,10 +513,9 @@ core::arch::global_asm!(
     "    pop r13",
     "    pop r14",
     "    pop r15",
-    "    add rsp, 8",  // pop dummy error code
+    "    add rsp, 8", // pop dummy error code
     "    swapgs",
     "    iretq",
-
     // === Kernel-mode #DE: panic ===
     "2:",
     "    call de_fault_kernel_handler",
@@ -551,11 +571,9 @@ core::arch::global_asm!(
     // Check if from user mode: CS & 3 (at rsp+16, after error code at rsp+0)
     "    test qword ptr [rsp + 16], 3",
     "    jz 2f",
-
     // === User-mode #PF ===
     // Swap user GS ↔ kernel GS so percpu is accessible via gs:xx
     "    swapgs",
-
     // Save all 15 GPRs
     "    push r15",
     "    push r14",
@@ -572,14 +590,12 @@ core::arch::global_asm!(
     "    push rcx",
     "    push rbx",
     "    push rax",
-
     // Call Rust handler:
     //   rdi = pointer to saved GPRs (15 u64s at rsp)
     //   rsi = pointer to interrupt frame (15*8=120 above: error_code, RIP, CS, RFLAGS, RSP, SS)
     "    mov rdi, rsp",
     "    lea rsi, [rsp + 120]",
     "    call page_fault_user_handler",
-
     // Restore all GPRs
     "    pop rax",
     "    pop rbx",
@@ -601,7 +617,6 @@ core::arch::global_asm!(
     // Swap kernel GS ↔ user GS before returning to user mode
     "    swapgs",
     "    iretq",
-
     // === Kernel-mode #PF: panic ===
     "2:",
     // GS_BASE already points to percpu — no swapgs needed.
@@ -635,14 +650,17 @@ extern "C" fn page_fault_user_handler(gprs: *mut u64, iframe: *mut u64) {
             // the fault, the same instruction faults again → force-kill.
             let last_rip = crate::sched::get_last_fault_rip_by_idx(idx as u32);
             if last_rip == rip && rip != 0 {
-                kprintln!("#PF-REPEATED tid={} rip={:#x} cr2={:#x} → force kill",
-                    tid, rip, addr);
+                kprintln!(
+                    "#PF-REPEATED tid={} rip={:#x} cr2={:#x} → force kill",
+                    tid,
+                    rip,
+                    addr
+                );
                 crate::sched::set_last_fault_rip_by_idx(idx as u32, 0);
                 if let Some(tid) = crate::sched::current_tid() {
                     crate::sched::set_pending_signal(tid, 11);
                 }
                 crate::sched::exit_current();
-                return;
             }
             crate::sched::set_last_fault_rip_by_idx(idx as u32, rip);
 
@@ -658,17 +676,23 @@ extern "C" fn page_fault_user_handler(gprs: *mut u64, iframe: *mut u64) {
                 // Force save even if signal_ctx_valid is true from a previous
                 // undelivered signal — we need the NEW faulting context.
                 crate::sched::clear_signal_ctx(crate::sched::ThreadId(tid));
-                crate::sched::save_signal_context_current(
-                    &real_gprs, rip, rsp, rflags,
-                );
+                crate::sched::save_signal_context_current(&real_gprs, rip, rsp, rflags);
                 // Store kernel-generated signal number and fault info.
                 crate::sched::set_kernel_signal_current(11); // SIGSEGV
                 crate::sched::set_fault_info_current(addr, code_bits);
-                kprintln!("#PF-SIG tid={} rip={:#x} rsp={:#x} cr2={:#x} code={:#x}",
-                    tid, rip, rsp, addr, code_bits);
+                kprintln!(
+                    "#PF-SIG tid={} rip={:#x} rsp={:#x} cr2={:#x} code={:#x}",
+                    tid,
+                    rip,
+                    rsp,
+                    addr,
+                    code_bits
+                );
                 // Do NOT set pending_signals — we redirect directly below.
                 // Redirect: overwrite RIP in interrupt frame → iret goes to trampoline.
-                unsafe { *iframe.add(1) = tramp; }
+                unsafe {
+                    *iframe.add(1) = tramp;
+                }
                 return;
             }
         }
@@ -677,7 +701,6 @@ extern "C" fn page_fault_user_handler(gprs: *mut u64, iframe: *mut u64) {
             crate::sched::set_pending_signal(tid, 11);
         }
         crate::sched::exit_current();
-        return;
     }
 
     // Log null-pointer faults (diagnostic only — VMM maps page 0 on demand,
@@ -686,7 +709,10 @@ extern "C" fn page_fault_user_handler(gprs: *mut u64, iframe: *mut u64) {
     if addr == 0 || rip == 0 {
         kprintln!(
             "#PF-NULL tid={} addr={:#x} code={:#x} rip={:#x}",
-            tid, addr, code_bits, rip
+            tid,
+            addr,
+            code_bits,
+            rip
         );
     }
     if crate::fault::push_fault(tid, addr, code_bits, cr3) {
@@ -694,7 +720,9 @@ extern "C" fn page_fault_user_handler(gprs: *mut u64, iframe: *mut u64) {
     } else {
         kprintln!(
             "page fault (user, no VMM): addr={:#x} code={:#x} rip={:#x}",
-            addr, code_bits, rip
+            addr,
+            code_bits,
+            rip
         );
         crate::sched::exit_current();
     }
@@ -713,28 +741,47 @@ extern "C" fn page_fault_kernel_handler() {
 // ---------------------------------------------------------------------------
 
 extern "x86-interrupt" fn device_not_available_handler(frame: InterruptStackFrame) {
-    panic!("EXCEPTION: #NM device not available at rip={:#x}\n{:#?}",
-        frame.instruction_pointer.as_u64(), frame);
+    panic!(
+        "EXCEPTION: #NM device not available at rip={:#x}\n{:#?}",
+        frame.instruction_pointer.as_u64(),
+        frame
+    );
 }
 
 extern "x86-interrupt" fn invalid_tss_handler(frame: InterruptStackFrame, code: u64) {
-    panic!("EXCEPTION: #TS invalid TSS (code {}) at rip={:#x}\n{:#?}",
-        code, frame.instruction_pointer.as_u64(), frame);
+    panic!(
+        "EXCEPTION: #TS invalid TSS (code {}) at rip={:#x}\n{:#?}",
+        code,
+        frame.instruction_pointer.as_u64(),
+        frame
+    );
 }
 
 extern "x86-interrupt" fn segment_not_present_handler(frame: InterruptStackFrame, code: u64) {
-    panic!("EXCEPTION: #NP segment not present (code {}) at rip={:#x}\n{:#?}",
-        code, frame.instruction_pointer.as_u64(), frame);
+    panic!(
+        "EXCEPTION: #NP segment not present (code {}) at rip={:#x}\n{:#?}",
+        code,
+        frame.instruction_pointer.as_u64(),
+        frame
+    );
 }
 
 extern "x86-interrupt" fn stack_segment_fault_handler(frame: InterruptStackFrame, code: u64) {
-    panic!("EXCEPTION: #SS stack segment fault (code {}) at rip={:#x}\n{:#?}",
-        code, frame.instruction_pointer.as_u64(), frame);
+    panic!(
+        "EXCEPTION: #SS stack segment fault (code {}) at rip={:#x}\n{:#?}",
+        code,
+        frame.instruction_pointer.as_u64(),
+        frame
+    );
 }
 
 extern "x86-interrupt" fn alignment_check_handler(frame: InterruptStackFrame, code: u64) {
-    panic!("EXCEPTION: #AC alignment check (code {}) at rip={:#x}\n{:#?}",
-        code, frame.instruction_pointer.as_u64(), frame);
+    panic!(
+        "EXCEPTION: #AC alignment check (code {}) at rip={:#x}\n{:#?}",
+        code,
+        frame.instruction_pointer.as_u64(),
+        frame
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -745,12 +792,16 @@ extern "x86-interrupt" fn alignment_check_handler(frame: InterruptStackFrame, co
 extern "x86-interrupt" fn pit_timer_handler(frame: InterruptStackFrame) {
     let from_user = frame.code_segment.0 & 3 != 0;
     if from_user {
-        unsafe { core::arch::asm!("swapgs", options(nomem, nostack, preserves_flags)); }
+        unsafe {
+            core::arch::asm!("swapgs", options(nomem, nostack, preserves_flags));
+        }
     }
     pic::send_eoi(0);
     crate::sched::tick();
     if from_user {
-        unsafe { core::arch::asm!("swapgs", options(nomem, nostack, preserves_flags)); }
+        unsafe {
+            core::arch::asm!("swapgs", options(nomem, nostack, preserves_flags));
+        }
     }
 }
 
@@ -779,11 +830,9 @@ core::arch::global_asm!(
     // Check if interrupted from user mode (CS & 3)
     "    test qword ptr [rsp + 8], 3",
     "    jz 2f",
-
     // === User mode interrupt ===
     // Swap user GS ↔ kernel GS so percpu is accessible via gs:xx
     "    swapgs",
-
     // Save all 15 GPRs
     "    push r15",
     "    push r14",
@@ -800,14 +849,12 @@ core::arch::global_asm!(
     "    push rcx",
     "    push rbx",
     "    push rax",
-
     // Call Rust handler:
     //   rdi = pointer to saved GPRs (15 u64s at rsp)
     //   rsi = pointer to interrupt frame (15*8 = 120 bytes above rsp)
     "    mov rdi, rsp",
     "    lea rsi, [rsp + 120]",
     "    call lapic_timer_user_handler",
-
     // Restore all GPRs (Rust handler may have modified the interrupt frame)
     "    pop rax",
     "    pop rbx",
@@ -827,7 +874,6 @@ core::arch::global_asm!(
     // Swap kernel GS ↔ user GS before returning to user mode
     "    swapgs",
     "    iretq",
-
     // === Kernel mode interrupt: save caller-saved regs, call tick ===
     "2:",
     // GS_BASE already points to percpu — no swapgs needed.
@@ -874,9 +920,12 @@ extern "C" fn lapic_timer_user_handler(gprs: *mut u64, iframe: *mut u64) {
         if target_cr3 != 0 {
             let current_cr3 = crate::mm::paging::read_cr3();
             if current_cr3 == target_cr3 {
-                static PROF_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-                static PROF_LAST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-                static PROF_REPEAT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                static PROF_COUNT: core::sync::atomic::AtomicU32 =
+                    core::sync::atomic::AtomicU32::new(0);
+                static PROF_LAST: core::sync::atomic::AtomicU64 =
+                    core::sync::atomic::AtomicU64::new(0);
+                static PROF_REPEAT: core::sync::atomic::AtomicU32 =
+                    core::sync::atomic::AtomicU32::new(0);
                 let user_rip = unsafe { *iframe };
                 let user_rsp = unsafe { *iframe.add(3) };
                 let n = PROF_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -892,15 +941,27 @@ extern "C" fn lapic_timer_user_handler(gprs: *mut u64, iframe: *mut u64) {
                 if user_rip == last {
                     let rep = PROF_REPEAT.fetch_add(1, Ordering::Relaxed);
                     if rep < 3 || rep % 200 == 0 {
-                        crate::kprintln!("PROF-SPIN n={} rip={:#x} rsp={:#x} rax={:#x} rep={}",
-                            n, user_rip, user_rsp, user_rax, rep);
+                        crate::kprintln!(
+                            "PROF-SPIN n={} rip={:#x} rsp={:#x} rax={:#x} rep={}",
+                            n,
+                            user_rip,
+                            user_rsp,
+                            user_rax,
+                            rep
+                        );
                     }
                 } else {
                     PROF_REPEAT.store(0, Ordering::Relaxed);
                     PROF_LAST.store(user_rip, Ordering::Relaxed);
                     if n < 10 || n % 100 == 0 {
-                        crate::kprintln!("PROF n={} rip={:#x} rsp={:#x} rax={:#x} rsi={:#x}",
-                            n, user_rip, user_rsp, user_rax, user_rsi);
+                        crate::kprintln!(
+                            "PROF n={} rip={:#x} rsp={:#x} rax={:#x} rsi={:#x}",
+                            n,
+                            user_rip,
+                            user_rsp,
+                            user_rax,
+                            user_rsi
+                        );
                     }
                 }
             }
@@ -922,8 +983,8 @@ extern "C" fn lapic_timer_user_handler(gprs: *mut u64, iframe: *mut u64) {
             if sig > 0 && sig < 64 {
                 unsafe {
                     // Read original user state from the interrupt frame
-                    let original_rip    = *iframe;
-                    let original_rsp    = *iframe.add(3);
+                    let original_rip = *iframe;
+                    let original_rsp = *iframe.add(3);
                     let original_rflags = *iframe.add(2);
 
                     // Build the full saved GPR array
@@ -935,7 +996,10 @@ extern "C" fn lapic_timer_user_handler(gprs: *mut u64, iframe: *mut u64) {
                     // Save context — returns false if a signal is already in progress
                     // (#PF handler saved it, or a previous timer delivery hasn't completed).
                     let did_save = crate::sched::save_signal_context_current(
-                        &saved_gprs, original_rip, original_rsp, original_rflags,
+                        &saved_gprs,
+                        original_rip,
+                        original_rsp,
+                        original_rflags,
                     );
 
                     if did_save {
@@ -948,7 +1012,7 @@ extern "C" fn lapic_timer_user_handler(gprs: *mut u64, iframe: *mut u64) {
                             crate::sched::set_fault_info_current(cr2, 5);
                         }
 
-                        *iframe = tramp;  // RIP = trampoline address
+                        *iframe = tramp; // RIP = trampoline address
                     }
                     // If !did_save: signal already in progress. Leave the pending bit
                     // set — it will be delivered after the current handler completes
@@ -978,12 +1042,16 @@ extern "C" fn lapic_timer_kernel_handler() {
 extern "x86-interrupt" fn reschedule_ipi_handler(frame: InterruptStackFrame) {
     let from_user = frame.code_segment.0 & 3 != 0;
     if from_user {
-        unsafe { core::arch::asm!("swapgs", options(nomem, nostack, preserves_flags)); }
+        unsafe {
+            core::arch::asm!("swapgs", options(nomem, nostack, preserves_flags));
+        }
     }
     lapic::eoi();
     crate::sched::try_schedule();
     if from_user {
-        unsafe { core::arch::asm!("swapgs", options(nomem, nostack, preserves_flags)); }
+        unsafe {
+            core::arch::asm!("swapgs", options(nomem, nostack, preserves_flags));
+        }
     }
 }
 

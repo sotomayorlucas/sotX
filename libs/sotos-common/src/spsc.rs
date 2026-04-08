@@ -50,7 +50,12 @@ impl SpscRing {
     /// # Safety
     /// `ptr` must point to at least 4096 bytes of writable, shared memory.
     /// `capacity` must be > 0 and `DATA_OFFSET + capacity * 8` must fit in one page.
-    pub unsafe fn init(ptr: *mut u8, capacity: u32, empty_cap: u32, full_cap: u32) -> &'static Self {
+    pub unsafe fn init(
+        ptr: *mut u8,
+        capacity: u32,
+        empty_cap: u32,
+        full_cap: u32,
+    ) -> &'static Self {
         // Zero the header
         core::ptr::write_bytes(ptr, 0, DATA_OFFSET);
 
@@ -108,7 +113,9 @@ pub fn try_send(ring: &SpscRing, value: u64) -> bool {
     }
 
     unsafe { ring.slot_ptr(tail).write_volatile(value) };
-    ring.tail.value.store(tail.wrapping_add(1), Ordering::Release);
+    ring.tail
+        .value
+        .store(tail.wrapping_add(1), Ordering::Release);
 
     // If ring was empty, wake the consumer.
     if tail == head {
@@ -138,7 +145,9 @@ pub fn try_recv(ring: &SpscRing) -> Option<u64> {
     }
 
     let value = unsafe { ring.slot_ptr(head).read_volatile() };
-    ring.head.value.store(head.wrapping_add(1), Ordering::Release);
+    ring.head
+        .value
+        .store(head.wrapping_add(1), Ordering::Release);
 
     // If ring was full, wake the producer.
     if tail.wrapping_sub(head) == ring.capacity() {
