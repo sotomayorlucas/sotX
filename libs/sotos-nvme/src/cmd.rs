@@ -1,24 +1,34 @@
-//! NVMe command opcodes and builders.
+//! NVMe command opcodes and SQE builders.
+//!
+//! All builders return a fully-populated [`SqEntry`] with `cdw0.opcode`
+//! set; the command ID is filled in later by
+//! [`crate::queue::SubmissionQueue::submit`]. Field encodings follow
+//! NVMe 1.4 §5 (Admin Command Set) and §6 (NVM Command Set).
 
 use crate::queue::SqEntry;
 
-// --- Admin command opcodes ---
+// --- Admin command opcodes (NVMe 1.4 Figure 139) ---
 
-/// Identify (admin opcode 0x06).
+/// Identify — admin opcode `0x06`. CNS in CDW10 selects controller vs
+/// namespace data structure.
 pub const ADMIN_IDENTIFY: u8 = 0x06;
-/// Create I/O Completion Queue (admin opcode 0x05).
+/// Create I/O Completion Queue — admin opcode `0x05`.
 pub const ADMIN_CREATE_IO_CQ: u8 = 0x05;
-/// Create I/O Submission Queue (admin opcode 0x01).
+/// Create I/O Submission Queue — admin opcode `0x01`.
 pub const ADMIN_CREATE_IO_SQ: u8 = 0x01;
 
-// --- I/O command opcodes (NVM command set) ---
+// --- I/O command opcodes (NVMe 1.4 NVM command set, Figure 346) ---
 
-/// Read (I/O opcode 0x02).
+/// Read — NVM I/O opcode `0x02`.
 pub const IO_READ: u8 = 0x02;
-/// Write (I/O opcode 0x01).
+/// Write — NVM I/O opcode `0x01`.
 pub const IO_WRITE: u8 = 0x01;
 
-/// Build an Identify Controller command (CNS=1).
+/// Build an *Identify Controller* command (CNS = `0x01`).
+///
+/// `prp1_phys` is the physical address of a 4 KiB host buffer the
+/// controller will fill with the Identify Controller data structure
+/// (NVMe 1.4 §5.15.2.1).
 pub fn identify_controller(prp1_phys: u64) -> SqEntry {
     let mut e = SqEntry::zeroed();
     e.cdw0 = ADMIN_IDENTIFY as u32;
@@ -27,7 +37,10 @@ pub fn identify_controller(prp1_phys: u64) -> SqEntry {
     e
 }
 
-/// Build an Identify Namespace command (CNS=0, NSID=1).
+/// Build an *Identify Namespace* command (CNS = `0x00`).
+///
+/// `nsid` selects the namespace; `prp1_phys` is the host buffer for
+/// the Identify Namespace data structure (NVMe 1.4 §5.15.2.2).
 pub fn identify_namespace(nsid: u32, prp1_phys: u64) -> SqEntry {
     let mut e = SqEntry::zeroed();
     e.cdw0 = ADMIN_IDENTIFY as u32;
@@ -37,11 +50,15 @@ pub fn identify_namespace(nsid: u32, prp1_phys: u64) -> SqEntry {
     e
 }
 
-/// Build a Create I/O Completion Queue command.
+/// Build a *Create I/O Completion Queue* admin command.
 ///
-/// - `qid`: Queue identifier (1-based for I/O queues).
-/// - `prp1_phys`: Physical address of the CQ buffer.
-/// - `size`: Queue size (0-based: actual entries - 1).
+/// - `qid`: I/O completion queue identifier (1-based).
+/// - `prp1_phys`: physical address of the (physically contiguous) CQ
+///   buffer.
+/// - `size`: 0-based queue size, i.e. `actual_entries - 1`.
+///
+/// CDW11 hard-codes `IEN=1, PC=1` (interrupts enabled, physically
+/// contiguous). Interrupt vector is left at 0.
 pub fn create_io_cq(qid: u16, prp1_phys: u64, size: u16) -> SqEntry {
     let mut e = SqEntry::zeroed();
     e.cdw0 = ADMIN_CREATE_IO_CQ as u32;
@@ -53,12 +70,15 @@ pub fn create_io_cq(qid: u16, prp1_phys: u64, size: u16) -> SqEntry {
     e
 }
 
-/// Build a Create I/O Submission Queue command.
+/// Build a *Create I/O Submission Queue* admin command.
 ///
-/// - `qid`: Queue identifier (1-based for I/O queues).
-/// - `prp1_phys`: Physical address of the SQ buffer.
-/// - `size`: Queue size (0-based: actual entries - 1).
-/// - `cqid`: Associated Completion Queue ID.
+/// - `qid`: I/O submission queue identifier (1-based).
+/// - `prp1_phys`: physical address of the (physically contiguous) SQ
+///   buffer.
+/// - `size`: 0-based queue size.
+/// - `cqid`: identifier of the completion queue this SQ should post to.
+///
+/// CDW11 sets `PC=1` and queue priority `0` (urgent).
 pub fn create_io_sq(qid: u16, prp1_phys: u64, size: u16, cqid: u16) -> SqEntry {
     let mut e = SqEntry::zeroed();
     e.cdw0 = ADMIN_CREATE_IO_SQ as u32;
@@ -70,12 +90,14 @@ pub fn create_io_sq(qid: u16, prp1_phys: u64, size: u16, cqid: u16) -> SqEntry {
     e
 }
 
-/// Build an I/O Read command (single-page PRP).
+/// Build a single-PRP NVM *Read* command.
 ///
-/// - `nsid`: Namespace ID (usually 1).
-/// - `lba`: Starting LBA.
-/// - `count`: Number of logical blocks to read (0-based: actual - 1).
-/// - `prp1_phys`: Physical address of the data buffer.
+/// - `nsid`: namespace identifier.
+/// - `lba`: starting logical block address (split across CDW10/CDW11).
+/// - `count`: 0-based number of logical blocks (NLB) to read.
+/// - `prp1_phys`: physical address of the data buffer; must be
+///   page-aligned for DMA. Single-PRP transfers are at most one host
+///   page (4 KiB at the configured MPS).
 pub fn io_read(nsid: u32, lba: u64, count: u16, prp1_phys: u64) -> SqEntry {
     let mut e = SqEntry::zeroed();
     e.cdw0 = IO_READ as u32;
@@ -87,14 +109,16 @@ pub fn io_read(nsid: u32, lba: u64, count: u16, prp1_phys: u64) -> SqEntry {
     e
 }
 
-/// Build an I/O Read command with PRP List support for multi-page transfers.
+/// Build an NVM *Read* command with PRP1 + PRP2 set, supporting up to
+/// two pages directly or a PRP-list page in PRP2 for larger transfers.
 ///
-/// - `nsid`: Namespace ID.
-/// - `lba`: Starting LBA.
-/// - `count`: Number of logical blocks (0-based).
-/// - `prp1_phys`: Physical address of the first data page.
-/// - `prp2_phys`: Physical address of the second page, OR a PRP List pointer
-///   if the transfer spans more than 2 pages.
+/// - `nsid`: namespace identifier.
+/// - `lba`: starting LBA.
+/// - `count`: 0-based NLB.
+/// - `prp1_phys`: physical address of the first data page.
+/// - `prp2_phys`: physical address of the second data page if exactly
+///   two pages, or the physical address of a PRP List page when the
+///   transfer spans more than two pages.
 pub fn io_read_prp(nsid: u32, lba: u64, count: u16, prp1_phys: u64, prp2_phys: u64) -> SqEntry {
     let mut e = SqEntry::zeroed();
     e.cdw0 = IO_READ as u32;
@@ -107,12 +131,10 @@ pub fn io_read_prp(nsid: u32, lba: u64, count: u16, prp1_phys: u64, prp2_phys: u
     e
 }
 
-/// Build an I/O Write command (single-page PRP).
+/// Build a single-PRP NVM *Write* command.
 ///
-/// - `nsid`: Namespace ID (usually 1).
-/// - `lba`: Starting LBA.
-/// - `count`: Number of logical blocks to write (0-based: actual - 1).
-/// - `prp1_phys`: Physical address of the data buffer.
+/// Mirror of [`io_read`] for the NVM Write opcode (`0x01`). Same
+/// alignment and length constraints apply to `prp1_phys`.
 pub fn io_write(nsid: u32, lba: u64, count: u16, prp1_phys: u64) -> SqEntry {
     let mut e = SqEntry::zeroed();
     e.cdw0 = IO_WRITE as u32;
@@ -124,7 +146,10 @@ pub fn io_write(nsid: u32, lba: u64, count: u16, prp1_phys: u64) -> SqEntry {
     e
 }
 
-/// Build an I/O Write command with PRP List support for multi-page transfers.
+/// Build an NVM *Write* command with PRP1 + PRP2 set.
+///
+/// Mirror of [`io_read_prp`] for the NVM Write opcode. Used by
+/// `crate::io::write_sectors_prp` for multi-page transfers.
 pub fn io_write_prp(nsid: u32, lba: u64, count: u16, prp1_phys: u64, prp2_phys: u64) -> SqEntry {
     let mut e = SqEntry::zeroed();
     e.cdw0 = IO_WRITE as u32;

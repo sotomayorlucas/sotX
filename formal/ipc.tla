@@ -25,7 +25,12 @@ VARIABLES
     messages,       \* Function: Thread -> message value (or NULL)
     delivered       \* Set of (sender, receiver, message) triples delivered
 
-NULL == CHOOSE x : x \notin Threads
+\* Tier 5: bounded NULL sentinel. The original `CHOOSE x : x \notin
+\* Threads` was unbounded (TLC can't enumerate the universe). We pick a
+\* literal that's structurally a Nat (so the `messages \in [Threads ->
+\* Nat \cup {NULL}]` type invariant still type-checks) and assert it
+\* lies outside any finite Threads model.
+NULL == 999
 
 TypeInvariant ==
     /\ state \in {"idle", "recv_wait", "send_wait"}

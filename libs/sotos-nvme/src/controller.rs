@@ -1,77 +1,122 @@
 //! NVMe controller initialization and admin queue management.
+//!
+//! Builds the [`NvmeController`] state machine on top of caller-supplied
+//! [`DmaPages`] and walks the controller through the NVMe 1.4 §7.6.1
+//! initialization sequence (CC.EN handshake → AQA/ASQ/ACQ → Identify →
+//! I/O queue creation).
 
 use crate::regs;
 use crate::queue::{SubmissionQueue, CompletionQueue, QUEUE_DEPTH};
 use crate::cmd;
 
-/// NVMe controller state.
+/// Live state for one initialised NVMe controller.
+///
+/// Holds the MMIO base, the doorbell stride, the admin queue pair, the
+/// (optional) I/O queue pair, the parsed namespace geometry, and the
+/// hooks needed to drive completions either by polling or via an
+/// interrupt notification cap.
 pub struct NvmeController {
-    /// MMIO base virtual address (BAR0, UC-mapped).
+    /// MMIO base virtual address (BAR0, must be UC-mapped by caller).
     pub mmio_base: *mut u8,
-    /// Doorbell stride from CAP register.
+    /// Doorbell stride captured from `CAP.DSTRD` at init.
     pub dstrd: u8,
-    /// Admin Submission Queue.
+    /// Admin Submission Queue (QID 0).
     pub admin_sq: SubmissionQueue,
-    /// Admin Completion Queue.
+    /// Admin Completion Queue (QID 0).
     pub admin_cq: CompletionQueue,
-    /// I/O Submission Queue (QID=1).
+    /// I/O Submission Queue (QID 1). `None` until [`init`](Self::init)
+    /// has issued *Create I/O SQ*.
     pub io_sq: Option<SubmissionQueue>,
-    /// I/O Completion Queue (QID=1).
+    /// I/O Completion Queue (QID 1). `None` until [`init`](Self::init)
+    /// has issued *Create I/O CQ*.
     pub io_cq: Option<CompletionQueue>,
-    /// Namespace size in logical blocks.
+    /// Namespace 1 size in logical blocks (NSZE field of Identify
+    /// Namespace).
     pub ns_size: u64,
-    /// LBA size in bytes (usually 512).
+    /// Logical block size in bytes — usually 512, derived from the
+    /// LBADS exponent of the active LBA Format.
     pub lba_size: u32,
-    /// Optional callback invoked on I/O completion (CID passed).
+    /// Optional callback fired with the completing CID after each I/O
+    /// completion is consumed.
     pub completion_callback: Option<fn(u16)>,
-    /// Optional notification cap for interrupt-driven completion.
-    /// When set, `wait_for_interrupt()` uses notify_wait instead of polling.
+    /// Notification capability used when `use_interrupts` is set:
+    /// `notify_wait()` blocks the thread until the kernel ISR signals.
     pub notify_cap: Option<u64>,
-    /// Whether to use interrupt-driven completion (true) or polling (false).
+    /// Selects the completion strategy: `false` = busy-poll the CQ,
+    /// `true` = block on `notify_cap` then poll once.
     pub use_interrupts: bool,
 }
 
-/// DMA memory layout provided by the caller.
+/// Caller-provided DMA layout for [`NvmeController::init`].
+///
+/// All `*_phys` fields are physical addresses and all `*_virt` fields
+/// are kernel/userspace virtual addresses for the same pages. Pages
+/// must be 4 KiB-aligned and at least one host page each.
 pub struct DmaPages {
-    /// Admin SQ: virtual + physical.
+    /// Admin SQ — virtual address.
     pub admin_sq_virt: *mut u8,
+    /// Admin SQ — physical address (programmed into `ASQ`).
     pub admin_sq_phys: u64,
-    /// Admin CQ: virtual + physical.
+    /// Admin CQ — virtual address.
     pub admin_cq_virt: *mut u8,
+    /// Admin CQ — physical address (programmed into `ACQ`).
     pub admin_cq_phys: u64,
-    /// I/O SQ: virtual + physical.
+    /// I/O SQ — virtual address.
     pub io_sq_virt: *mut u8,
+    /// I/O SQ — physical address (PRP1 of *Create I/O SQ*).
     pub io_sq_phys: u64,
-    /// I/O CQ: virtual + physical.
+    /// I/O CQ — virtual address.
     pub io_cq_virt: *mut u8,
+    /// I/O CQ — physical address (PRP1 of *Create I/O CQ*).
     pub io_cq_phys: u64,
-    /// Identify buffer (4 KiB): virtual + physical.
+    /// Identify scratch buffer (4 KiB) — virtual address. Reused for
+    /// Identify Controller and Identify Namespace.
     pub identify_virt: *mut u8,
+    /// Identify scratch buffer — physical address.
     pub identify_phys: u64,
 }
 
-/// Result from controller initialization.
+/// Information returned from a successful
+/// [`NvmeController::init`] call.
 pub struct InitResult {
+    /// Major version from the `VS` register (e.g. `1` for NVMe 1.4).
     pub version_major: u16,
+    /// Minor version from the `VS` register (e.g. `4` for NVMe 1.4).
     pub version_minor: u16,
+    /// Namespace 1 size in logical blocks.
     pub ns_size: u64,
+    /// Logical block size in bytes.
     pub lba_size: u32,
 }
 
-/// Wait callback — called while spinning for controller state changes.
-/// The caller provides this to yield or sleep instead of busy-spinning.
+/// Spin-wait callback. Invoked from the inside of polling loops so the
+/// caller can yield, halt, or otherwise avoid burning cycles. The
+/// kernel-side wrapper typically passes a `notify_wait` or `hlt` stub.
 pub type WaitFn = fn();
 
 impl NvmeController {
-    /// Initialize the NVMe controller.
+    /// Drive an NVMe controller through its full bring-up sequence.
     ///
-    /// Performs the full init sequence:
-    /// 1. Read CAP → MQES, DSTRD
-    /// 2. Disable controller (CC.EN=0, wait CSTS.RDY=0)
-    /// 3. Set AQA/ASQ/ACQ
-    /// 4. Enable (CC.EN=1, wait CSTS.RDY=1)
-    /// 5. Identify Controller + Namespace
-    /// 6. Create I/O CQ + SQ
+    /// Steps (NVMe 1.4 §7.6.1):
+    /// 1. Read `CAP` → derive `MQES`, `DSTRD`, queue depth.
+    /// 2. Disable controller (`CC.EN = 0`, wait for `CSTS.RDY = 0`).
+    /// 3. Program `AQA`, `ASQ`, `ACQ` from [`DmaPages`].
+    /// 4. Enable (`CC.EN = 1`, wait for `CSTS.RDY = 1`).
+    /// 5. Issue *Identify Controller* and *Identify Namespace 1*; parse
+    ///    `NSZE` and the active LBA Format to populate `ns_size` /
+    ///    `lba_size`.
+    /// 6. Create I/O CQ (QID 1) and I/O SQ (QID 1, CQID 1).
+    ///
+    /// Returns the initialised controller and an [`InitResult`]
+    /// summary, or a static error string if the controller fails to
+    /// become ready or any admin command returns non-zero status.
+    ///
+    /// # Safety
+    /// The caller must guarantee that `mmio_base` points at a valid
+    /// UC-mapped BAR0 mapping for the lifetime of the returned
+    /// controller, and that all addresses in `dma` are valid DMA pages
+    /// for the controller. The function performs raw MMIO and
+    /// physical-address writes.
     pub unsafe fn init(
         mmio_base: *mut u8,
         dma: &DmaPages,
@@ -205,7 +250,10 @@ impl NvmeController {
         Ok((ctrl, result))
     }
 
-    /// Submit an admin command and wait for completion.
+    /// Submit one admin command, ring the admin SQ doorbell, and
+    /// busy-poll the admin CQ until either a completion arrives or the
+    /// 10M-iter timeout fires. Returns the raw CQE on success or a
+    /// static error string on timeout / non-zero status.
     fn admin_submit_and_wait(&mut self, entry: crate::queue::SqEntry, wait: WaitFn) -> Result<crate::queue::CqEntry, &'static str> {
         let _cid = self.admin_sq.submit(entry);
 
@@ -233,7 +281,8 @@ impl NvmeController {
         Err("NVMe: admin command timeout")
     }
 
-    /// Ring the I/O SQ doorbell (QID=1).
+    /// Write the current I/O SQ tail to the QID 1 SQ doorbell. No-op
+    /// if the I/O SQ has not been created yet.
     pub fn ring_io_sq_doorbell(&self) {
         if let Some(ref sq) = self.io_sq {
             let db_offset = regs::sq_doorbell_offset(1, self.dstrd);
@@ -243,7 +292,8 @@ impl NvmeController {
         }
     }
 
-    /// Ring the I/O CQ doorbell (QID=1).
+    /// Write the current I/O CQ head to the QID 1 CQ doorbell. No-op
+    /// if the I/O CQ has not been created yet.
     pub fn ring_io_cq_doorbell(&self) {
         if let Some(ref cq) = self.io_cq {
             let cq_db = regs::cq_doorbell_offset(1, self.dstrd);

@@ -41,12 +41,18 @@ const _: () = assert!(core::mem::size_of::<CommandHeader>() == 32);
 /// CFL (Command FIS Length) for a standard H2D Register FIS = 5 DWORDs (20 bytes).
 pub const CFL_H2D: u32 = 5;
 
-/// Flag bits in `flags_cfl_prdtl`.
+// Flag bits in `flags_cfl_prdtl` (AHCI 1.3.1 §4.2.2).
+/// A (ATAPI) — command is an ATAPI PACKET command.
 pub const CH_FLAG_ATAPI: u32 = 1 << 5;
+/// W (Write) — data moves host-to-device.
 pub const CH_FLAG_WRITE: u32 = 1 << 6;
+/// P (Prefetchable) — HBA may prefetch PRDs.
 pub const CH_FLAG_PREFETCH: u32 = 1 << 7;
+/// R (Reset) — command is part of a device reset sequence.
 pub const CH_FLAG_RESET: u32 = 1 << 8;
+/// B (BIST) — command is a BIST sequence.
 pub const CH_FLAG_BIST: u32 = 1 << 9;
+/// C (Clear BSY on R_OK) — HBA should clear BSY on successful completion.
 pub const CH_FLAG_CLEAR_BSY: u32 = 1 << 10;
 
 impl CommandHeader {
@@ -110,12 +116,16 @@ pub const MAX_CMD_SLOTS: usize = 32;
 /// Command List — array of command headers (1024 bytes, 1024-byte aligned).
 #[repr(C, align(1024))]
 pub struct CommandList {
+    /// The 32 slot entries. `headers[i]` is programmed before
+    /// issuing command `i` via `PORT_CI`.
     pub headers: [CommandHeader; MAX_CMD_SLOTS],
 }
 
 const _: () = assert!(core::mem::size_of::<CommandList>() == 1024);
 
 impl CommandList {
+    /// All-zeros Command List — used to initialize the per-port
+    /// CLB page before setting `PORT_CLB`.
     pub const fn zeroed() -> Self {
         Self {
             headers: [CommandHeader::zeroed(); MAX_CMD_SLOTS],

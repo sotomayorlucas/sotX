@@ -180,36 +180,67 @@ pub fn portsc_offset(port: u8) -> usize {
 // Volatile MMIO helpers (same pattern as sotos-nvme)
 // ---------------------------------------------------------------------------
 
+/// Volatile read of a single byte at `base + offset`.
+///
+/// # Safety
+/// `base` must point to a valid MMIO region (UC-mapped) of at least
+/// `offset + 1` bytes; the caller is responsible for the lifetime and
+/// alignment of the mapping.
 #[inline]
 pub unsafe fn read8(base: *const u8, offset: usize) -> u8 {
     let ptr = base.add(offset);
     unsafe { core::ptr::read_volatile(ptr) }
 }
 
+/// Volatile read of a 32-bit MMIO register at `base + offset`.
+///
+/// # Safety
+/// `base` must point to a valid MMIO region (UC-mapped) of at least
+/// `offset + 4` bytes.
 #[inline]
 pub unsafe fn read32(base: *const u8, offset: usize) -> u32 {
     let ptr = base.add(offset) as *const u32;
     unsafe { core::ptr::read_volatile(ptr) }
 }
 
+/// Volatile write of a 32-bit MMIO register at `base + offset`.
+///
+/// # Safety
+/// `base` must point to a writable, UC-mapped MMIO region of at least
+/// `offset + 4` bytes.
 #[inline]
 pub unsafe fn write32(base: *mut u8, offset: usize, val: u32) {
     let ptr = base.add(offset) as *mut u32;
     unsafe { core::ptr::write_volatile(ptr, val) }
 }
 
+/// Volatile read of a 64-bit MMIO register at `base + offset`.
+///
+/// # Safety
+/// `base` must point to a valid MMIO region (UC-mapped) of at least
+/// `offset + 8` bytes.
 #[inline]
 pub unsafe fn read64(base: *const u8, offset: usize) -> u64 {
     let ptr = base.add(offset) as *const u64;
     unsafe { core::ptr::read_volatile(ptr) }
 }
 
+/// Volatile write of a 64-bit MMIO register at `base + offset`.
+///
+/// # Safety
+/// `base` must point to a writable, UC-mapped MMIO region of at least
+/// `offset + 8` bytes.
 #[inline]
 pub unsafe fn write64(base: *mut u8, offset: usize, val: u64) {
     let ptr = base.add(offset) as *mut u64;
     unsafe { core::ptr::write_volatile(ptr, val) }
 }
 
+/// Volatile read of a 16-bit MMIO register at `base + offset`.
+///
+/// # Safety
+/// `base` must point to a valid MMIO region (UC-mapped) of at least
+/// `offset + 2` bytes.
 #[inline]
 pub unsafe fn read16(base: *const u8, offset: usize) -> u16 {
     let ptr = base.add(offset) as *const u16;

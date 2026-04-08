@@ -20,6 +20,7 @@ mod elf;
 mod fault;
 mod initrd;
 mod ipc;
+mod karl;
 mod irq;
 mod migrate;
 mod mm;
@@ -27,6 +28,7 @@ mod panic;
 mod pool;
 mod sched;
 mod shm;
+mod sot;
 mod svc_registry;
 mod sync;
 mod syscall;
@@ -133,6 +135,12 @@ extern "C" fn kmain() -> ! {
     // Serial MUST be first — we need debug output before anything else.
     arch::serial::init();
     kprintln!("sotOS v0.1.0 — microkernel booting...");
+    kprintln!("  sotBSD/STYX exokernel v0.1.0");
+
+    // KARL-style per-boot ID seed -- derived from RDTSC + a fixed
+    // mixer. Read by tx, sched, and other id pools so that visible
+    // identifiers drift across reboots.
+    karl::init();
 
     if !BASE_REVISION.is_supported() {
         kprintln!("FATAL: Limine base revision not supported");
@@ -188,6 +196,12 @@ extern "C" fn kmain() -> ! {
 
     // Capability system.
     cap::init();
+    // Tier 5 KARL: seed the channel/notification/endpoint pools so
+    // their visible IDs drift across reboots, just like cap IDs.
+    ipc::channel::init();
+    ipc::notify::init();
+    ipc::endpoint::init();
+    kprintln!("[sot] === Project STYX exokernel layer active ===");
     kinfo!(sotos_common::trace::cat::IPC, "[ok] Capabilities");
 
     // Scheduler.
@@ -714,7 +728,10 @@ fn load_initrd(cr3: u64) {
         }
     }
 
-    let stack_top = allocate_user_stack(&addr_space, 4, "init");
+    // Tier 5: Ed25519 verify (ed25519-compact) plus SHA-512 burns ~8KB
+    // of stack, on top of init's existing usage. 16 pages (64 KB) gives
+    // headroom; 4 pages overflowed into the BootInfo page.
+    let stack_top = allocate_user_stack(&addr_space, 16, "init");
 
     // Create an AddrSpace cap for init's own AS (for CoW fork cloning).
     let init_as_cap = cap::insert(cap::CapObject::AddrSpace { cr3 }, cap::Rights::ALL, None)
