@@ -119,8 +119,10 @@ pub const HID_GET_PROTOCOL: u8 = 0x03;
 /// HID class request: SET_IDLE.
 pub const HID_SET_IDLE: u8 = 0x0A;
 
-/// HID protocol values.
+// HID protocol values (USB HID 1.11 §7.2.5).
+/// Boot protocol — simplified reports defined by the HID boot spec.
 pub const HID_PROTOCOL_BOOT: u16 = 0;
+/// Report protocol — full report format described by the device's HID descriptor.
 pub const HID_PROTOCOL_REPORT: u16 = 1;
 
 /// Build the 8-byte USB setup packet for SET_PROTOCOL(Boot).

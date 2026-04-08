@@ -1,10 +1,15 @@
 //! Mouse event structure — the unified output format for all mouse input.
 
-/// Mouse button bitmask constants.
+// Mouse button bitmask constants.
+/// Left mouse button — bit 0 of `MouseEvent::buttons`.
 pub const BUTTON_LEFT: u8 = 1 << 0;
+/// Right mouse button — bit 1.
 pub const BUTTON_RIGHT: u8 = 1 << 1;
+/// Middle (wheel) mouse button — bit 2.
 pub const BUTTON_MIDDLE: u8 = 1 << 2;
+/// Side button 4 (browser "back") — bit 3.
 pub const BUTTON_4: u8 = 1 << 3;
+/// Side button 5 (browser "forward") — bit 4.
 pub const BUTTON_5: u8 = 1 << 4;
 
 /// A mouse event representing a state change.

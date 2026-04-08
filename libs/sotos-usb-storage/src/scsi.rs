@@ -151,10 +151,13 @@ impl InquiryResponse {
     }
 }
 
-/// SCSI peripheral device types.
-pub const PDT_DIRECT_ACCESS: u8 = 0x00; // Disk drive
-pub const PDT_CDROM: u8 = 0x05;         // CD/DVD-ROM
-pub const PDT_OPTICAL: u8 = 0x07;       // Optical memory
+// SCSI peripheral device types (SPC-3 Table 82).
+/// Direct access block device (e.g. HDD/SSD/USB stick) — `0x00`.
+pub const PDT_DIRECT_ACCESS: u8 = 0x00;
+/// CD/DVD-ROM device — `0x05`.
+pub const PDT_CDROM: u8 = 0x05;
+/// Optical memory device — `0x07`.
+pub const PDT_OPTICAL: u8 = 0x07;
 
 /// READ CAPACITY (10) response (8 bytes).
 #[derive(Clone, Copy)]
@@ -215,12 +218,20 @@ impl SenseData {
     }
 }
 
-/// SCSI Sense Keys.
+// SCSI Sense Keys (SPC-3 §4.5.6).
+/// `0x0` — no specific sense information.
 pub const SENSE_NO_SENSE: u8 = 0x00;
+/// `0x1` — command completed after automatic recovery.
 pub const SENSE_RECOVERED_ERROR: u8 = 0x01;
+/// `0x2` — logical unit not ready (e.g. spinning up, no medium).
 pub const SENSE_NOT_READY: u8 = 0x02;
+/// `0x3` — unrecoverable medium error (bad sector).
 pub const SENSE_MEDIUM_ERROR: u8 = 0x03;
+/// `0x4` — hardware failure detected by the device.
 pub const SENSE_HARDWARE_ERROR: u8 = 0x04;
+/// `0x5` — illegal CDB field or parameter.
 pub const SENSE_ILLEGAL_REQUEST: u8 = 0x05;
+/// `0x6` — unit attention (medium change, reset, etc.).
 pub const SENSE_UNIT_ATTENTION: u8 = 0x06;
+/// `0x7` — write attempted on write-protected medium.
 pub const SENSE_DATA_PROTECT: u8 = 0x07;

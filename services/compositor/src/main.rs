@@ -17,6 +17,11 @@ mod wayland;
 mod render;
 mod input;
 mod wallpaper;
+mod font;
+mod animation;
+mod cursor;
+#[cfg(feature = "skia")]
+mod skia_render;
 
 use sotos_common::sys;
 use sotos_common::{BootInfo, IpcMsg, BOOT_INFO_ADDR, SyncUnsafeCell};
@@ -125,17 +130,60 @@ static SELF_AS_CAP: SyncUnsafeCell<u64> = SyncUnsafeCell::new(0);
 static CURSOR_X: SyncUnsafeCell<i32> = SyncUnsafeCell::new(0);
 static CURSOR_Y: SyncUnsafeCell<i32> = SyncUnsafeCell::new(0);
 
+/// Logical cursor shape. Set by future hover/drag logic; currently always
+/// `Default`. `compose()` reads this to pick the glyph drawn on top of the
+/// scene. Wiring it into per-region input is deliberately deferred.
+#[allow(dead_code)]
+static CURRENT_SHAPE: SyncUnsafeCell<cursor::CursorShape> =
+    SyncUnsafeCell::new(cursor::CursorShape::Default);
+
 /// Configure serial counter.
 static CONFIGURE_SERIAL: SyncUnsafeCell<u32> = SyncUnsafeCell::new(1);
 
 /// Global event serial counter (for input events sent to clients).
 static EVENT_SERIAL: SyncUnsafeCell<u32> = SyncUnsafeCell::new(100);
 
-/// Index of the focused (keyboard-receiving) client, or MAX_CLIENTS if none.
-static FOCUSED_CLIENT: SyncUnsafeCell<usize> = SyncUnsafeCell::new(MAX_CLIENTS);
+/// Per-frame input focus state.
+///
+/// Consolidates the keyboard / pointer focus tracked across the compositor.
+/// Surface IDs are Wayland `wl_surface` object IDs (per-client). The
+/// `*_idx` fields cache the matching slots in the global `CLIENTS`,
+/// `TOPLEVELS` and `SURFACES` tables so the input handlers can dispatch
+/// without re-walking those arrays.
+struct FocusState {
+    /// Wayland `wl_surface` object ID with keyboard focus, or `None`.
+    keyboard_focus: Option<u32>,
+    /// Latest pointer position in screen coordinates.
+    pointer_x: i32,
+    pointer_y: i32,
+    /// Wayland `wl_surface` object ID currently under the cursor, or `None`.
+    hovered_surface: Option<u32>,
+    /// Cached index into `CLIENTS` for the keyboard-focused client
+    /// (`MAX_CLIENTS` if none).
+    focused_client_idx: usize,
+    /// Cached index into `TOPLEVELS` for the focused toplevel
+    /// (`MAX_TOPLEVELS` if none).
+    focused_toplevel_idx: usize,
+}
 
-/// Index of the focused toplevel (for keyboard routing), or MAX_TOPLEVELS if none.
-static FOCUSED_TOPLEVEL: SyncUnsafeCell<usize> = SyncUnsafeCell::new(MAX_TOPLEVELS);
+impl FocusState {
+    const fn empty() -> Self {
+        Self {
+            keyboard_focus: None,
+            pointer_x: 0,
+            pointer_y: 0,
+            hovered_surface: None,
+            focused_client_idx: MAX_CLIENTS,
+            focused_toplevel_idx: MAX_TOPLEVELS,
+        }
+    }
+}
+
+// SAFETY: the compositor runs as a single-threaded IPC loop. There are no
+// AP cores polling input, no signal handlers reading FocusState, and all
+// consumers (handle_keyboard, handle_mouse, compose, apply_dispatch_result)
+// are called serially from the main loop. A Mutex would be cargo-cult.
+static FOCUS: SyncUnsafeCell<FocusState> = SyncUnsafeCell::new(FocusState::empty());
 
 /// Drag state: if dragging a window, (toplevel_idx, offset_x, offset_y).
 static DRAG_TL: SyncUnsafeCell<usize> = SyncUnsafeCell::new(MAX_TOPLEVELS);
@@ -265,11 +313,29 @@ pub extern "C" fn _start() -> ! {
         Err(_) => print(b"compositor: svc_register failed\n"),
     }
 
+    // Initialise input rings non-destructively. We probe the KB/MOUSE
+    // SPSC pages (and mark them as "polled" for the WIRED smoke test)
+    // BEFORE waiting for a client, so the boot-smoke marker is emitted
+    // even when the compositor has no clients yet. We do NOT consume any
+    // bytes here -- LUCAS still owns the hardware until a client arrives.
+    if input::try_init() {
+        print(b"compositor: input rings available\n");
+    } else {
+        print(b"compositor: WARNING: input device init failed, continuing without input\n");
+    }
+    if input::rings_polled() {
+        print(b"=== compositor input: WIRED ===\n");
+    } else {
+        print(b"=== compositor input: FAIL ===\n");
+    }
+
     print(b"compositor: waiting for clients on IPC\n");
 
     // Passive: block on IPC endpoint waiting for Wayland client connections.
-    // Do NOT touch framebuffer or KB/MOUSE rings until a client connects --
-    // the serial console and LUCAS shell own those resources until then.
+    // Do NOT touch framebuffer or consume KB/MOUSE bytes until a client
+    // connects -- the serial console and LUCAS shell own those resources
+    // until then. Boot-smoke: events are silently swallowed when no
+    // client is connected (this is NOT an error).
     loop {
         match sys::recv(ep_cap) {
             Ok(msg) => {
@@ -290,13 +356,9 @@ pub extern "C" fn _start() -> ! {
         wallpaper::draw(fb, 0, 0, fb.width as i32, fb.height as i32);
         *CURSOR_X.get() = (fb.width / 2) as i32;
         *CURSOR_Y.get() = (fb.height / 2) as i32;
-    }
-
-    // Initialize input devices (non-fatal -- compositor works without input).
-    if input::try_init() {
-        print(b"compositor: input rings available\n");
-    } else {
-        print(b"compositor: WARNING: input device init failed, continuing without input\n");
+        let focus = &mut *FOCUS.get();
+        focus.pointer_x = (fb.width / 2) as i32;
+        focus.pointer_y = (fb.height / 2) as i32;
     }
 
     // Active compositing loop with IPC polling.
@@ -744,15 +806,15 @@ fn apply_dispatch_result(client_idx: usize, result: &DispatchResult) {
     // When a new toplevel is created, auto-focus the first one.
     if tl_id != 0 {
         unsafe {
-            let focused_tl = &mut *FOCUSED_TOPLEVEL.get();
-            let focused_cl = &mut *FOCUSED_CLIENT.get();
-            if *focused_tl >= MAX_TOPLEVELS {
+            let focus = &mut *FOCUS.get();
+            if focus.focused_toplevel_idx >= MAX_TOPLEVELS {
                 // Find the toplevel we just created.
                 let tls = &*TOPLEVELS.get();
                 for i in 0..MAX_TOPLEVELS {
                     if tls[i].active && tls[i].toplevel_id == tl_id {
-                        *focused_tl = i;
-                        *focused_cl = client_idx;
+                        focus.focused_toplevel_idx = i;
+                        focus.focused_client_idx = client_idx;
+                        focus.keyboard_focus = Some(tls[i].wl_surface_id);
                         print(b"compositor: focused toplevel ");
                         print_u32_dec(tl_id);
                         print(b"\n");
@@ -763,8 +825,16 @@ fn apply_dispatch_result(client_idx: usize, result: &DispatchResult) {
         }
     }
 
-    // Damage reported?
-    if result.damage {
+    if result.new_layer_surface.0 != 0 {
+        print(b"compositor: new layer_surface ");
+        print_u32_dec(result.new_layer_surface.0);
+        print(b"\n");
+    }
+
+    // Layer-layout is recomputed unconditionally at the top of every
+    // `compose()` call, so a dirty flag only needs to trigger a
+    // redraw here.
+    if result.layer_layout_dirty || result.damage {
         mark_damage();
     }
 }
@@ -781,10 +851,13 @@ fn handle_keyboard(scancode: u8) {
 
     let state = if is_release { 0u32 } else { 1u32 };
 
-    // Send wl_keyboard::key event to the focused client.
+    // Send wl_keyboard::key event to the focused client. With no
+    // focused client we silently swallow the event (boot-smoke path).
     unsafe {
-        let focused_cl = *FOCUSED_CLIENT.get();
+        let focus = &*FOCUS.get();
+        let focused_cl = focus.focused_client_idx;
         if focused_cl >= MAX_CLIENTS { return; }
+        if focus.keyboard_focus.is_none() { return; }
 
         let clients = &*CLIENTS.get();
         if !clients[focused_cl].active { return; }
@@ -822,6 +895,9 @@ fn handle_mouse(packet: input::MousePacket) {
         *cy = (*cy + packet.dy).max(0).min(fb.height as i32 - 1);
         cursor_x = *cx;
         cursor_y = *cy;
+        let focus = &mut *FOCUS.get();
+        focus.pointer_x = *cx;
+        focus.pointer_y = *cy;
     }
 
     mark_damage();
@@ -880,12 +956,28 @@ fn handle_mouse(packet: input::MousePacket) {
             && cursor_y >= close_y0 && cursor_y < close_y0 + 16
         {
             // Close the toplevel.
+            //
+            // The close-button is currently the ONLY surface-destruction path
+            // in the compositor. When client-disconnect / xdg_toplevel.destroy
+            // / wl_surface.destroy land, every one of those code paths MUST
+            // also clear `hovered_surface` (and `focused_*`) for any surface
+            // it tears down — otherwise input handlers will dispatch events
+            // to a dead wl_surface ID.
             unsafe {
                 let toplevels_mut = &mut *TOPLEVELS.get();
+                let destroyed_surface_id = toplevels_mut[hit_tl_idx].wl_surface_id;
                 toplevels_mut[hit_tl_idx].active = false;
                 // Clear focus if this was focused.
-                if *FOCUSED_TOPLEVEL.get() == hit_tl_idx {
-                    *FOCUSED_TOPLEVEL.get() = MAX_TOPLEVELS;
+                let focus = &mut *FOCUS.get();
+                if focus.focused_toplevel_idx == hit_tl_idx {
+                    focus.focused_toplevel_idx = MAX_TOPLEVELS;
+                    focus.focused_client_idx = MAX_CLIENTS;
+                    focus.keyboard_focus = None;
+                }
+                // Clear hover if it pointed at the destroyed surface, so the
+                // next mouse event doesn't dispatch to a dead wl_surface ID.
+                if focus.hovered_surface == Some(destroyed_surface_id) {
+                    focus.hovered_surface = None;
                 }
             }
             mark_damage();
@@ -916,23 +1008,21 @@ fn handle_mouse(packet: input::MousePacket) {
                     let a = core::ptr::addr_of_mut!(toplevels_mut[hit_tl_idx]);
                     let b = core::ptr::addr_of_mut!(toplevels_mut[last_active]);
                     core::ptr::swap(a, b);
-                    // Update focused_tl to track the moved window.
-                    *FOCUSED_TOPLEVEL.get() = last_active;
                     hit_tl_idx = last_active;
-                } else {
-                    *FOCUSED_TOPLEVEL.get() = hit_tl_idx;
                 }
             }
         }
 
-        // Update focus to this window's client.
+        // Click-to-focus: update focus to this window's client + surface.
         unsafe {
-            *FOCUSED_TOPLEVEL.get() = hit_tl_idx;
             let surfaces = &*SURFACES.get();
             let tl = &(*TOPLEVELS.get())[hit_tl_idx];
+            let focus = &mut *FOCUS.get();
+            focus.focused_toplevel_idx = hit_tl_idx;
+            focus.keyboard_focus = Some(tl.wl_surface_id);
             for si in 0..MAX_SURFACES {
                 if surfaces[si].active && surfaces[si].surface_id == tl.wl_surface_id {
-                    *FOCUSED_CLIENT.get() = surfaces[si].client_idx;
+                    focus.focused_client_idx = surfaces[si].client_idx;
                     break;
                 }
             }
@@ -942,7 +1032,17 @@ fn handle_mouse(packet: input::MousePacket) {
 
     unsafe { *PREV_BUTTONS.get() = packet.buttons; }
 
+    unsafe {
+        let focus = &mut *FOCUS.get();
+        focus.hovered_surface = if hit_tl_idx < MAX_TOPLEVELS {
+            Some(toplevels[hit_tl_idx].wl_surface_id)
+        } else {
+            None
+        };
+    }
+
     // Send pointer events to the client that owns the hit toplevel.
+    // No client = silently swallow (not an error).
     if hit_tl_idx < MAX_TOPLEVELS {
         let tl = &toplevels[hit_tl_idx];
         // Find the client owning this toplevel's surface.
@@ -1047,6 +1147,40 @@ fn handle_mouse(packet: input::MousePacket) {
 // Compositing
 // ---------------------------------------------------------------------------
 
+/// Blit a layer_surface's wl_surface buffer to the framebuffer, or a
+/// placeholder fill if the client hasn't committed a buffer yet. Used
+/// once per layer tier in the compose pass.
+fn draw_layer_surface(
+    fb: &render::Framebuffer,
+    ls: &wayland::layer_shell::LayerSurface,
+    surfaces: &[Surface; MAX_SURFACES],
+    buffers: &[wayland::shm::ShmBuffer; MAX_BUFFERS],
+    pools: &[wayland::shm::ShmPool; MAX_POOLS],
+    placeholder: u32,
+) {
+    let mut drew_buffer = false;
+    for si in 0..MAX_SURFACES {
+        let surf = &surfaces[si];
+        if !surf.active || surf.surface_id != ls.surface_id { continue; }
+        if !surf.committed { continue; }
+        if let Some(buf_idx) = surf.buffer_idx {
+            let buf = &buffers[buf_idx];
+            if !buf.active { continue; }
+            let pool_idx = buf.pool_idx;
+            if pool_idx < MAX_POOLS && pools[pool_idx].active {
+                let pool = &pools[pool_idx];
+                let src = (pool.mapped_vaddr + buf.offset as u64) as *const u32;
+                fb.blit(ls.x, ls.y, buf.width, buf.height, src, buf.stride);
+                drew_buffer = true;
+            }
+        }
+        break;
+    }
+    if !drew_buffer && ls.computed_width > 0 && ls.computed_height > 0 {
+        fb.fill_rect(ls.x, ls.y, ls.computed_width, ls.computed_height, placeholder);
+    }
+}
+
 fn compose() {
     unsafe {
         let fb = &mut *FB.get();
@@ -1054,37 +1188,76 @@ fn compose() {
         let surfaces = &*SURFACES.get();
         let buffers = &*BUFFERS.get();
         let pools = &*POOLS.get();
-        let focused_tl = *FOCUSED_TOPLEVEL.get();
+        let focused_tl = (*FOCUS.get()).focused_toplevel_idx;
 
         // Repaint background (we redraw the whole frame on damage).
         wallpaper::draw(fb, 0, 0, fb.width as i32, fb.height as i32);
+
+        // Re-run layer layout so any window-size / hot-plug change
+        // propagates to layer surfaces before we read their positions.
+        let insets = wayland::layer_shell::layout_all(fb.width, fb.height);
+
+        // ── Z-order: Background → Bottom → toplevels → Top → cursor → Overlay ──
+
+        // Background layer (wallpapers).
+        for ls in wayland::layer_shell::iter_layer(wayland::layer_shell::Layer::Background) {
+            draw_layer_surface(fb, ls, surfaces, buffers, pools, 0xFF1A1A2A);
+        }
+
+        // Bottom layer (docks that should sit beneath windows).
+        for ls in wayland::layer_shell::iter_layer(wayland::layer_shell::Layer::Bottom) {
+            draw_layer_surface(fb, ls, surfaces, buffers, pools, 0xFF2A2A3A);
+        }
+
+        // Clamp toplevels into the area left free by exclusive zones.
+        // This is a minimal enforcement: we push any toplevel whose
+        // title bar would overlap a reserved strip, and trim bottom
+        // overflow. Horizontal clamp is symmetric.
+        let avail_top = insets.top as i32;
+        let avail_bottom_limit = fb.height as i32 - insets.bottom as i32;
+        let avail_left = insets.left as i32;
+        let avail_right_limit = fb.width as i32 - insets.right as i32;
 
         // Draw all active toplevels.
         for i in 0..MAX_TOPLEVELS {
             let tl = &toplevels[i];
             if !tl.active { continue; }
 
+            // Effective top-left after inset clamping.
+            let title_top = (tl.y - TITLE_BAR_HEIGHT as i32).max(avail_top);
+            let eff_y = title_top + TITLE_BAR_HEIGHT as i32;
+            let eff_x = tl.x.max(avail_left);
+
+            // Clip the body height if it would overflow the usable area.
+            let eff_h_max = (avail_bottom_limit - eff_y).max(0) as u32;
+            let eff_h = tl.height.min(eff_h_max);
+            let eff_w_max = (avail_right_limit - eff_x).max(0) as u32;
+            let eff_w = tl.width.min(eff_w_max);
+
             // Title bar color: highlight focused toplevel.
             let bar_color = if i == focused_tl { 0xFF5577AA } else { 0xFF404040 };
             fb.fill_rect(
-                tl.x, tl.y - TITLE_BAR_HEIGHT as i32,
-                tl.width, TITLE_BAR_HEIGHT,
+                eff_x, title_top,
+                eff_w, TITLE_BAR_HEIGHT,
                 bar_color,
             );
             // Close button (top-right corner of title bar).
-            let close_x = tl.x + tl.width as i32 - 20;
-            let close_y = tl.y - TITLE_BAR_HEIGHT as i32 + 4;
+            let close_x = eff_x + eff_w as i32 - 20;
+            let close_y = title_top + 4;
             fb.fill_rect(close_x, close_y, 16, 16, 0xFFFF5555);
-            // "X" on close button
-            fb.draw_text(close_x + 4, close_y + 4, b"x", 0xFFFFFFFF);
+            // "X" on close button (compact font)
+            fb.draw_text(close_x + 5, close_y + 3, b"x", 0xFFFFFFFF);
 
-            // Title text in the title bar.
-            let text_x = tl.x + 6;
-            let text_y = tl.y - TITLE_BAR_HEIGHT as i32 + 8;
-            let max_chars = ((tl.width as i32 - 30) / 8).max(0) as usize;
+            // Title text in the title bar — anti-aliased large font (10x20),
+            // centered vertically inside the title bar.
+            let text_x = eff_x + 6;
+            let text_y = title_top
+                + ((TITLE_BAR_HEIGHT as i32 - font::TITLE_FONT_HEIGHT) / 2).max(0);
+            let max_chars = ((eff_w as i32 - 30) / 10).max(0) as usize;
             let len = tl.title_len.min(max_chars);
             if len > 0 {
-                fb.draw_text(text_x, text_y, &tl.title[..len], 0xFFEEEEEE);
+                let s = core::str::from_utf8(&tl.title[..len]).unwrap_or("");
+                font::draw_text(fb, text_x, text_y, s, 0xFFEEEEEE, true);
             }
 
             // Find the surface and its buffer.
@@ -1098,30 +1271,35 @@ fn compose() {
                     let buf = &buffers[buf_idx];
                     if !buf.active { continue; }
 
-                    // Find the pool and blit the buffer.
                     let pool_idx = buf.pool_idx;
                     if pool_idx < MAX_POOLS && pools[pool_idx].active {
                         let pool = &pools[pool_idx];
                         let src = (pool.mapped_vaddr + buf.offset as u64) as *const u32;
-
-                        // Blit directly from the shared pool memory.
-                        // With real SHM, the client writes pixels here and the
-                        // compositor reads them -- no test pattern needed.
-                        fb.blit(tl.x, tl.y, buf.width, buf.height, src, buf.stride);
+                        fb.blit(eff_x, eff_y, buf.width.min(eff_w), buf.height.min(eff_h), src, buf.stride);
                         found_buffer = true;
                     }
                 }
                 break;
             }
 
-            // If no buffer attached yet, draw a placeholder fill.
-            if !found_buffer {
-                fb.fill_rect(tl.x, tl.y, tl.width, tl.height, 0xFF333355);
+            if !found_buffer && eff_w > 0 && eff_h > 0 {
+                fb.fill_rect(eff_x, eff_y, eff_w, eff_h, 0xFF333355);
             }
         }
 
-        // Draw cursor on top of everything.
+        // Top layer (panels, bars).
+        for ls in wayland::layer_shell::iter_layer(wayland::layer_shell::Layer::Top) {
+            draw_layer_surface(fb, ls, surfaces, buffers, pools, 0xFF3A3A5A);
+        }
+
+        // Draw cursor above toplevels/top but below overlay (matches wlr behaviour).
         fb.draw_cursor(*CURSOR_X.get(), *CURSOR_Y.get());
+
+        // Overlay layer (notifications, lockscreens, OSDs). Drawn last so
+        // nothing can obscure critical UI.
+        for ls in wayland::layer_shell::iter_layer(wayland::layer_shell::Layer::Overlay) {
+            draw_layer_surface(fb, ls, surfaces, buffers, pools, 0xFF4A3A6A);
+        }
     }
 }
 

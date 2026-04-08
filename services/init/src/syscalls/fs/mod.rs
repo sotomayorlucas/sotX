@@ -5,6 +5,11 @@
 // ---------------------------------------------------------------------------
 
 pub(crate) mod fs_vfs;
+pub(crate) mod vfs_read_write;
+pub(crate) mod vfs_metadata;
+pub(crate) mod vfs_open;
+pub(crate) mod vfs_path;
+pub(crate) mod vfs_delete;
 pub(crate) mod fs_pipe;
 pub(crate) mod fs_special;
 pub(crate) mod fs_dir;

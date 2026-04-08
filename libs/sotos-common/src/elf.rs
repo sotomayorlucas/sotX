@@ -53,6 +53,43 @@ const P_MEMSZ: usize = 40;
 const PT_LOAD: u32 = 1;
 const PT_DYNAMIC: u32 = 2;
 const PT_INTERP: u32 = 3;
+const PT_TLS: u32 = 7;
+
+/// PT_TLS template descriptor.
+///
+/// `filesz` is the size of the initialized TLS data (`.tdata`); `memsz`
+/// is the total static TLS size including `.tbss` zero-initialized bytes.
+/// `offset` is the file offset of the `.tdata` bytes.
+#[derive(Clone, Copy)]
+pub struct PtTls {
+    pub offset: usize,
+    pub vaddr: u64,
+    pub filesz: usize,
+    pub memsz: usize,
+    pub align: u64,
+}
+
+const P_ALIGN: usize = 48;
+
+/// Extract the PT_TLS template from a parsed ELF, if present.
+pub fn parse_tls(data: &[u8], info: &ElfInfo) -> Option<PtTls> {
+    for i in 0..info.phnum {
+        let ph = info.phoff + i * info.phentsize;
+        if ph + info.phentsize > data.len() {
+            break;
+        }
+        if read_u32(data, ph + P_TYPE) == PT_TLS {
+            return Some(PtTls {
+                offset: read_u64(data, ph + P_OFFSET) as usize,
+                vaddr: read_u64(data, ph + P_VADDR),
+                filesz: read_u64(data, ph + P_FILESZ) as usize,
+                memsz: read_u64(data, ph + P_MEMSZ) as usize,
+                align: read_u64(data, ph + P_ALIGN),
+            });
+        }
+    }
+    None
+}
 
 /// Information about the PT_INTERP segment (dynamic linker path).
 pub struct InterpInfo {

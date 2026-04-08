@@ -29,6 +29,8 @@ pub struct HubDescriptor {
 }
 
 impl HubDescriptor {
+    /// All-zeros descriptor — placeholder before a real
+    /// `GET_DESCRIPTOR(HUB)` response has been parsed.
     pub const fn empty() -> Self {
         HubDescriptor {
             length: 0,
@@ -70,47 +72,68 @@ pub const DESC_SS_HUB: u8 = 0x2A;
 // Hub Port Status
 // ---------------------------------------------------------------
 
-/// Hub port status bits (wPortStatus from GET_PORT_STATUS).
+// `wPortStatus` bits (USB 2.0 §11.24.2.7.1).
+/// A device is present on the port.
 pub const HUB_PORT_CONNECTION: u16 = 1 << 0;
+/// The port is enabled (device can issue transactions).
 pub const HUB_PORT_ENABLE: u16 = 1 << 1;
+/// The port has been suspended.
 pub const HUB_PORT_SUSPEND: u16 = 1 << 2;
+/// The port has asserted over-current.
 pub const HUB_PORT_OVER_CURRENT: u16 = 1 << 3;
+/// The hub is currently resetting the port.
 pub const HUB_PORT_RESET: u16 = 1 << 4;
+/// The port's Vbus is powered.
 pub const HUB_PORT_POWER: u16 = 1 << 8;
+/// Low-speed device attached.
 pub const HUB_PORT_LOW_SPEED: u16 = 1 << 9;
+/// High-speed device attached.
 pub const HUB_PORT_HIGH_SPEED: u16 = 1 << 10;
 
-/// Hub port change bits (wPortChange from GET_PORT_STATUS).
+// `wPortChange` bits (USB 2.0 §11.24.2.7.2).
+/// Connection status has changed since last cleared.
 pub const HUB_C_PORT_CONNECTION: u16 = 1 << 0;
+/// Port enable/disable status has changed.
 pub const HUB_C_PORT_ENABLE: u16 = 1 << 1;
+/// Suspend status has changed.
 pub const HUB_C_PORT_SUSPEND: u16 = 1 << 2;
+/// Over-current status has changed.
 pub const HUB_C_PORT_OVER_CURRENT: u16 = 1 << 3;
+/// Reset has completed.
 pub const HUB_C_PORT_RESET: u16 = 1 << 4;
 
 /// Combined port status and change (returned by GET_PORT_STATUS).
 #[derive(Clone, Copy)]
 pub struct HubPortStatus {
+    /// `wPortStatus` word — see the `HUB_PORT_*` constants.
     pub status: u16,
+    /// `wPortChange` word — see the `HUB_C_PORT_*` constants.
     pub change: u16,
 }
 
 impl HubPortStatus {
+    /// `true` iff `HUB_PORT_CONNECTION` is set (device attached).
     pub fn is_connected(&self) -> bool {
         self.status & HUB_PORT_CONNECTION != 0
     }
 
+    /// `true` iff `HUB_PORT_ENABLE` is set.
     pub fn is_enabled(&self) -> bool {
         self.status & HUB_PORT_ENABLE != 0
     }
 
+    /// `true` iff `HUB_PORT_POWER` is set.
     pub fn is_powered(&self) -> bool {
         self.status & HUB_PORT_POWER != 0
     }
 
+    /// `true` iff the connection-change bit is set (requires
+    /// `CLEAR_FEATURE(C_PORT_CONNECTION)` to acknowledge).
     pub fn connection_changed(&self) -> bool {
         self.change & HUB_C_PORT_CONNECTION != 0
     }
 
+    /// `true` iff the port-reset completion bit is set.
     pub fn reset_changed(&self) -> bool {
         self.change & HUB_C_PORT_RESET != 0
     }
@@ -142,10 +165,14 @@ const HUB_REQ_CLEAR_FEATURE: u8 = 1;
 const HUB_REQ_SET_FEATURE: u8 = 3;
 const HUB_REQ_GET_DESCRIPTOR: u8 = 6;
 
-/// Hub port features (for SET_FEATURE / CLEAR_FEATURE).
+// Hub port features (USB 2.0 §11.24.2 Table 11-17).
+/// `PORT_RESET` — assert reset on the downstream port.
 pub const HUB_FEAT_PORT_RESET: u16 = 4;
+/// `PORT_POWER` — enable Vbus on the downstream port.
 pub const HUB_FEAT_PORT_POWER: u16 = 8;
+/// `C_PORT_CONNECTION` — clear the connection-status change bit.
 pub const HUB_FEAT_C_PORT_CONNECTION: u16 = 16;
+/// `C_PORT_RESET` — clear the reset-complete change bit.
 pub const HUB_FEAT_C_PORT_RESET: u16 = 20;
 
 // ---------------------------------------------------------------

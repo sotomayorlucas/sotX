@@ -1,0 +1,19 @@
+[workspace]
+
+[package]
+name = "sotos-abi-fuzz"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "abi-fuzz"
+path = "src/main.rs"
+
+[dependencies]
+sotos-common = { path = "../../libs/sotos-common" }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

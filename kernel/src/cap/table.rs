@@ -11,6 +11,7 @@ use alloc::vec::Vec;
 use sotos_common::SysError;
 
 use crate::pool::{Pool, PoolHandle};
+use crate::sot::cap_epoch::InterpositionPolicy;
 
 /// Unique capability identifier (wraps a generation-checked PoolHandle).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,6 +95,16 @@ pub enum CapObject {
     Domain { id: u32 },
     /// User address space (PML4).
     AddrSpace { cr3: u64 },
+    /// Interposed capability: routes through a proxy domain before
+    /// reaching the original kernel object.
+    Interposed {
+        /// Handle of the original capability being proxied.
+        original: u32,
+        /// Domain that intercepts operations on this capability.
+        proxy_domain: u32,
+        /// Interposition policy (see `InterpositionPolicy`).
+        policy: u8,
+    },
     /// Null / empty slot.
     #[allow(dead_code)]
     Null,
@@ -106,6 +117,8 @@ struct CapEntry {
     rights: Rights,
     /// Parent capability (for the CDT). None = root capability.
     parent: Option<PoolHandle>,
+    /// Epoch at which this capability was created (for O(1) revocation).
+    epoch: u64,
 }
 
 /// The kernel's capability table.
@@ -120,17 +133,19 @@ impl CapabilityTable {
         }
     }
 
-    /// Insert a new capability.
+    /// Insert a new capability stamped with the given epoch.
     pub fn insert(
         &mut self,
         object: CapObject,
         rights: Rights,
         parent: Option<CapId>,
+        epoch: u64,
     ) -> Option<CapId> {
         let handle = self.entries.alloc(CapEntry {
             object,
             rights,
             parent: parent.map(|c| c.handle()),
+            epoch,
         });
         Some(CapId(handle))
     }
@@ -148,6 +163,54 @@ impl CapabilityTable {
     pub fn lookup(&self, id: CapId) -> Option<(CapObject, Rights)> {
         let entry = self.entries.get(id.handle())?;
         Some((entry.object, entry.rights))
+    }
+
+    /// Create a derived capability with narrowed rights (child in CDT).
+    ///
+    /// The new cap refers to the same object but with `rights & mask`.
+    /// It inherits the parent's epoch.
+    pub fn attenuate(&mut self, id: CapId, rights_mask: Rights) -> Option<CapId> {
+        let entry = *self.entries.get(id.handle())?;
+        let new_rights = entry.rights.restrict(rights_mask);
+        self.insert(entry.object, new_rights, Some(id), entry.epoch)
+    }
+
+    /// Create an interposed capability that routes through a proxy domain.
+    ///
+    /// The returned cap has an `Interposed` object wrapping the original
+    /// handle, the proxy domain id, and the interposition policy byte.
+    /// Rights and epoch are copied from the original.
+    pub fn interpose(
+        &mut self,
+        id: CapId,
+        proxy_domain: u32,
+        policy: u8,
+    ) -> Option<CapId> {
+        // Validate the policy byte.
+        let _policy = InterpositionPolicy::from_u8(policy)?;
+        let entry = *self.entries.get(id.handle())?;
+        let object = CapObject::Interposed {
+            original: id.raw(),
+            proxy_domain,
+            policy,
+        };
+        self.insert(object, entry.rights, Some(id), entry.epoch)
+    }
+
+    /// Check whether a capability is interposed.
+    pub fn is_interposed(&self, id: CapId) -> bool {
+        self.entries
+            .get(id.handle())
+            .map(|e| matches!(e.object, CapObject::Interposed { .. }))
+            .unwrap_or(false)
+    }
+
+    /// O(1) epoch check: returns true if the capability's epoch >= min_epoch.
+    pub fn check_epoch(&self, id: CapId, min_epoch: u64) -> bool {
+        self.entries
+            .get(id.handle())
+            .map(|e| e.epoch >= min_epoch)
+            .unwrap_or(false)
     }
 
     /// Revoke a capability and all capabilities derived from it (CDT walk).
