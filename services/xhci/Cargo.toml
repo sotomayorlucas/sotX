@@ -2,6 +2,7 @@
 name = "sotos-xhci-svc"
 version = "0.1.0"
 edition = "2021"
+publish = false
 
 [dependencies]
 sotos-common = { path = "../../libs/sotos-common" }

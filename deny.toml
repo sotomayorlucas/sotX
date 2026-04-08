@@ -1,0 +1,71 @@
+# cargo-deny configuration for sotOS
+#
+# This file configures dependency policy for the sotOS workspace.
+# Run locally with: `cargo deny check`
+#
+# Wildcard policy:
+#   All workspace crates are now marked `publish = false`, so cargo-deny
+#   accepts path-style internal dependencies (e.g. `{ path = "../foo" }`)
+#   which report as "wildcard" version requirements. We enable
+#   `allow-wildcard-paths = true` to permit those path deps while still
+#   rejecting wildcard requirements on external crates.io dependencies.
+#
+#   Previously this was set to `warn` because cargo-deny only honors
+#   `allow-wildcard-paths` for unpublished crates. Now that every
+#   workspace member carries `publish = false`, we can safely flip this
+#   to `deny` (documented follow-up from PR #45 cleanup wave).
+
+[graph]
+targets = [
+    { triple = "x86_64-unknown-none" },
+    { triple = "x86_64-unknown-linux-musl" },
+    { triple = "x86_64-unknown-linux-gnu" },
+]
+all-features = false
+no-default-features = false
+
+[output]
+feature-depth = 1
+
+[advisories]
+version = 2
+ignore = []
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "MPL-2.0",
+]
+confidence-threshold = 0.8
+# Workspace crates are marked `publish = false` and intentionally have no
+# `license` field. Treat them as "private" so cargo-deny skips license
+# checks for them without forcing us to add a license expression everywhere.
+private = { ignore = true }
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+allow = []
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "warn"
+unknown-git = "warn"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
