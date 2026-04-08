@@ -106,6 +106,9 @@ extern "C" {
 /// On SMP, each CPU must call this (MSRs are per-CPU).
 pub fn init() {
     // Enable SYSCALL/SYSRET in EFER.
+    // SAFETY: IA32_EFER.SCE is guaranteed present on x86_64 (part of the
+    // long-mode feature set) and this call happens once per CPU during boot
+    // before any user-mode thread exists, so no SYSCALL instruction can race.
     unsafe {
         Efer::update(|flags| {
             *flags |= EferFlags::SYSTEM_CALL_EXTENSIONS;

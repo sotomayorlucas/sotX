@@ -23,11 +23,17 @@ pub const PIC2_OFFSET: u8 = 40;
 /// Small I/O delay — read from an unused port.
 #[inline]
 unsafe fn io_wait() {
+    // SAFETY: port 0x80 is the legacy POST diagnostic port — writing to it
+    // is the canonical ~1us I/O delay and has no effect on any driver.
     unsafe { outb(0x80, 0) };
 }
 
 /// Initialize both 8259 PICs with ICW1-4 sequence and mask all IRQs.
 pub fn init() {
+    // SAFETY: the master/slave 8259 ports (0x20/0x21/0xA0/0xA1) are owned by
+    // the PIC driver with no concurrent users during kernel init. The command
+    // sequence below follows the 8259 ICW1-ICW4 initialization protocol exactly,
+    // and port 0x80 is the POST diagnostic port used purely for I/O delay.
     unsafe {
         // Save current masks.
         let mask1 = inb(PIC1_DATA);
@@ -67,6 +73,9 @@ pub fn init() {
 
 /// Unmask (enable) a specific IRQ line.
 pub fn unmask(irq: u8) {
+    // SAFETY: PIC1_DATA/PIC2_DATA (0x21/0xA1) are the IMR registers owned by
+    // the PIC driver; the read-modify-write sequence is atomic w.r.t. other
+    // IRQ sources on a single CPU and the driver is the sole writer.
     unsafe {
         if irq < 8 {
             let mask = inb(PIC1_DATA) & !(1 << irq);
@@ -83,6 +92,8 @@ pub fn unmask(irq: u8) {
 
 /// Mask (disable) a specific IRQ line.
 pub fn mask(irq: u8) {
+    // SAFETY: same as `unmask` — PIC1_DATA/PIC2_DATA are the PIC IMR registers
+    // owned exclusively by the PIC driver.
     unsafe {
         if irq < 8 {
             let val = inb(PIC1_DATA) | (1 << irq);
@@ -97,6 +108,9 @@ pub fn mask(irq: u8) {
 
 /// Send End-Of-Interrupt to the appropriate PIC(s).
 pub fn send_eoi(irq: u8) {
+    // SAFETY: writing 0x20 (EOI) to PIC1_CMD/PIC2_CMD (0x20/0xA0) is the
+    // canonical end-of-interrupt sequence per the 8259 spec. Called from IRQ
+    // handlers which are the sole users of these command ports.
     unsafe {
         if irq >= 8 {
             outb(PIC2_CMD, EOI);

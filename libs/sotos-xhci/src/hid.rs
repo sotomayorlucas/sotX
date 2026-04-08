@@ -4,19 +4,30 @@
 //! compatible with the existing sotOS keyboard ring buffer.
 
 /// HID boot protocol keyboard report (8 bytes).
+///
+/// Layout is fixed by USB HID 1.11 §B.1: one byte of modifier keys,
+/// a reserved byte, then up to six simultaneously-pressed non-modifier
+/// keys identified by HID usage code.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct BootReport {
-    pub modifiers: u8,   // Modifier key bitmask
+    /// Modifier-key bitmask — see the `MOD_*` constants.
+    pub modifiers: u8,
+    /// Reserved byte (written by the device, ignored by the host).
     pub _reserved: u8,
-    pub keys: [u8; 6],   // Up to 6 simultaneous key codes
+    /// Up to 6 simultaneously pressed key HID usage codes. `0` = empty slot.
+    pub keys: [u8; 6],
 }
 
 impl BootReport {
+    /// All-zeros report — convenient as the "previous report" baseline
+    /// before the first interrupt IN completes.
     pub const fn empty() -> Self {
         BootReport { modifiers: 0, _reserved: 0, keys: [0; 6] }
     }
 
+    /// Parse the first 8 bytes of `buf` into a [`BootReport`]. Shorter
+    /// buffers are treated as an all-zeros report.
     pub fn from_bytes(buf: &[u8]) -> Self {
         let mut r = Self::empty();
         if buf.len() >= 8 {
@@ -33,14 +44,22 @@ impl BootReport {
     }
 }
 
-// Modifier bit positions.
+// Modifier bit positions (USB HID 1.11 §B.1 Table B-1).
+/// Left Ctrl — bit 0 of `BootReport::modifiers`.
 pub const MOD_LCTRL: u8 = 0;
+/// Left Shift — bit 1 of `BootReport::modifiers`.
 pub const MOD_LSHIFT: u8 = 1;
+/// Left Alt — bit 2 of `BootReport::modifiers`.
 pub const MOD_LALT: u8 = 2;
+/// Left GUI (Windows / Command) — bit 3.
 pub const MOD_LGUI: u8 = 3;
+/// Right Ctrl — bit 4.
 pub const MOD_RCTRL: u8 = 4;
+/// Right Shift — bit 5.
 pub const MOD_RSHIFT: u8 = 5;
+/// Right Alt (AltGr) — bit 6.
 pub const MOD_RALT: u8 = 6;
+/// Right GUI — bit 7.
 pub const MOD_RGUI: u8 = 7;
 
 /// PS/2 scancode for each modifier. 0xFF = needs E0 prefix.
@@ -168,7 +187,9 @@ static HID_TO_PS2: [u8; 116] = [
 /// Scancode event: a single PS/2 scancode byte to emit.
 /// Extended keys emit two events: E0 prefix + code.
 pub struct ScancodeEvent {
+    /// Up to two scancode bytes (E0 prefix + scancode for extended keys).
     pub bytes: [u8; 2],
+    /// Number of valid bytes in `bytes` (1 or 2).
     pub len: u8,
 }
 

@@ -5,8 +5,22 @@ edition = "2021"
 
 [workspace]
 
+[features]
+default = []
+# Enables the path-based `skia_render` module.
+#
+# NOTE: `tiny-skia` requires the `alloc` crate. The compositor is
+# `#![no_std]` without a global allocator, so enabling this feature
+# currently fails to link. It is kept behind a feature flag so a future
+# PR can add an allocator and turn it on without touching the default
+# build. The compositor works without it — all existing paths remain
+# unchanged when the feature is off.
+skia = ["dep:tiny-skia"]
+
 [dependencies]
 sotos-common = { path = "../../libs/sotos-common" }
+embedded-graphics = { version = "0.8", default-features = false }
+tiny-skia = { version = "0.11", default-features = false, features = ["no-std-float"], optional = true }
 
 [profile.dev]
 panic = "abort"

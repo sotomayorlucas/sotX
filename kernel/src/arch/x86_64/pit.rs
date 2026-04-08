@@ -17,6 +17,9 @@ const TARGET_HZ: u32 = 100;
 pub fn init() {
     let divisor: u16 = (PIT_FREQUENCY / TARGET_HZ) as u16; // 11932 = 0x2E9C
 
+    // SAFETY: writing PIT command+channel registers 0x43/0x40 per the 8253/8254
+    // spec. These ports are owned by the PIT driver (not aliased), the command
+    // byte selects channel 0 rate-generator mode, and `divisor` is constant.
     unsafe {
         // Channel 0, access lo/hi byte, mode 2 (rate generator), binary.
         outb(PIT_CMD, 0x34);

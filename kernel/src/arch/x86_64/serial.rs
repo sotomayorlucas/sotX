@@ -12,6 +12,9 @@ const COM1: u16 = 0x3F8;
 
 /// Initialize COM1 serial port at 38400 baud.
 pub fn init() {
+    // SAFETY: COM1 I/O ports 0x3F8..0x3FF are owned by this serial driver;
+    // no other code touches them. The write sequence below follows the 16550
+    // UART init protocol and uses only constant port numbers.
     unsafe {
         outb(COM1 + 1, 0x00); // Disable all interrupts
         outb(COM1 + 3, 0x80); // Enable DLAB (set baud rate divisor)
@@ -25,6 +28,9 @@ pub fn init() {
 
 /// Write a single byte to COM1, waiting for the transmit buffer.
 pub fn write_byte(byte: u8) {
+    // SAFETY: COM1+5 is the Line Status Register and COM1 is the Transmit
+    // Holding Register; both are part of the serial driver's exclusive port
+    // range. Reading the LSR has no side effects beyond the device.
     unsafe {
         // Wait for transmit holding register to be empty.
         while inb(COM1 + 5) & 0x20 == 0 {}
@@ -34,6 +40,9 @@ pub fn write_byte(byte: u8) {
 
 /// Non-blocking read: returns Some(byte) if data available, None otherwise.
 pub fn read_byte_nonblocking() -> Option<u8> {
+    // SAFETY: COM1+5 (LSR) and COM1 (Receiver Buffer) are owned by this
+    // serial driver. The LSR read is side-effect-free; RBR is only read when
+    // DR=1, which is the documented way to consume a received byte.
     unsafe {
         // Check Line Status Register bit 0 (Data Ready).
         if inb(COM1 + 5) & 0x01 != 0 {

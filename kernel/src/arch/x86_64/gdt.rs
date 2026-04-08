@@ -66,6 +66,11 @@ unsafe impl Sync for TssStorage {}
 static TSS_STORAGE: TssStorage = TssStorage(UnsafeCell::new(TaskStateSegment::new()));
 
 fn tss() -> &'static TaskStateSegment {
+    // SAFETY: `TSS_STORAGE` is a `static` `UnsafeCell<TaskStateSegment>`
+    // initialized at compile time with `TaskStateSegment::new()`. We only
+    // hand out shared references here; the only mutation of the cell happens
+    // inside the GDT `Lazy` initializer, which runs exactly once before any
+    // caller of `tss()`, so no aliasing `&mut` can coexist.
     unsafe { &*TSS_STORAGE.0.get() }
 }
 
@@ -86,6 +91,10 @@ struct Selectors {
 static GDT: Lazy<(GlobalDescriptorTable, Selectors)> = Lazy::new(|| {
     // Set up the double-fault IST entry before the GDT captures a reference
     // to the TSS. (Lazy init runs exactly once, before GDT.0.load().)
+    // SAFETY: `Lazy::new` runs this closure exactly once, strictly before any
+    // other code can observe the GDT, so we hold the only mutable access to
+    // `TSS_STORAGE`'s UnsafeCell. The static stack arrays we take `VirtAddr`s
+    // of are valid for `'static`.
     unsafe {
         (*TSS_STORAGE.0.get()).interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = {
             let stack_start = VirtAddr::from_ptr(&DOUBLE_FAULT_STACK);
@@ -132,6 +141,10 @@ static GDT: Lazy<(GlobalDescriptorTable, Selectors)> = Lazy::new(|| {
 /// Early-boot GDT init (before heap). Uses static Lazy GDT + TSS.
 pub fn init() {
     GDT.0.load();
+    // SAFETY: `GDT.0.load()` on the preceding line installed the GDT, so the
+    // selectors in `GDT.1` are present and valid for the current CPU; loading
+    // matching segment registers and the TSS selector is always allowed
+    // immediately after the GDT is made active.
     unsafe {
         CS::set_reg(GDT.1.code);
         SS::set_reg(GDT.1.data);
@@ -197,6 +210,11 @@ pub fn init_percpu(percpu: &mut PerCpu) {
     let gdt = Box::leak(gdt);
     gdt.load();
 
+    // SAFETY: the per-CPU GDT was just loaded on the line above, so all
+    // selectors computed by `gdt.append(...)` are present in the new GDT; the
+    // TSS referenced by `tss_sel` was leaked onto the heap and lives for
+    // `'static`. Reloading segment registers and the TSS selector is safe
+    // immediately after installing a new GDT.
     unsafe {
         CS::set_reg(code);
         SS::set_reg(data);

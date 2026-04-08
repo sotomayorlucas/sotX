@@ -39,6 +39,9 @@ const IA32_APIC_BASE_MSR: u32 = 0x1B;
 
 fn read_msr(msr: u32) -> u64 {
     let (lo, hi): (u32, u32);
+    // SAFETY: `rdmsr` is only used here for IA32_APIC_BASE (0x1B), which is
+    // present on every x86_64 CPU. The instruction only reads an MSR and
+    // writes eax/edx — no memory access, no stack use.
     unsafe {
         core::arch::asm!(
             "rdmsr",
@@ -53,11 +56,18 @@ fn read_msr(msr: u32) -> u64 {
 
 fn lapic_read(offset: u32) -> u32 {
     let base = LAPIC_BASE.load(Ordering::Relaxed);
+    // SAFETY: `base` is the HHDM virtual address of the LAPIC MMIO page that
+    // `init()` mapped as uncacheable; `offset` is a compile-time LAPIC
+    // register offset (<0x400), so the address is inside the mapped MMIO page.
     unsafe { core::ptr::read_volatile((base + offset as u64) as *const u32) }
 }
 
 fn lapic_write(offset: u32, val: u32) {
     let base = LAPIC_BASE.load(Ordering::Relaxed);
+    // SAFETY: `base` is the HHDM address of the LAPIC MMIO page mapped by
+    // `init()`; `offset` is a compile-time LAPIC register offset inside the
+    // mapped page. LAPIC registers are memory-mapped device state, never aliased
+    // to regular RAM.
     unsafe { core::ptr::write_volatile((base + offset as u64) as *mut u32, val) }
 }
 
@@ -114,6 +124,10 @@ pub fn calibrate() -> u32 {
     // PIT channel 2 one-shot for ~10ms (11932 ticks at 1.193182 MHz)
     let pit_count: u16 = 11932; // ~10ms
 
+    // SAFETY: PIT ports 0x42/0x43 and the PC/AT keyboard-controller port
+    // 0x61 (used to gate PIT channel 2) are owned by the kernel during
+    // calibration — no driver races here. The sequence configures channel 2
+    // in mode 0 (one-shot) per the 8253/8254 spec.
     unsafe {
         // Gate off speaker, use channel 2
         let gate = inb(0x61);
