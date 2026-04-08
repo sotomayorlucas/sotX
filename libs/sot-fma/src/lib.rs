@@ -28,27 +28,42 @@
 pub mod correlator;
 pub mod predictor;
 
-/// Mirror of `sotos_provenance::types::ProvenanceEntry` (same field set
-/// and order). Re-defined here so the FMA crate can build inside the
-/// kernel workspace without pulling the personality crate in as a
-/// secondary workspace root. Keep these two definitions in sync.
+/// Layout-compatible mirror of `kernel::sot::provenance::ProvenanceEntry`.
+///
+/// This has to match the kernel's `#[repr(C)]` struct byte-for-byte so the
+/// FMA engine can consume entries drained straight out of the per-CPU SPSC
+/// ring buffers without copying into a reshaped struct first. The field set,
+/// order, types and `#[repr(C)]` attribute are all load-bearing — the
+/// `const _` assertions below pin the size and every field offset so a
+/// future edit to either side is caught at build time instead of silently
+/// corrupting drained data.
+///
+/// Kept here (rather than importing `sot-provenance`) so the FMA crate can
+/// build inside the kernel workspace without pulling the personality crate
+/// in as a secondary workspace root.
 #[derive(Clone, Copy, Debug)]
+#[repr(C)]
 pub struct ProvenanceEntry {
-    /// Monotonic epoch counter (kernel tick).
+    /// Global epoch at time of operation.
     pub epoch: u64,
     /// Domain that performed the operation.
     pub domain_id: u32,
     /// Operation code (see `OP_*` constants and the upstream
     /// `sotos_provenance::types::Operation` enum).
     pub operation: u16,
-    /// Semantic object ID that was acted upon.
-    pub so_id: u64,
-    /// Semantic object type tag.
+    /// Semantic object type tag (matches `sotos_provenance::types::SoType`
+    /// when set; 0 = unknown / not classified).
     pub so_type: u8,
-    /// Rights mask that was exercised.
-    pub rights: u32,
-    /// Optional second SO (e.g. delegation target).
-    pub secondary_so: u64,
+    /// Padding for alignment. Must stay zero on producers.
+    pub _pad: u8,
+    /// Secure Object that was acted upon.
+    pub so_id: u64,
+    /// Version of the SO after the operation.
+    pub version: u64,
+    /// Transaction ID (0 if not in a transaction).
+    pub tx_id: u64,
+    /// Timestamp (TSC value at the moment the entry was recorded).
+    pub timestamp: u64,
 }
 
 /// Operation code for "capability revoked", mirrors the Solaris FMA
@@ -57,11 +72,20 @@ pub struct ProvenanceEntry {
 /// `sotos_provenance::types::Operation::Revoke`.
 pub const OP_REVOKE: u16 = 7;
 
-// Compile-time guard: if a future edit grows or shrinks `ProvenanceEntry`
-// without updating the consumers that walk drained ring entries, this
-// assertion breaks the build instead of silently corrupting the data.
-// Reflects rustc's default field-reordered layout (no `#[repr(C)]`).
-const _: () = assert!(core::mem::size_of::<ProvenanceEntry>() == 40);
+// Compile-time guards: if either side drifts, the build breaks instead of
+// silently corrupting drained ring data. Size is 48 bytes (matches the
+// kernel's `#[repr(C)]` layout); every field offset is pinned explicitly.
+const _: () = assert!(core::mem::size_of::<ProvenanceEntry>() == 48);
+const _: () = assert!(core::mem::align_of::<ProvenanceEntry>() == 8);
+const _: () = assert!(core::mem::offset_of!(ProvenanceEntry, epoch) == 0);
+const _: () = assert!(core::mem::offset_of!(ProvenanceEntry, domain_id) == 8);
+const _: () = assert!(core::mem::offset_of!(ProvenanceEntry, operation) == 12);
+const _: () = assert!(core::mem::offset_of!(ProvenanceEntry, so_type) == 14);
+const _: () = assert!(core::mem::offset_of!(ProvenanceEntry, _pad) == 15);
+const _: () = assert!(core::mem::offset_of!(ProvenanceEntry, so_id) == 16);
+const _: () = assert!(core::mem::offset_of!(ProvenanceEntry, version) == 24);
+const _: () = assert!(core::mem::offset_of!(ProvenanceEntry, tx_id) == 32);
+const _: () = assert!(core::mem::offset_of!(ProvenanceEntry, timestamp) == 40);
 // Pin the Solaris-FMA "Revoke" discriminant — local invariant only;
 // upstream divergence still has to be caught at the ingest boundary.
 const _: () = assert!(OP_REVOKE == 7);
@@ -225,10 +249,12 @@ mod tests {
             epoch: 0,
             domain_id: 1,
             operation: op,
-            so_id: 42,
             so_type: 1,
-            rights: 0,
-            secondary_so: 0,
+            _pad: 0,
+            so_id: 42,
+            version: 0,
+            tx_id: 0,
+            timestamp: 0,
         }
     }
 

@@ -36,10 +36,12 @@ fn revoke_entry() -> ProvenanceEntry {
         epoch: 0,
         domain_id: 7,
         operation: OP_REVOKE,
-        so_id: 0,
         so_type: 0,
-        rights: 0,
-        secondary_so: 0,
+        _pad: 0,
+        so_id: 0,
+        version: 0,
+        tx_id: 0,
+        timestamp: 0,
     }
 }
 
