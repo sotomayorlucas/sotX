@@ -21,6 +21,7 @@ pub mod shell;
 pub mod seat;
 pub mod xdg_popup;
 pub mod layer_shell;
+pub mod output;
 
 use sotos_common::IpcMsg;
 
@@ -342,6 +343,7 @@ pub struct ClientObjects {
     pub pointer_id: u32,
     pub keyboard_id: u32,
     pub layer_shell_id: u32,
+    pub output_id: u32,
     pub xdg_surfaces: [XdgSurfaceBinding; MAX_XDG_SURFACES],
     pub xdg_toplevels: [XdgToplevelBinding; MAX_XDG_TOPLEVELS],
     pub shm_pool_ids: [u32; MAX_SHM_POOLS],
@@ -363,6 +365,7 @@ impl ClientObjects {
             pointer_id: 0,
             keyboard_id: 0,
             layer_shell_id: 0,
+            output_id: 0,
             xdg_surfaces: [const { XdgSurfaceBinding::empty() }; MAX_XDG_SURFACES],
             xdg_toplevels: [const { XdgToplevelBinding::empty() }; MAX_XDG_TOPLEVELS],
             shm_pool_ids: [0u32; MAX_SHM_POOLS],
@@ -623,9 +626,22 @@ pub fn dispatch_message(
                 5 => {
                     objs.layer_shell_id = bound.client_id;
                 }
+                7 => {
+                    objs.output_id = bound.client_id;
+                    output::send_init_events(
+                        bound.client_id,
+                        &mut result.events,
+                        &mut result.event_count,
+                    );
+                }
                 _ => {}
             }
         }
+        return result;
+    }
+
+    // wl_output: only `release` (opcode 0) is defined; swallow silently.
+    if id == objs.output_id && objs.output_id != 0 {
         return result;
     }
 
