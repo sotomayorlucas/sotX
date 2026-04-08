@@ -307,7 +307,13 @@ pub extern "C" fn _start() -> ! {
     // already up by the time init reaches this point. The bar gracefully
     // exits with `statusbar: no layer-shell` on compositors that haven't
     // landed G7 (zwlr_layer_shell_v1) yet.
-    spawn_process(b"sot-statusbar");
+    //
+    // TEMPORARILY DISABLED: spawn_process passes self_as_cap=0 to children,
+    // so the statusbar can't allocate caps for its SHM pool and ends up in
+    // an infinite VMM SEGV loop at 0x903890 that floods the serial bandwidth
+    // and starves the rest of the boot. Re-enable once init forwards the
+    // child's AS cap (or once kernel-side spawn lands like compositor).
+    // spawn_process(b"sot-statusbar");
 
     // --- Phase 6b: STYX exokernel syscall validation (Tier 1.2) ---
     // Validates SOT syscalls 300-310 from userspace. Output goes to serial.
@@ -352,10 +358,17 @@ pub extern "C" fn _start() -> ! {
     // After the one-shot demo + watchdog launch, spawn the attacker a
     // second time so the watchdog has fresh provenance to drain. Proves
     // continuous draining works, not just the boot one-shot.
-    for _ in 0..2000 { sys::yield_now(); }
+    //
+    // TCG fix (run-full deadlock U4): bumped from 2K + 8K -> 20K + 200K.
+    // Device services (NVMe, xHCI) need order-of-magnitude more wall-clock
+    // cycles to settle on TCG because each MMIO read costs ~1000 host
+    // cycles. Companion units U1/U2/U3 reduced the worst busy-yield
+    // offenders, but this defensive backstop prevents init from racing
+    // them. On native + WHPX this is microseconds; on TCG ~1-2 seconds.
+    for _ in 0..20_000 { sys::yield_now(); }
     spawn_process(b"attacker");
     // Give the watchdog enough yields to pick up the second wave.
-    for _ in 0..8000 { sys::yield_now(); }
+    for _ in 0..200_000 { sys::yield_now(); }
 
     // --- Phase 6e: Tier 4 advanced features demo ---
     // Storage (ZFS + HAMMER2 snapshot managers driven by SOT tx events),

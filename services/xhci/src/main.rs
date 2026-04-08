@@ -220,8 +220,11 @@ pub extern "C" fn _start() -> ! {
         }
     }
     if first_port == 0 {
-        print(b"xhci: no connected ports\n");
-        loop { sys::yield_now(); }
+        print(b"xhci: no connected ports, parking on notify_wait\n");
+        // TCG fix (run-full deadlock U2): sleep on notify instead of
+        // busy-yielding so the kernel scheduler doesn't round-robin
+        // this thread against init's main thread forever.
+        loop { sys::notify_wait(notify_cap); }
     }
 
     // Read port speed.

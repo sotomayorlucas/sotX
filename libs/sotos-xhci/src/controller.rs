@@ -173,25 +173,33 @@ impl XhciController {
         let max_scratch = regs::hcs2_max_scratchpad(hcs2);
 
         // 3. Halt: clear USBCMD.RS, wait for USBSTS.HCH=1.
+        // TCG fix (run-full deadlock U1): cap loop + yield only every 256 iters.
+        // Each MMIO read costs ~1000 host cycles on TCG; the old per-iter
+        // wait() generated 100K context switches that round-robin-starved init.
         let cmd = regs::read32(op_base as *const u8, regs::OP_USBCMD);
         regs::write32(op_base, regs::OP_USBCMD, cmd & !regs::CMD_RS);
-        for _ in 0..100_000 {
+        for i in 0..100_000_u32 {
             let sts = regs::read32(op_base as *const u8, regs::OP_USBSTS);
             if sts & regs::STS_HCH != 0 {
                 break;
             }
-            wait();
+            if (i & 0xFF) == 0 {
+                wait();
+            }
         }
 
         // 4. Reset: set HCRST, wait for HCRST=0 AND CNR=0.
+        // TCG fix (run-full deadlock U1): cap from 1M -> 100K, yield every 256 iters.
         regs::write32(op_base, regs::OP_USBCMD, regs::CMD_HCRST);
-        for _ in 0..1_000_000 {
+        for i in 0..100_000_u32 {
             let cmd_val = regs::read32(op_base as *const u8, regs::OP_USBCMD);
             let sts = regs::read32(op_base as *const u8, regs::OP_USBSTS);
             if (cmd_val & regs::CMD_HCRST == 0) && (sts & regs::STS_CNR == 0) {
                 break;
             }
-            wait();
+            if (i & 0xFF) == 0 {
+                wait();
+            }
         }
         // Verify reset completed.
         let sts = regs::read32(op_base as *const u8, regs::OP_USBSTS);
@@ -246,14 +254,17 @@ impl XhciController {
         regs::write32(op_base, regs::OP_USBCMD, usbcmd | regs::CMD_INTE);
 
         // 10. Run: set USBCMD.RS=1, wait for USBSTS.HCH=0.
+        // TCG fix (run-full deadlock U1): yield every 256 iters.
         let usbcmd = regs::read32(op_base as *const u8, regs::OP_USBCMD);
         regs::write32(op_base, regs::OP_USBCMD, usbcmd | regs::CMD_RS);
-        for _ in 0..100_000 {
+        for i in 0..100_000_u32 {
             let sts_val = regs::read32(op_base as *const u8, regs::OP_USBSTS);
             if sts_val & regs::STS_HCH == 0 {
                 break;
             }
-            wait();
+            if (i & 0xFF) == 0 {
+                wait();
+            }
         }
         let sts_final = regs::read32(op_base as *const u8, regs::OP_USBSTS);
         if sts_final & regs::STS_HCH != 0 {
@@ -293,12 +304,17 @@ impl XhciController {
 
     /// Submit a command TRB and wait for a Command Completion Event.
     /// Skips non-command events (e.g. Port Status Change) that may be pending.
+    ///
+    /// TCG fix (run-full deadlock U1): cap from 10M -> 100K, yield every 256.
+    /// Each MMIO read costs ~1000 host cycles on TCG; the old 10M iter loop
+    /// took ~10s per command and starved init's main thread for ~13 minutes
+    /// across 8 USB enumeration commands.
     pub unsafe fn submit_command(&mut self, trb: Trb, wait: WaitFn) -> Result<Trb, &'static str> {
         self.cmd_ring.enqueue(trb);
         self.ring_cmd_doorbell();
 
         // Poll event ring for completion, skipping non-command events.
-        for _ in 0..10_000_000 {
+        for i in 0..100_000_u32 {
             if let Some(evt) = self.evt_ring.poll() {
                 self.evt_ring.advance();
                 self.update_erdp();
@@ -309,7 +325,9 @@ impl XhciController {
                 // Non-command event (e.g. Port Status Change) — skip and keep polling.
                 continue;
             }
-            wait();
+            if (i & 0xFF) == 0 {
+                wait();
+            }
         }
         Err("xhci: command timeout")
     }
@@ -401,8 +419,10 @@ impl XhciController {
 
     /// Wait for a Transfer Event on the event ring.
     /// Skips Command Completion and Port Status events.
+    ///
+    /// TCG fix (run-full deadlock U1): cap from 10M -> 100K, yield every 256.
     pub unsafe fn wait_transfer_event(&mut self, wait: WaitFn) -> Result<Trb, &'static str> {
-        for _ in 0..10_000_000 {
+        for i in 0..100_000_u32 {
             if let Some(evt) = self.evt_ring.poll() {
                 self.evt_ring.advance();
                 self.update_erdp();
@@ -413,7 +433,9 @@ impl XhciController {
                 // Skip non-transfer events.
                 continue;
             }
-            wait();
+            if (i & 0xFF) == 0 {
+                wait();
+            }
         }
         Err("xhci: transfer event timeout")
     }

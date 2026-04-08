@@ -135,12 +135,17 @@ impl NvmeController {
         if cc & regs::CC_EN != 0 {
             unsafe { regs::write32(mmio_base, regs::REG_CC, cc & !regs::CC_EN); }
             // Wait for CSTS.RDY = 0.
-            for _ in 0..100_000 {
+            // TCG fix (run-full deadlock U3): cap from 100K -> 50K, yield every
+            // 256 iters. Each MMIO read costs ~1000 host cycles on TCG; the
+            // old per-iter wait() generated context switches that starved init.
+            for i in 0..50_000_u32 {
                 let csts = unsafe { regs::read32(mmio_base, regs::REG_CSTS) };
                 if csts & regs::CSTS_RDY == 0 {
                     break;
                 }
-                wait();
+                if (i & 0xFF) == 0 {
+                    wait();
+                }
             }
         }
 
@@ -163,14 +168,17 @@ impl NvmeController {
         unsafe { regs::write32(mmio_base, regs::REG_CC, cc_val); }
 
         // Wait for CSTS.RDY = 1.
+        // TCG fix (run-full deadlock U3): cap from 1M -> 100K, yield every 256.
         let mut ready = false;
-        for _ in 0..1_000_000 {
+        for i in 0..100_000_u32 {
             let csts = unsafe { regs::read32(mmio_base, regs::REG_CSTS) };
             if csts & regs::CSTS_RDY != 0 {
                 ready = true;
                 break;
             }
-            wait();
+            if (i & 0xFF) == 0 {
+                wait();
+            }
         }
         if !ready {
             return Err("NVMe: controller failed to become ready");
@@ -264,7 +272,8 @@ impl NvmeController {
         }
 
         // Poll for completion.
-        for _ in 0..10_000_000 {
+        // TCG fix (run-full deadlock U3): cap from 10M -> 100K, yield every 256.
+        for i in 0..100_000_u32 {
             if let Some(cqe) = self.admin_cq.poll() {
                 self.admin_cq.advance();
                 // Ring the admin CQ doorbell.
@@ -276,7 +285,9 @@ impl NvmeController {
                 }
                 return Ok(cqe);
             }
-            wait();
+            if (i & 0xFF) == 0 {
+                wait();
+            }
         }
         Err("NVMe: admin command timeout")
     }

@@ -596,3 +596,27 @@ run-rootdisk: image create-test-disk create-rootdisk-disk
         -display none \
         -no-reboot \
         -m 512M
+
+# run-full-quick — TCG-friendly variant of `run-full` without USB devices.
+# qemu-xhci + usb-kbd + usb-mouse historically triggered a USB enumeration
+# busy-yield storm in libs/sotos-xhci that took ~13 minutes on TCG (the
+# xHCI driver's submit_command() polled in a 10-million-iteration loop,
+# each MMIO read ~1000 host cycles -> ~13 min round-robin context-switching
+# with init). Units U1-U4 of the run-full deadlock fix wave bounded those
+# loops, but `run-full-quick` is still useful for routine boot smoke when
+# you don't care about the USB enumeration path. Use `run-full` to exercise
+# the actual xHCI USB enumeration path on real hardware or after the fix.
+run-full-quick: image create-test-disk create-nvme-disk
+    "{{QEMU}}" \
+        -drive format=raw,file={{IMAGE}} \
+        -drive if=none,format=raw,file=target/disk.img,id=disk0 \
+        -device virtio-blk-pci,drive=disk0,disable-modern=on \
+        -drive file=target/nvme-disk.img,format=raw,if=none,id=nvme0 \
+        -device nvme,serial=sotOS-NVMe,drive=nvme0 \
+        -netdev user,id=net0,dns=8.8.8.8,hostfwd=udp::5555-:5555,hostfwd=tcp::7777-:7 \
+        -device virtio-net-pci,netdev=net0,disable-modern=on \
+        -device AC97 \
+        -device ahci,id=ahci0 \
+        -serial stdio \
+        -no-reboot \
+        -m 2048M

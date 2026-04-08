@@ -218,6 +218,10 @@ name = "sot-bhyve"
 version = "0.1.0"
 
 [[package]]
+name = "sot-crossbow"
+version = "0.1.0"
+
+[[package]]
 name = "sot-fma"
 version = "0.1.0"
 
@@ -228,6 +232,9 @@ version = "0.1.0"
 [[package]]
 name = "sot-network"
 version = "0.1.0"
+dependencies = [
+ "sot-crossbow",
+]
 
 [[package]]
 name = "sot-zfs"
@@ -262,6 +269,7 @@ dependencies = [
  "rand_chacha",
  "rand_core",
  "sot-bhyve",
+ "sot-crossbow",
  "sot-fma",
  "sot-hammer2",
  "sot-network",
