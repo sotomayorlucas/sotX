@@ -16,6 +16,7 @@
 mod wayland;
 mod render;
 mod input;
+mod animation;
 mod cursor;
 #[cfg(feature = "skia")]
 mod skia_render;
