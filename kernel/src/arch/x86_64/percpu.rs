@@ -113,6 +113,10 @@ pub fn alloc_ap(cpu_index: u32, lapic_id: u32) -> &'static mut PerCpu {
 #[inline]
 pub fn current_percpu() -> &'static mut PerCpu {
     let ptr: u64;
+    // SAFETY: per the fn docs, the caller has ensured GS_BASE points at a
+    // valid leaked `PerCpu` whose `self_ptr` field (at offset 0) stores the
+    // struct's own virtual address. The resulting `&mut PerCpu` is then a
+    // unique-per-CPU reference to a stable heap allocation.
     unsafe {
         core::arch::asm!(
             "mov {}, gs:[0]",
@@ -125,6 +129,10 @@ pub fn current_percpu() -> &'static mut PerCpu {
 
 /// Write the IA32_GS_BASE MSR.
 pub fn write_gs_base(addr: u64) {
+    // SAFETY: IA32_GS_BASE (0xC0000101) exists on all x86_64 CPUs. Callers
+    // pass the address of a leaked `PerCpu` struct, which remains live for
+    // the lifetime of the kernel; this function is only invoked from BSP/AP
+    // boot paths before any code reads gs:xx.
     unsafe {
         core::arch::asm!(
             "wrmsr",
@@ -140,6 +148,9 @@ pub fn write_gs_base(addr: u64) {
 /// In kernel mode (after swapgs), this holds the user's GS value.
 /// Used to restore a thread's user GS_BASE on context switch.
 pub fn write_kernel_gs_base(addr: u64) {
+    // SAFETY: IA32_KERNEL_GS_BASE (0xC0000102) is defined on all x86_64 CPUs.
+    // Writing it only changes the value that a later SWAPGS will load into
+    // GS_BASE; it cannot affect currently-executing kernel code.
     unsafe {
         core::arch::asm!(
             "wrmsr",

@@ -6,6 +6,14 @@
 
 #![no_std]
 
+/// Sprint 3 -- frozen ABI version of this crate.
+///
+/// Bump the minor on additive changes (new syscall, new struct field
+/// at the end), the major on breaking changes (renumbering, struct
+/// reshuffling, deletions). The CI gate in `.github/workflows/ci.yml`
+/// asserts this constant matches `docs/ABI_v0.1.0.md`.
+pub const ABI_VERSION: &str = "0.1.0";
+
 pub mod elf;
 pub mod linux_abi;
 pub mod spsc;
@@ -193,6 +201,13 @@ pub enum Syscall {
     ResourceLimit = 141,
     /// Get total live thread count.
     ThreadCount = 142,
+    /// Register a death notification for a target thread.
+    /// rdi = thread_cap (READ), rsi = notification_cap (WRITE).
+    /// Kernel signals the notification when the thread transitions to Dead.
+    ThreadNotify = 143,
+    /// Non-blocking poll of a notification's pending bit.
+    /// rdi = notification_cap (READ). Returns 1 if pending (and clears), 0 otherwise.
+    NotifyPoll = 144,
     /// Combined send+receive with timeout (ticks in extra reg).
     CallTimeout = 135,
     /// Receive with timeout (ep_cap in rdi[31:0], timeout in rdi[63:32]).
@@ -231,6 +246,8 @@ pub enum Syscall {
     TxCommit = 309,
     /// Abort current transaction, rollback changes.
     TxAbort = 310,
+    /// Tier 2 (MultiObject) two-phase commit: PREPARE phase.
+    TxPrepare = 311,
 }
 
 /// Error codes returned by syscalls.
@@ -261,6 +278,10 @@ pub enum SysError {
 
 /// Maximum supported CPUs (used by kernel scheduler, IPC, slab, watchdog).
 pub const MAX_CPUS: usize = 16;
+
+/// Maximum number of registered thread-death notifications
+/// (SYS_THREAD_NOTIFY table — fixed-size, no kernel heap).
+pub const MAX_THREAD_NOTIFY: usize = 64;
 
 /// Keyboard scancode ring buffer virtual address (shared: kernel, kbd, init, xhci).
 pub const KB_RING_ADDR: u64 = 0x510000;
@@ -621,6 +642,62 @@ pub mod sys {
     #[inline(always)]
     pub fn debug_free_frames() -> u64 {
         syscall0(252)
+    }
+
+    /// Drain up to `max` provenance entries from `cpu_id`'s ring into the
+    /// caller-provided buffer at `dest`. Each slot is 48 bytes (matching
+    /// kernel `ProvenanceEntry`). Returns the number of entries written.
+    /// SAFETY: caller must ensure `dest` points at writable storage of at
+    /// least `max * 48` bytes.
+    #[inline(always)]
+    pub unsafe fn provenance_drain(dest: *mut u8, max: u64, cpu_id: u64) -> u64 {
+        syscall3(260, dest as u64, max, cpu_id)
+    }
+
+    /// Inject a synthetic provenance entry into the current CPU's ring.
+    /// `operation` matches `sotos_provenance::Operation` (u16),
+    /// `so_type` matches `sotos_provenance::SoType` (u8). Used by the
+    /// Tier 3 deception demo's attacker simulator to drive the kernel
+    /// ring with semantically meaningful events.
+    #[inline(always)]
+    pub fn provenance_emit(operation: u16, so_type: u8, so_id: u64, owner_domain: u32) {
+        let _ = syscall4(
+            261,
+            operation as u64,
+            so_type as u64,
+            so_id,
+            owner_domain as u64,
+        );
+    }
+
+    /// Snapshot the per-CPU provenance ring statistics. Returns
+    /// `(len, dropped, total_pushed, capacity)`. Zero if `cpu_id` is
+    /// out of range.
+    ///
+    /// `len` = unread entries currently in the ring
+    /// `dropped` = entries dropped because the ring was full
+    /// `total_pushed` = lifetime count of successful pushes
+    /// `capacity` = ring capacity (entries, not bytes)
+    #[inline(always)]
+    pub fn provenance_stats(cpu_id: u64) -> (u64, u64, u64, u64) {
+        let len: u64;
+        let dropped: u64;
+        let total: u64;
+        let cap: u64;
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                inlateout("rax") 262u64 => len,
+                in("rdi") cpu_id,
+                lateout("rdx") dropped,
+                lateout("r8")  total,
+                lateout("r9")  cap,
+                lateout("rcx") _,
+                lateout("r11") _,
+                options(nostack),
+            );
+        }
+        (len, dropped, total, cap)
     }
 
     /// Non-blocking read one byte from serial. Returns Some(byte) or None.
@@ -1354,6 +1431,32 @@ pub mod sys {
         syscall0(super::Syscall::ThreadCount as u64)
     }
 
+    /// Register a death notification for a target thread.
+    ///
+    /// When the kernel-tracked thread referred to by `thread_cap` transitions
+    /// to the Dead state (graceful exit via SYS_THREAD_EXIT), the notification
+    /// referred to by `notify_cap` will be signaled (pending bit set, or
+    /// any blocked waiter woken).
+    ///
+    /// The kernel uses one-shot semantics: a single registration fires exactly
+    /// once. If the supervisor wants to track a respawned thread, it must
+    /// re-register against the new tid.
+    ///
+    /// `thread_cap` must be a Thread capability with READ rights;
+    /// `notify_cap` must be a Notification capability with WRITE rights.
+    #[inline(always)]
+    pub fn thread_notify(thread_cap: u64, notify_cap: u64) -> Result<(), i64> {
+        check_unit(syscall2(super::Syscall::ThreadNotify as u64, thread_cap, notify_cap))
+    }
+
+    /// Non-blocking poll of a notification's pending bit.
+    /// Returns true if the notification was pending (and clears it), false otherwise.
+    /// Used by supervisors that need to check many notifications without sleeping.
+    #[inline(always)]
+    pub fn notify_poll(notify_cap: u64) -> bool {
+        syscall1(super::Syscall::NotifyPoll as u64, notify_cap) != 0
+    }
+
     /// Set the FS_BASE MSR for the current thread (TLS support).
     #[inline(always)]
     pub fn set_fs_base(addr: u64) -> Result<(), i64> {
@@ -1425,6 +1528,13 @@ pub mod sys {
     pub fn so_create(type_id: u64, policy: u64) -> Result<u64, i64> {
         check_val(syscall2(super::Syscall::SoCreate as u64, type_id, policy))
     }
+    /// Same as `so_create` but also sets the owner_domain field used by
+    /// the kernel provenance recorder. Lets userspace tag activity it
+    /// produces with a domain id so the GraphHunter can group operations.
+    #[inline(always)]
+    pub fn so_create_owned(type_id: u64, policy: u64, owner_domain: u64) -> Result<u64, i64> {
+        check_val(syscall3(super::Syscall::SoCreate as u64, type_id, policy, owner_domain))
+    }
     #[inline(always)]
     pub fn so_invoke(cap: u64, method: u64, arg0: u64, arg1: u64) -> Result<u64, i64> {
         check_val(syscall4(super::Syscall::SoInvoke as u64, cap, method, arg0, arg1))
@@ -1455,7 +1565,9 @@ pub mod sys {
     }
     #[inline(always)]
     pub fn tx_begin(tier: u64) -> Result<u64, i64> {
-        check_val(syscall1(super::Syscall::TxBegin as u64, tier))
+        // Pass domain_cap=0 (root) explicitly so kernel sees a clean rdi/rsi.
+        // Use syscall2 to ensure tier lands in rsi instead of leaving it uninitialized.
+        check_val(syscall2(super::Syscall::TxBegin as u64, 0, tier))
     }
     #[inline(always)]
     pub fn tx_commit(tx_id: u64) -> Result<(), i64> {
@@ -1464,5 +1576,11 @@ pub mod sys {
     #[inline(always)]
     pub fn tx_abort(tx_id: u64) -> Result<(), i64> {
         check_unit(syscall1(super::Syscall::TxAbort as u64, tx_id))
+    }
+    /// Tier 2 (MultiObject) two-phase commit: PREPARE phase.
+    /// Active -> Preparing. Must be followed by `tx_commit` or `tx_abort`.
+    #[inline(always)]
+    pub fn tx_prepare(tx_id: u64) -> Result<(), i64> {
+        check_unit(syscall1(super::Syscall::TxPrepare as u64, tx_id))
     }
 }

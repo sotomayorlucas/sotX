@@ -1,0 +1,271 @@
+PKG_INSTALL.CONF(5)           File Formats Manual          PKG_INSTALL.CONF(5)
+
+NNAAMMEE
+     ppkkgg__iinnssttaallll..ccoonnff - configuration file for package installation tools
+
+DDEESSCCRRIIPPTTIIOONN
+     The file ppkkgg__iinnssttaallll..ccoonnff contains system defaults for the package
+     installation tools as a list of variable-value pairs.  Each line has the
+     format VARIABLE=VALUE.  If the value consists of more than one line, each
+     line is prefixed with VARIABLE=.
+
+     The current value of a variable can be checked by running
+           ppkkgg__aaddmmiinn ccoonnffiigg--vvaarr VVAARRIIAABBLLEE
+
+     Some variables are overriden by environmental variables of the same name.
+     Those are marked by (*).
+
+     The following variables are supported:
+
+     ACCEPTABLE_LICENSES (list of license names)
+             Default: empty
+
+             Space-separated list of licenses considered acceptable when
+             CHECK_LICENSE is `yes' or `always', in addition to those listed
+             in DEFAULT_ACCEPTABLE_LICENSES.  License names are case-
+             sensitive.
+
+     ACTIVE_FTP (empty or non-empty)
+             Default: empty
+
+             If non-empty, force the use of active FTP.  Otherwise, try
+             passive FTP first, and fall back to active FTP if the server
+             reports a syntax error.
+
+     CACHE_INDEX (`yes' or `no')
+             Default: yes
+
+             If `yes', cache directory listings in memory.  This avoids
+             retransfers of the large directory index for HTTP.
+
+     CERTIFICATE_ANCHOR_PKGS (empty or path)
+             Default: empty
+
+             Path to the file containing the certificates used for validating
+             binary packages.  A package is trusted when a certificate chain
+             ends in one of the certificates contained in this file.  The
+             certificates must be PEM-encoded.
+
+             Required when VERIFIED_INSTALLATION is anything other than
+             `never'.
+
+     CERTIFICATE_ANCHOR_PKGVULN (empty or path)
+             Default: empty
+
+             If non-empty, path to the file containing the certificates used
+             for validating _p_k_g_-_v_u_l_n_e_r_a_b_i_l_i_t_i_e_s.  The _p_k_g_-_v_u_l_n_e_r_a_b_i_l_i_t_i_e_s is
+             trusted when a certificate chain ends in one of the certificates
+             contained in this file.  The certificates must be PEM-encoded.
+
+     CERTIFICATE_CHAIN (empty or path)
+             Default: empty
+
+             If non-empty, path to a file containing additional certificates
+             that can be used for completing certificate chains when
+             validating binary packages or pkg-vulnerabilities files.
+
+     CHECK_LICENSE (`yes', `no', or `always')
+             Default: no
+
+             When installing a package, check whether its license, as
+             specified in the LICENSE build info tag, is acceptable, i.e.,
+             listed in ACCEPTABLE_LICENSES or DEFAULT_ACCEPTABLE_LICENSES.
+
+             Supported values are:
+
+             no          Install package no matter what license it has.
+
+             yes         If package has LICENSE set, require the license to be
+                         acceptable before installing.  If package is missing
+                         LICENSE, install it anyway.
+
+             always      Require LICENSE to be set, and require the license to
+                         be acceptable, before installing.
+
+     CHECK_END_OF_LIFE (`yes' or `no')
+             Default: `yes'
+
+             During vulnerability checks, consider packages that have reached
+             end-of-life as vulnerable.
+
+     CHECK_OS_VERSION (`yes' or `no')
+             Default: `yes'
+
+             If `yes', pkg_add will warn if the host OS version mismatches the
+             OS version the package was built on.
+
+             For example, you can set this to `no' in order to install
+             packages built for NetBSD 9.0 on NetBSD 10.0, where they will
+             still generally work.  Packages for which this may not work have
+             a more stringent version check through the osabi package; see
+             CHECK_OSABI.
+
+     CHECK_OSABI (`yes' or `no')
+             Default: `yes'
+
+             If `yes', the osabi package checks that it matches the OS
+             version.
+
+             Packages that are tightly bound to a specific version of an
+             operating system, such as kernel modules or sysutils/lsof, depend
+             on the osabi package to reflect this, so that even if
+             CHECK_OS_VERSION is `no', such packages will refuse to install
+             unless CHECK_OSABI is also `no'.
+
+     CHECK_VULNERABILITIES (`never', `always', or `interactive')
+             Default: `never'
+
+             Check for vulnerabilities when installing a package.  Supported
+             values are:
+
+             never            Install package even if it is known to be
+                              vulnerable.
+
+             always           Install package only if it is not known to be
+                              vulnerable.
+
+                              If the _p_k_g_-_v_u_l_n_e_r_a_b_i_l_i_t_i_e_s file is missing,
+                              assume package is vulnerable and refuse to
+                              install it.
+
+             interactive      Install package without user interaction if it
+                              is not known to be vulnerable.  Otherwise,
+                              prompt user to confirm installation.
+
+                              If the _p_k_g_-_v_u_l_n_e_r_a_b_i_l_i_t_i_e_s file is missing,
+                              ignore it and install package anyway.
+
+     DEFAULT_ACCEPTABLE_LICENSES
+             Space separated list of licenses considered acceptable when
+             CHECK_LICENSE is `yes' or `always', in addition to those listed
+             in ACCEPTABLE_LICENSES.  License names are case-sensitive.
+
+             The default value of DEFAULT_ACCEPTABLE_LICENSES (list of license
+             names) lists all licenses recorded in pkgsrc which have been
+             either:
+
+             --   approved as open source by the _O_p_e_n _S_o_u_r_c_e _I_n_i_t_i_a_t_i_v_e:
+                 hhttttppss::////ooppeennssoouurrccee..oorrgg//,
+
+             --   approved as free software by the _F_r_e_e _S_o_f_t_w_a_r_e _F_o_u_n_d_a_t_i_o_n:
+                 hhttttppss::////wwwwww..ffssff..oorrgg//, or
+
+             --   considered free software under the Debian Free Software
+                 Guidelines by the _D_e_b_i_a_n _P_r_o_j_e_c_t: hhttttppss::////wwwwww..ddeebbiiaann..oorrgg//,
+             and are not `network copyleft' licenses such as the GNU Affero
+             GPLv3.
+
+     GPG (empty or path)
+             Default: empty
+
+             Path to gpg(1), required for ppkkgg__aaddmmiinn ggppgg--ssiiggnn--ppaacckkaaggee.  (All
+             other GPG/OpenPGP operations are done internally with
+             libnetpgpverify(3).)
+
+     GPG_KEYRING_PKGVULN (empty or path)
+             Default: empty
+
+             If non-empty, keyring to use for verifying OpenPGP signatures on
+             _p_k_g_-_v_u_l_n_e_r_a_b_i_l_i_t_i_e_s, overriding the default keyring.
+
+     GPG_KEYRING_SIGN (empty or path)
+             Default: empty
+
+             If non-empty, keyring to use for signing packages with ppkkgg__aaddmmiinn
+             ggppgg--ssiiggnn--ppaacckkaaggee, overriding the default keyring.
+
+     GPG_KEYRING_VERIFY (empty or path)
+             Default: empty
+
+             If non-empty, keyring to use for verifying package signatures on
+             installation, overriding the default keyring.
+
+     GPG_SIGN_AS (empty or OpenPGP user-id)
+             Default: empty
+
+             If non-empty, OpenPGP user-id to use for signing packages with
+             ppkkgg__aaddmmiinn ggppgg--ssiiggnn--ppaacckkaaggee, passed as the argument of
+             `--local-user' (--uu) to gpg(1).
+
+     IGNORE_PROXY (empty or non-empty)
+             Default: empty
+
+             If non-empty, use direct connections and ignore FTP_PROXY and
+             HTTP_PROXY.
+
+     IGNORE_URL (URL, may be specified multiple times)
+             Default: none
+
+             URL of a security advisory from the _p_k_g_-_v_u_l_n_e_r_a_b_i_l_i_t_i_e_s that
+             should be ignored when running:
+                   ppkkgg__aaddmmiinn aauuddiitt
+             May be specified multiple times to ignore multiple advisories.
+
+     PKG_DBDIR (*) (path)
+             Default: _@_P_K_G___D_B_D_I_R_@
+
+             Location of the packages database.  This option is overriden by
+             the argument of the --KK option.
+
+     PKG_PATH (*) (semicolon-separated list of paths or URLs)
+             Default: empty
+
+             Search path for packages.  The entries are separated by
+             semicolon.  Each entry specifies a directory or URL to search for
+             packages.
+
+     PKG_REFCOUNT_DBDIR (*) (path)
+             Default: ${PKG_DBDIR}_._r_e_f_c_o_u_n_t
+
+             Location of the package reference counts database directory.
+
+     PKGVULNDIR (path)
+             Default: ${PKG_DBDIR}
+
+             Directory name in which the _p_k_g_-_v_u_l_n_e_r_a_b_i_l_i_t_i_e_s file resides.
+
+     PKGVULNURL (URL)
+             Default:
+             hhttttpp::////ccddnn..NNeettBBSSDD..oorrgg//ppuubb//NNeettBBSSDD//ppaacckkaaggeess//vvuullnnss//ppkkgg--vvuullnneerraabblliittiieess..ggzz
+
+             URL which is used for updating the local _p_k_g_-_v_u_l_n_e_r_a_b_i_l_i_t_i_e_s file
+             when running:
+                   ppkkgg__aaddmmiinn ffeettcchh--ppkkgg--vvuullnneerraabbiilliittiieess
+
+             _N_o_t_e: Usually, only the compression type should be changed.
+             Currently supported are uncompressed files and files compressed
+             by bzip2(1) (_._b_z_2) or gzip(1) (_._g_z).
+
+     VERBOSE_NETIO (empty or non-empty)
+             Default: empty
+
+             If non-empty, log details of network IO to stderr.
+
+     VERIFIED_INSTALLATION (`never', `always', `trusted', or `interactive')
+             Default: `never'
+
+             Verification requirement for installing a package.  Supported
+             values are:
+
+             never            Install package unconditionally.
+
+             always           Install package only if it has a valid X.509 or
+                              OpenPGP signature.
+
+             trusted          Install package without user interaction if it
+                              has a valid X.509 or OpenPGP signature.
+                              Otherwise, prompt user to confirm installation.
+
+             interactive      Always prompt the user to confirm installation
+                              when installing a package.  WWAARRNNIINNGG: This does
+                              not tell the user whether the package had a
+                              valid signature or not.
+
+FFIILLEESS
+     _@_S_Y_S_C_O_N_F_D_I_R_@_/_p_k_g___i_n_s_t_a_l_l_._c_o_n_f      Default location for the file
+                                        described in this manual page.
+
+SSEEEE AALLSSOO
+     pkg_add(1), pkg_admin(1), pkg_create(1), pkg_delete(1), pkg_info(1)
+
+pkgsrc                         October 28, 2014                         pkgsrc

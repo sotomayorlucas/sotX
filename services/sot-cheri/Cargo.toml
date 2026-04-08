@@ -1,0 +1,17 @@
+[package]
+name = "sotos-sot-cheri"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "sot-cheri"
+path = "src/main.rs"
+
+[dependencies]
+sotos-common = { path = "../../libs/sotos-common" }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

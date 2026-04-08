@@ -33,6 +33,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
+name = "ed25519-compact"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33ce99a9e19c84beb4cc35ece85374335ccc398240712114c85038319ed709bd"
+
+[[package]]
 name = "embedded-graphics"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -208,12 +214,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "sot-bhyve"
+version = "0.1.0"
+
+[[package]]
+name = "sot-fma"
+version = "0.1.0"
+
+[[package]]
+name = "sot-hammer2"
+version = "0.1.0"
+
+[[package]]
+name = "sot-network"
+version = "0.1.0"
+
+[[package]]
+name = "sot-zfs"
+version = "0.1.0"
+
+[[package]]
 name = "sotos-common"
 version = "0.1.0"
 dependencies = [
  "bitflags",
  "linux-raw-sys",
 ]
+
+[[package]]
+name = "sotos-deception"
+version = "0.1.0"
 
 [[package]]
 name = "sotos-gui"
@@ -227,14 +257,22 @@ dependencies = [
 name = "sotos-init"
 version = "0.1.0"
 dependencies = [
+ "ed25519-compact",
  "goblin",
  "rand_chacha",
  "rand_core",
+ "sot-bhyve",
+ "sot-fma",
+ "sot-hammer2",
+ "sot-network",
+ "sot-zfs",
  "sotos-common",
+ "sotos-deception",
  "sotos-gui",
  "sotos-ld",
  "sotos-objstore",
  "sotos-pci",
+ "sotos-provenance",
  "sotos-virtio",
  "sotos-wasm",
  "ufmt",
@@ -264,6 +302,10 @@ version = "0.1.0"
 dependencies = [
  "sotos-common",
 ]
+
+[[package]]
+name = "sotos-provenance"
+version = "0.1.0"
 
 [[package]]
 name = "sotos-virtio"

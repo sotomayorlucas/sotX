@@ -1,0 +1,7 @@
+[package]
+name = "sot-fma"
+version = "0.1.0"
+edition = "2021"
+description = "Fault Management Architecture (FMA) — predictive self-healing engine over the SOT provenance ring."
+
+[dependencies]

@@ -41,6 +41,7 @@ pub const CAP_SSS: u32 = 1 << 27;
 pub const CAP_S64A: u32 = 1 << 31;
 /// Number of Command Slots (bits 12:8) — 0-based.
 pub const CAP_NCS_SHIFT: u32 = 8;
+/// 5-bit mask used to extract the NCS field from `CAP`.
 pub const CAP_NCS_MASK: u32 = 0x1F;
 
 /// Extract number of command slots supported (1-based).
@@ -113,6 +114,7 @@ pub const CMD_CLO: u32 = 1 << 3;
 pub const CMD_FRE: u32 = 1 << 4;
 /// Current Command Slot (bits 12:8, read-only).
 pub const CMD_CCS_SHIFT: u32 = 8;
+/// 5-bit mask used to extract the CCS field from `PORT_CMD`.
 pub const CMD_CCS_MASK: u32 = 0x1F;
 /// FIS Receive Running (read-only).
 pub const CMD_FR: u32 = 1 << 14;

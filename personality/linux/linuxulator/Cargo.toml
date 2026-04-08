@@ -1,0 +1,9 @@
+[package]
+name = "sot-linuxulator"
+version = "0.1.0"
+edition = "2021"
+description = "Linux personality layer: syscall table, translation, and procfs emulation for SOT domains"
+
+[workspace]
+
+[dependencies]

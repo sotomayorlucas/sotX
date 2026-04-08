@@ -1,0 +1,40 @@
+$NetBSD: README.Cygwin,v 1.3 2022/12/06 15:22:18 schmonz Exp $
+
+Please read the general README file as well.
+
+==========================================================================
+
+If fetching pkgsrc via git, make sure you get it with Unix line endings:
+
+	$ git clone https://github.com/NetBSD/pkgsrc.git \
+	    --config core.eol=lf \
+	    --config core.autocrlf=input
+
+If you've already fetched pkgsrc without these options, fix up the line
+endings now:
+
+	$ cd pkgsrc
+	$ git config core.eol lf
+	$ git config core.autocrlf input
+	$ git checkout-index --force --all
+
+pkgsrc supports both gcc (GNU Compiler Collection) and clang (C Language Family
+Frontend for LLVM). gcc is the default.
+
+To bootstrap using clang:
+
+	env CC=clang ./bootstrap --compiler=clang
+
+You need to install minimal base packages in `Base' category plus any of
+compiler, gcc, gcc4, and/or clang. For gcc and gcc4, C and C++ compiler will be
+installed by default, but you can install Fortran compiler additionally because
+it will be required to use libtool. If it is not installed (or too old), Fortran
+compiler will be installed with pkgsrc automatically.
+
+==========================================================================
+
+The su(1) command has been in Cygwin distribution, but it has never worked.
+Unless you bootstrap pkgsrc with the --unprivileged option, workaround is:
+
+  * Right click "Cygwin Terminal" in your Start Menu, then pick
+    "Run as administrator".

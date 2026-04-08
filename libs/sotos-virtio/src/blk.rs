@@ -35,11 +35,40 @@ struct VirtioBlkReqHeader {
     sector: u64,
 }
 
-/// Virtual address layout for driver memory.
+/// Virtual address layout for driver memory (default — 1st device).
 const VQ_VADDR: u64 = 0xC00000;     // Virtqueue pages (up to 3 pages for queue_size=256)
 const HDR_VADDR: u64 = 0xC03000;    // Request header page
 const STATUS_VADDR: u64 = 0xC04000; // Status byte page
 const DATA_VADDR: u64 = 0xC05000;   // Data buffer page
+
+/// Per-instance virtual address layout for the driver's queue/header/status/data pages.
+/// Allows multiple VirtioBlk devices to coexist in the same address space.
+#[derive(Clone, Copy)]
+pub struct BlkVaddrs {
+    pub vq: u64,
+    pub hdr: u64,
+    pub status: u64,
+    pub data: u64,
+}
+
+impl BlkVaddrs {
+    /// Default vaddrs used by the first virtio-blk device.
+    pub const fn default_first() -> Self {
+        Self { vq: VQ_VADDR, hdr: HDR_VADDR, status: STATUS_VADDR, data: DATA_VADDR }
+    }
+
+    /// Lay out vq/hdr/status/data sequentially starting at `base`.
+    /// vq occupies 3 pages (queue_size up to 256), then 1 page each for
+    /// hdr, status, data — caller must reserve at least 6 pages from `base`.
+    pub const fn sequential(base: u64) -> Self {
+        Self {
+            vq:     base,
+            hdr:    base + 0x3000,
+            status: base + 0x4000,
+            data:   base + 0x5000,
+        }
+    }
+}
 
 /// Virtio-BLK device driver.
 pub struct VirtioBlk {
@@ -57,6 +86,8 @@ pub struct VirtioBlk {
     hdr_phys: u64,
     status_phys: u64,
     data_phys: u64,
+    /// Per-instance virtual addresses for queue/hdr/status/data.
+    vaddrs: BlkVaddrs,
     /// Disk capacity in sectors.
     pub capacity: u64,
 }
@@ -88,11 +119,35 @@ fn dbg_u64(mut n: u64) {
 }
 
 impl VirtioBlk {
+    /// Initialize the virtio-blk device using the default (1st-device) vaddrs.
+    pub fn init(pci_dev: &PciDevice, pci_bus: &PciBus) -> Result<Self, &'static str> {
+        Self::init_at(pci_dev, pci_bus, BlkVaddrs::default_first())
+    }
+
+    /// Find the Nth virtio-blk PCI device (vendor 0x1AF4, device 0x1001), counting from 0.
+    /// Returns None if fewer than N+1 such devices are present.
+    pub fn nth_device(pci_bus: &PciBus, n: usize) -> Option<PciDevice> {
+        let (devs, count) = pci_bus.enumerate::<32>();
+        let mut seen = 0usize;
+        for i in 0..count {
+            if devs[i].vendor_id == 0x1AF4 && devs[i].device_id == 0x1001 {
+                if seen == n {
+                    return Some(devs[i]);
+                }
+                seen += 1;
+            }
+        }
+        None
+    }
+
     /// Initialize the virtio-blk device.
     ///
     /// Performs full legacy device init: reset → ack → driver → features →
     /// virtqueue setup → driver_ok.
-    pub fn init(pci_dev: &PciDevice, pci_bus: &PciBus) -> Result<Self, &'static str> {
+    ///
+    /// `vaddrs` lets each device own a unique virtqueue/header/status/data
+    /// virtual address region so that multiple instances can coexist.
+    pub fn init_at(pci_dev: &PciDevice, pci_bus: &PciBus, vaddrs: BlkVaddrs) -> Result<Self, &'static str> {
         // 1. Read BAR0 (I/O port space).
         let bar0_raw = pci_bus.bar0(pci_dev.addr);
         if bar0_raw & 1 == 0 {
@@ -152,12 +207,12 @@ impl VirtioBlk {
 
         // Map virtqueue pages.
         for i in 0..vq_pages {
-            sys::map_offset(VQ_VADDR + (i as u64) * 4096, vq_mem_cap, (i as u64) * 4096, 2)
+            sys::map_offset(vaddrs.vq + (i as u64) * 4096, vq_mem_cap, (i as u64) * 4096, 2)
                 .map_err(|_| "map_offset for vq failed")?;
         }
 
         // 13. Initialize the virtqueue data structure (zeroes all pages via volatile writes + mfence).
-        let vq = Virtqueue::new(VQ_VADDR, vq_phys, queue_size);
+        let vq = Virtqueue::new(vaddrs.vq, vq_phys, queue_size);
 
         // 14. Write queue address (PFN) to device.
         let _ = sys::port_out32(bar_cap, bar_base + VIRTIO_QUEUE_ADDRESS, vq.phys_pfn());
@@ -165,15 +220,15 @@ impl VirtioBlk {
         // 15. Allocate and map DMA pages: header, status, data.
         let hdr_cap = sys::frame_alloc().map_err(|_| "frame_alloc hdr")?;
         let hdr_phys = sys::frame_phys(hdr_cap).map_err(|_| "frame_phys hdr")?;
-        sys::map(HDR_VADDR, hdr_cap, 2).map_err(|_| "map hdr")?;
+        sys::map(vaddrs.hdr, hdr_cap, 2).map_err(|_| "map hdr")?;
 
         let status_cap = sys::frame_alloc().map_err(|_| "frame_alloc status")?;
         let status_phys = sys::frame_phys(status_cap).map_err(|_| "frame_phys status")?;
-        sys::map(STATUS_VADDR, status_cap, 2).map_err(|_| "map status")?;
+        sys::map(vaddrs.status, status_cap, 2).map_err(|_| "map status")?;
 
         let data_cap = sys::frame_alloc().map_err(|_| "frame_alloc data")?;
         let data_phys = sys::frame_phys(data_cap).map_err(|_| "frame_phys data")?;
-        sys::map(DATA_VADDR, data_cap, 2).map_err(|_| "map data")?;
+        sys::map(vaddrs.data, data_cap, 2).map_err(|_| "map data")?;
 
         // 16. Set DRIVER_OK.
         let _ = sys::port_out(bar_cap, bar_base + VIRTIO_DEVICE_STATUS,
@@ -193,6 +248,7 @@ impl VirtioBlk {
             hdr_phys,
             status_phys,
             data_phys,
+            vaddrs,
             capacity,
         })
     }
@@ -202,17 +258,17 @@ impl VirtioBlk {
         self.read_sectors_multi(sector, 1)
     }
 
-    /// Read `count` contiguous sectors (max 8 = 4KB) into DATA_VADDR.
+    /// Read `count` contiguous sectors (max 8 = 4KB) into the device's data page.
     pub fn read_sectors_multi(&mut self, sector: u64, count: u32) -> Result<(), &'static str> {
         let count = count.min(8); // data page is 4KB = 8 sectors max
-        let hdr = HDR_VADDR as *mut VirtioBlkReqHeader;
+        let hdr = self.vaddrs.hdr as *mut VirtioBlkReqHeader;
         unsafe {
             core::ptr::write_volatile(&raw mut (*hdr).req_type, VIRTIO_BLK_T_IN);
             core::ptr::write_volatile(&raw mut (*hdr).reserved, 0);
             core::ptr::write_volatile(&raw mut (*hdr).sector, sector);
         }
 
-        unsafe { core::ptr::write_volatile(STATUS_VADDR as *mut u8, 0xFF); }
+        unsafe { core::ptr::write_volatile(self.vaddrs.status as *mut u8, 0xFF); }
 
         let d0 = self.vq.alloc_desc().ok_or("no desc for header")?;
         let d1 = self.vq.alloc_desc().ok_or("no desc for data")?;
@@ -232,7 +288,7 @@ impl VirtioBlk {
         self.wait_completion()?;
         self.vq.free_chain(d0);
 
-        let status = unsafe { core::ptr::read_volatile(STATUS_VADDR as *const u8) };
+        let status = unsafe { core::ptr::read_volatile(self.vaddrs.status as *const u8) };
         if status != 0 {
             return Err("read_sectors_multi: device returned error status");
         }
@@ -240,10 +296,10 @@ impl VirtioBlk {
         Ok(())
     }
 
-    /// Write a 512-byte sector from the data buffer at DATA_VADDR.
+    /// Write a 512-byte sector from the device's data buffer.
     pub fn write_sector(&mut self, sector: u64) -> Result<(), &'static str> {
         // Write request header.
-        let hdr = HDR_VADDR as *mut VirtioBlkReqHeader;
+        let hdr = self.vaddrs.hdr as *mut VirtioBlkReqHeader;
         unsafe {
             core::ptr::write_volatile(&raw mut (*hdr).req_type, VIRTIO_BLK_T_OUT);
             core::ptr::write_volatile(&raw mut (*hdr).reserved, 0);
@@ -251,7 +307,7 @@ impl VirtioBlk {
         }
 
         // Clear status byte.
-        unsafe { core::ptr::write_volatile(STATUS_VADDR as *mut u8, 0xFF); }
+        unsafe { core::ptr::write_volatile(self.vaddrs.status as *mut u8, 0xFF); }
 
         // Allocate 3 descriptors: header(RO) → data(RO) → status(WO).
         let d0 = self.vq.alloc_desc().ok_or("no desc for header")?;
@@ -277,7 +333,7 @@ impl VirtioBlk {
         self.vq.free_chain(d0);
 
         // Check status byte.
-        let status = unsafe { core::ptr::read_volatile(STATUS_VADDR as *const u8) };
+        let status = unsafe { core::ptr::read_volatile(self.vaddrs.status as *const u8) };
         if status != 0 {
             return Err("write_sector: device returned error status");
         }
@@ -287,12 +343,12 @@ impl VirtioBlk {
 
     /// Return a pointer to the data buffer (for reading sector data).
     pub fn data_ptr(&self) -> *const u8 {
-        DATA_VADDR as *const u8
+        self.vaddrs.data as *const u8
     }
 
     /// Return a mutable pointer to the data buffer (for writing sector data).
     pub fn data_ptr_mut(&self) -> *mut u8 {
-        DATA_VADDR as *mut u8
+        self.vaddrs.data as *mut u8
     }
 
     /// Wait for the virtqueue to return a used entry.
