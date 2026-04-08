@@ -20,23 +20,34 @@ pub fn setup_packet(
         | ((w_length as u64) << 48)
 }
 
-// Standard requests.
+// Standard requests (USB 2.0 §9.4).
+/// `GET_DESCRIPTOR` — bRequest = 6.
 pub const REQ_GET_DESCRIPTOR: u8 = 6;
+/// `SET_CONFIGURATION` — bRequest = 9.
 pub const REQ_SET_CONFIGURATION: u8 = 9;
 
 // HID class requests (bmRequestType = 0x21 for interface OUT).
+/// `SET_PROTOCOL` — HID class request, bRequest = 0x0B.
 pub const REQ_SET_PROTOCOL: u8 = 0x0B;
+/// `SET_IDLE` — HID class request, bRequest = 0x0A.
 pub const REQ_SET_IDLE: u8 = 0x0A;
 
-// Descriptor types.
+// Descriptor types (USB 2.0 §9.4, Table 9-5).
+/// Device descriptor — wValue high byte = 1.
 pub const DESC_DEVICE: u8 = 1;
+/// Configuration descriptor — wValue high byte = 2.
 pub const DESC_CONFIGURATION: u8 = 2;
+/// Interface descriptor — wValue high byte = 4.
 pub const DESC_INTERFACE: u8 = 4;
+/// Endpoint descriptor — wValue high byte = 5.
 pub const DESC_ENDPOINT: u8 = 5;
 
 // HID class/protocol.
+/// USB HID base-class code (USB HID 1.11 §4.1).
 pub const HID_CLASS: u8 = 3;
+/// HID boot-subclass (USB HID 1.11 §4.2).
 pub const HID_SUBCLASS_BOOT: u8 = 1;
+/// HID boot-protocol keyboard (USB HID 1.11 §4.3).
 pub const HID_PROTOCOL_KEYBOARD: u8 = 1;
 
 /// GET_DESCRIPTOR(Device, 18 bytes) setup packet.
@@ -70,11 +81,16 @@ pub fn set_idle(interface: u16) -> u64 {
 
 /// Result of parsing a configuration descriptor for a HID keyboard.
 pub struct HidKbdInfo {
+    /// `bConfigurationValue` from the configuration descriptor.
     pub config_value: u8,
+    /// `bInterfaceNumber` of the matched HID boot keyboard interface.
     pub interface_num: u8,
-    pub ep_addr: u8,      // e.g. 0x81 = EP1 IN
+    /// Endpoint address (e.g. `0x81` = EP1 IN) of the interrupt IN endpoint.
+    pub ep_addr: u8,
+    /// `wMaxPacketSize` from the endpoint descriptor.
     pub max_packet: u16,
-    pub interval: u8,     // bInterval from endpoint descriptor
+    /// `bInterval` — polling interval in frames/microframes.
+    pub interval: u8,
 }
 
 /// Parse a configuration descriptor buffer to find a HID boot keyboard interface
@@ -137,10 +153,15 @@ pub fn parse_config_for_hid_kbd(buf: &[u8]) -> Option<HidKbdInfo> {
 
 /// Mass storage interface info (Bulk-Only Transport).
 pub struct MassStorageInfo {
+    /// `bInterfaceNumber` of the matched BBB interface.
     pub interface_num: u8,
-    pub ep_bulk_in: u8,   // e.g., 0x81
-    pub ep_bulk_out: u8,  // e.g., 0x02
+    /// Bulk-IN endpoint address (e.g. `0x81`).
+    pub ep_bulk_in: u8,
+    /// Bulk-OUT endpoint address (e.g. `0x02`).
+    pub ep_bulk_out: u8,
+    /// `wMaxPacketSize` of the Bulk-IN endpoint.
     pub max_packet_in: u16,
+    /// `wMaxPacketSize` of the Bulk-OUT endpoint.
     pub max_packet_out: u16,
 }
 

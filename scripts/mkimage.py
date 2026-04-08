@@ -6,18 +6,67 @@ Creates an MBR-partitioned disk with a FAT32 partition containing the
 Limine BIOS bootloader, kernel, and boot config. Then runs `limine.exe
 bios-install` to make it bootable.
 
+Reproducibility
+---------------
+This builder is fully deterministic: running it twice with the same inputs
+produces a byte-identical disk image. We follow the Reproducible Builds
+initiative's `SOURCE_DATE_EPOCH` convention
+(https://reproducible-builds.org/docs/source-date-epoch/).
+
+The default epoch is 1700000000 (2023-11-14 22:13:20 UTC), an arbitrary but
+fixed point in time chosen so that:
+
+  * FAT32 timestamps are well within the FAT epoch (1980-01-01..2107-12-31).
+  * The value is the same on every host so CI runs on Linux and Windows
+    produce identical images.
+
+Override via environment variable: `SOURCE_DATE_EPOCH=<unix_seconds>`.
+
+Note: this script does NOT call time.time(), datetime.now(), os.urandom or
+os.path.getmtime(); every byte that lands on disk is derived from the input
+files and the fixed epoch. The MBR partition table contains no timestamps,
+the FAT32 BPB volume serial is hardcoded (0xDEAD1337), and directory entries
+have their create/modify/access times set explicitly from SOURCE_DATE_EPOCH.
+
 Usage:
     python scripts/mkimage.py [--kernel PATH] [--output PATH] [--size SIZE_MB]
 """
 
 import argparse
+import os
 import struct
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 SECTOR = 512
 PART_START_LBA = 2048  # 1 MiB alignment (standard)
+
+# Reproducible Builds: every timestamp written to the image is derived from
+# this single value. Default 1700000000 = 2023-11-14T22:13:20Z.
+SOURCE_DATE_EPOCH = int(os.environ.get("SOURCE_DATE_EPOCH", "1700000000"))
+
+
+def fat_time_date(epoch_seconds: int) -> tuple:
+    """Convert a unix timestamp to a FAT32 (time, date, tenths) tuple.
+
+    FAT32 packs date as ((year-1980)<<9)|(month<<5)|day and time as
+    (hour<<11)|(minute<<5)|(seconds//2). Tenths is a 0..199 byte that
+    refines create-time to 10ms granularity. Clamped to the FAT epoch
+    (1980-01-01..2107-12-31). Uses gmtime so the same epoch produces the
+    same wall-clock fields on every host regardless of TZ.
+    """
+    FAT_MIN = 315532800   # 1980-01-01T00:00:00Z
+    FAT_MAX = 4354819199  # 2107-12-31T23:59:59Z
+    t = time.gmtime(min(max(epoch_seconds, FAT_MIN), FAT_MAX))
+    fat_date = ((t.tm_year - 1980) << 9) | (t.tm_mon << 5) | t.tm_mday
+    fat_time = (t.tm_hour << 11) | (t.tm_min << 5) | (t.tm_sec // 2)
+    tenths = (t.tm_sec % 2) * 100
+    return fat_time & 0xFFFF, fat_date & 0xFFFF, tenths & 0xFF
+
+
+FAT_TIME, FAT_DATE, FAT_TENTHS = fat_time_date(SOURCE_DATE_EPOCH)
 
 
 _sfn_counter = {}  # Track numeric tails per directory level
@@ -239,10 +288,18 @@ class Fat32:
                 prev = nc
 
     def _dir_entry(self, name83: bytes, cluster: int, size: int, is_dir: bool) -> bytes:
+        # FAT32 32-byte directory entry. Timestamp fields are written from
+        # SOURCE_DATE_EPOCH (see top of file) so the image is reproducible.
         e = bytearray(32)
         e[0:11] = name83
         e[11] = 0x10 if is_dir else 0x20
+        e[13] = FAT_TENTHS                                # create tenths
+        struct.pack_into('<H', e, 14, FAT_TIME)           # create time
+        struct.pack_into('<H', e, 16, FAT_DATE)           # create date
+        struct.pack_into('<H', e, 18, FAT_DATE)           # last access date
         struct.pack_into('<H', e, 20, (cluster >> 16) & 0xFFFF)
+        struct.pack_into('<H', e, 22, FAT_TIME)           # write time
+        struct.pack_into('<H', e, 24, FAT_DATE)           # write date
         struct.pack_into('<H', e, 26, cluster & 0xFFFF)
         struct.pack_into('<I', e, 28, 0 if is_dir else size)
         return bytes(e)

@@ -1,0 +1,75 @@
+name: Fuzz
+
+# Unit 9 -- nightly ABI fuzz harness.
+#
+# Boots the full sotOS image under QEMU TCG and runs the
+# `services/abi-fuzz/` userspace binary, which hammers the kernel
+# syscall surface with deterministic xorshift64-driven random
+# arguments. The host driver `scripts/abi_fuzz.py` greps the serial
+# output for the success marker emitted by the binary on completion:
+#
+#     === abi-fuzz: <ok>/<total> survived ===
+#
+# A missing marker means the kernel page-faulted, panicked, or wedged
+# the boot before reaching the fuzz phase -- in which case the serial
+# log is uploaded as an artifact for triage.
+
+on:
+  schedule:
+    # Daily at 04:00 UTC.
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: "Fuzz iterations to run (informational only -- the binary hard-codes 10000)"
+        required: false
+        default: "10000"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  abi-fuzz:
+    name: ABI fuzz harness (10000 iterations)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly Rust
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: x86_64-unknown-none
+          components: rust-src
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: abi-fuzz
+
+      - name: Install QEMU + just + python
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+              qemu-system-x86 just python3
+          python3 --version
+          just --version
+          qemu-system-x86_64 --version | head -1
+
+      - name: Generate signing manifest (required by initrd)
+        run: |
+          pip install --user cryptography
+          just sigmanifest
+
+      - name: Build sotOS image
+        run: just image
+
+      - name: Run ABI fuzz harness
+        run: python3 scripts/abi_fuzz.py --iterations ${{ github.event.inputs.iterations || '10000' }}
+
+      - name: Upload serial log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: abi-fuzz-serial-log
+          path: target/serial.log
+          if-no-files-found: warn

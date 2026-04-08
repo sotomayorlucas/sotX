@@ -83,6 +83,19 @@ mod lucas_handler;
 mod lkl;
 mod wine_diag;
 mod boot_tests;
+mod sot_types;
+mod sot_bridge;
+mod crossbow_demo;
+mod deception_demo;
+mod fma_demo;
+mod tier4_demo;
+mod tier5_demo;
+mod tier6_demo;
+mod tier6b_demo;
+mod tier6c_demo;
+mod tier6d_demo;
+mod supervisor;
+mod signify;
 
 use framebuffer::{print, print_u64, print_hex64, print_hex, fb_init};
 use exec::MAP_WRITABLE;
@@ -104,6 +117,9 @@ use boot_tests::{test_dynamic_linking, test_wasm, run_linux_test, run_musl_test,
 //   0xE60000        LUCAS handler stack (16 pages)
 //   0xE70000        VirtioBlk storage (1 page)
 //   0xE80000+       Child process stacks (0x2000 each)
+//   0xEA0000..0xEA6000  ROOT_BLK (6 pages, second virtio-blk vaddrs from
+//                       BlkVaddrs::sequential — persistent rootdisk)
+//   0xEB0000..0xEB1000  ROOT_STORE (1 page, in-memory RootStore mini-fs)
 //   0x1000000       Shell ELF
 //   0x2000000       brk heap (BRK_LIMIT = 1 MiB)
 //   0x3000000       mmap region
@@ -252,6 +268,10 @@ pub extern "C" fn _start() -> ! {
     // --- Phase 4: Virtio-BLK + Object Store ---
     let mut blk = init_block_storage(boot_info);
 
+    // --- Phase 4b (Unit 3): persistent rootdisk on the SECOND virtio-blk ---
+    // Safe no-op when only one drive is present (e.g. plain `just run`).
+    mount_or_format_root(boot_info);
+
     // --- Phase 5: Look up net service endpoint ---
     for _ in 0..50 { sys::yield_now(); }
     let net_name = b"net";
@@ -273,8 +293,149 @@ pub extern "C" fn _start() -> ! {
     // To enable: boot with -smp 2 and LKL auto-activates when kernel finishes booting.
     lkl::init();
 
+    // --- Phase 5c: Tier 5 close — SHA-256 boot chain verification ---
+    // Stream every signed initrd binary through the streaming SHA-256
+    // implementation in services/init/src/signify.rs and compare against
+    // the manifest produced by scripts/build_signify_manifest.py.
+    signify::verify_manifest();
+
     // --- Phase 6: Userspace process spawning ---
     spawn_process(b"hello");
+
+    // --- Phase 6a: Tokyo Night layer-shell status bar ---
+    // Compositor was spawned by the kernel (see kernel/src/main.rs), so it's
+    // already up by the time init reaches this point. The bar gracefully
+    // exits with `statusbar: no layer-shell` on compositors that haven't
+    // landed G7 (zwlr_layer_shell_v1) yet.
+    spawn_process(b"sot-statusbar");
+
+    // --- Phase 6b: STYX exokernel syscall validation (Tier 1.2) ---
+    // Validates SOT syscalls 300-310 from userspace. Output goes to serial.
+    spawn_process(b"styx-test");
+
+    // --- Phase 6b2: POSIX-equivalence smoke (Tier 5 follow-up) ---
+    // Native sotOS-side conformance pass for thread/frame/IPC/sleep/io
+    // primitives, complementing the LUCAS Linux ABI runners.
+    spawn_process(b"posix-test");
+    for _ in 0..2000 { sys::yield_now(); }
+
+    // --- Phase 6b3: Per-subsystem kernel test suite (Tier 5 follow-up) ---
+    // Mini battery across mm/frame, ipc/endpoint+channel+notify,
+    // sched/thread, sot/tx+so+provenance, cap/debug.
+    spawn_process(b"kernel-test");
+    for _ in 0..3000 { sys::yield_now(); }
+
+    // --- Phase 6c: BSD personality stub (Tier 2.2) ---
+    // Spawn rump-vfs server, give it time to register, then exercise the
+    // OPEN/READ/CLOSE protocol against /etc/passwd from this process.
+    spawn_process(b"rump-vfs");
+    for _ in 0..200 { sys::yield_now(); }
+    test_rump_vfs();
+
+    // --- Phase 6d: Deception live demo (Tier 3) ---
+    // First spawn the "attacker" binary so it produces real provenance
+    // entries on the kernel SOT ring under owner_domain=7. Then run the
+    // demo which drains the ring, runs the AnomalyDetector + Migration
+    // orchestrator, and exercises the interposition + fake /proc/version
+    // path with the Ubuntu 22.04 webserver profile.
+    spawn_process(b"attacker");
+    for _ in 0..200 { sys::yield_now(); }
+    deception_demo::run();
+
+    // --- Phase 6d2: FMA predictive engine demo (Unit 12) ---
+    // Run the in-process FaultManagement state machine through five
+    // canned scenarios (clean, disk-retry cluster, ECC uncorrectable,
+    // thermal alone, thermal + behavioral anomalies). Boot test marker:
+    // `=== FMA: PASS ===`.
+    let _ = crate::fma_demo::run();
+
+    // After the one-shot demo + watchdog launch, spawn the attacker a
+    // second time so the watchdog has fresh provenance to drain. Proves
+    // continuous draining works, not just the boot one-shot.
+    for _ in 0..2000 { sys::yield_now(); }
+    spawn_process(b"attacker");
+    // Give the watchdog enough yields to pick up the second wave.
+    for _ in 0..8000 { sys::yield_now(); }
+
+    // --- Phase 6e: Tier 4 advanced features demo ---
+    // Storage (ZFS + HAMMER2 snapshot managers driven by SOT tx events),
+    // bhyve (bare-metal Intel CPUID/MSR spoofing), and PF firewall
+    // (capability interposer with deception override).
+    tier4_demo::run();
+
+    // --- Phase 6e+: Crossbow VNIC primitive demo ---
+    // Provisions VNICs for three deception domains, drives a small
+    // route burst to trip the per-port rate limiter, revokes and
+    // re-provisions to confirm slot reuse. Companion to PfInterposer.
+    if !crossbow_demo::run() {
+        print(b"!! crossbow_demo failed -- continuing anyway\n");
+    }
+
+    // --- Phase 6f: Tier 5 production hardening demo ---
+    // IPC + provenance ring + cap_interpose benchmarks, real 2PC
+    // MultiObject transactions, fuzz / robustness pass.
+    tier5_demo::run();
+
+    // --- Unit 9: ABI fuzz harness (Tier 5 follow-up) ---
+    // Hammers the kernel syscall surface with deterministic random
+    // arguments. Prints `=== abi-fuzz: <ok>/<total> survived ===`
+    // when done. Driven from CI by scripts/abi_fuzz.py.
+    spawn_process(b"abi-fuzz");
+    for _ in 0..4000 { sys::yield_now(); }
+
+    // --- Phase 6g: Tier 6 PANDORA Task 1 — DTrace integration ---
+    // Spawn the sot-dtrace service first, give it time to register,
+    // then run the client demo that streams provenance-backed probes
+    // through the sotbsd::: provider namespace.
+    spawn_process(b"sot-dtrace");
+    supervisor::record(b"sot-dtrace");
+    for _ in 0..400 { sys::yield_now(); }
+    tier6_demo::run();
+
+    // --- Phase 6h: Tier 6 PANDORA Task 2 — pkgsrc bridge ---
+    // Spawn the sot-pkg service (the pkgng-compatible package manager
+    // shim) and let the tier6b client demo walk through register / list
+    // / info / remove against it. This is the in-init equivalent of a
+    // pkgsrc `pkg_add` flow once the vendor tools land.
+    spawn_process(b"sot-pkg");
+    supervisor::record(b"sot-pkg");
+    for _ in 0..400 { sys::yield_now(); }
+    tier6b_demo::run();
+
+    // --- Phase 6i: Tier 6 PANDORA Task 3 — CARP + pfsync cluster ---
+    // Spawn the sot-carp service (the OpenBSD ip_carp + if_pfsync shim
+    // -- vendor sources live under vendor/openbsd-carp) and let the
+    // tier6c client demo drive a two-node failover scenario, asserting
+    // that the elected MASTER changes on death and that the replicated
+    // pfsync state table survives the cutover.
+    spawn_process(b"sot-carp");
+    supervisor::record(b"sot-carp");
+    for _ in 0..400 { sys::yield_now(); }
+    tier6c_demo::run();
+
+    // --- Phase 6j: Tier 6 PANDORA Task 4 — software CHERI ---
+    // Spawn the sot-cheri service (the 128-bit compressed-cap shim,
+    // vendored from CTSRD-CHERI under vendor/cheri-compressed-cap) and
+    // let the tier6d client demo exercise every CHERI invariant we
+    // care about: bounds monotonicity, permission monotonicity,
+    // sealing / unsealing, and out-of-bounds enforcement.
+    spawn_process(b"sot-cheri");
+    supervisor::record(b"sot-cheri");
+    for _ in 0..400 { sys::yield_now(); }
+    tier6d_demo::run();
+
+    // Unit 1 — SMF active respawn. Wire main.rs's spawn_process into the
+    // supervisor as the respawn callback, then run the boot self-test that
+    // exercises SYS_THREAD_NOTIFY (143) end-to-end: spawn -> register ->
+    // detect natural exit -> respawn -> verify. Prints
+    // `=== SMF respawn: PASS ===` for the boot-smoke CI grep.
+    supervisor::install_respawn_fn(spawn_process);
+    supervisor::run_smf_test();
+
+    // Sprint 2 -- final supervisor sweep before LUCAS shell takes over.
+    // Walks the SMF service table and reports current state of every
+    // tracked service. Now backed by the new SMF dependency graph.
+    supervisor::check_all();
 
     // --- Phase 7: Dynamic linking test ---
     test_dynamic_linking();
@@ -425,7 +586,7 @@ extern "C" fn blk_handler() -> ! {
 }
 
 /// Spawn a new process from an initrd binary by name.
-fn spawn_process(name: &[u8]) {
+fn spawn_process(name: &[u8]) -> Option<u64> {
     use sotos_common::elf;
 
     print(b"SPAWN: loading '");
@@ -439,13 +600,13 @@ fn spawn_process(name: &[u8]) {
             Ok(f) => f,
             Err(_) => {
                 print(b"SPAWN: frame_alloc failed for buffer\n");
-                return;
+                return None;
             }
         };
         buf_frames[i as usize] = frame_cap;
         if sys::map(SPAWN_BUF_BASE + i * 0x1000, frame_cap, MAP_WRITABLE).is_err() {
             print(b"SPAWN: map buffer page failed\n");
-            return;
+            return None;
         }
     }
 
@@ -461,7 +622,7 @@ fn spawn_process(name: &[u8]) {
             for i in 0..SPAWN_BUF_PAGES {
                 let _ = sys::unmap_free(SPAWN_BUF_BASE + i * 0x1000);
             }
-            return;
+            return None;
         }
     };
 
@@ -479,7 +640,7 @@ fn spawn_process(name: &[u8]) {
             for i in 0..SPAWN_BUF_PAGES {
                 let _ = sys::unmap_free(SPAWN_BUF_BASE + i * 0x1000);
             }
-            return;
+            return None;
         }
     };
 
@@ -494,7 +655,7 @@ fn spawn_process(name: &[u8]) {
             for i in 0..SPAWN_BUF_PAGES {
                 let _ = sys::unmap_free(SPAWN_BUF_BASE + i * 0x1000);
             }
-            return;
+            return None;
         }
     };
 
@@ -516,14 +677,14 @@ fn spawn_process(name: &[u8]) {
                 Ok(f) => f,
                 Err(_) => {
                     print(b"SPAWN: frame_alloc failed for segment\n");
-                    return;
+                    return None;
                 }
             };
 
             let temp_vaddr = 0x5100000u64;
             if sys::map(temp_vaddr, frame_cap, MAP_WRITABLE).is_err() {
                 print(b"SPAWN: temp map failed\n");
-                return;
+                return None;
             }
 
             unsafe {
@@ -555,7 +716,7 @@ fn spawn_process(name: &[u8]) {
             let flags = if is_writable { MAP_WRITABLE } else { 0 };
             if sys::map_into(as_cap, page_vaddr, frame_cap, flags).is_err() {
                 print(b"SPAWN: map_into failed\n");
-                return;
+                return None;
             }
 
             page_vaddr += 4096;
@@ -572,12 +733,12 @@ fn spawn_process(name: &[u8]) {
             Ok(f) => f,
             Err(_) => {
                 print(b"SPAWN: frame_alloc failed for stack\n");
-                return;
+                return None;
             }
         };
         if sys::map_into(as_cap, stack_base + i * 0x1000, frame_cap, MAP_WRITABLE).is_err() {
             print(b"SPAWN: map_into stack failed\n");
-            return;
+            return None;
         }
     }
     let stack_top = stack_base + stack_pages * 0x1000;
@@ -585,25 +746,28 @@ fn spawn_process(name: &[u8]) {
     let caps: [u64; 0] = [];
     if sys::bootinfo_write(as_cap, caps.as_ptr() as u64, 0).is_err() {
         print(b"SPAWN: bootinfo_write failed\n");
-        return;
+        return None;
     }
 
-    match sys::thread_create_in(as_cap, elf_info.entry, stack_top, 0) {
+    let result = match sys::thread_create_in(as_cap, elf_info.entry, stack_top, 0) {
         Ok(tid) => {
             print(b"SPAWN: '");
             print(name);
             print(b"' launched (tid cap = ");
             print_u64(tid);
             print(b")\n");
+            Some(tid)
         }
         Err(_) => {
             print(b"SPAWN: thread_create_in failed\n");
+            None
         }
-    }
+    };
 
     for i in 0..SPAWN_BUF_PAGES {
         let _ = sys::unmap_free(SPAWN_BUF_BASE + i * 0x1000);
     }
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -783,6 +947,176 @@ fn init_objstore(blk: VirtioBlk) -> Option<VirtioBlk> {
 }
 
 // ---------------------------------------------------------------------------
+// Unit 3 — persistent rootdisk (second virtio-blk device)
+// ---------------------------------------------------------------------------
+//
+// Probes for a SECOND virtio-blk PCI device (added by `just run-rootdisk`).
+// If present, mounts a tiny "root store" on it: a SOTROOT magic header in
+// sector 0 plus the boot marker `/persist/boot_marker` in sector 2. First
+// boot formats the disk; subsequent boots see the signature and re-verify
+// the marker, demonstrating persistence.
+//
+// This intentionally does NOT spin up a second `ObjectStore` — that type
+// uses a hardcoded STORE_VADDR (0xD00000) and would collide with the
+// primary store. The root store is a self-contained mini-fs on disk.
+//
+// The root virtio-blk uses 6 pages from 0xEA0000 (vq/hdr/status/data laid
+// out by `BlkVaddrs::sequential`); the in-memory `RootStore` lives at
+// 0xEB0000. All inside the previously-unused 0xEA0000..0xEC0000 hole,
+// disjoint from the primary store (0xD00000..0xE40000) and the BLK
+// handler stack (0xE90000..0xE94000).
+
+use sotos_virtio::blk::BlkVaddrs;
+
+const ROOT_BLK_BASE:   u64 = 0xEA0000;
+const ROOT_STORE_BASE: u64 = 0xEB0000;
+
+const ROOT_SIGNATURE: &[u8; 8] = b"SOTROOT\0";
+const ROOT_SECTOR_SIGNATURE: u64 = 0;
+const ROOT_SECTOR_MARKER: u64 = 2;
+const ROOT_MARKER_BODY: &[u8] = b"/persist/boot_marker\nsotOS persistent rootdisk OK\n";
+
+/// In-memory state for the persistent rootdisk. Lives at ROOT_STORE_BASE.
+/// Wraps the second VirtioBlk so child handlers can later borrow it for
+/// /persist/* I/O via SHARED_ROOT_STORE_PTR.
+#[repr(C)]
+pub(crate) struct RootStore {
+    pub(crate) blk: VirtioBlk,
+}
+
+// Build-time guard: RootStore is mapped into a single 4 KiB page at
+// ROOT_STORE_BASE via `frame_alloc + map`, so any future field addition that
+// pushes its size past one page must break the build instead of silently
+// corrupting adjacent memory.
+const _: () = assert!(core::mem::size_of::<RootStore>() <= 4096);
+
+/// Shared pointer to the persistent root store. Null until a second drive
+/// is found and successfully mounted.
+pub(crate) static SHARED_ROOT_STORE_PTR: AtomicU64 = AtomicU64::new(0);
+
+/// Initialize the SECOND virtio-blk device (persistent rootdisk) using its own
+/// vaddr region so it does not collide with the primary device.
+fn init_virtio_root_blk(boot_info: &BootInfo) -> Option<VirtioBlk> {
+    if boot_info.cap_count <= CAP_PCI as u64 {
+        return None;
+    }
+    let pci = PciBus::new(boot_info.caps[CAP_PCI]);
+
+    // Index 0 is the primary virtio-blk; the rootdisk is index 1.
+    let dev = match VirtioBlk::nth_device(&pci, 1) {
+        Some(d) => d,
+        None => {
+            print(b"ROOTBLK: second virtio-blk not present, skipping\n");
+            return None;
+        }
+    };
+
+    print(b"ROOTBLK: found at dev ");
+    print_u64(dev.addr.dev as u64);
+    print(b" IRQ ");
+    print_u64(dev.irq_line as u64);
+    print(b"\n");
+
+    match VirtioBlk::init_at(&dev, &pci, BlkVaddrs::sequential(ROOT_BLK_BASE)) {
+        Ok(blk) => {
+            print(b"ROOTBLK: ");
+            print_u64(blk.capacity);
+            print(b" sectors\n");
+            Some(blk)
+        }
+        Err(e) => {
+            print(b"ROOTBLK: init failed: ");
+            print(e.as_bytes());
+            print(b"\n");
+            None
+        }
+    }
+}
+
+/// Fill the device's data buffer with `bytes` (zero-padded to 512), then
+/// write it to `sector`. Returns true on success, prints `prefix` on error.
+fn rootblk_write_sector(blk: &mut VirtioBlk, sector: u64, bytes: &[u8], prefix: &[u8]) -> bool {
+    unsafe {
+        let p = blk.data_ptr_mut();
+        core::ptr::write_bytes(p, 0, 512);
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), p, bytes.len());
+    }
+    match blk.write_sector(sector) {
+        Ok(()) => true,
+        Err(e) => {
+            print(prefix);
+            print(e.as_bytes());
+            print(b"\n");
+            false
+        }
+    }
+}
+
+/// Probe for SOTROOT signature, format if absent, write/read the boot marker,
+/// and publish the store via SHARED_ROOT_STORE_PTR. Prints the PASS marker on
+/// success. Safe to call when no second drive is present (returns early).
+fn mount_or_format_root(boot_info: &BootInfo) {
+    let mut blk = match init_virtio_root_blk(boot_info) {
+        Some(b) => b,
+        None => return,
+    };
+
+    if blk.read_sector(ROOT_SECTOR_SIGNATURE).is_err() {
+        print(b"ROOTBLK: read sector 0 failed\n");
+        return;
+    }
+    let head = unsafe { core::slice::from_raw_parts(blk.data_ptr(), ROOT_SIGNATURE.len()) };
+    let formatted_now = head != &ROOT_SIGNATURE[..];
+
+    if formatted_now {
+        print(b"ROOTBLK: no signature, formatting...\n");
+        if !rootblk_write_sector(&mut blk, ROOT_SECTOR_SIGNATURE, ROOT_SIGNATURE,
+                                 b"ROOTBLK: write signature failed: ") {
+            return;
+        }
+    } else {
+        print(b"ROOTBLK: SOTROOT signature found (persistent boot)\n");
+    }
+
+    if !rootblk_write_sector(&mut blk, ROOT_SECTOR_MARKER, ROOT_MARKER_BODY,
+                             b"ROOTBLK: write marker failed: ") {
+        return;
+    }
+
+    if let Err(e) = blk.read_sector(ROOT_SECTOR_MARKER) {
+        print(b"ROOTBLK: re-read marker failed: ");
+        print(e.as_bytes());
+        print(b"\n");
+        return;
+    }
+    let verify = unsafe { core::slice::from_raw_parts(blk.data_ptr(), 20) };
+    if verify != b"/persist/boot_marker" {
+        print(b"ROOTBLK: marker mismatch on read-back\n");
+        return;
+    }
+
+    let frame = match sys::frame_alloc() {
+        Ok(f) => f,
+        Err(_) => { print(b"ROOTBLK: frame_alloc failed\n"); return; }
+    };
+    if sys::map(ROOT_STORE_BASE, frame, MAP_WRITABLE).is_err() {
+        print(b"ROOTBLK: map failed\n");
+        return;
+    }
+    unsafe {
+        core::ptr::write(ROOT_STORE_BASE as *mut RootStore, RootStore { blk });
+    }
+    SHARED_ROOT_STORE_PTR.store(ROOT_STORE_BASE, Ordering::Release);
+
+    if formatted_now {
+        print(b"ROOTBLK: formatted + marker written\n");
+    } else {
+        print(b"ROOTBLK: marker re-verified across boot\n");
+    }
+    print(b"=== persistent rootdisk: PASS ===\n");
+}
+
+// ---------------------------------------------------------------------------
 // FAT32 boot partition test
 // ---------------------------------------------------------------------------
 
@@ -905,6 +1239,129 @@ fn start_lucas(blk: Option<VirtioBlk>) {
 fn panic_halt() -> ! {
     print(b"PANIC\n");
     loop {}
+}
+
+// ---------------------------------------------------------------------------
+// Tier 2.2 — rump-vfs client smoke test
+// ---------------------------------------------------------------------------
+
+/// Exercise the rump-vfs IPC ABI by opening, reading, and printing /etc/passwd.
+/// Mirrors the protocol declared in `services/rump-vfs/src/main.rs`.
+fn test_rump_vfs() {
+    use sotos_common::IpcMsg;
+
+    print(b"RUMP-VFS-TEST: looking up service...\n");
+    let svc_name = b"rump-vfs";
+    let ep = match sys::svc_lookup(svc_name.as_ptr() as u64, svc_name.len() as u64) {
+        Ok(cap) => cap,
+        Err(e) => {
+            print(b"RUMP-VFS-TEST: svc_lookup failed (");
+            print_i64(e);
+            print(b")\n");
+            return;
+        }
+    };
+
+    // OPEN /etc/passwd
+    let path = b"/etc/passwd";
+    let mut open_msg = IpcMsg::empty();
+    open_msg.tag = 1; // TAG_OPEN
+    {
+        let dst = unsafe {
+            core::slice::from_raw_parts_mut(open_msg.regs.as_mut_ptr() as *mut u8, 56)
+        };
+        dst[..path.len()].copy_from_slice(path);
+    }
+    let open_reply = match sys::call(ep, &open_msg) {
+        Ok(r) => r,
+        Err(e) => {
+            print(b"RUMP-VFS-TEST: OPEN call failed (");
+            print_i64(e);
+            print(b")\n");
+            return;
+        }
+    };
+    let fd = open_reply.regs[0] as i64;
+    if fd <= 0 {
+        print(b"RUMP-VFS-TEST: OPEN returned errno ");
+        print_i64(fd);
+        print(b"\n");
+        return;
+    }
+    print(b"RUMP-VFS-TEST: OPEN /etc/passwd -> fd=");
+    print_u64(fd as u64);
+    print(b"\n");
+
+    // READ in 64-byte chunks until EOF (tag=0)
+    print(b"--- /etc/passwd ---\n");
+    let mut offset: u64 = 0;
+    let mut total: u64 = 0;
+    loop {
+        let mut read_msg = IpcMsg::empty();
+        read_msg.tag = 2; // TAG_READ
+        read_msg.regs[0] = fd as u64;
+        read_msg.regs[1] = offset;
+        let read_reply = match sys::call(ep, &read_msg) {
+            Ok(r) => r,
+            Err(e) => {
+                print(b"\nRUMP-VFS-TEST: READ call failed (");
+                print_i64(e);
+                print(b")\n");
+                break;
+            }
+        };
+        let n = read_reply.tag as usize;
+        if n == 0 {
+            break;
+        }
+        let bytes = unsafe {
+            core::slice::from_raw_parts(read_reply.regs.as_ptr() as *const u8, n)
+        };
+        for &b in bytes {
+            sys::debug_print(b);
+        }
+        offset += n as u64;
+        total += n as u64;
+        if n < 64 {
+            // Short read: end of file. Avoid one extra round trip.
+            break;
+        }
+    }
+    print(b"--- EOF (");
+    print_u64(total);
+    print(b" bytes) ---\n");
+
+    // CLOSE
+    let mut close_msg = IpcMsg::empty();
+    close_msg.tag = 3; // TAG_CLOSE
+    close_msg.regs[0] = fd as u64;
+    match sys::call(ep, &close_msg) {
+        Ok(r) if r.regs[0] == 0 => print(b"RUMP-VFS-TEST: CLOSE ok\n"),
+        Ok(r) => {
+            print(b"RUMP-VFS-TEST: CLOSE errno ");
+            print_i64(r.regs[0] as i64);
+            print(b"\n");
+        }
+        Err(e) => {
+            print(b"RUMP-VFS-TEST: CLOSE call failed (");
+            print_i64(e);
+            print(b")\n");
+        }
+    }
+
+    if total > 0 {
+        print(b"RUMP-VFS-TEST: PASS\n");
+    } else {
+        print(b"RUMP-VFS-TEST: FAIL (no bytes read)\n");
+    }
+}
+
+fn print_i64(mut n: i64) {
+    if n < 0 {
+        sys::debug_print(b'-');
+        n = -n;
+    }
+    print_u64(n as u64);
 }
 
 #[panic_handler]

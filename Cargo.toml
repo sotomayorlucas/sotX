@@ -17,6 +17,8 @@ members = [
     "libs/sotos-gui",
     "libs/sotos-lua",
     "libs/sotos-pkg",
+    "libs/sot-fma",
+    "libs/sot-crossbow",
 ]
 exclude = [
     "services/init",
@@ -35,7 +37,26 @@ exclude = [
     "services/drm-test",
     "services/hello-gui",
     "services/styx-test",
+    "services/rump-vfs",
+    "services/attacker",
+    "services/posix-test",
+    "services/kernel-test",
+    "services/sot-dtrace",
+    "services/sot-pkg",
+    "services/sot-carp",
+    "services/sot-cheri",
+    "services/sot-statusbar",
+    "services/abi-fuzz",
     "libs/sotos-testlib",
+    "tools/sotctl",
+    "tools/capctl",
+    "tools/txlog",
+    "tools/provenance-viewer",
+    "tools/deception-config",
+    "tests/integration",
+    "tests/security",
+    "tests/posix",
+    "tests/deception",
 ]
 
 [profile.dev]
