@@ -244,10 +244,18 @@ static CURRENT_VM: [core::sync::atomic::AtomicU32; MAX_CPUS] = {
     [ZERO; MAX_CPUS]
 };
 
+// We store `handle.raw() + 1` so that the value 0 unambiguously means
+// "no active VM". Without this offset, the first allocated VM (slot 0,
+// generation 0 → raw == 0) would collide with the empty sentinel and
+// the dispatcher would think there's no active VM.
+
 /// Set the active VM handle for this CPU before entering `vmx::vmx_run`.
 fn set_current_vm(handle: PoolHandle) {
     let cpu = crate::arch::x86_64::percpu::current_percpu().cpu_index as usize;
-    CURRENT_VM[cpu].store(handle.raw(), core::sync::atomic::Ordering::Release);
+    CURRENT_VM[cpu].store(
+        handle.raw().wrapping_add(1),
+        core::sync::atomic::Ordering::Release,
+    );
 }
 
 /// Clear the active VM handle for this CPU after the run loop exits.
@@ -260,11 +268,11 @@ fn clear_current_vm() {
 /// `vm_exit_handler_rust` to find which VM's profile to dispatch with.
 pub fn current_vm_for_dispatch() -> Option<PoolHandle> {
     let cpu = crate::arch::x86_64::percpu::current_percpu().cpu_index as usize;
-    let raw = CURRENT_VM[cpu].load(core::sync::atomic::Ordering::Acquire);
-    if raw == 0 {
+    let stored = CURRENT_VM[cpu].load(core::sync::atomic::Ordering::Acquire);
+    if stored == 0 {
         None
     } else {
-        Some(PoolHandle::from_raw(raw))
+        Some(PoolHandle::from_raw(stored - 1))
     }
 }
 
@@ -433,6 +441,21 @@ fn run_phase_b_test_inner() -> Result<(), VmObjError> {
                     "  vmx-test: vmx_run returned but vCPU not halted; vm_instruction_error={:?}",
                     err
                 );
+                // Post-run field dump so we can see whether the controls
+                // and host state survived the vmx_run path.
+                let pin = vmx::vmread(vmx::VMCS_PIN_BASED_CTLS, vmcs_phys);
+                let p1 = vmx::vmread(vmx::VMCS_PROC_BASED_CTLS, vmcs_phys);
+                let p2 = vmx::vmread(vmx::VMCS_PROC_BASED_CTLS2, vmcs_phys);
+                let h_cr0 = vmx::vmread(vmx::VMCS_HOST_CR0, vmcs_phys);
+                let h_cr3 = vmx::vmread(vmx::VMCS_HOST_CR3, vmcs_phys);
+                let h_cr4 = vmx::vmread(vmx::VMCS_HOST_CR4, vmcs_phys);
+                let h_rip = vmx::vmread(vmx::VMCS_HOST_RIP, vmcs_phys);
+                let g_cr0 = vmx::vmread(vmx::VMCS_GUEST_CR0, vmcs_phys);
+                let g_rip = vmx::vmread(vmx::VMCS_GUEST_RIP, vmcs_phys);
+                crate::kprintln!(
+                    "  vmx-test POST: pin={:?} p1={:?} p2={:?} hcr0={:?} hcr3={:?} hcr4={:?} hrip={:?} gcr0={:?} grip={:?}",
+                    pin, p1, p2, h_cr0, h_cr3, h_cr4, h_rip, g_cr0, g_rip
+                );
             }
         }
         Err(e) => {
@@ -476,6 +499,75 @@ fn run_one_vcpu(vm_handle: PoolHandle, ept: &MiniEpt) -> Result<(), VmxError> {
         exit,
         entry,
         eptp
+    );
+
+    // Comprehensive dump of fields that could be the source of error 7.
+    // Read the bitmap addresses, the control-related fields, and the
+    // host CR0/CR3/CR4 to verify they round-trip correctly.
+    let msr_bm = vmx::vmread(vmx::VMCS_MSR_BITMAP, vmcs_phys);
+    let io_a = vmx::vmread(vmx::VMCS_IO_BITMAP_A, vmcs_phys);
+    let io_b = vmx::vmread(vmx::VMCS_IO_BITMAP_B, vmcs_phys);
+    let vapic = vmx::vmread(vmx::VMCS_VIRT_APIC_ADDR, vmcs_phys);
+    let tpr_thr = vmx::vmread(vmx::VMCS_TPR_THRESHOLD, vmcs_phys);
+    let vpid = vmx::vmread(vmx::VMCS_VPID, vmcs_phys);
+    let link = vmx::vmread(vmx::VMCS_VMCS_LINK_POINTER, vmcs_phys);
+    crate::kprintln!(
+        "  vmx-test: msr_bm={:?} io_a={:?} io_b={:?} vapic={:?} tpr={:?} vpid={:?} link={:?}",
+        msr_bm,
+        io_a,
+        io_b,
+        vapic,
+        tpr_thr,
+        vpid,
+        link
+    );
+
+    let h_cr0 = vmx::vmread(vmx::VMCS_HOST_CR0, vmcs_phys);
+    let h_cr3 = vmx::vmread(vmx::VMCS_HOST_CR3, vmcs_phys);
+    let h_cr4 = vmx::vmread(vmx::VMCS_HOST_CR4, vmcs_phys);
+    let h_rsp = vmx::vmread(vmx::VMCS_HOST_RSP, vmcs_phys);
+    let h_rip = vmx::vmread(vmx::VMCS_HOST_RIP, vmcs_phys);
+    let h_efer = vmx::vmread(vmx::VMCS_HOST_IA32_EFER, vmcs_phys);
+    let h_pat = vmx::vmread(vmx::VMCS_HOST_IA32_PAT, vmcs_phys);
+    crate::kprintln!(
+        "  vmx-test: host cr0={:?} cr3={:?} cr4={:?} rsp={:?} rip={:?} efer={:?} pat={:?}",
+        h_cr0,
+        h_cr3,
+        h_cr4,
+        h_rsp,
+        h_rip,
+        h_efer,
+        h_pat
+    );
+
+    let g_cr0 = vmx::vmread(vmx::VMCS_GUEST_CR0, vmcs_phys);
+    let g_cr3 = vmx::vmread(vmx::VMCS_GUEST_CR3, vmcs_phys);
+    let g_cr4 = vmx::vmread(vmx::VMCS_GUEST_CR4, vmcs_phys);
+    let g_rip = vmx::vmread(vmx::VMCS_GUEST_RIP, vmcs_phys);
+    let g_rsp = vmx::vmread(vmx::VMCS_GUEST_RSP, vmcs_phys);
+    let g_rfl = vmx::vmread(vmx::VMCS_GUEST_RFLAGS, vmcs_phys);
+    let g_efer = vmx::vmread(vmx::VMCS_GUEST_IA32_EFER, vmcs_phys);
+    crate::kprintln!(
+        "  vmx-test: guest cr0={:?} cr3={:?} cr4={:?} rip={:?} rsp={:?} rfl={:?} efer={:?}",
+        g_cr0,
+        g_cr3,
+        g_cr4,
+        g_rip,
+        g_rsp,
+        g_rfl,
+        g_efer
+    );
+
+    let g_cs_sel = vmx::vmread(vmx::VMCS_GUEST_CS_SELECTOR, vmcs_phys);
+    let g_cs_ar = vmx::vmread(vmx::VMCS_GUEST_CS_ACCESS_RIGHTS, vmcs_phys);
+    let g_tr_ar = vmx::vmread(vmx::VMCS_GUEST_TR_ACCESS_RIGHTS, vmcs_phys);
+    let g_ldtr_ar = vmx::vmread(vmx::VMCS_GUEST_LDTR_ACCESS_RIGHTS, vmcs_phys);
+    crate::kprintln!(
+        "  vmx-test: guest cs_sel={:?} cs_ar={:?} tr_ar={:?} ldtr_ar={:?}",
+        g_cs_sel,
+        g_cs_ar,
+        g_tr_ar,
+        g_ldtr_ar
     );
 
     // Drop the pool lock before entering the VMX hot path — vmx_run

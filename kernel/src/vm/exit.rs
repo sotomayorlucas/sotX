@@ -105,8 +105,10 @@ pub fn dispatch(
     state: &mut KernelVCpuState,
     profile: &super::deception::KernelDeceptionProfile,
 ) -> ExitAction {
+    kprintln!("  dispatch: enter");
     let vmcs_phys = state.vmcs.phys;
     let reason = read_exit_reason(vmcs_phys);
+    kprintln!("  dispatch: reason={}", reason);
 
     match reason {
         REASON_CPUID => handle_cpuid(state, profile, vmcs_phys),

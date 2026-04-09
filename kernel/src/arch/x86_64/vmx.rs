@@ -463,6 +463,12 @@ pub fn init_bsp() {
             kprintln!("  vmx: ia32_vmx_true_exit_ctls      = {:#x}", rdmsr(IA32_VMX_TRUE_EXIT_CTLS));
             kprintln!("  vmx: ia32_vmx_entry_ctls          = {:#x}", rdmsr(IA32_VMX_ENTRY_CTLS));
             kprintln!("  vmx: ia32_vmx_true_entry_ctls     = {:#x}", rdmsr(IA32_VMX_TRUE_ENTRY_CTLS));
+            kprintln!("  vmx: ia32_vmx_ept_vpid_cap        = {:#x}", rdmsr(0x48C));
+            kprintln!("  vmx: ia32_vmx_misc                = {:#x}", rdmsr(0x485));
+            kprintln!("  vmx: ia32_vmx_cr0_fixed0          = {:#x}", rdmsr(IA32_VMX_CR0_FIXED0));
+            kprintln!("  vmx: ia32_vmx_cr0_fixed1          = {:#x}", rdmsr(IA32_VMX_CR0_FIXED1));
+            kprintln!("  vmx: ia32_vmx_cr4_fixed0          = {:#x}", rdmsr(IA32_VMX_CR4_FIXED0));
+            kprintln!("  vmx: ia32_vmx_cr4_fixed1          = {:#x}", rdmsr(IA32_VMX_CR4_FIXED1));
         }
         Err(VmxError::NotSupported) => {
             // print_capabilities already announced this; no extra noise.
@@ -754,6 +760,27 @@ pub const VMCS_ENTRY_CTLS: u64 = 0x4012;
 pub const VMCS_VM_INSTRUCTION_ERROR: u64 = 0x4400;
 #[allow(dead_code)]
 pub const VMCS_VM_EXIT_REASON: u64 = 0x4402;
+// 32-bit control fields that may need explicit zeroing.
+#[allow(dead_code)]
+pub const VMCS_PAGE_FAULT_ERROR_CODE_MASK: u64 = 0x4006;
+#[allow(dead_code)]
+pub const VMCS_PAGE_FAULT_ERROR_CODE_MATCH: u64 = 0x4008;
+#[allow(dead_code)]
+pub const VMCS_CR3_TARGET_COUNT: u64 = 0x400A;
+#[allow(dead_code)]
+pub const VMCS_VM_EXIT_MSR_STORE_COUNT: u64 = 0x400E;
+#[allow(dead_code)]
+pub const VMCS_VM_EXIT_MSR_LOAD_COUNT: u64 = 0x4010;
+#[allow(dead_code)]
+pub const VMCS_VM_ENTRY_MSR_LOAD_COUNT: u64 = 0x4014;
+#[allow(dead_code)]
+pub const VMCS_VM_ENTRY_INTR_INFO: u64 = 0x4016;
+#[allow(dead_code)]
+pub const VMCS_VM_ENTRY_EXCEPTION_ERROR_CODE: u64 = 0x4018;
+#[allow(dead_code)]
+pub const VMCS_VM_ENTRY_INSTRUCTION_LENGTH: u64 = 0x401A;
+#[allow(dead_code)]
+pub const VMCS_TSC_OFFSET: u64 = 0x2010;
 #[allow(dead_code)]
 pub const VMCS_VM_EXIT_INTR_INFO: u64 = 0x4404;
 #[allow(dead_code)]
@@ -945,35 +972,37 @@ const IA32_SYSENTER_EIP: u32 = 0x176;
 
 /// Apply VMX fixed-bit constraints to a desired control value.
 ///
-/// Each "true" control MSR encodes:
-///   - bits  [31:0]: allowed-zero — bit X = 0 means the control bit X
-///     MUST be 1 (cannot be cleared)
-///   - bits [63:32]: allowed-one  — bit X = 1 means the control bit X
-///     MAY be 1 (otherwise it MUST be 0)
+/// **KVM nested-VMX convention** (matches `adjust_vmx_controls()` in
+/// `arch/x86/kvm/vmx/vmx.c`):
+///   - low 32 bits = bits that **must be 1** (force them on with OR)
+///   - high 32 bits = bits that **may be 1** (mask everything else off)
 ///
-/// The result that the CPU will accept is `(desired | must_be_1) & allowed_one`,
-/// where `must_be_1 = !allowed_zero`.
+/// Result: `(desired | low) & high`. Bits in low get forced on; bits
+/// not in high get masked off. KVM validates with the inverse —
+/// `(~ctl & low) | (ctl & ~high) == 0` — and our trace confirmed our
+/// previous (inverted) formula was producing values KVM rejected on
+/// `vmx_control_verify(pin_based_vm_exec_control, low, high)`.
+///
+/// NOTE: this is the OPPOSITE of the literal SDM A.3.1 wording, which
+/// says bit X = 1 in low means "control may be 0". KVM (and apparently
+/// the actual hardware) uses this convention instead — the safe way to
+/// match it is to mirror KVM's source one-for-one.
 fn adjust_controls(desired: u32, msr: u32) -> u32 {
     let m = rdmsr(msr);
-    let allowed_zero = m as u32; // bits [31:0]
-    let allowed_one = (m >> 32) as u32; // bits [63:32]
-    let must_be_1 = !allowed_zero;
-    (desired | must_be_1) & allowed_one
+    let low = m as u32;
+    let high = (m >> 32) as u32;
+    (desired | low) & high
 }
 
 /// Adjust secondary processor-based controls (`IA32_VMX_PROCBASED_CTLS2`).
 ///
-/// Unlike the other VMX control MSRs, `PROCBASED_CTLS2` has **no default-1
-/// bits** — the low 32 bits ("allowed 0-settings") are typically zero on
-/// real hardware AND on KVM's nested-VMX, which would make the standard
-/// `must_be_1 = !allowed_zero` formula force ALL 32 bits to 1 (impossible
-/// since most are reserved). The correct interpretation per Intel SDM
-/// 24.6.2 + 31.5.1 is: only consult `allowed_one` (high 32) and clamp
-/// the desired value against it.
+/// `PROCBASED_CTLS2` has **no default-1 bits** — the low 32 bits are
+/// typically zero on KVM's nested-VMX. Skip the "OR with low" step
+/// and just clamp to `high`.
 fn adjust_controls2(desired: u32, msr: u32) -> u32 {
     let m = rdmsr(msr);
-    let allowed_one = (m >> 32) as u32;
-    desired & allowed_one
+    let high = (m >> 32) as u32;
+    desired & high
 }
 
 /// Apply CR0/CR4 fixed-bit constraints. Each FIXED0/FIXED1 MSR pair has:
@@ -1305,6 +1334,21 @@ pub fn setup_controls(vmcs_phys: u64) -> Result<(), VmxError> {
     // VMCS link pointer must be all-ones (Intel SDM 26.4.2).
     vmwrite(VMCS_VMCS_LINK_POINTER, !0u64, vmcs_phys)?;
 
+    // Explicit-zero entry/exit/control fields. `vmcs_clear` is supposed
+    // to leave these at 0, but the SDM only guarantees "an implementation-
+    // defined cleared state" — being explicit costs nothing and removes
+    // a class of "I assumed it was 0" bugs.
+    vmwrite(VMCS_VM_ENTRY_INTR_INFO, 0, vmcs_phys)?;
+    vmwrite(VMCS_VM_ENTRY_EXCEPTION_ERROR_CODE, 0, vmcs_phys)?;
+    vmwrite(VMCS_VM_ENTRY_INSTRUCTION_LENGTH, 0, vmcs_phys)?;
+    vmwrite(VMCS_VM_ENTRY_MSR_LOAD_COUNT, 0, vmcs_phys)?;
+    vmwrite(VMCS_VM_EXIT_MSR_STORE_COUNT, 0, vmcs_phys)?;
+    vmwrite(VMCS_VM_EXIT_MSR_LOAD_COUNT, 0, vmcs_phys)?;
+    vmwrite(VMCS_CR3_TARGET_COUNT, 0, vmcs_phys)?;
+    vmwrite(VMCS_PAGE_FAULT_ERROR_CODE_MASK, 0, vmcs_phys)?;
+    vmwrite(VMCS_PAGE_FAULT_ERROR_CODE_MATCH, 0, vmcs_phys)?;
+    vmwrite(VMCS_TSC_OFFSET, 0, vmcs_phys)?;
+
     // KVM-required bitmap pages. Allocate empty (all-zero) bitmaps:
     // - MSR bitmap: zero = trap NO MSR (default RDMSR/WRMSR behavior).
     //   Combined with PROC_BASED_CTLS.HLT_EXIT etc, this gives us
@@ -1348,14 +1392,26 @@ pub fn setup_guest_state(
     stack_gpa: u64,
     cr3_gpa: u64,
 ) -> Result<(), VmxError> {
-    // CR0: PE=1, PG=1, NE=1, then fixed bits. PG=1 is required for
-    // 64-bit mode.
-    let cr0 = adjust_cr(0x8000_0021, IA32_VMX_CR0_FIXED0, IA32_VMX_CR0_FIXED1);
-    vmwrite(VMCS_GUEST_CR0, cr0, vmcs_phys)?;
+    // CR0 / CR4 for the GUEST.
+    //
+    // **KVM nested-VMX overrides the SDM here.** Per Intel SDM 26.3.1.1
+    // with unrestricted guest enabled, only CR0.PE/PG and CR4.PAE are
+    // required. **But KVM's `nested_guest_cr4_valid` enforces the FULL
+    // CR4_FIXED0/1 constraint regardless** — including CR4.VMXE
+    // (bit 13). So we MUST set VMXE in guest CR4 even though VMX
+    // operation in the guest is impossible.
+    //
+    // Likewise CR0_FIXED0 typically requires PE (bit 0), NE (bit 5),
+    // and PG (bit 31) — all of which we want anyway for long mode.
+    //
+    // The earlier `adjust_cr(...)` with the FIXED MSRs gave the right
+    // values; rewriting them as literals to make the intent obvious.
+    //
+    // CR0: PE | ET | NE | PG = 0x80000031
+    vmwrite(VMCS_GUEST_CR0, 0x8000_0031, vmcs_phys)?;
     vmwrite(VMCS_GUEST_CR3, cr3_gpa, vmcs_phys)?;
-    // CR4: PAE=1 (required for long mode), then fixed bits.
-    let cr4 = adjust_cr(0x20, IA32_VMX_CR4_FIXED0, IA32_VMX_CR4_FIXED1);
-    vmwrite(VMCS_GUEST_CR4, cr4, vmcs_phys)?;
+    // CR4: PAE | VMXE = 0x2020 (KVM requires VMXE; SDM doesn't)
+    vmwrite(VMCS_GUEST_CR4, 0x2020, vmcs_phys)?;
 
     // EFER: LME=1 (long mode enable) + LMA=1 (long mode active).
     // Bit 8 = LME, bit 10 = LMA. Bit 11 = NXE (no-execute) is also
@@ -1606,6 +1662,13 @@ extern "C" fn vm_exit_handler_rust(state: *mut crate::vm::KernelVCpuState) -> u3
     // `vmx_run`) holds the only mutable reference to it for the
     // duration of this VM execution.
     let state_ref = unsafe { &mut *state };
+    let vmcs_phys = state_ref.vmcs.phys;
+    let reason_raw = vmread(VMCS_VM_EXIT_REASON, vmcs_phys);
+    crate::kprintln!(
+        "  vm-exit: state={:#x} reason={:?}",
+        state as u64,
+        reason_raw
+    );
     let vm_handle = crate::vm::current_vm_for_dispatch();
     let action = match vm_handle {
         Some(h) => {
@@ -1623,6 +1686,7 @@ extern "C" fn vm_exit_handler_rust(state: *mut crate::vm::KernelVCpuState) -> u3
             crate::vm::exit::ExitAction::Terminate
         }
     };
+    crate::kprintln!("  vm-exit: action={:?}", action as u32);
     match action {
         crate::vm::exit::ExitAction::Resume => 0,
         crate::vm::exit::ExitAction::Terminate => 1,
@@ -1632,10 +1696,9 @@ extern "C" fn vm_exit_handler_rust(state: *mut crate::vm::KernelVCpuState) -> u3
 core::arch::global_asm!(
     ".global vmx_exit_trampoline",
     "vmx_exit_trampoline:",
-    // Entry: just took a VM-exit. RSP = vmx_exit_stack_top - 8.
-    // [rsp] = saved Rust return address from vmx_run_inner.
-    // All GPRs are guest values; we have to save them before doing
-    // anything else.
+    // Entry: just took a VM-exit. RSP = HOST_RSP from VMCS = the top
+    // of the per-CPU vmx_exit_stack (NOT the kernel stack — those
+    // are completely separate).
     //
     // Find the active KernelVCpuState via gs:[104]. RAX is currently
     // a guest value, but we need a scratch register. Save it on the
@@ -1688,10 +1751,18 @@ core::arch::global_asm!(
     // failure as Terminate.
     "2:",
     // === Terminate ===
-    // RSP at this point is wherever we left it after the dispatcher
-    // call: that's vmx_exit_stack_top - 8 (the slot containing the
-    // Rust return address). `ret` pops it back into rip and returns
-    // to vmx_run_inner.
+    // RSP is currently somewhere on the vmx_exit_stack. The kernel
+    // stack (where vmx_run_inner pushed rbp/rbx/r12-r15) is at
+    // gs:[112] (PERCPU_VMX_SAVED_KERNEL_RSP). Switch back to it
+    // BEFORE popping anything — otherwise we pop garbage from the
+    // exit stack and `ret` to 0 → kernel #PF.
+    "    mov rsp, gs:[112]",
+    "    pop r15",
+    "    pop r14",
+    "    pop r13",
+    "    pop r12",
+    "    pop rbx",
+    "    pop rbp",
     "    ret",
 );
 
@@ -1707,15 +1778,13 @@ core::arch::global_asm!(
     "    push r13",
     "    push r14",
     "    push r15",
+    // Stash the kernel RSP into PerCpu so the trampoline's terminate
+    // path can switch back to this stack before popping. (The
+    // trampoline runs on the per-CPU vmx_exit_stack — see HOST_RSP
+    // in setup_host_state.)
+    "    mov gs:[112], rsp",
     // Stash the state pointer in PerCpu so the trampoline can find it.
     "    mov gs:[104], rdi",
-    // Push our return address (the post-vmlaunch label) onto the
-    // vmx_exit_stack so the trampoline's terminate path can `ret`
-    // back here. The exit stack lives in PerCpu at offset 96.
-    "    mov rax, gs:[96]",        // rax = vmx_exit_stack_top
-    "    sub rax, 8",
-    "    lea rcx, [rip + 3f]",     // rcx = address of post_vmlaunch label
-    "    mov [rax], rcx",          // store return address at exit_stack_top - 8
     // Load guest GPRs from state.gprs into CPU registers.
     "    mov rbx, [rdi + 8]",
     "    mov rcx, [rdi + 16]",
@@ -1744,8 +1813,13 @@ core::arch::global_asm!(
     "4:",
     "    vmresume",
     "3:",
-    // post_vmlaunch — either vmlaunch/vmresume failed (immediate
-    // fall-through) OR the trampoline `ret`ed back here on terminate.
+    // post_vmlaunch — vmlaunch/vmresume failed (immediate fall-through).
+    // RSP is still on the kernel stack here (no swap happened) so we
+    // can pop directly. The success path enters via the trampoline's
+    // terminate branch which restores RSP from gs:[112] and then
+    // jumps here via `ret` after popping rbp — wait no, the
+    // trampoline does its own pops. So this label is ONLY hit on
+    // vmlaunch/vmresume failure.
     "    pop r15",
     "    pop r14",
     "    pop r13",
@@ -1765,12 +1839,17 @@ core::arch::global_asm!(
 /// **Caller must hold the vCPU as `&mut`** so the asm trampoline's
 /// in-place mutation of `state.gprs` is sound.
 pub fn vmx_run(state: &mut crate::vm::KernelVCpuState) -> Result<(), VmxError> {
-    // Make this vCPU's VMCS the active one on this CPU. The first
-    // vmptrld of a freshly-allocated VMCS must be preceded by vmclear.
-    if !state.launched {
-        vmcs_clear(&state.vmcs)?;
-    }
-    vmcs_load(&state.vmcs)?;
+    // **Caller contract**: the VMCS is already loaded as the active
+    // VMCS on this CPU and has its CONTROL and GUEST state populated.
+    // We DO NOT call `vmcs_clear` here — clearing wipes the entire
+    // VMCS to zeros, which would destroy everything `setup_controls`
+    // and `setup_guest_state` just wrote, and produce
+    // `vm_instruction_error=7` because `pin_based_ctls=0` etc. fail
+    // the must-be-1 checks.
+    //
+    // Host state, on the other hand, depends on the current CPU's
+    // CR0/CR3/CR4/exit-stack/RIP/etc. and must be re-written every
+    // time we run on a (potentially different) CPU.
 
     // Populate host state with `vmx_exit_trampoline` as HOST_RIP.
     let exit_top = alloc_exit_stack_for_current_cpu()?;

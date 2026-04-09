@@ -81,12 +81,23 @@ pub struct PerCpu {
     /// (via `gs:[104]`) to find the GPR save area without an indirect
     /// jump table. 0 when no vCPU is currently in non-root operation.
     pub current_vcpu_state: u64,
+    /// offset 112: kernel RSP at the moment of `vmlaunch` / `vmresume`.
+    /// Saved by `vmx_run_inner` before entering VMX non-root operation;
+    /// restored by the asm exit trampoline's terminate path BEFORE
+    /// popping callee-saved registers, because the trampoline runs on
+    /// the per-CPU `vmx_exit_stack` (HOST_RSP) — completely distinct
+    /// from the kernel stack where we pushed `rbp/rbx/r12-r15`.
+    /// Without this, the terminate `pop` sequence pops garbage from
+    /// the exit stack and `ret`s to address 0 → kernel #PF.
+    pub vmx_saved_kernel_rsp: u64,
 }
 
 /// Assembly-accessible offset for `current_vcpu_state` (`gs:[104]`).
 /// Used by `vmx::vmx_exit_trampoline` to find the active vCPU's
 /// `KernelVCpuState` after a VM-exit.
 pub const PERCPU_CURRENT_VCPU_STATE: usize = 104;
+/// Assembly-accessible offset for `vmx_saved_kernel_rsp` (`gs:[112]`).
+pub const PERCPU_VMX_SAVED_KERNEL_RSP: usize = 112;
 
 unsafe impl Send for PerCpu {}
 unsafe impl Sync for PerCpu {}
@@ -111,6 +122,7 @@ impl PerCpu {
             active_vmcs_phys: 0,
             vmx_exit_stack_top: 0,
             current_vcpu_state: 0,
+            vmx_saved_kernel_rsp: 0,
         }
     }
 

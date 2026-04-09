@@ -735,9 +735,27 @@ core::arch::global_asm!(
     // Swap kernel GS ↔ user GS before returning to user mode
     "    swapgs",
     "    iretq",
-    // === Kernel-mode #PF: panic ===
+    // === Kernel-mode #PF: save GPRs, pass iframe, panic ===
     "2:",
     // GS_BASE already points to percpu — no swapgs needed.
+    // Save 15 GPRs onto the stack so the Rust handler can dump them.
+    "    push r15",
+    "    push r14",
+    "    push r13",
+    "    push r12",
+    "    push r11",
+    "    push r10",
+    "    push r9",
+    "    push r8",
+    "    push rbp",
+    "    push rdi",
+    "    push rsi",
+    "    push rdx",
+    "    push rcx",
+    "    push rbx",
+    "    push rax",
+    "    mov rdi, rsp",          // gprs ptr
+    "    lea rsi, [rsp + 120]",  // iframe ptr (15*8 = 120 bytes above)
     "    call page_fault_kernel_handler",
     // unreachable — kernel handler panics
     "    ud2",
@@ -859,12 +877,40 @@ extern "C" fn page_fault_user_handler(gprs: *mut u64, iframe: *mut u64) {
     }
 }
 
-/// Kernel-mode #PF handler — panics.
-/// Called from assembly when CS indicates kernel mode.
+/// Kernel-mode #PF handler — prints diagnostics and panics.
+///
+/// Called from `page_fault_handler_asm` (kernel branch). The asm stub
+/// pushes 15 GPRs and passes pointers to the GPR save area + iframe.
 #[no_mangle]
-extern "C" fn page_fault_kernel_handler() {
+extern "C" fn page_fault_kernel_handler(gprs: *mut u64, iframe: *mut u64) {
     let addr = Cr2::read_raw();
-    panic!("page fault (kernel): addr={:#x}", addr);
+    // SAFETY: see gp_fault_kernel_handler — same layout, same lifetime.
+    let error_code = unsafe { *iframe };
+    let rip = unsafe { *iframe.add(1) };
+    let cs = unsafe { *iframe.add(2) };
+    let rflags = unsafe { *iframe.add(3) };
+    let rsp = unsafe { *iframe.add(4) };
+    let rax = unsafe { *gprs };
+    let rcx = unsafe { *gprs.add(2) };
+    let rdx = unsafe { *gprs.add(3) };
+    let rdi = unsafe { *gprs.add(5) };
+    crate::kprintln!(
+        "#PF(kernel) addr={:#x} rip={:#x} cs={:#x} rflags={:#x} rsp={:#x} code={:#x}",
+        addr,
+        rip,
+        cs,
+        rflags,
+        rsp,
+        error_code
+    );
+    crate::kprintln!(
+        "  rax={:#x} rcx={:#x} rdx={:#x} rdi={:#x}",
+        rax,
+        rcx,
+        rdx,
+        rdi
+    );
+    panic!("page fault (kernel)");
 }
 
 // ---------------------------------------------------------------------------
