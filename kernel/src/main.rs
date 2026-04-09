@@ -93,6 +93,7 @@ mod sync;
 mod syscall;
 pub mod trace;
 mod user;
+mod vm;
 pub mod watchdog;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 

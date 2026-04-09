@@ -401,3 +401,316 @@ pub fn init_bsp() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// VMCS lifecycle (B.3): allocation, vmclear, vmptrld, vmread, vmwrite
+// ---------------------------------------------------------------------------
+
+/// A VMCS region — 4 KiB physical frame whose first 4 bytes hold the
+/// `IA32_VMX_BASIC` revision id, identical layout to a VMXON region but
+/// used to back a single vCPU rather than the per-CPU VMX root state.
+///
+/// Owned by `kernel/src/vm/mod.rs::KernelVCpuState` (Phase B.5+); kept
+/// here as a small wrapper so all VMX phys-frame manipulation is in
+/// one module.
+#[derive(Debug, Clone, Copy)]
+pub struct VmcsRegion {
+    /// Physical address of the 4 KiB region. Used as the operand to
+    /// `vmptrld` and `vmclear`.
+    pub phys: u64,
+}
+
+impl VmcsRegion {
+    /// Allocate a new VMCS region from the frame allocator. Writes the
+    /// VMCS revision id to offset 0 (mandatory per Intel SDM Vol 3C
+    /// §24.2). Returns `Err(OutOfFrames)` on allocation failure.
+    pub fn allocate() -> Result<Self, VmxError> {
+        let frame = mm::alloc_frame().ok_or(VmxError::OutOfFrames)?;
+        let phys = frame.addr();
+        let virt = phys + mm::hhdm_offset();
+        let rev = vmcs_revision_id();
+        // SAFETY: freshly-allocated frame, HHDM-mapped writable, no
+        // other reference exists. We write 4 bytes at offset 0.
+        unsafe {
+            core::ptr::write_volatile(virt as *mut u32, rev);
+        }
+        Ok(Self { phys })
+    }
+}
+
+/// Execute `vmclear`. Transitions the target VMCS to the *clear* state
+/// and (if it was the active VMCS on this CPU) flushes any cached state
+/// back to memory. Required before the first `vmptrld` of a new region.
+///
+/// # Safety
+///
+/// Caller must already be in VMX root operation (`vmxon` succeeded).
+unsafe fn vmclear(vmcs_phys: u64) -> Result<(), VmxError> {
+    let phys = vmcs_phys;
+    let cf: u8;
+    let zf: u8;
+    // SAFETY: see fn-level safety contract.
+    unsafe {
+        core::arch::asm!(
+            "vmclear [{ptr}]",
+            "setc {cf}",
+            "setz {zf}",
+            ptr = in(reg) &phys,
+            cf = out(reg_byte) cf,
+            zf = out(reg_byte) zf,
+            options(nostack),
+        );
+    }
+    if cf != 0 {
+        Err(VmxError::VmFailInvalid)
+    } else if zf != 0 {
+        Err(VmxError::VmFailValid)
+    } else {
+        Ok(())
+    }
+}
+
+/// Execute `vmptrld`. Loads the target VMCS as the active VMCS on this
+/// logical CPU. After this returns successfully, all `vmread`/`vmwrite`
+/// operations target the loaded VMCS.
+///
+/// # Safety
+///
+/// - Must be in VMX root operation
+/// - `vmcs_phys` must point at a 4 KiB-aligned page whose first 4 bytes
+///   hold the correct VMCS revision id (call `VmcsRegion::allocate`)
+/// - The VMCS must already have been `vmclear`ed at least once on
+///   *this* logical CPU before its first `vmptrld` here
+unsafe fn vmptrld_raw(vmcs_phys: u64) -> Result<(), VmxError> {
+    let phys = vmcs_phys;
+    let cf: u8;
+    let zf: u8;
+    // SAFETY: see fn-level safety contract.
+    unsafe {
+        core::arch::asm!(
+            "vmptrld [{ptr}]",
+            "setc {cf}",
+            "setz {zf}",
+            ptr = in(reg) &phys,
+            cf = out(reg_byte) cf,
+            zf = out(reg_byte) zf,
+            options(nostack),
+        );
+    }
+    if cf != 0 {
+        Err(VmxError::VmFailInvalid)
+    } else if zf != 0 {
+        Err(VmxError::VmFailValid)
+    } else {
+        Ok(())
+    }
+}
+
+/// `vmclear` + update `PerCpu::active_vmcs_phys` if we just clobbered
+/// the active VMCS. Safe wrapper around the raw intrinsic.
+pub fn vmcs_clear(region: &VmcsRegion) -> Result<(), VmxError> {
+    if percpu::current_percpu().vmxon_region_phys == 0 {
+        return Err(VmxError::NotSupported);
+    }
+    // SAFETY: we just verified the CPU is in VMX root operation
+    // (`vmxon_region_phys != 0` is set only by `enable_on_current_cpu`
+    // after a successful `vmxon`). The `vmclear` instruction is always
+    // legal in VMX root regardless of which VMCS, if any, is active.
+    unsafe { vmclear(region.phys)? };
+    let pc = percpu::current_percpu();
+    if pc.active_vmcs_phys == region.phys {
+        pc.active_vmcs_phys = 0;
+    }
+    Ok(())
+}
+
+/// `vmptrld` + update `PerCpu::active_vmcs_phys`. Safe wrapper around
+/// the raw intrinsic.
+pub fn vmcs_load(region: &VmcsRegion) -> Result<(), VmxError> {
+    if percpu::current_percpu().vmxon_region_phys == 0 {
+        return Err(VmxError::NotSupported);
+    }
+    // SAFETY: in VMX root operation (see `vmcs_clear` rationale).
+    // Caller is expected to have called `vmcs_clear` at least once on
+    // this logical CPU; we trust the type-state convention here rather
+    // than tracking it in the kernel.
+    unsafe { vmptrld_raw(region.phys)? };
+    percpu::current_percpu().active_vmcs_phys = region.phys;
+    Ok(())
+}
+
+/// Execute `vmread` against the currently-active VMCS.
+///
+/// **Asserts** that the active VMCS on this CPU matches what the caller
+/// expects, by passing the expected VMCS phys as `expected_vmcs_phys`.
+/// If they disagree, returns `Err(VmFailInvalid)` instead of issuing
+/// the instruction. Without this assertion, a missed `vmptrld` between
+/// vCPUs would silently read fields from the wrong VMCS — the kind of
+/// bug that takes weeks to find.
+///
+/// `field` is one of the VMCS encoding constants (host/guest/control
+/// fields, see Intel SDM Vol 3C Appendix B).
+pub fn vmread(field: u64, expected_vmcs_phys: u64) -> Result<u64, VmxError> {
+    let pc = percpu::current_percpu();
+    if pc.active_vmcs_phys == 0 || pc.active_vmcs_phys != expected_vmcs_phys {
+        return Err(VmxError::VmFailInvalid);
+    }
+    let value: u64;
+    let cf: u8;
+    let zf: u8;
+    // SAFETY: we just verified the active VMCS matches the caller's
+    // expectation, so vmread targets a known VMCS. `field` is checked
+    // by the CPU itself; an unsupported field sets ZF (VMfailValid).
+    unsafe {
+        core::arch::asm!(
+            "vmread {value}, {field}",
+            "setc {cf}",
+            "setz {zf}",
+            value = out(reg) value,
+            field = in(reg) field,
+            cf = out(reg_byte) cf,
+            zf = out(reg_byte) zf,
+            options(nostack),
+        );
+    }
+    if cf != 0 {
+        Err(VmxError::VmFailInvalid)
+    } else if zf != 0 {
+        Err(VmxError::VmFailValid)
+    } else {
+        Ok(value)
+    }
+}
+
+/// Execute `vmwrite` against the currently-active VMCS, with the same
+/// active-VMCS assertion as `vmread`.
+pub fn vmwrite(field: u64, value: u64, expected_vmcs_phys: u64) -> Result<(), VmxError> {
+    let pc = percpu::current_percpu();
+    if pc.active_vmcs_phys == 0 || pc.active_vmcs_phys != expected_vmcs_phys {
+        return Err(VmxError::VmFailInvalid);
+    }
+    let cf: u8;
+    let zf: u8;
+    // SAFETY: same reasoning as vmread — we verified the target VMCS.
+    unsafe {
+        core::arch::asm!(
+            "vmwrite {field}, {value}",
+            "setc {cf}",
+            "setz {zf}",
+            field = in(reg) field,
+            value = in(reg) value,
+            cf = out(reg_byte) cf,
+            zf = out(reg_byte) zf,
+            options(nostack),
+        );
+    }
+    if cf != 0 {
+        Err(VmxError::VmFailInvalid)
+    } else if zf != 0 {
+        Err(VmxError::VmFailValid)
+    } else {
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// VMCS field encodings (Intel SDM Vol 3C Appendix B)
+// ---------------------------------------------------------------------------
+//
+// Only the fields we actually use in Phase B are spelled out here.
+// More will land as Phase B.4 (host state) and B.5 (exit handler) need
+// them. The encoding scheme is:
+//   bit 0:    access type (0 = full, 1 = high half of 64-bit fields)
+//   bits 1-9: index
+//   bits 10-11: type (0=control, 1=read-only, 2=guest, 3=host)
+//   bits 12-13: width (0=16b, 1=64b, 2=32b, 3=natural)
+
+// 16-bit control fields
+#[allow(dead_code)]
+pub const VMCS_VPID: u64 = 0x0000;
+// 16-bit guest state
+#[allow(dead_code)]
+pub const VMCS_GUEST_CS_SELECTOR: u64 = 0x0802;
+// 16-bit host state
+#[allow(dead_code)]
+pub const VMCS_HOST_CS_SELECTOR: u64 = 0x0C02;
+#[allow(dead_code)]
+pub const VMCS_HOST_DS_SELECTOR: u64 = 0x0C06;
+#[allow(dead_code)]
+pub const VMCS_HOST_ES_SELECTOR: u64 = 0x0C00;
+#[allow(dead_code)]
+pub const VMCS_HOST_FS_SELECTOR: u64 = 0x0C08;
+#[allow(dead_code)]
+pub const VMCS_HOST_GS_SELECTOR: u64 = 0x0C0A;
+#[allow(dead_code)]
+pub const VMCS_HOST_SS_SELECTOR: u64 = 0x0C04;
+#[allow(dead_code)]
+pub const VMCS_HOST_TR_SELECTOR: u64 = 0x0C0C;
+
+// 64-bit control fields
+#[allow(dead_code)]
+pub const VMCS_IO_BITMAP_A: u64 = 0x2000;
+#[allow(dead_code)]
+pub const VMCS_IO_BITMAP_B: u64 = 0x2002;
+#[allow(dead_code)]
+pub const VMCS_MSR_BITMAP: u64 = 0x2004;
+#[allow(dead_code)]
+pub const VMCS_EPTP: u64 = 0x201A;
+
+// 32-bit control fields
+#[allow(dead_code)]
+pub const VMCS_PIN_BASED_CTLS: u64 = 0x4000;
+#[allow(dead_code)]
+pub const VMCS_PROC_BASED_CTLS: u64 = 0x4002;
+#[allow(dead_code)]
+pub const VMCS_EXCEPTION_BITMAP: u64 = 0x4004;
+#[allow(dead_code)]
+pub const VMCS_PROC_BASED_CTLS2: u64 = 0x401E;
+#[allow(dead_code)]
+pub const VMCS_EXIT_CTLS: u64 = 0x400C;
+#[allow(dead_code)]
+pub const VMCS_ENTRY_CTLS: u64 = 0x4012;
+
+// 32-bit read-only data fields (exit info)
+#[allow(dead_code)]
+pub const VMCS_VM_EXIT_REASON: u64 = 0x4402;
+#[allow(dead_code)]
+pub const VMCS_VM_EXIT_INTR_INFO: u64 = 0x4404;
+#[allow(dead_code)]
+pub const VMCS_EXIT_QUALIFICATION: u64 = 0x6400;
+
+// Natural-width host state
+#[allow(dead_code)]
+pub const VMCS_HOST_CR0: u64 = 0x6C00;
+#[allow(dead_code)]
+pub const VMCS_HOST_CR3: u64 = 0x6C02;
+#[allow(dead_code)]
+pub const VMCS_HOST_CR4: u64 = 0x6C04;
+#[allow(dead_code)]
+pub const VMCS_HOST_FS_BASE: u64 = 0x6C06;
+#[allow(dead_code)]
+pub const VMCS_HOST_GS_BASE: u64 = 0x6C08;
+#[allow(dead_code)]
+pub const VMCS_HOST_TR_BASE: u64 = 0x6C0A;
+#[allow(dead_code)]
+pub const VMCS_HOST_GDTR_BASE: u64 = 0x6C0C;
+#[allow(dead_code)]
+pub const VMCS_HOST_IDTR_BASE: u64 = 0x6C0E;
+#[allow(dead_code)]
+pub const VMCS_HOST_RSP: u64 = 0x6C14;
+#[allow(dead_code)]
+pub const VMCS_HOST_RIP: u64 = 0x6C16;
+
+// Natural-width guest state
+#[allow(dead_code)]
+pub const VMCS_GUEST_CR0: u64 = 0x6800;
+#[allow(dead_code)]
+pub const VMCS_GUEST_CR3: u64 = 0x6802;
+#[allow(dead_code)]
+pub const VMCS_GUEST_CR4: u64 = 0x6804;
+#[allow(dead_code)]
+pub const VMCS_GUEST_RSP: u64 = 0x681C;
+#[allow(dead_code)]
+pub const VMCS_GUEST_RIP: u64 = 0x681E;
+#[allow(dead_code)]
+pub const VMCS_GUEST_RFLAGS: u64 = 0x6820;
