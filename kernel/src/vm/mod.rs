@@ -342,13 +342,61 @@ fn run_phase_b_test_inner() -> Result<(), VmObjError> {
     let stack_frame =
         crate::mm::alloc_frame().ok_or(VmObjError::Vmx(VmxError::OutOfFrames))?;
 
-    // 4. Build the minimal EPT, map GPA 0x1000 → payload, GPA 0x2000 → stack.
+    // 4. KVM nested-VMX forces the guest to run in 64-bit mode. That
+    //    requires CR0.PG=1, so we need a guest page table that maps
+    //    the payload + stack into the guest virtual address space.
+    //    Allocate 3 frames for a minimal 4-level table that uses a
+    //    single 2 MiB leaf to identity-map guest virt 0..2 MiB →
+    //    guest phys 0..2 MiB:
+    //      PML4[0] -> PDPT
+    //      PDPT[0] -> PD
+    //      PD[0]   -> 2 MiB leaf at GPA 0
+    let pml4_frame = crate::mm::alloc_frame().ok_or(VmObjError::Vmx(VmxError::OutOfFrames))?;
+    let pdpt_frame = crate::mm::alloc_frame().ok_or(VmObjError::Vmx(VmxError::OutOfFrames))?;
+    let pd_frame = crate::mm::alloc_frame().ok_or(VmObjError::Vmx(VmxError::OutOfFrames))?;
+    let pml4_phys = pml4_frame.addr();
+    let pdpt_phys = pdpt_frame.addr();
+    let pd_phys = pd_frame.addr();
+    let hhdm = crate::mm::hhdm_offset();
+    // SAFETY: each frame is freshly allocated, HHDM-mapped writable,
+    // not aliased. We zero them and write one entry per page.
+    //
+    // Guest PT entry flags: P=1 W=1 = 0x3.
+    // PD entry with PS=1 (2 MiB leaf): P=1 W=1 PS=1 = 0x83.
+    unsafe {
+        core::ptr::write_bytes((pml4_phys + hhdm) as *mut u8, 0, 4096);
+        core::ptr::write_bytes((pdpt_phys + hhdm) as *mut u8, 0, 4096);
+        core::ptr::write_bytes((pd_phys + hhdm) as *mut u8, 0, 4096);
+        // GUEST page table entries use GUEST physical addresses. Since
+        // EPT is identity-mapped over 0..2 MiB, GPA = HPA for these.
+        // BUT — pml4/pdpt/pd are at HPAs that may be outside 0..2 MiB,
+        // so we need DIFFERENT GPAs for them and let EPT translate.
+        //
+        // Use this scheme:
+        //   GPA 0x1000 = payload (host frame `payload_phys`)
+        //   GPA 0x2000 = stack   (host frame `stack_frame.addr()`)
+        //   GPA 0x10000 = pml4   (host frame `pml4_phys`)
+        //   GPA 0x11000 = pdpt   (host frame `pdpt_phys`)
+        //   GPA 0x12000 = pd     (host frame `pd_phys`)
+        // Guest CR3 = GPA 0x10000 = pml4's guest physical.
+        //
+        // Then PML4[0] holds GPA 0x11000 (pdpt's GPA), PDPT[0] holds
+        // GPA 0x12000 (pd's GPA), PD[0] holds GPA 0 with PS=1
+        // (2 MiB leaf mapping guest virt 0..2 MiB to guest phys 0..2 MiB).
+        *((pml4_phys + hhdm) as *mut u64) = 0x11000 | 0x3;
+        *((pdpt_phys + hhdm) as *mut u64) = 0x12000 | 0x3;
+        *((pd_phys + hhdm) as *mut u64) = 0x0 | 0x83;
+    }
+
+    // 5. Build the minimal EPT and map all 5 GPAs into it.
     let ept = MiniEpt::allocate().map_err(VmObjError::Vmx)?;
     ept.map_4k(0x1000, payload_phys).map_err(VmObjError::Vmx)?;
     ept.map_4k(0x2000, stack_frame.addr()).map_err(VmObjError::Vmx)?;
+    ept.map_4k(0x10000, pml4_phys).map_err(VmObjError::Vmx)?;
+    ept.map_4k(0x11000, pdpt_phys).map_err(VmObjError::Vmx)?;
+    ept.map_4k(0x12000, pd_phys).map_err(VmObjError::Vmx)?;
 
-    // 5. Configure the vCPU's VMCS: load it, set up controls + EPTP +
-    //    host state + guest state, then run.
+    // 6. Configure the vCPU's VMCS and run.
     set_current_vm(vm_handle);
     let result = run_one_vcpu(vm_handle, &ept);
     clear_current_vm();
@@ -403,11 +451,32 @@ fn run_one_vcpu(vm_handle: PoolHandle, ept: &MiniEpt) -> Result<(), VmxError> {
     let vmcs_phys = vcpu.vmcs.phys;
 
     // Initial VMCS setup: clear, load, controls, EPTP, guest state.
+    // Guest CR3 = GPA 0x10000 (the PML4's guest-physical address as
+    // mapped via EPT in `run_phase_b_test_inner`).
     vmx::vmcs_clear(&vcpu.vmcs)?;
     vmx::vmcs_load(&vcpu.vmcs)?;
     vmx::setup_controls(vmcs_phys)?;
     vmx::vmwrite(vmx::VMCS_EPTP, ept.eptp(), vmcs_phys)?;
-    vmx::setup_guest_state(vmcs_phys, 0x1000, 0x2FF0)?;
+    vmx::setup_guest_state(vmcs_phys, 0x1000, 0x2FF0, 0x10000)?;
+
+    // Diagnostic: read back the control fields the CPU actually accepted.
+    // VM-instruction-error 7 ("invalid control field") means one of these
+    // is bad — printing them lets us identify which on the next boot.
+    let pin = vmx::vmread(vmx::VMCS_PIN_BASED_CTLS, vmcs_phys);
+    let p1 = vmx::vmread(vmx::VMCS_PROC_BASED_CTLS, vmcs_phys);
+    let p2 = vmx::vmread(vmx::VMCS_PROC_BASED_CTLS2, vmcs_phys);
+    let exit = vmx::vmread(vmx::VMCS_EXIT_CTLS, vmcs_phys);
+    let entry = vmx::vmread(vmx::VMCS_ENTRY_CTLS, vmcs_phys);
+    let eptp = vmx::vmread(vmx::VMCS_EPTP, vmcs_phys);
+    crate::kprintln!(
+        "  vmx-test: pin={:?} proc1={:?} proc2={:?} exit={:?} entry={:?} eptp={:?}",
+        pin,
+        p1,
+        p2,
+        exit,
+        entry,
+        eptp
+    );
 
     // Drop the pool lock before entering the VMX hot path — vmx_run
     // calls back into the dispatcher which re-locks the pool.

@@ -245,6 +245,37 @@ unsafe fn enable_cr4_vmxe() {
     }
 }
 
+/// Force CR0 and CR4 to satisfy the VMX fixed-bit constraints
+/// (IA32_VMX_CR0_FIXED0/1 and IA32_VMX_CR4_FIXED0/1). `vmxon` raises
+/// #GP if any bit in CR0/CR4 violates these — `mov cr0/cr4` does NOT
+/// fault until you actually try to enter VMX root, so the kernel may
+/// be running with bits VMX forbids (e.g. CR0.NW/CD or CR4 reserved
+/// bits set by firmware) right up until the vmxon attempt.
+///
+/// **Must be called AFTER `enable_cr4_vmxe`** so that VMXE is in the
+/// CR4 value being written. Otherwise we'd clobber the bit we just set.
+#[inline]
+unsafe fn normalize_cr0_cr4_for_vmx() {
+    unsafe {
+        // CR0
+        let mut cr0: u64;
+        core::arch::asm!("mov {}, cr0", out(reg) cr0, options(nomem, nostack, preserves_flags));
+        let new_cr0 = adjust_cr(cr0, IA32_VMX_CR0_FIXED0, IA32_VMX_CR0_FIXED1);
+        if new_cr0 != cr0 {
+            cr0 = new_cr0;
+            core::arch::asm!("mov cr0, {}", in(reg) cr0, options(nomem, nostack, preserves_flags));
+        }
+        // CR4 — VMXE was already set by enable_cr4_vmxe.
+        let mut cr4: u64;
+        core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags));
+        let new_cr4 = adjust_cr(cr4, IA32_VMX_CR4_FIXED0, IA32_VMX_CR4_FIXED1);
+        if new_cr4 != cr4 {
+            cr4 = new_cr4;
+            core::arch::asm!("mov cr4, {}", in(reg) cr4, options(nomem, nostack, preserves_flags));
+        }
+    }
+}
+
 /// Execute the `vmxon` instruction. The operand is a memory location
 /// holding the 64-bit physical address of the VMXON region.
 ///
@@ -368,8 +399,31 @@ pub fn enable_on_current_cpu() -> Result<(), VmxError> {
     // bit on this CPU; setting it cannot fault.
     unsafe {
         enable_cr4_vmxe();
+        // Force CR0/CR4 to satisfy IA32_VMX_CR0/CR4_FIXED0/1. The
+        // kernel may be running with bits VMX forbids (e.g. CR0.CD
+        // set by firmware) and `vmxon` would raise #GP otherwise.
+        // MUST run AFTER enable_cr4_vmxe so VMXE is in the live
+        // CR4 value when we read+adjust+write it.
+        normalize_cr0_cr4_for_vmx();
     }
     let region_phys = allocate_vmxon_region()?;
+    // Diagnostic: dump the post-normalize CR0/CR4 + region phys so any
+    // future vmxon failures show what the CPU saw.
+    {
+        let cr0: u64;
+        let cr4: u64;
+        unsafe {
+            core::arch::asm!("mov {}, cr0", out(reg) cr0, options(nomem, nostack, preserves_flags));
+            core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags));
+        }
+        kprintln!(
+            "  vmx: pre-vmxon cr0={:#x} cr4={:#x} region_phys={:#x} rev={:#x}",
+            cr0,
+            cr4,
+            region_phys,
+            vmcs_revision_id()
+        );
+    }
     // SAFETY: we just allocated the region, set CR4.VMXE, ensured
     // feature_control is locked-and-enabled, and verified VMX is
     // supported. We are not yet in VMX root (this is the first vmxon
@@ -392,6 +446,23 @@ pub fn init_bsp() {
                 "  vmx: BSP entered VMX root operation (vmxon_region_phys={:#x})",
                 region
             );
+            // Diagnostic dump of all the capability MSRs we use during
+            // VMCS construction. Phase B's first KVM boot reported
+            // VM-instruction-error 7 (invalid control field), and the
+            // root cause is almost certainly that one of these MSRs
+            // has unexpected bits set (e.g. nested KVM not supporting
+            // HLT_EXIT in the TRUE variant).
+            let basic = read_vmx_basic();
+            kprintln!("  vmx: ia32_vmx_basic = {:#x}", basic);
+            kprintln!("  vmx: ia32_vmx_pinbased_ctls       = {:#x}", rdmsr(IA32_VMX_PINBASED_CTLS));
+            kprintln!("  vmx: ia32_vmx_true_pinbased_ctls  = {:#x}", rdmsr(IA32_VMX_TRUE_PINBASED_CTLS));
+            kprintln!("  vmx: ia32_vmx_procbased_ctls      = {:#x}", rdmsr(IA32_VMX_PROCBASED_CTLS));
+            kprintln!("  vmx: ia32_vmx_true_procbased_ctls = {:#x}", rdmsr(IA32_VMX_TRUE_PROCBASED_CTLS));
+            kprintln!("  vmx: ia32_vmx_procbased_ctls2     = {:#x}", rdmsr(IA32_VMX_PROCBASED_CTLS2));
+            kprintln!("  vmx: ia32_vmx_exit_ctls           = {:#x}", rdmsr(IA32_VMX_EXIT_CTLS));
+            kprintln!("  vmx: ia32_vmx_true_exit_ctls      = {:#x}", rdmsr(IA32_VMX_TRUE_EXIT_CTLS));
+            kprintln!("  vmx: ia32_vmx_entry_ctls          = {:#x}", rdmsr(IA32_VMX_ENTRY_CTLS));
+            kprintln!("  vmx: ia32_vmx_true_entry_ctls     = {:#x}", rdmsr(IA32_VMX_TRUE_ENTRY_CTLS));
         }
         Err(VmxError::NotSupported) => {
             // print_capabilities already announced this; no extra noise.
@@ -656,7 +727,13 @@ pub const VMCS_IO_BITMAP_B: u64 = 0x2002;
 #[allow(dead_code)]
 pub const VMCS_MSR_BITMAP: u64 = 0x2004;
 #[allow(dead_code)]
+pub const VMCS_VIRT_APIC_ADDR: u64 = 0x2012;
+#[allow(dead_code)]
 pub const VMCS_EPTP: u64 = 0x201A;
+/// 32-bit control: TPR threshold for the virtual APIC. Required when
+/// the "Use TPR shadow" primary processor-based control is set.
+#[allow(dead_code)]
+pub const VMCS_TPR_THRESHOLD: u64 = 0x401C;
 
 // 32-bit control fields
 #[allow(dead_code)]
@@ -729,6 +806,20 @@ pub const VMCS_HOST_IA32_SYSENTER_CS: u64 = 0x4C00;
 pub const VMCS_HOST_IA32_EFER: u64 = 0x2C02;
 #[allow(dead_code)]
 pub const VMCS_HOST_IA32_EFER_HIGH: u64 = 0x2C03;
+#[allow(dead_code)]
+pub const VMCS_HOST_IA32_PAT: u64 = 0x2C00;
+#[allow(dead_code)]
+pub const VMCS_HOST_IA32_PERF_GLOBAL_CTRL: u64 = 0x2C04;
+#[allow(dead_code)]
+pub const VMCS_GUEST_IA32_PAT: u64 = 0x2804;
+#[allow(dead_code)]
+pub const VMCS_GUEST_IA32_EFER: u64 = 0x2806;
+#[allow(dead_code)]
+pub const VMCS_GUEST_IA32_PERF_GLOBAL_CTRL: u64 = 0x2808;
+/// `GUEST_IA32_DEBUGCTL` (full). Required when ENTRY_CTLS bit 2
+/// (Load debug controls) is set, which KVM forces on.
+#[allow(dead_code)]
+pub const VMCS_GUEST_IA32_DEBUGCTL: u64 = 0x2802;
 
 // Guest segment fields (used by 32-bit protected-mode test guest)
 #[allow(dead_code)]
@@ -810,6 +901,13 @@ pub const VMCS_GUEST_INTERRUPTIBILITY_STATE: u64 = 0x4824;
 pub const VMCS_GUEST_ACTIVITY_STATE: u64 = 0x4826;
 #[allow(dead_code)]
 pub const VMCS_VMCS_LINK_POINTER: u64 = 0x2800;
+/// 32-bit guest state. Required when pin-based control bit 6
+/// (Activate VMX-preemption timer) is set. KVM nested-VMX forces
+/// this bit on, so we must always populate the timer field even if
+/// we don't intend to use it. Setting it to 0xFFFFFFFF gives the
+/// guest the maximum window before the preemption-timer VM-exit.
+#[allow(dead_code)]
+pub const VMCS_GUEST_VMX_PREEMPTION_TIMER_VALUE: u64 = 0x482E;
 
 // ---------------------------------------------------------------------------
 // B.4 — VMX capability MSRs + control fixed-bit machinery
@@ -861,6 +959,21 @@ fn adjust_controls(desired: u32, msr: u32) -> u32 {
     let allowed_one = (m >> 32) as u32; // bits [63:32]
     let must_be_1 = !allowed_zero;
     (desired | must_be_1) & allowed_one
+}
+
+/// Adjust secondary processor-based controls (`IA32_VMX_PROCBASED_CTLS2`).
+///
+/// Unlike the other VMX control MSRs, `PROCBASED_CTLS2` has **no default-1
+/// bits** — the low 32 bits ("allowed 0-settings") are typically zero on
+/// real hardware AND on KVM's nested-VMX, which would make the standard
+/// `must_be_1 = !allowed_zero` formula force ALL 32 bits to 1 (impossible
+/// since most are reserved). The correct interpretation per Intel SDM
+/// 24.6.2 + 31.5.1 is: only consult `allowed_one` (high 32) and clamp
+/// the desired value against it.
+fn adjust_controls2(desired: u32, msr: u32) -> u32 {
+    let m = rdmsr(msr);
+    let allowed_one = (m >> 32) as u32;
+    desired & allowed_one
 }
 
 /// Apply CR0/CR4 fixed-bit constraints. Each FIXED0/FIXED1 MSR pair has:
@@ -1101,12 +1214,43 @@ pub fn setup_host_state(vmcs_phys: u64, host_rsp: u64, host_rip: u64) -> Result<
     let efer = rdmsr(IA32_EFER);
     vmwrite(VMCS_HOST_IA32_EFER, efer, vmcs_phys)?;
 
+    // IA32_PAT — required because exit_ctls bit 19 (Load IA32_PAT) is
+    // forced on by KVM. The host's PAT is at MSR 0x277.
+    let pat = rdmsr(0x277);
+    vmwrite(VMCS_HOST_IA32_PAT, pat, vmcs_phys)?;
+
+    // IA32_PERF_GLOBAL_CTRL — required because exit_ctls bit 12 is
+    // forced on. We don't use perf counters in the kernel, so 0 is fine.
+    vmwrite(VMCS_HOST_IA32_PERF_GLOBAL_CTRL, 0, vmcs_phys)?;
+
     Ok(())
+}
+
+/// Allocate a 4 KiB frame and zero it via HHDM. Used for the
+/// MSR/IO/VIRT-APIC bitmap pages that KVM nested-VMX requires.
+fn alloc_zero_page() -> Result<u64, VmxError> {
+    let frame = mm::alloc_frame().ok_or(VmxError::OutOfFrames)?;
+    let phys = frame.addr();
+    let virt = phys + mm::hhdm_offset();
+    // SAFETY: freshly allocated frame, HHDM-mapped writable, no other
+    // reference to this physical page.
+    unsafe {
+        core::ptr::write_bytes(virt as *mut u8, 0, 4096);
+    }
+    Ok(phys)
 }
 
 /// Populate the VMCS execution control fields (pin/proc/exit/entry +
 /// secondary). Applies the fixed-bit MSR adjustments so the values
 /// the CPU sees are always legal for this microarchitecture.
+///
+/// **Allocates** the MSR-bitmap, I/O-bitmap A/B, and virtual-APIC pages
+/// because KVM nested-VMX reports the corresponding control bits
+/// (TPR shadow, Use I/O bitmaps, Use MSR bitmaps) as must-be-1, and
+/// VM entry fails with error 7 if the supporting VMCS fields aren't
+/// populated. The allocated pages are leaked — Phase B has at most
+/// one VM at a time so the few KiB don't matter; Phase C will own
+/// them per-VM.
 ///
 /// EPTP is filled separately by the caller (it depends on a per-VM
 /// EPT root, not host state).
@@ -1128,8 +1272,10 @@ pub fn setup_controls(vmcs_phys: u64) -> Result<(), VmxError> {
     vmwrite(VMCS_PROC_BASED_CTLS, proc1 as u64, vmcs_phys)?;
 
     // Secondary: EPT, VPID, unrestricted guest. Adjusted against
-    // IA32_VMX_PROCBASED_CTLS2 (no "true" variant).
-    let proc2 = adjust_controls(
+    // IA32_VMX_PROCBASED_CTLS2 — uses `adjust_controls2` because
+    // CTLS2 has no default-1 bits and KVM reports allowed_zero=0,
+    // which the standard formula misinterprets as "all bits required".
+    let proc2 = adjust_controls2(
         (1 << 1) | (1 << 5) | (1 << 7), // EPT | VPID | UNRESTRICTED_GUEST
         IA32_VMX_PROCBASED_CTLS2,
     );
@@ -1139,8 +1285,13 @@ pub fn setup_controls(vmcs_phys: u64) -> Result<(), VmxError> {
     let exit = adjust_controls(1 << 9, IA32_VMX_TRUE_EXIT_CTLS);
     vmwrite(VMCS_EXIT_CTLS, exit as u64, vmcs_phys)?;
 
-    // VM-entry: 32-bit guest for the test payload (no IA32E_GUEST).
-    let entry = adjust_controls(0, IA32_VMX_TRUE_ENTRY_CTLS);
+    // VM-entry: 64-bit guest (IA-32e mode bit 9, FORCED on by KVM).
+    // Also Load IA32_EFER (bit 15) and Load IA32_PAT (bit 14) since
+    // they're forced too — desired here so the bits show up explicitly.
+    let entry = adjust_controls(
+        (1 << 9) | (1 << 14) | (1 << 15),
+        IA32_VMX_TRUE_ENTRY_CTLS,
+    );
     vmwrite(VMCS_ENTRY_CTLS, entry as u64, vmcs_phys)?;
 
     // Exception bitmap = 0 (no exceptions cause exits — we let the
@@ -1154,37 +1305,89 @@ pub fn setup_controls(vmcs_phys: u64) -> Result<(), VmxError> {
     // VMCS link pointer must be all-ones (Intel SDM 26.4.2).
     vmwrite(VMCS_VMCS_LINK_POINTER, !0u64, vmcs_phys)?;
 
+    // KVM-required bitmap pages. Allocate empty (all-zero) bitmaps:
+    // - MSR bitmap: zero = trap NO MSR (default RDMSR/WRMSR behavior).
+    //   Combined with PROC_BASED_CTLS.HLT_EXIT etc, this gives us
+    //   passthrough for MSR access (we don't trap RDMSR/WRMSR in B.5).
+    // - I/O bitmap A/B: zero = trap NO I/O port (combined with bit 24
+    //   "unconditional I/O exit" — if that's also forced on, all I/O
+    //   traps regardless of bitmap).
+    // - Virtual APIC: zero page for TPR shadow.
+    let msr_bitmap = alloc_zero_page()?;
+    let io_bitmap_a = alloc_zero_page()?;
+    let io_bitmap_b = alloc_zero_page()?;
+    let virt_apic = alloc_zero_page()?;
+    vmwrite(VMCS_MSR_BITMAP, msr_bitmap, vmcs_phys)?;
+    vmwrite(VMCS_IO_BITMAP_A, io_bitmap_a, vmcs_phys)?;
+    vmwrite(VMCS_IO_BITMAP_B, io_bitmap_b, vmcs_phys)?;
+    vmwrite(VMCS_VIRT_APIC_ADDR, virt_apic, vmcs_phys)?;
+    // TPR threshold must be a 4-bit value when TPR shadow is enabled.
+    // 0 means "no exit on TPR drop" — fine for our HLT-and-exit guest.
+    vmwrite(VMCS_TPR_THRESHOLD, 0, vmcs_phys)?;
+
     Ok(())
 }
 
-/// Populate guest state for a 32-bit protected-mode flat guest. The
-/// guest enters with CR0.PE=1, CR0.PG=0 (no paging — EPT alone provides
-/// translation), flat 32-bit code/data segments, RIP at `entry_gpa`.
+/// Populate guest state for a **64-bit long-mode** flat guest.
+///
+/// KVM nested-VMX forces `ENTRY_CTLS.IA-32e mode guest` (bit 9) on, so
+/// we cannot run a 32-bit guest under KVM. The guest enters in long
+/// mode with paging enabled (CR0.PG=1, CR4.PAE=1, EFER.LME+LMA=1),
+/// flat 64-bit code/data segments, RIP at `entry_gpa`.
+///
+/// `cr3_gpa` must point at the guest's PML4 (whose physical pages
+/// are EPT-mapped 1:1 by the caller). The guest CPU walks the page
+/// table on every memory access — both code fetches AND data — so
+/// the page-table pages themselves must be reachable through EPT.
 ///
 /// Used by the Phase B test payload to run a `mov eax, 1; cpuid; hlt`
-/// sequence at a known guest physical address (which the EPT then maps
-/// to the host frame holding those bytes).
+/// sequence at a known guest virtual address.
 pub fn setup_guest_state(
     vmcs_phys: u64,
     entry_gpa: u64,
     stack_gpa: u64,
+    cr3_gpa: u64,
 ) -> Result<(), VmxError> {
-    // CR0: PE=1, NE=1, fixed bits applied. No paging.
-    let cr0 = adjust_cr(0x21, IA32_VMX_CR0_FIXED0, IA32_VMX_CR0_FIXED1);
+    // CR0: PE=1, PG=1, NE=1, then fixed bits. PG=1 is required for
+    // 64-bit mode.
+    let cr0 = adjust_cr(0x8000_0021, IA32_VMX_CR0_FIXED0, IA32_VMX_CR0_FIXED1);
     vmwrite(VMCS_GUEST_CR0, cr0, vmcs_phys)?;
-    vmwrite(VMCS_GUEST_CR3, 0, vmcs_phys)?;
-    let cr4 = adjust_cr(0, IA32_VMX_CR4_FIXED0, IA32_VMX_CR4_FIXED1);
+    vmwrite(VMCS_GUEST_CR3, cr3_gpa, vmcs_phys)?;
+    // CR4: PAE=1 (required for long mode), then fixed bits.
+    let cr4 = adjust_cr(0x20, IA32_VMX_CR4_FIXED0, IA32_VMX_CR4_FIXED1);
     vmwrite(VMCS_GUEST_CR4, cr4, vmcs_phys)?;
 
-    // Flat 32-bit code segment, DPL=0, granularity=4K, default size=32-bit.
-    // access_rights: present(7) + S(4) + type=10/Code-Read/Acc(0xB) = 0x9B,
-    // db(14)=1 32-bit, g(15)=1 4K granularity → 0xC09B
+    // EFER: LME=1 (long mode enable) + LMA=1 (long mode active).
+    // Bit 8 = LME, bit 10 = LMA. Bit 11 = NXE (no-execute) is also
+    // typically required.
+    let efer = (1u64 << 8) | (1 << 10) | (1 << 11);
+    vmwrite(VMCS_GUEST_IA32_EFER, efer, vmcs_phys)?;
+
+    // IA32_PAT — needed because ENTRY_CTLS bit 14 (Load IA32_PAT) is
+    // forced on by KVM. Use the host's current PAT value.
+    let pat = rdmsr(0x277);
+    vmwrite(VMCS_GUEST_IA32_PAT, pat, vmcs_phys)?;
+
+    // PERF_GLOBAL_CTRL — guest does not use perf counters.
+    vmwrite(VMCS_GUEST_IA32_PERF_GLOBAL_CTRL, 0, vmcs_phys)?;
+
+    // DEBUGCTL — required because ENTRY_CTLS bit 2 (Load debug
+    // controls) is forced on by KVM. 0 = no debug features.
+    vmwrite(VMCS_GUEST_IA32_DEBUGCTL, 0, vmcs_phys)?;
+
+    // 64-bit code segment. Access rights:
+    //   present(7) + S(4) + type=Code/Read/Acc(0xB) = 0x9B
+    //   L(13) = 1 (long mode), G(15) = 1 (4K granularity)
+    //   = 0xA09B
     vmwrite(VMCS_GUEST_CS_SELECTOR, 0x08, vmcs_phys)?;
     vmwrite(VMCS_GUEST_CS_BASE, 0, vmcs_phys)?;
     vmwrite(VMCS_GUEST_CS_LIMIT, 0xFFFFFFFF, vmcs_phys)?;
-    vmwrite(VMCS_GUEST_CS_ACCESS_RIGHTS, 0xC09B, vmcs_phys)?;
+    vmwrite(VMCS_GUEST_CS_ACCESS_RIGHTS, 0xA09B, vmcs_phys)?;
 
-    // Flat 32-bit data segments (DS/ES/SS/FS/GS).
+    // 64-bit data segments. In long mode, base/limit are ignored for
+    // DS/ES/SS/FS/GS, but VMX entry checks still expect "present" set.
+    //   present(7) + S(4) + type=Data/Write/Acc(0x3) = 0x93
+    //   db(14)=1 + g(15)=1 = 0xC093
     let data_ar = 0xC093u64;
     for (sel_field, base_field, limit_field, ar_field) in [
         (
@@ -1251,6 +1454,13 @@ pub fn setup_guest_state(
     // Activity state = 0 (active), interruptibility = 0.
     vmwrite(VMCS_GUEST_INTERRUPTIBILITY_STATE, 0, vmcs_phys)?;
     vmwrite(VMCS_GUEST_ACTIVITY_STATE, 0, vmcs_phys)?;
+
+    // VMX preemption timer value. Required because KVM forces pin-based
+    // bit 6 (activate VMX-preemption timer) on; without writing this
+    // field VM entry fails with VM-instruction-error 7.
+    // 0xFFFFFFFF = max window (~143s on a 30 GHz TSC), longer than any
+    // Phase B test guest will run.
+    vmwrite(VMCS_GUEST_VMX_PREEMPTION_TIMER_VALUE, 0xFFFF_FFFF, vmcs_phys)?;
 
     Ok(())
 }
@@ -1324,6 +1534,22 @@ impl MiniEpt {
         unsafe {
             let entry_ptr = (pt_virt as *mut u64).add(pt_idx);
             *entry_ptr = host_phys | EPT_LEAF_FLAGS;
+        }
+        Ok(())
+    }
+
+    /// Identity-map ALL of guest physical `[0..2 MiB)` to a contiguous
+    /// host range starting at `host_base_phys`. Convenience for the
+    /// Phase B test which needs the guest page-table pages, payload,
+    /// and stack all reachable through EPT.
+    ///
+    /// Equivalent to calling `map_4k` 512 times.
+    #[allow(dead_code)]
+    pub fn identity_map_first_2m(&self, host_base_phys: u64) -> Result<(), VmxError> {
+        for i in 0..512 {
+            let gpa = (i as u64) * 4096;
+            let hpa = host_base_phys + gpa;
+            self.map_4k(gpa, hpa)?;
         }
         Ok(())
     }
