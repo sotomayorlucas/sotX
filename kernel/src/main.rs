@@ -303,6 +303,12 @@ extern "C" fn kmain() -> ! {
     // Only `just run-kvm` (with `-cpu host,+vmx`) will reach VMX root.
     arch::vmx::init_bsp();
 
+    // Phase B test path: create a tiny VM, run a `mov eax,1; cpuid; hlt`
+    // payload, observe the spoofed CPUID exit and the HLT termination.
+    // No-op under TCG/WHPX (gated behind `cpu_has_vmx`).
+    vm::init();
+    vm::run_phase_b_test();
+
     // Spawn init process (first userspace code).
     let user_cr3 = spawn_init_process();
     kinfo!(sotos_common::trace::cat::PROCESS, "[ok] Init process");

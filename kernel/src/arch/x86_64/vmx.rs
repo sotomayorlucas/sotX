@@ -410,9 +410,10 @@ pub fn init_bsp() {
 /// `IA32_VMX_BASIC` revision id, identical layout to a VMXON region but
 /// used to back a single vCPU rather than the per-CPU VMX root state.
 ///
-/// Owned by `kernel/src/vm/mod.rs::KernelVCpuState` (Phase B.5+); kept
-/// here as a small wrapper so all VMX phys-frame manipulation is in
-/// one module.
+/// `#[repr(C)]` so it can be embedded in `KernelVCpuState` (also
+/// `#[repr(C)]`) without disturbing the asm-visible field offsets the
+/// trampoline relies on.
+#[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct VmcsRegion {
     /// Physical address of the 4 KiB region. Used as the operand to
@@ -673,6 +674,8 @@ pub const VMCS_ENTRY_CTLS: u64 = 0x4012;
 
 // 32-bit read-only data fields (exit info)
 #[allow(dead_code)]
+pub const VMCS_VM_INSTRUCTION_ERROR: u64 = 0x4400;
+#[allow(dead_code)]
 pub const VMCS_VM_EXIT_REASON: u64 = 0x4402;
 #[allow(dead_code)]
 pub const VMCS_VM_EXIT_INTR_INFO: u64 = 0x4404;
@@ -714,3 +717,851 @@ pub const VMCS_GUEST_RSP: u64 = 0x681C;
 pub const VMCS_GUEST_RIP: u64 = 0x681E;
 #[allow(dead_code)]
 pub const VMCS_GUEST_RFLAGS: u64 = 0x6820;
+
+// Additional natural-width host state needed by `setup_host_state`.
+#[allow(dead_code)]
+pub const VMCS_HOST_IA32_SYSENTER_ESP: u64 = 0x6C10;
+#[allow(dead_code)]
+pub const VMCS_HOST_IA32_SYSENTER_EIP: u64 = 0x6C12;
+#[allow(dead_code)]
+pub const VMCS_HOST_IA32_SYSENTER_CS: u64 = 0x4C00;
+#[allow(dead_code)]
+pub const VMCS_HOST_IA32_EFER: u64 = 0x2C02;
+#[allow(dead_code)]
+pub const VMCS_HOST_IA32_EFER_HIGH: u64 = 0x2C03;
+
+// Guest segment fields (used by 32-bit protected-mode test guest)
+#[allow(dead_code)]
+pub const VMCS_GUEST_ES_SELECTOR: u64 = 0x0800;
+#[allow(dead_code)]
+pub const VMCS_GUEST_SS_SELECTOR: u64 = 0x0804;
+#[allow(dead_code)]
+pub const VMCS_GUEST_DS_SELECTOR: u64 = 0x0806;
+#[allow(dead_code)]
+pub const VMCS_GUEST_FS_SELECTOR: u64 = 0x0808;
+#[allow(dead_code)]
+pub const VMCS_GUEST_GS_SELECTOR: u64 = 0x080A;
+#[allow(dead_code)]
+pub const VMCS_GUEST_LDTR_SELECTOR: u64 = 0x080C;
+#[allow(dead_code)]
+pub const VMCS_GUEST_TR_SELECTOR: u64 = 0x080E;
+
+#[allow(dead_code)]
+pub const VMCS_GUEST_ES_BASE: u64 = 0x6806;
+#[allow(dead_code)]
+pub const VMCS_GUEST_CS_BASE: u64 = 0x6808;
+#[allow(dead_code)]
+pub const VMCS_GUEST_SS_BASE: u64 = 0x680A;
+#[allow(dead_code)]
+pub const VMCS_GUEST_DS_BASE: u64 = 0x680C;
+#[allow(dead_code)]
+pub const VMCS_GUEST_FS_BASE: u64 = 0x680E;
+#[allow(dead_code)]
+pub const VMCS_GUEST_GS_BASE: u64 = 0x6810;
+#[allow(dead_code)]
+pub const VMCS_GUEST_LDTR_BASE: u64 = 0x6812;
+#[allow(dead_code)]
+pub const VMCS_GUEST_TR_BASE: u64 = 0x6814;
+#[allow(dead_code)]
+pub const VMCS_GUEST_GDTR_BASE: u64 = 0x6816;
+#[allow(dead_code)]
+pub const VMCS_GUEST_IDTR_BASE: u64 = 0x6818;
+
+#[allow(dead_code)]
+pub const VMCS_GUEST_ES_LIMIT: u64 = 0x4800;
+#[allow(dead_code)]
+pub const VMCS_GUEST_CS_LIMIT: u64 = 0x4802;
+#[allow(dead_code)]
+pub const VMCS_GUEST_SS_LIMIT: u64 = 0x4804;
+#[allow(dead_code)]
+pub const VMCS_GUEST_DS_LIMIT: u64 = 0x4806;
+#[allow(dead_code)]
+pub const VMCS_GUEST_FS_LIMIT: u64 = 0x4808;
+#[allow(dead_code)]
+pub const VMCS_GUEST_GS_LIMIT: u64 = 0x480A;
+#[allow(dead_code)]
+pub const VMCS_GUEST_LDTR_LIMIT: u64 = 0x480C;
+#[allow(dead_code)]
+pub const VMCS_GUEST_TR_LIMIT: u64 = 0x480E;
+#[allow(dead_code)]
+pub const VMCS_GUEST_GDTR_LIMIT: u64 = 0x4810;
+#[allow(dead_code)]
+pub const VMCS_GUEST_IDTR_LIMIT: u64 = 0x4812;
+
+#[allow(dead_code)]
+pub const VMCS_GUEST_ES_ACCESS_RIGHTS: u64 = 0x4814;
+#[allow(dead_code)]
+pub const VMCS_GUEST_CS_ACCESS_RIGHTS: u64 = 0x4816;
+#[allow(dead_code)]
+pub const VMCS_GUEST_SS_ACCESS_RIGHTS: u64 = 0x4818;
+#[allow(dead_code)]
+pub const VMCS_GUEST_DS_ACCESS_RIGHTS: u64 = 0x481A;
+#[allow(dead_code)]
+pub const VMCS_GUEST_FS_ACCESS_RIGHTS: u64 = 0x481C;
+#[allow(dead_code)]
+pub const VMCS_GUEST_GS_ACCESS_RIGHTS: u64 = 0x481E;
+#[allow(dead_code)]
+pub const VMCS_GUEST_LDTR_ACCESS_RIGHTS: u64 = 0x4820;
+#[allow(dead_code)]
+pub const VMCS_GUEST_TR_ACCESS_RIGHTS: u64 = 0x4822;
+#[allow(dead_code)]
+pub const VMCS_GUEST_INTERRUPTIBILITY_STATE: u64 = 0x4824;
+#[allow(dead_code)]
+pub const VMCS_GUEST_ACTIVITY_STATE: u64 = 0x4826;
+#[allow(dead_code)]
+pub const VMCS_VMCS_LINK_POINTER: u64 = 0x2800;
+
+// ---------------------------------------------------------------------------
+// B.4 — VMX capability MSRs + control fixed-bit machinery
+// ---------------------------------------------------------------------------
+
+#[allow(dead_code)]
+const IA32_VMX_PINBASED_CTLS: u32 = 0x481;
+#[allow(dead_code)]
+const IA32_VMX_PROCBASED_CTLS: u32 = 0x482;
+#[allow(dead_code)]
+const IA32_VMX_EXIT_CTLS: u32 = 0x483;
+#[allow(dead_code)]
+const IA32_VMX_ENTRY_CTLS: u32 = 0x484;
+const IA32_VMX_PROCBASED_CTLS2: u32 = 0x48B;
+const IA32_VMX_TRUE_PINBASED_CTLS: u32 = 0x48D;
+const IA32_VMX_TRUE_PROCBASED_CTLS: u32 = 0x48E;
+const IA32_VMX_TRUE_EXIT_CTLS: u32 = 0x48F;
+const IA32_VMX_TRUE_ENTRY_CTLS: u32 = 0x490;
+
+#[allow(dead_code)]
+const IA32_VMX_CR0_FIXED0: u32 = 0x486;
+#[allow(dead_code)]
+const IA32_VMX_CR0_FIXED1: u32 = 0x487;
+#[allow(dead_code)]
+const IA32_VMX_CR4_FIXED0: u32 = 0x488;
+#[allow(dead_code)]
+const IA32_VMX_CR4_FIXED1: u32 = 0x489;
+
+const IA32_FS_BASE: u32 = 0xC000_0100;
+const IA32_GS_BASE: u32 = 0xC000_0101;
+const IA32_EFER: u32 = 0xC000_0080;
+const IA32_SYSENTER_CS: u32 = 0x174;
+const IA32_SYSENTER_ESP: u32 = 0x175;
+const IA32_SYSENTER_EIP: u32 = 0x176;
+
+/// Apply VMX fixed-bit constraints to a desired control value.
+///
+/// Each "true" control MSR encodes:
+///   - bits  [31:0]: allowed-zero — bit X = 0 means the control bit X
+///     MUST be 1 (cannot be cleared)
+///   - bits [63:32]: allowed-one  — bit X = 1 means the control bit X
+///     MAY be 1 (otherwise it MUST be 0)
+///
+/// The result that the CPU will accept is `(desired | must_be_1) & allowed_one`,
+/// where `must_be_1 = !allowed_zero`.
+fn adjust_controls(desired: u32, msr: u32) -> u32 {
+    let m = rdmsr(msr);
+    let allowed_zero = m as u32; // bits [31:0]
+    let allowed_one = (m >> 32) as u32; // bits [63:32]
+    let must_be_1 = !allowed_zero;
+    (desired | must_be_1) & allowed_one
+}
+
+/// Apply CR0/CR4 fixed-bit constraints. Each FIXED0/FIXED1 MSR pair has:
+///   - FIXED0: bit X = 1 means the bit MUST be set
+///   - FIXED1: bit X = 0 means the bit MUST be clear
+fn adjust_cr(value: u64, fixed0_msr: u32, fixed1_msr: u32) -> u64 {
+    let must_be_1 = rdmsr(fixed0_msr);
+    let must_be_0 = !rdmsr(fixed1_msr);
+    (value | must_be_1) & !must_be_0
+}
+
+// ---------------------------------------------------------------------------
+// B.4 — Host state read helpers
+// ---------------------------------------------------------------------------
+
+#[inline]
+fn read_cr0() -> u64 {
+    let v: u64;
+    unsafe {
+        core::arch::asm!("mov {}, cr0", out(reg) v, options(nomem, nostack, preserves_flags));
+    }
+    v
+}
+
+#[inline]
+fn read_cr3() -> u64 {
+    let v: u64;
+    unsafe {
+        core::arch::asm!("mov {}, cr3", out(reg) v, options(nomem, nostack, preserves_flags));
+    }
+    v
+}
+
+#[inline]
+fn read_cr4() -> u64 {
+    let v: u64;
+    unsafe {
+        core::arch::asm!("mov {}, cr4", out(reg) v, options(nomem, nostack, preserves_flags));
+    }
+    v
+}
+
+/// Read GDTR base address via `sgdt`.
+#[inline]
+fn read_gdtr_base() -> u64 {
+    #[repr(C, packed)]
+    struct Gdtr {
+        limit: u16,
+        base: u64,
+    }
+    let mut g = Gdtr { limit: 0, base: 0 };
+    unsafe {
+        core::arch::asm!("sgdt [{}]", in(reg) &mut g, options(nostack, preserves_flags));
+    }
+    g.base
+}
+
+/// Read IDTR base address via `sidt`.
+#[inline]
+fn read_idtr_base() -> u64 {
+    #[repr(C, packed)]
+    struct Idtr {
+        limit: u16,
+        base: u64,
+    }
+    let mut i = Idtr { limit: 0, base: 0 };
+    unsafe {
+        core::arch::asm!("sidt [{}]", in(reg) &mut i, options(nostack, preserves_flags));
+    }
+    i.base
+}
+
+#[inline]
+fn read_cs() -> u16 {
+    let v: u16;
+    unsafe {
+        core::arch::asm!("mov {0:x}, cs", out(reg) v, options(nomem, nostack, preserves_flags));
+    }
+    v
+}
+
+#[inline]
+fn read_ds() -> u16 {
+    let v: u16;
+    unsafe {
+        core::arch::asm!("mov {0:x}, ds", out(reg) v, options(nomem, nostack, preserves_flags));
+    }
+    v
+}
+
+#[inline]
+fn read_es() -> u16 {
+    let v: u16;
+    unsafe {
+        core::arch::asm!("mov {0:x}, es", out(reg) v, options(nomem, nostack, preserves_flags));
+    }
+    v
+}
+
+#[inline]
+fn read_fs() -> u16 {
+    let v: u16;
+    unsafe {
+        core::arch::asm!("mov {0:x}, fs", out(reg) v, options(nomem, nostack, preserves_flags));
+    }
+    v
+}
+
+#[inline]
+fn read_gs() -> u16 {
+    let v: u16;
+    unsafe {
+        core::arch::asm!("mov {0:x}, gs", out(reg) v, options(nomem, nostack, preserves_flags));
+    }
+    v
+}
+
+#[inline]
+fn read_ss() -> u16 {
+    let v: u16;
+    unsafe {
+        core::arch::asm!("mov {0:x}, ss", out(reg) v, options(nomem, nostack, preserves_flags));
+    }
+    v
+}
+
+/// Read TR via `str`.
+#[inline]
+fn read_tr() -> u16 {
+    let v: u16;
+    unsafe {
+        core::arch::asm!("str {0:x}", out(reg) v, options(nomem, nostack, preserves_flags));
+    }
+    v
+}
+
+// ---------------------------------------------------------------------------
+// B.5 — Per-CPU exit stack allocation
+// ---------------------------------------------------------------------------
+
+/// Number of pages in the per-CPU VMX exit stack. 2 pages = 8 KiB,
+/// matches the kernel-stack convention; same shape as the IST stacks
+/// the GDT module allocates for #PF/#GP/#DF.
+const VMX_EXIT_STACK_PAGES: usize = 2;
+
+/// Allocate a 2-page exit stack for the current CPU and store the top
+/// (high address) in `PerCpu::vmx_exit_stack_top`. Idempotent: if the
+/// stack is already allocated, returns Ok immediately.
+///
+/// Called once per CPU after `enable_on_current_cpu()` succeeds, before
+/// any VMCS on this CPU has its `HOST_RSP` populated.
+pub fn alloc_exit_stack_for_current_cpu() -> Result<u64, VmxError> {
+    let pc = percpu::current_percpu();
+    if pc.vmx_exit_stack_top != 0 {
+        return Ok(pc.vmx_exit_stack_top);
+    }
+    let base = mm::alloc_contiguous(VMX_EXIT_STACK_PAGES).ok_or(VmxError::OutOfFrames)?;
+    let virt = base.addr() + mm::hhdm_offset();
+    let top = virt + (VMX_EXIT_STACK_PAGES as u64) * 4096;
+    pc.vmx_exit_stack_top = top;
+    Ok(top)
+}
+
+// ---------------------------------------------------------------------------
+// B.4/B.5 — Host + control state setup helpers (no guest state yet,
+// that's the test payload's job in B.5)
+// ---------------------------------------------------------------------------
+
+use crate::arch::x86_64::gdt;
+
+/// Populate the **host** state fields of a VMCS so that on every
+/// VM-exit the CPU restores the kernel's current execution context.
+///
+/// Must be called with `vmcs_phys` already loaded as the active VMCS
+/// (i.e. after `vmcs_load`). Reads the *current* CR0/CR3/CR4/segments/
+/// MSRs/GDTR/IDTR/TR — so the kernel state captured here is whatever
+/// the calling thread sees at the moment of the call.
+///
+/// `host_rip` is the address of the asm exit trampoline.
+/// `host_rsp` is the per-CPU exit stack top (must be DISTINCT from any
+/// thread kernel stack — see #PF/IST gotcha).
+pub fn setup_host_state(vmcs_phys: u64, host_rsp: u64, host_rip: u64) -> Result<(), VmxError> {
+    // Control registers — read live, never hardcoded.
+    vmwrite(VMCS_HOST_CR0, read_cr0(), vmcs_phys)?;
+    vmwrite(VMCS_HOST_CR3, read_cr3(), vmcs_phys)?;
+    vmwrite(VMCS_HOST_CR4, read_cr4(), vmcs_phys)?;
+
+    // RSP / RIP — caller-supplied.
+    vmwrite(VMCS_HOST_RSP, host_rsp, vmcs_phys)?;
+    vmwrite(VMCS_HOST_RIP, host_rip, vmcs_phys)?;
+
+    // Segment selectors. Per Intel SDM Vol 3C 26.2.3, host selectors
+    // must have RPL=0 and TI=0 — we read live values which already
+    // satisfy this in kernel mode.
+    vmwrite(VMCS_HOST_CS_SELECTOR, (read_cs() & 0xFFF8) as u64, vmcs_phys)?;
+    vmwrite(VMCS_HOST_SS_SELECTOR, (read_ss() & 0xFFF8) as u64, vmcs_phys)?;
+    vmwrite(VMCS_HOST_DS_SELECTOR, (read_ds() & 0xFFF8) as u64, vmcs_phys)?;
+    vmwrite(VMCS_HOST_ES_SELECTOR, (read_es() & 0xFFF8) as u64, vmcs_phys)?;
+    vmwrite(VMCS_HOST_FS_SELECTOR, (read_fs() & 0xFFF8) as u64, vmcs_phys)?;
+    vmwrite(VMCS_HOST_GS_SELECTOR, (read_gs() & 0xFFF8) as u64, vmcs_phys)?;
+    vmwrite(VMCS_HOST_TR_SELECTOR, (read_tr() & 0xFFF8) as u64, vmcs_phys)?;
+
+    // Descriptor table bases.
+    vmwrite(VMCS_HOST_GDTR_BASE, read_gdtr_base(), vmcs_phys)?;
+    vmwrite(VMCS_HOST_IDTR_BASE, read_idtr_base(), vmcs_phys)?;
+
+    // FS_BASE / GS_BASE come from MSRs (kernel uses GS_BASE for the
+    // PerCpu pointer; FS_BASE is normally 0 in kernel).
+    vmwrite(VMCS_HOST_FS_BASE, rdmsr(IA32_FS_BASE), vmcs_phys)?;
+    vmwrite(VMCS_HOST_GS_BASE, rdmsr(IA32_GS_BASE), vmcs_phys)?;
+
+    // TR base — for our setup, the per-CPU TSS pointer in PerCpu is
+    // the kernel virtual address of the TSS, which is what the GDT
+    // descriptor encodes too. Reading from PerCpu avoids parsing the
+    // GDT descriptor format.
+    let tss_ptr = percpu::current_percpu().tss as u64;
+    vmwrite(VMCS_HOST_TR_BASE, tss_ptr, vmcs_phys)?;
+
+    // SYSENTER MSRs (rarely used in kernel — sotOS uses SYSCALL — but
+    // the VMCS requires them).
+    vmwrite(
+        VMCS_HOST_IA32_SYSENTER_CS,
+        rdmsr(IA32_SYSENTER_CS) & 0xFFFF_FFFF,
+        vmcs_phys,
+    )?;
+    vmwrite(
+        VMCS_HOST_IA32_SYSENTER_ESP,
+        rdmsr(IA32_SYSENTER_ESP),
+        vmcs_phys,
+    )?;
+    vmwrite(
+        VMCS_HOST_IA32_SYSENTER_EIP,
+        rdmsr(IA32_SYSENTER_EIP),
+        vmcs_phys,
+    )?;
+
+    // IA32_EFER — host stays in long mode, save the live value.
+    let efer = rdmsr(IA32_EFER);
+    vmwrite(VMCS_HOST_IA32_EFER, efer, vmcs_phys)?;
+
+    Ok(())
+}
+
+/// Populate the VMCS execution control fields (pin/proc/exit/entry +
+/// secondary). Applies the fixed-bit MSR adjustments so the values
+/// the CPU sees are always legal for this microarchitecture.
+///
+/// EPTP is filled separately by the caller (it depends on a per-VM
+/// EPT root, not host state).
+pub fn setup_controls(vmcs_phys: u64) -> Result<(), VmxError> {
+    // Pin-based: external interrupts cause exits, NMIs cause exits.
+    let pin = adjust_controls(
+        (1 << 0) | (1 << 3), // EXTINT_EXIT | NMI_EXIT
+        IA32_VMX_TRUE_PINBASED_CTLS,
+    );
+    vmwrite(VMCS_PIN_BASED_CTLS, pin as u64, vmcs_phys)?;
+
+    // Primary proc-based: HLT exit (so HLT terminates), MSR bitmaps
+    // disabled (so RDMSR/WRMSR always exit), and secondary controls
+    // enabled.
+    let proc1 = adjust_controls(
+        (1 << 7) | (1 << 31), // HLT_EXIT | SECONDARY
+        IA32_VMX_TRUE_PROCBASED_CTLS,
+    );
+    vmwrite(VMCS_PROC_BASED_CTLS, proc1 as u64, vmcs_phys)?;
+
+    // Secondary: EPT, VPID, unrestricted guest. Adjusted against
+    // IA32_VMX_PROCBASED_CTLS2 (no "true" variant).
+    let proc2 = adjust_controls(
+        (1 << 1) | (1 << 5) | (1 << 7), // EPT | VPID | UNRESTRICTED_GUEST
+        IA32_VMX_PROCBASED_CTLS2,
+    );
+    vmwrite(VMCS_PROC_BASED_CTLS2, proc2 as u64, vmcs_phys)?;
+
+    // VM-exit: host runs in 64-bit (HOST_ADDR_SPACE bit 9).
+    let exit = adjust_controls(1 << 9, IA32_VMX_TRUE_EXIT_CTLS);
+    vmwrite(VMCS_EXIT_CTLS, exit as u64, vmcs_phys)?;
+
+    // VM-entry: 32-bit guest for the test payload (no IA32E_GUEST).
+    let entry = adjust_controls(0, IA32_VMX_TRUE_ENTRY_CTLS);
+    vmwrite(VMCS_ENTRY_CTLS, entry as u64, vmcs_phys)?;
+
+    // Exception bitmap = 0 (no exceptions cause exits — we let the
+    // guest handle its own faults).
+    vmwrite(VMCS_EXCEPTION_BITMAP, 0, vmcs_phys)?;
+
+    // VPID = 1 for this VM (Phase B has only one VM at a time, so
+    // hardcoding is fine; Phase C will allocate per-VM).
+    vmwrite(VMCS_VPID, 1, vmcs_phys)?;
+
+    // VMCS link pointer must be all-ones (Intel SDM 26.4.2).
+    vmwrite(VMCS_VMCS_LINK_POINTER, !0u64, vmcs_phys)?;
+
+    Ok(())
+}
+
+/// Populate guest state for a 32-bit protected-mode flat guest. The
+/// guest enters with CR0.PE=1, CR0.PG=0 (no paging — EPT alone provides
+/// translation), flat 32-bit code/data segments, RIP at `entry_gpa`.
+///
+/// Used by the Phase B test payload to run a `mov eax, 1; cpuid; hlt`
+/// sequence at a known guest physical address (which the EPT then maps
+/// to the host frame holding those bytes).
+pub fn setup_guest_state(
+    vmcs_phys: u64,
+    entry_gpa: u64,
+    stack_gpa: u64,
+) -> Result<(), VmxError> {
+    // CR0: PE=1, NE=1, fixed bits applied. No paging.
+    let cr0 = adjust_cr(0x21, IA32_VMX_CR0_FIXED0, IA32_VMX_CR0_FIXED1);
+    vmwrite(VMCS_GUEST_CR0, cr0, vmcs_phys)?;
+    vmwrite(VMCS_GUEST_CR3, 0, vmcs_phys)?;
+    let cr4 = adjust_cr(0, IA32_VMX_CR4_FIXED0, IA32_VMX_CR4_FIXED1);
+    vmwrite(VMCS_GUEST_CR4, cr4, vmcs_phys)?;
+
+    // Flat 32-bit code segment, DPL=0, granularity=4K, default size=32-bit.
+    // access_rights: present(7) + S(4) + type=10/Code-Read/Acc(0xB) = 0x9B,
+    // db(14)=1 32-bit, g(15)=1 4K granularity → 0xC09B
+    vmwrite(VMCS_GUEST_CS_SELECTOR, 0x08, vmcs_phys)?;
+    vmwrite(VMCS_GUEST_CS_BASE, 0, vmcs_phys)?;
+    vmwrite(VMCS_GUEST_CS_LIMIT, 0xFFFFFFFF, vmcs_phys)?;
+    vmwrite(VMCS_GUEST_CS_ACCESS_RIGHTS, 0xC09B, vmcs_phys)?;
+
+    // Flat 32-bit data segments (DS/ES/SS/FS/GS).
+    let data_ar = 0xC093u64;
+    for (sel_field, base_field, limit_field, ar_field) in [
+        (
+            VMCS_GUEST_DS_SELECTOR,
+            VMCS_GUEST_DS_BASE,
+            VMCS_GUEST_DS_LIMIT,
+            VMCS_GUEST_DS_ACCESS_RIGHTS,
+        ),
+        (
+            VMCS_GUEST_ES_SELECTOR,
+            VMCS_GUEST_ES_BASE,
+            VMCS_GUEST_ES_LIMIT,
+            VMCS_GUEST_ES_ACCESS_RIGHTS,
+        ),
+        (
+            VMCS_GUEST_SS_SELECTOR,
+            VMCS_GUEST_SS_BASE,
+            VMCS_GUEST_SS_LIMIT,
+            VMCS_GUEST_SS_ACCESS_RIGHTS,
+        ),
+        (
+            VMCS_GUEST_FS_SELECTOR,
+            VMCS_GUEST_FS_BASE,
+            VMCS_GUEST_FS_LIMIT,
+            VMCS_GUEST_FS_ACCESS_RIGHTS,
+        ),
+        (
+            VMCS_GUEST_GS_SELECTOR,
+            VMCS_GUEST_GS_BASE,
+            VMCS_GUEST_GS_LIMIT,
+            VMCS_GUEST_GS_ACCESS_RIGHTS,
+        ),
+    ] {
+        vmwrite(sel_field, 0x10, vmcs_phys)?;
+        vmwrite(base_field, 0, vmcs_phys)?;
+        vmwrite(limit_field, 0xFFFFFFFF, vmcs_phys)?;
+        vmwrite(ar_field, data_ar, vmcs_phys)?;
+    }
+
+    // LDTR: unusable. access_rights bit 16 (unusable) = 0x10000.
+    vmwrite(VMCS_GUEST_LDTR_SELECTOR, 0, vmcs_phys)?;
+    vmwrite(VMCS_GUEST_LDTR_BASE, 0, vmcs_phys)?;
+    vmwrite(VMCS_GUEST_LDTR_LIMIT, 0xFFFF, vmcs_phys)?;
+    vmwrite(VMCS_GUEST_LDTR_ACCESS_RIGHTS, 0x10082, vmcs_phys)?;
+
+    // TR: must be present even with no real TSS. type=11 (busy 32-bit TSS).
+    vmwrite(VMCS_GUEST_TR_SELECTOR, 0, vmcs_phys)?;
+    vmwrite(VMCS_GUEST_TR_BASE, 0, vmcs_phys)?;
+    vmwrite(VMCS_GUEST_TR_LIMIT, 0xFFFF, vmcs_phys)?;
+    vmwrite(VMCS_GUEST_TR_ACCESS_RIGHTS, 0x008B, vmcs_phys)?;
+
+    // GDTR / IDTR: minimal (the guest doesn't use them in our payload).
+    vmwrite(VMCS_GUEST_GDTR_BASE, 0, vmcs_phys)?;
+    vmwrite(VMCS_GUEST_GDTR_LIMIT, 0xFFFF, vmcs_phys)?;
+    vmwrite(VMCS_GUEST_IDTR_BASE, 0, vmcs_phys)?;
+    vmwrite(VMCS_GUEST_IDTR_LIMIT, 0xFFFF, vmcs_phys)?;
+
+    // RIP / RSP / RFLAGS.
+    vmwrite(VMCS_GUEST_RIP, entry_gpa, vmcs_phys)?;
+    vmwrite(VMCS_GUEST_RSP, stack_gpa, vmcs_phys)?;
+    // RFLAGS: bit 1 (reserved, always 1), interrupts disabled.
+    vmwrite(VMCS_GUEST_RFLAGS, 0x0000_0002, vmcs_phys)?;
+
+    // Activity state = 0 (active), interruptibility = 0.
+    vmwrite(VMCS_GUEST_INTERRUPTIBILITY_STATE, 0, vmcs_phys)?;
+    vmwrite(VMCS_GUEST_ACTIVITY_STATE, 0, vmcs_phys)?;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// B.5 — Minimal EPT (just enough to identity-map a few pages)
+// ---------------------------------------------------------------------------
+
+/// EPT entry flags: read | write | execute, memory type WB.
+const EPT_LEAF_FLAGS: u64 = 0x37; // R(1) | W(2) | X(4) | (WB(6) << 3)
+/// EPT entry flags for non-leaf entries: read | write | execute.
+const EPT_NONLEAF_FLAGS: u64 = 0x07;
+
+/// A minimal 4-level EPT root. Holds the PML4 frame plus pre-allocated
+/// PDPT/PD/PT frames so we can identity-map a contiguous low-memory
+/// region without dynamic allocation in the hot path.
+///
+/// **Phase B only.** Phase D will replace this with a real lazy-fault
+/// EPT that grows as the guest touches new pages.
+pub struct MiniEpt {
+    pub pml4_phys: u64,
+    pub pdpt_phys: u64,
+    pub pd_phys: u64,
+    pub pt_phys: u64,
+}
+
+impl MiniEpt {
+    /// Allocate a 4-level EPT covering guest physical addresses
+    /// `[0 .. 2 MiB)` via 4 KiB leaf entries. Each level except the
+    /// PT has exactly one entry; the PT has 512 entries, all initially
+    /// zero (not present). Use `map_4k` to install a leaf.
+    pub fn allocate() -> Result<Self, VmxError> {
+        let pml4 = mm::alloc_frame().ok_or(VmxError::OutOfFrames)?;
+        let pdpt = mm::alloc_frame().ok_or(VmxError::OutOfFrames)?;
+        let pd = mm::alloc_frame().ok_or(VmxError::OutOfFrames)?;
+        let pt = mm::alloc_frame().ok_or(VmxError::OutOfFrames)?;
+
+        let hhdm = mm::hhdm_offset();
+        // Zero all four pages, then thread them together.
+        unsafe {
+            for &p in &[pml4.addr(), pdpt.addr(), pd.addr(), pt.addr()] {
+                core::ptr::write_bytes((p + hhdm) as *mut u8, 0, 4096);
+            }
+            // PML4[0] -> PDPT
+            *((pml4.addr() + hhdm) as *mut u64) = pdpt.addr() | EPT_NONLEAF_FLAGS;
+            // PDPT[0] -> PD
+            *((pdpt.addr() + hhdm) as *mut u64) = pd.addr() | EPT_NONLEAF_FLAGS;
+            // PD[0] -> PT
+            *((pd.addr() + hhdm) as *mut u64) = pt.addr() | EPT_NONLEAF_FLAGS;
+        }
+
+        Ok(Self {
+            pml4_phys: pml4.addr(),
+            pdpt_phys: pdpt.addr(),
+            pd_phys: pd.addr(),
+            pt_phys: pt.addr(),
+        })
+    }
+
+    /// Identity-map a 4 KiB guest physical page to the given host
+    /// frame. `gpa` must be in `[0 .. 2 MiB)` (the range covered by
+    /// the single PT this MiniEpt allocated).
+    pub fn map_4k(&self, gpa: u64, host_phys: u64) -> Result<(), VmxError> {
+        let pt_idx = ((gpa >> 12) & 0x1FF) as usize;
+        if (gpa >> 21) != 0 {
+            return Err(VmxError::OutOfFrames); // outside 2 MiB window
+        }
+        let pt_virt = self.pt_phys + mm::hhdm_offset();
+        // SAFETY: pt_phys is a valid 4 KiB frame allocated above; we
+        // write one u64 entry within bounds.
+        unsafe {
+            let entry_ptr = (pt_virt as *mut u64).add(pt_idx);
+            *entry_ptr = host_phys | EPT_LEAF_FLAGS;
+        }
+        Ok(())
+    }
+
+    /// Build the EPTP value for the VMCS field.
+    ///
+    /// Format: pml4_phys | (page-walk-length-1 << 3) | memory-type
+    /// = pml4_phys | (3 << 3) | 6 (WB)
+    /// = pml4_phys | 0x1E
+    pub fn eptp(&self) -> u64 {
+        self.pml4_phys | (3 << 3) | 6
+    }
+}
+
+// ---------------------------------------------------------------------------
+// B.5 — VM-exit trampoline + vCPU run loop
+// ---------------------------------------------------------------------------
+//
+// `vmx_exit_trampoline` is the host RIP target for every VM-exit in
+// Phase B. The CPU jumps here with HOST_RSP = vmx_exit_stack_top - 8
+// (the [-8] slot holds the Rust `vmx_run` return address that we
+// pushed before vmlaunch).
+//
+// Trampoline contract:
+//   1. Save guest GPRs into `state.gprs` (state pointer is in gs:[104])
+//   2. Call `vm_exit_handler_rust(state)` — Rust dispatcher
+//   3. Read return value (ExitAction) from eax:
+//        0 = Resume → reload guest GPRs, vmresume → loop on next exit
+//        1 = Terminate → ret (pops Rust return address, control returns
+//            to vmx_run after the vmlaunch/vmresume instruction)
+//
+// The `state.gprs` field is at offset 0 of `KernelVCpuState` (load-bearing
+// `#[repr(C)]` ordering — see `vm/mod.rs` doc comment).
+
+extern "C" {
+    /// Asm exit trampoline. Defined below via `global_asm!`. Address
+    /// is what we write into `VMCS_HOST_RIP`.
+    pub fn vmx_exit_trampoline();
+
+    /// Naked-ish helper that performs the actual `vmlaunch` /
+    /// `vmresume` and returns when the trampoline does `ret`.
+    /// Returns `()`; `state.halted` indicates whether the dispatcher
+    /// terminated the vCPU.
+    fn vmx_run_inner(state: *mut crate::vm::KernelVCpuState);
+}
+
+/// C-ABI dispatcher entry point invoked by the asm exit trampoline.
+/// `state` is a pointer to the `KernelVCpuState` whose VMCS is currently
+/// active. Returns `0` to resume, `1` to terminate.
+#[no_mangle]
+extern "C" fn vm_exit_handler_rust(state: *mut crate::vm::KernelVCpuState) -> u32 {
+    // SAFETY: the trampoline passed us a pointer to the
+    // currently-active vCPU's KernelVCpuState. The caller (Rust
+    // `vmx_run`) holds the only mutable reference to it for the
+    // duration of this VM execution.
+    let state_ref = unsafe { &mut *state };
+    let vm_handle = crate::vm::current_vm_for_dispatch();
+    let action = match vm_handle {
+        Some(h) => {
+            // Look up the VM's profile by handle, dispatch, return.
+            // We re-borrow the pool's profile via a copy so we don't
+            // hold the pool lock across the dispatcher.
+            let profile = crate::vm::profile_for(h);
+            crate::vm::exit::dispatch(state_ref, &profile)
+        }
+        None => {
+            crate::kprintln!(
+                "  vmx: VM-exit on cpu {} with no active VM — terminating",
+                percpu::current_percpu().cpu_index
+            );
+            crate::vm::exit::ExitAction::Terminate
+        }
+    };
+    match action {
+        crate::vm::exit::ExitAction::Resume => 0,
+        crate::vm::exit::ExitAction::Terminate => 1,
+    }
+}
+
+core::arch::global_asm!(
+    ".global vmx_exit_trampoline",
+    "vmx_exit_trampoline:",
+    // Entry: just took a VM-exit. RSP = vmx_exit_stack_top - 8.
+    // [rsp] = saved Rust return address from vmx_run_inner.
+    // All GPRs are guest values; we have to save them before doing
+    // anything else.
+    //
+    // Find the active KernelVCpuState via gs:[104]. RAX is currently
+    // a guest value, but we need a scratch register. Save it on the
+    // exit stack first.
+    "    push rax",
+    "    mov rax, gs:[104]",        // rax = &KernelVCpuState (gprs at offset 0)
+    "    mov [rax + 8], rbx",       // gprs.rbx
+    "    mov [rax + 16], rcx",      // gprs.rcx
+    "    mov [rax + 24], rdx",      // gprs.rdx
+    "    mov [rax + 32], rsi",      // gprs.rsi
+    "    mov [rax + 40], rdi",      // gprs.rdi
+    "    mov [rax + 48], rbp",      // gprs.rbp
+    "    mov [rax + 56], r8",       // gprs.r8
+    "    mov [rax + 64], r9",       // gprs.r9
+    "    mov [rax + 72], r10",      // gprs.r10
+    "    mov [rax + 80], r11",      // gprs.r11
+    "    mov [rax + 88], r12",      // gprs.r12
+    "    mov [rax + 96], r13",      // gprs.r13
+    "    mov [rax + 104], r14",     // gprs.r14
+    "    mov [rax + 112], r15",     // gprs.r15
+    // Now save the original guest rax (currently on the stack) into gprs.rax.
+    "    pop rcx",                  // rcx = original guest rax
+    "    mov [rax], rcx",           // gprs.rax
+    // Call the C-ABI dispatcher with rdi = &KernelVCpuState
+    "    mov rdi, rax",
+    "    call vm_exit_handler_rust",
+    // eax now holds the action: 0 = Resume, 1 = Terminate
+    "    test eax, eax",
+    "    jne 2f",                   // non-zero → terminate
+    // === Resume ===
+    // Reload guest GPRs from state.gprs (state ptr is back in gs:[104]).
+    "    mov rax, gs:[104]",
+    "    mov rbx, [rax + 8]",
+    "    mov rcx, [rax + 16]",
+    "    mov rdx, [rax + 24]",
+    "    mov rsi, [rax + 32]",
+    "    mov rdi, [rax + 40]",
+    "    mov rbp, [rax + 48]",
+    "    mov r8,  [rax + 56]",
+    "    mov r9,  [rax + 64]",
+    "    mov r10, [rax + 72]",
+    "    mov r11, [rax + 80]",
+    "    mov r12, [rax + 88]",
+    "    mov r13, [rax + 96]",
+    "    mov r14, [rax + 104]",
+    "    mov r15, [rax + 112]",
+    "    mov rax, [rax]",           // rax LAST so we don't clobber the base
+    "    vmresume",
+    // vmresume falls through ONLY on failure (CF or ZF set). Treat
+    // failure as Terminate.
+    "2:",
+    // === Terminate ===
+    // RSP at this point is wherever we left it after the dispatcher
+    // call: that's vmx_exit_stack_top - 8 (the slot containing the
+    // Rust return address). `ret` pops it back into rip and returns
+    // to vmx_run_inner.
+    "    ret",
+);
+
+core::arch::global_asm!(
+    ".global vmx_run_inner",
+    "vmx_run_inner:",
+    // Args: rdi = &KernelVCpuState
+    // Save callee-saved regs onto the kernel stack (we need rbx/rbp/
+    // r12-r15 preserved across the entire VM execution).
+    "    push rbp",
+    "    push rbx",
+    "    push r12",
+    "    push r13",
+    "    push r14",
+    "    push r15",
+    // Stash the state pointer in PerCpu so the trampoline can find it.
+    "    mov gs:[104], rdi",
+    // Push our return address (the post-vmlaunch label) onto the
+    // vmx_exit_stack so the trampoline's terminate path can `ret`
+    // back here. The exit stack lives in PerCpu at offset 96.
+    "    mov rax, gs:[96]",        // rax = vmx_exit_stack_top
+    "    sub rax, 8",
+    "    lea rcx, [rip + 3f]",     // rcx = address of post_vmlaunch label
+    "    mov [rax], rcx",          // store return address at exit_stack_top - 8
+    // Load guest GPRs from state.gprs into CPU registers.
+    "    mov rbx, [rdi + 8]",
+    "    mov rcx, [rdi + 16]",
+    "    mov rdx, [rdi + 24]",
+    "    mov rsi, [rdi + 32]",
+    "    mov rbp, [rdi + 48]",
+    "    mov r8,  [rdi + 56]",
+    "    mov r9,  [rdi + 64]",
+    "    mov r10, [rdi + 72]",
+    "    mov r11, [rdi + 80]",
+    "    mov r12, [rdi + 88]",
+    "    mov r13, [rdi + 96]",
+    "    mov r14, [rdi + 104]",
+    "    mov r15, [rdi + 112]",
+    // launched flag is at offset 120+8+1 = 129 in KernelVCpuState
+    // (gprs[120] + vmcs[8] + idx[1] + launched)
+    // Read launched into al.
+    "    mov al, [rdi + 129]",
+    "    test al, al",
+    // Now load rax and rdi (the last GPRs we still needed for indexing).
+    "    mov rax, [rdi]",
+    "    mov rdi, [rdi + 40]",
+    "    jne 4f",                  // launched != 0 → vmresume
+    "    vmlaunch",
+    "    jmp 3f",                  // vmlaunch falls through on failure
+    "4:",
+    "    vmresume",
+    "3:",
+    // post_vmlaunch — either vmlaunch/vmresume failed (immediate
+    // fall-through) OR the trampoline `ret`ed back here on terminate.
+    "    pop r15",
+    "    pop r14",
+    "    pop r13",
+    "    pop r12",
+    "    pop rbx",
+    "    pop rbp",
+    "    ret",
+);
+
+/// Run the given vCPU until it terminates.
+///
+/// Sets up the active VMCS, populates host state, and enters the
+/// asm `vmx_run_inner` which executes `vmlaunch` (or `vmresume`).
+/// Returns when the dispatcher in the asm trampoline decides to
+/// terminate (HLT, unhandled exit, etc.).
+///
+/// **Caller must hold the vCPU as `&mut`** so the asm trampoline's
+/// in-place mutation of `state.gprs` is sound.
+pub fn vmx_run(state: &mut crate::vm::KernelVCpuState) -> Result<(), VmxError> {
+    // Make this vCPU's VMCS the active one on this CPU. The first
+    // vmptrld of a freshly-allocated VMCS must be preceded by vmclear.
+    if !state.launched {
+        vmcs_clear(&state.vmcs)?;
+    }
+    vmcs_load(&state.vmcs)?;
+
+    // Populate host state with `vmx_exit_trampoline` as HOST_RIP.
+    let exit_top = alloc_exit_stack_for_current_cpu()?;
+    setup_host_state(
+        state.vmcs.phys,
+        exit_top - 8,
+        vmx_exit_trampoline as *const () as u64,
+    )?;
+
+    // SAFETY: state is borrowed mutably for the duration of this call,
+    // so the asm side has exclusive access. The trampoline finds it
+    // via `gs:[104]` which we set inside `vmx_run_inner`.
+    unsafe {
+        vmx_run_inner(state as *mut _);
+    }
+
+    // Mark launched so the next call uses vmresume.
+    state.launched = true;
+    Ok(())
+}

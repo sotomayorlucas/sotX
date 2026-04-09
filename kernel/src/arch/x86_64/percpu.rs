@@ -73,10 +73,20 @@ pub struct PerCpu {
     /// offset 96: top (high address) of the per-CPU VMX exit stack, or 0
     /// if not allocated. Used as `HOST_RSP` in every VMCS this CPU runs;
     /// must be DISTINCT from any thread's kernel stack — same shape as
-    /// the `#PF + IST` corruption gotcha. Allocated lazily in B.4 when
-    /// the first VMCS is set up on this CPU.
+    /// the `#PF + IST` corruption gotcha. Allocated by `vmx::init_per_cpu`.
     pub vmx_exit_stack_top: u64,
+    /// offset 104: pointer to the `KernelVCpuState` whose VMCS is the
+    /// currently-active VMCS on this CPU. Set by `vcpu_run` immediately
+    /// before `vmlaunch`/`vmresume`; read by the asm exit trampoline
+    /// (via `gs:[104]`) to find the GPR save area without an indirect
+    /// jump table. 0 when no vCPU is currently in non-root operation.
+    pub current_vcpu_state: u64,
 }
+
+/// Assembly-accessible offset for `current_vcpu_state` (`gs:[104]`).
+/// Used by `vmx::vmx_exit_trampoline` to find the active vCPU's
+/// `KernelVCpuState` after a VM-exit.
+pub const PERCPU_CURRENT_VCPU_STATE: usize = 104;
 
 unsafe impl Send for PerCpu {}
 unsafe impl Sync for PerCpu {}
@@ -100,6 +110,7 @@ impl PerCpu {
             vmxon_region_phys: 0,
             active_vmcs_phys: 0,
             vmx_exit_stack_top: 0,
+            current_vcpu_state: 0,
         }
     }
 
