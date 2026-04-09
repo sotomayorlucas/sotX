@@ -290,6 +290,18 @@ extern "C" fn kmain() -> ! {
         lapic_ticks
     );
 
+    // VMX capability detection (Phase B.0 — read-only). Reports whether
+    // the bhyve VT-x backend can come up on this CPU + accelerator.
+    arch::vmx::print_capabilities();
+
+    // VMX bringup on the BSP (Phase B.1 + B.2). Allocates the per-CPU
+    // VMXON region, sets CR4.VMXE, programs IA32_FEATURE_CONTROL if
+    // unlocked, and executes the `vmxon` instruction. Gated behind
+    // `cpu_has_vmx()` so TCG and WHPX boots are unaffected — they
+    // return `Err(NotSupported)` and continue with VMX disabled.
+    // Only `just run-kvm` (with `-cpu host,+vmx`) will reach VMX root.
+    arch::vmx::init_bsp();
+
     // Spawn init process (first userspace code).
     let user_cr3 = spawn_init_process();
     kinfo!(sotos_common::trace::cat::PROCESS, "[ok] Init process");

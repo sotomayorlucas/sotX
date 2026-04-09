@@ -61,6 +61,21 @@ pub struct PerCpu {
     /// stack — yielding garbage that WHPX rejects on `fxrstor64` with #GP
     /// (TCG accepts it silently).
     pub next_fpu_ptr: u64,
+    /// offset 80: physical address of this CPU's VMXON region (4 KiB,
+    /// allocated by `vmx::init_per_cpu`). 0 = not initialised / not in
+    /// VMX root operation. Required for `vmxon` and `vmxoff`.
+    pub vmxon_region_phys: u64,
+    /// offset 88: physical address of the currently-VMPTRLDed VMCS, or 0
+    /// if no VMCS is active on this CPU. `vmread`/`vmwrite` must assert
+    /// this matches the VMCS they intend to touch — writing fields into
+    /// the wrong VMCS silently corrupts state.
+    pub active_vmcs_phys: u64,
+    /// offset 96: top (high address) of the per-CPU VMX exit stack, or 0
+    /// if not allocated. Used as `HOST_RSP` in every VMCS this CPU runs;
+    /// must be DISTINCT from any thread's kernel stack — same shape as
+    /// the `#PF + IST` corruption gotcha. Allocated lazily in B.4 when
+    /// the first VMCS is set up on this CPU.
+    pub vmx_exit_stack_top: u64,
 }
 
 unsafe impl Send for PerCpu {}
@@ -82,6 +97,9 @@ impl PerCpu {
             held_locks: 0,
             tss: core::ptr::null_mut(),
             next_fpu_ptr: 0,
+            vmxon_region_phys: 0,
+            active_vmcs_phys: 0,
+            vmx_exit_stack_top: 0,
         }
     }
 

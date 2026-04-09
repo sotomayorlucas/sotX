@@ -7,6 +7,7 @@ pub mod pic;
 pub mod pit;
 pub mod serial;
 pub mod syscall;
+pub mod vmx;
 
 /// Halt the CPU in a loop. Used after kernel initialization
 /// and as the final stop for panics.
