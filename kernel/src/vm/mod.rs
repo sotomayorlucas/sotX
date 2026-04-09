@@ -17,6 +17,7 @@
 //! RDMSR exit arms route through `KernelDeceptionProfile` and the HLT
 //! exit terminates the vCPU.
 
+pub mod bzimage;
 pub mod deception;
 pub mod devmodel;
 pub mod exit;
@@ -337,6 +338,44 @@ static VM_POOL: Mutex<Pool<VmObject>> = Mutex::new(Pool::new());
 pub fn init() {
     // Pool is already initialised at static-init time. Nothing to do
     // for Phase B; Phase C will register VM-related syscalls here.
+}
+
+// ---------------------------------------------------------------------------
+// Phase F.4 — bzImage slice handle
+// ---------------------------------------------------------------------------
+//
+// `load_initrd` in `kernel/src/main.rs` calls `set_bzimage` after the
+// CPIO scan finds `bzImage`. The Phase F.4 loader (in
+// `kernel/src/vm/bzimage.rs`) reads the slice through `bzimage_slice`
+// when SYS_VM_RUN is invoked. Stored as a (ptr, len) pair under an
+// AtomicU64 + AtomicUsize so the read path is lock-free.
+
+use core::sync::atomic::{AtomicUsize, Ordering as AOrd};
+
+static BZIMAGE_PTR: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static BZIMAGE_LEN: AtomicUsize = AtomicUsize::new(0);
+
+/// Stash a bzImage slice for the VM subsystem to consume later.
+/// Called from `load_initrd` once the CPIO scan finds the file.
+pub fn set_bzimage(bytes: &'static [u8]) {
+    BZIMAGE_PTR.store(bytes.as_ptr() as u64, AOrd::Release);
+    BZIMAGE_LEN.store(bytes.len(), AOrd::Release);
+}
+
+/// Return the bzImage as a static slice if one was registered.
+/// Returns `None` if `load_initrd` did not find a `bzImage` entry
+/// (e.g. on TCG/WHPX boots that ship without one).
+pub fn bzimage_slice() -> Option<&'static [u8]> {
+    let ptr = BZIMAGE_PTR.load(AOrd::Acquire);
+    let len = BZIMAGE_LEN.load(AOrd::Acquire);
+    if ptr == 0 || len == 0 {
+        return None;
+    }
+    // SAFETY: `set_bzimage` is only called from `load_initrd` with a
+    // `&'static [u8]` whose backing storage lives for the lifetime
+    // of the kernel (the Limine module data is mapped in HHDM and
+    // never freed). Reconstructing the slice is sound.
+    Some(unsafe { core::slice::from_raw_parts(ptr as *const u8, len) })
 }
 
 /// Create a new VM. Returns an opaque pool handle on success; the
