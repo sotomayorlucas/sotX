@@ -97,3 +97,73 @@ pub fn notify(irq: u8) {
         let _ = notify::signal(*handle);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Phase E — MSI vector allocator
+// ---------------------------------------------------------------------------
+
+/// First IDT vector available to MSI consumers. Below this:
+///   0..31    CPU exceptions (#DE, #DB, #BP, #PF, #GP, ...)
+///   32..47   8259 PIC IRQs 0..15 (timer, keyboard, ...)
+///   48       LAPIC timer (`lapic::TIMER_VECTOR`)
+///   49       Reschedule IPI (`idt::RESCHEDULE_VECTOR`)
+const MSI_VECTOR_FIRST: u8 = 50;
+
+/// Last IDT vector available to MSI consumers. 240..254 reserved
+/// for things like the spurious LAPIC vector (255).
+const MSI_VECTOR_LAST: u8 = 239;
+
+/// Pre-reserved IDT vector for the Phase E self-IPI delivery test.
+/// Picked from the upper end of the MSI range so it doesn't collide
+/// with anything the kernel statically registers and so the bitmap
+/// allocator can still hand out neighbouring vectors during the test.
+pub const MSI_TEST_VECTOR: u8 = 200;
+
+/// Bitmap of free MSI vectors. `false` = available, `true` = held by
+/// some `CapObject::Msi` (or pre-reserved by `init`).
+static MSI_BITMAP: Mutex<[bool; (MSI_VECTOR_LAST - MSI_VECTOR_FIRST + 1) as usize]> =
+    Mutex::new([false; (MSI_VECTOR_LAST - MSI_VECTOR_FIRST + 1) as usize]);
+
+/// Initialise the MSI vector allocator. Marks `MSI_TEST_VECTOR` as
+/// pre-reserved so the Phase E delivery test can install its IDT
+/// handler at a stable, known vector.
+pub fn init_msi() {
+    let mut bm = MSI_BITMAP.lock();
+    let idx = (MSI_TEST_VECTOR - MSI_VECTOR_FIRST) as usize;
+    bm[idx] = true;
+}
+
+/// Allocate the next free MSI vector. Returns `None` if every
+/// vector in the range is taken.
+pub fn alloc_msi_vector() -> Option<u8> {
+    let mut bm = MSI_BITMAP.lock();
+    for (i, slot) in bm.iter_mut().enumerate() {
+        if !*slot {
+            *slot = true;
+            return Some(MSI_VECTOR_FIRST + i as u8);
+        }
+    }
+    None
+}
+
+/// Return an MSI vector to the free pool. Silently ignores vectors
+/// outside the MSI range and the pre-reserved test vector.
+pub fn free_msi_vector(vector: u8) {
+    if vector < MSI_VECTOR_FIRST || vector > MSI_VECTOR_LAST {
+        return;
+    }
+    if vector == MSI_TEST_VECTOR {
+        return; // never freed; lives for the lifetime of the kernel
+    }
+    let idx = (vector - MSI_VECTOR_FIRST) as usize;
+    let mut bm = MSI_BITMAP.lock();
+    bm[idx] = false;
+}
+
+/// Snapshot the number of currently-allocated MSI vectors. Test
+/// helper, not on any hot path.
+#[allow(dead_code)]
+pub fn msi_allocated_count() -> usize {
+    let bm = MSI_BITMAP.lock();
+    bm.iter().filter(|b| **b).count()
+}

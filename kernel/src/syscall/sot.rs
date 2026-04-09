@@ -477,6 +477,7 @@ fn handle_so_observe(frame: &mut TrapFrame) {
                 CapObject::AddrSpace { .. } => 11,
                 CapObject::Interposed { .. } => 5,
                 CapObject::Vm { .. } => 12,
+                CapObject::Msi { .. } => 13,
                 CapObject::Null => 0xFF,
             };
             frame.rax = 0;

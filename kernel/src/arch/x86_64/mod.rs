@@ -2,6 +2,7 @@ pub mod ept;
 pub mod gdt;
 pub mod idt;
 pub mod io;
+pub mod ioapic;
 pub mod lapic;
 pub mod percpu;
 pub mod pic;

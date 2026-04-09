@@ -72,6 +72,7 @@
 
 extern crate alloc;
 
+mod acpi;
 mod arch;
 mod boot_uefi;
 mod cap;
@@ -126,7 +127,7 @@ pub extern "C" fn __stack_chk_fail() -> ! {
 
 use limine::request::{
     FramebufferRequest, HhdmRequest, MemoryMapRequest, ModuleRequest, MpRequest, RequestsEndMarker,
-    RequestsStartMarker,
+    RequestsStartMarker, RsdpRequest,
 };
 use limine::BaseRevision;
 
@@ -168,6 +169,12 @@ static MP_REQUEST: MpRequest = MpRequest::new();
 #[used]
 #[link_section = ".requests"]
 static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
+
+/// Request the ACPI RSDP virtual address from Limine. Used by the
+/// Phase E ACPI parser to discover IOAPIC + ISO entries.
+#[used]
+#[link_section = ".requests"]
+static RSDP_REQUEST: RsdpRequest = RsdpRequest::new();
 
 /// Counter for APs that have finished initialization.
 static APS_READY: AtomicU32 = AtomicU32::new(0);
@@ -291,6 +298,51 @@ extern "C" fn kmain() -> ! {
         "[ok] LAPIC calibrated ({} ticks/10ms)",
         lapic_ticks
     );
+
+    // Phase E — ACPI parser + IOAPIC discovery + MSI vector allocator.
+    // Limine v8 returns the RSDP at an HHDM virtual address; the
+    // parser walks the RSDT/XSDT chain looking for the MADT and
+    // records IOAPIC + Interrupt Source Override entries. We do
+    // this AFTER lapic::init() so the parser's diagnostic kprintln
+    // lines are already after the LAPIC banner — the order has no
+    // hardware-level dependency.
+    if let Some(rsdp) = RSDP_REQUEST.get_response() {
+        acpi::init(rsdp.address());
+    } else {
+        kdebug!("  acpi: limine did not provide an RSDP — skipping");
+    }
+    arch::ioapic::init_all();
+    irq::init_msi();
+    kinfo!(sotos_common::trace::cat::PROCESS, "[ok] ACPI + IOAPIC + MSI");
+
+    // Phase E — MSI delivery acceptance test.
+    // Send a self-IPI via the LAPIC ICR with `MSI_TEST_VECTOR`. The
+    // pre-registered IDT handler increments `MSI_TEST_COUNTER`. We
+    // briefly enable interrupts so the LAPIC can deliver the
+    // queued vector through the host IDT, then verify the counter.
+    {
+        use core::sync::atomic::Ordering;
+        let lapic_id = arch::percpu::current_percpu().lapic_id;
+        let before = arch::idt::MSI_TEST_COUNTER.load(Ordering::Acquire);
+        arch::lapic::send_ipi(lapic_id, irq::MSI_TEST_VECTOR);
+        // Sti window so the LAPIC delivers the queued vector.
+        unsafe { core::arch::asm!("sti", "nop", "cli", options(nomem, nostack)); }
+        let after = arch::idt::MSI_TEST_COUNTER.load(Ordering::Acquire);
+        if after == before + 1 {
+            kprintln!(
+                "  msi-test: self-IPI (vector {}) delivered, counter {} -> {} — PASS",
+                irq::MSI_TEST_VECTOR,
+                before,
+                after
+            );
+        } else {
+            kprintln!(
+                "  msi-test: self-IPI delivery failed; counter {} -> {} (expected +1)",
+                before,
+                after
+            );
+        }
+    }
 
     // VMX capability detection (Phase B.0 — read-only). Reports whether
     // the bhyve VT-x backend can come up on this CPU + accelerator.

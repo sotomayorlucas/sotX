@@ -213,11 +213,33 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
     // Reschedule IPI (vector 49)
     idt[RESCHEDULE_VECTOR].set_handler_fn(reschedule_ipi_handler);
 
+    // Phase E — pre-reserved MSI delivery test vector (200). The
+    // Phase E acceptance test sends a self-IPI with this vector via
+    // LAPIC ICR and verifies the handler ran. Vector 200 is also
+    // marked busy in `irq::init_msi`'s bitmap so the dynamic
+    // allocator never hands it out to a userspace driver.
+    idt[crate::irq::MSI_TEST_VECTOR].set_handler_fn(msi_test_handler);
+
     // LAPIC spurious interrupt (vector 0xFF)
     idt[SPURIOUS_VECTOR].set_handler_fn(spurious_handler);
 
     idt
 });
+
+/// Counter incremented every time the Phase E MSI test handler fires.
+/// The Phase E delivery test compares this against an expected value
+/// before and after sending a self-IPI.
+pub static MSI_TEST_COUNTER: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+/// Phase E acceptance handler — increments `MSI_TEST_COUNTER` and EOIs
+/// the LAPIC. The handler runs at vector 200 (`MSI_TEST_VECTOR`); the
+/// caller is responsible for ensuring no real device is wired to that
+/// vector before triggering it.
+extern "x86-interrupt" fn msi_test_handler(_frame: x86_64::structures::idt::InterruptStackFrame) {
+    MSI_TEST_COUNTER.fetch_add(1, core::sync::atomic::Ordering::Release);
+    lapic::eoi();
+}
 
 /// Initialize the IDT (first call forces Lazy init and loads IDTR).
 pub fn init() {

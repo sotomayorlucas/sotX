@@ -75,6 +75,7 @@ impl CapObjectAdapter {
             CapObject::AddrSpace { .. } => SOType::AddrSpace,
             CapObject::Interposed { .. } => SOType::Capability,
             CapObject::Vm { .. } => SOType::Capability,
+            CapObject::Msi { .. } => SOType::Irq,
             CapObject::Null => SOType::Capability,
         }
     }

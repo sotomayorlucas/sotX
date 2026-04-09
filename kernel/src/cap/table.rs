@@ -110,6 +110,12 @@ pub enum CapObject {
     /// to a `Pool<VmObject>` slot internally. RUN/PROFILE/INTROSPECT
     /// gating uses the standard READ/WRITE Rights bits.
     Vm { id: u32 },
+    /// Phase E — MSI vector handed out by `irq::alloc_msi_vector`.
+    /// `vector` is the IDT vector the LAPIC delivers; `lapic_id` is
+    /// the destination CPU encoded into the MSI message address by
+    /// the device. Holding this capability is what authorises a
+    /// userspace driver to program a virtio device's MSI capability.
+    Msi { vector: u8, lapic_id: u32 },
     /// Null / empty slot.
     #[allow(dead_code)]
     Null,
