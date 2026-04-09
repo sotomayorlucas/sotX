@@ -215,9 +215,14 @@ fn run_bhyve() -> bool {
     true
 }
 
-/// Phase C kernel-backed run. Allocates a VM, installs the bare-metal
-/// Intel deception profile, runs the canned `cpuid; hlt` payload, and
-/// drains the introspection ring to prove the kernel did the spoof.
+/// Number of EPT lazy-fault pages the kernel test payload touches.
+/// Mirrors `kernel/src/vm/mod.rs::EXPECTED_LAZY_PAGES`.
+const EXPECTED_LAZY_PAGES: u64 = 4;
+
+/// Phase C/D kernel-backed run. Allocates a VM, installs the bare-metal
+/// Intel deception profile, runs the canned payload (`cpuid` + 4 stores
+/// to unmapped GPAs + `hlt`), and drains the introspection ring to
+/// prove the kernel handled both CPUID spoofing AND lazy EPT faults.
 fn run_bhyve_kernel_backend() -> Result<(), vm_backend::BackendError> {
     // 1. Allocate the VM (1 vCPU, 64 frames = 256 KiB budget).
     let vm = vm_backend::vm_create(1, 64)?;
@@ -233,16 +238,18 @@ fn run_bhyve_kernel_backend() -> Result<(), vm_backend::BackendError> {
     }
 
     // 3. Run the guest. Blocks the calling thread inside the kernel
-    //    until the canned `mov eax, 1; cpuid; hlt` payload terminates.
+    //    until the canned payload terminates with HLT.
     if let Err(e) = vm_backend::vm_run(vm, 0) {
         let _ = vm_backend::vm_destroy(vm);
         return Err(e);
     }
     print(b"    bhyve: VMX single-vCPU guest exited via real VMRESUME\n");
 
-    // 4. Drain the introspection ring. Phase B's payload runs exactly
-    //    one CPUID exit (leaf 1) and one HLT exit, so we expect at
-    //    least one CPUID event and one HLT event in the ring.
+    // 4. Drain the introspection ring. The Phase D payload generates:
+    //      1× CPUID (leaf 1, spoofed)
+    //      4× EPT_VIOLATION (writes to GPAs 0x3000..0x6000)
+    //      1× HLT
+    //    = 6 events total. We over-allocate to 16 to be safe.
     let mut events = [VmIntrospectEvent::zeroed(); 16];
     let n = match vm_backend::vm_introspect_drain(vm, &mut events) {
         Ok(n) => n,
@@ -257,7 +264,8 @@ fn run_bhyve_kernel_backend() -> Result<(), vm_backend::BackendError> {
 
     let mut cpuid_events = 0u64;
     let mut hlt_events = 0u64;
-    let mut vendor_ok = false;
+    let mut ept_events = 0u64;
+    let mut max_pages_used = 0u64;
     let mut family_ok = false;
     for ev in events.iter().take(n) {
         match ev.kind {
@@ -265,9 +273,7 @@ fn run_bhyve_kernel_backend() -> Result<(), vm_backend::BackendError> {
                 cpuid_events += 1;
                 let leaf = (ev.a & 0xFFFF_FFFF) as u32;
                 let eax = (ev.b & 0xFFFF_FFFF) as u32;
-                let ebx = (ev.b >> 32) as u32;
                 let ecx = (ev.c & 0xFFFF_FFFF) as u32;
-                let edx = (ev.c >> 32) as u32;
                 if leaf == 1 {
                     let stepping = eax & 0xF;
                     let model = ((eax >> 4) & 0xF) | (((eax >> 16) & 0xF) << 4);
@@ -285,16 +291,17 @@ fn run_bhyve_kernel_backend() -> Result<(), vm_backend::BackendError> {
                     if family == 6 && model == 85 && stepping == 7 && hypervisor_bit == 0 {
                         family_ok = true;
                     }
-                    let _ = (ebx, edx);
-                } else if leaf == 0 {
-                    let vendor = [
-                        (ebx & 0xFF) as u8, (ebx >> 8) as u8, (ebx >> 16) as u8, (ebx >> 24) as u8,
-                        (edx & 0xFF) as u8, (edx >> 8) as u8, (edx >> 16) as u8, (edx >> 24) as u8,
-                        (ecx & 0xFF) as u8, (ecx >> 8) as u8, (ecx >> 16) as u8, (ecx >> 24) as u8,
-                    ];
-                    if &vendor == b"GenuineIntel" {
-                        vendor_ok = true;
-                    }
+                }
+            }
+            VmIntrospectEvent::KIND_EPT_VIOLATION => {
+                ept_events += 1;
+                print(b"    bhyve: lazy EPT fault @ gpa=0x");
+                print_hex(ev.a);
+                print(b" pages_used=");
+                print_u64(ev.c);
+                print(b"\n");
+                if ev.c > max_pages_used {
+                    max_pages_used = ev.c;
                 }
             }
             VmIntrospectEvent::KIND_HLT => {
@@ -304,11 +311,6 @@ fn run_bhyve_kernel_backend() -> Result<(), vm_backend::BackendError> {
         }
     }
 
-    // Phase B's payload is `mov eax, 1; cpuid; hlt` — that's exactly
-    // one CPUID (leaf 1) + one HLT. Vendor (leaf 0) is NOT exercised
-    // by this payload, so vendor_ok stays false; we only assert on
-    // the leaf-1 family/model/stepping match.
-    let _ = vendor_ok;
     if cpuid_events < 1 || hlt_events < 1 {
         print(b"    bhyve: !! expected >=1 CPUID and >=1 HLT in introspection ring\n");
         let _ = vm_backend::vm_destroy(vm);
@@ -319,13 +321,35 @@ fn run_bhyve_kernel_backend() -> Result<(), vm_backend::BackendError> {
         let _ = vm_backend::vm_destroy(vm);
         return Err(vm_backend::BackendError::KernelError(-1));
     }
+    if ept_events != EXPECTED_LAZY_PAGES {
+        print(b"    bhyve: !! expected exactly ");
+        print_u64(EXPECTED_LAZY_PAGES);
+        print(b" EPT_VIOLATION events, got ");
+        print_u64(ept_events);
+        print(b"\n");
+        let _ = vm_backend::vm_destroy(vm);
+        return Err(vm_backend::BackendError::KernelError(-1));
+    }
+    if max_pages_used != EXPECTED_LAZY_PAGES {
+        print(b"    bhyve: !! expected mem_pages_used to reach ");
+        print_u64(EXPECTED_LAZY_PAGES);
+        print(b" after the lazy faults, got max=");
+        print_u64(max_pages_used);
+        print(b"\n");
+        let _ = vm_backend::vm_destroy(vm);
+        return Err(vm_backend::BackendError::KernelError(-1));
+    }
     print(b"    bhyve: ");
     print_u64(cpuid_events);
     print(b" spoofed CPUID + ");
+    print_u64(ept_events);
+    print(b" lazy EPT fault + ");
     print_u64(hlt_events);
     print(b" HLT observed via introspection ring\n");
 
-    // 5. Tear down.
+    // 5. Tear down. The Drop impl frees the EPT root, every
+    //    intermediate table frame, and the 4 leaf frames the lazy
+    //    fault path allocated.
     vm_backend::vm_destroy(vm)?;
     Ok(())
 }

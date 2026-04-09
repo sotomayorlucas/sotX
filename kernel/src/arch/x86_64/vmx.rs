@@ -783,6 +783,10 @@ pub const VMCS_TSC_OFFSET: u64 = 0x2010;
 pub const VMCS_VM_EXIT_INTR_INFO: u64 = 0x4404;
 #[allow(dead_code)]
 pub const VMCS_EXIT_QUALIFICATION: u64 = 0x6400;
+/// 64-bit read-only field: guest-physical address of the access that
+/// caused an EPT_VIOLATION exit. Page-aligned (low 12 bits zero).
+#[allow(dead_code)]
+pub const VMCS_GUEST_PHYSICAL_ADDRESS: u64 = 0x2400;
 
 // Natural-width host state
 #[allow(dead_code)]
@@ -1536,105 +1540,6 @@ pub fn setup_guest_state(
     vmwrite(VMCS_GUEST_VMX_PREEMPTION_TIMER_VALUE, 0xFFFF_FFFF, vmcs_phys)?;
 
     Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// B.5 — Minimal EPT (just enough to identity-map a few pages)
-// ---------------------------------------------------------------------------
-
-/// EPT entry flags: read | write | execute, memory type WB.
-const EPT_LEAF_FLAGS: u64 = 0x37; // R(1) | W(2) | X(4) | (WB(6) << 3)
-/// EPT entry flags for non-leaf entries: read | write | execute.
-const EPT_NONLEAF_FLAGS: u64 = 0x07;
-
-/// A minimal 4-level EPT root. Holds the PML4 frame plus pre-allocated
-/// PDPT/PD/PT frames so we can identity-map a contiguous low-memory
-/// region without dynamic allocation in the hot path.
-///
-/// **Phase B only.** Phase D will replace this with a real lazy-fault
-/// EPT that grows as the guest touches new pages.
-pub struct MiniEpt {
-    pub pml4_phys: u64,
-    pub pdpt_phys: u64,
-    pub pd_phys: u64,
-    pub pt_phys: u64,
-}
-
-impl MiniEpt {
-    /// Allocate a 4-level EPT covering guest physical addresses
-    /// `[0 .. 2 MiB)` via 4 KiB leaf entries. Each level except the
-    /// PT has exactly one entry; the PT has 512 entries, all initially
-    /// zero (not present). Use `map_4k` to install a leaf.
-    pub fn allocate() -> Result<Self, VmxError> {
-        let pml4 = mm::alloc_frame().ok_or(VmxError::OutOfFrames)?;
-        let pdpt = mm::alloc_frame().ok_or(VmxError::OutOfFrames)?;
-        let pd = mm::alloc_frame().ok_or(VmxError::OutOfFrames)?;
-        let pt = mm::alloc_frame().ok_or(VmxError::OutOfFrames)?;
-
-        let hhdm = mm::hhdm_offset();
-        // Zero all four pages, then thread them together.
-        unsafe {
-            for &p in &[pml4.addr(), pdpt.addr(), pd.addr(), pt.addr()] {
-                core::ptr::write_bytes((p + hhdm) as *mut u8, 0, 4096);
-            }
-            // PML4[0] -> PDPT
-            *((pml4.addr() + hhdm) as *mut u64) = pdpt.addr() | EPT_NONLEAF_FLAGS;
-            // PDPT[0] -> PD
-            *((pdpt.addr() + hhdm) as *mut u64) = pd.addr() | EPT_NONLEAF_FLAGS;
-            // PD[0] -> PT
-            *((pd.addr() + hhdm) as *mut u64) = pt.addr() | EPT_NONLEAF_FLAGS;
-        }
-
-        Ok(Self {
-            pml4_phys: pml4.addr(),
-            pdpt_phys: pdpt.addr(),
-            pd_phys: pd.addr(),
-            pt_phys: pt.addr(),
-        })
-    }
-
-    /// Identity-map a 4 KiB guest physical page to the given host
-    /// frame. `gpa` must be in `[0 .. 2 MiB)` (the range covered by
-    /// the single PT this MiniEpt allocated).
-    pub fn map_4k(&self, gpa: u64, host_phys: u64) -> Result<(), VmxError> {
-        let pt_idx = ((gpa >> 12) & 0x1FF) as usize;
-        if (gpa >> 21) != 0 {
-            return Err(VmxError::OutOfFrames); // outside 2 MiB window
-        }
-        let pt_virt = self.pt_phys + mm::hhdm_offset();
-        // SAFETY: pt_phys is a valid 4 KiB frame allocated above; we
-        // write one u64 entry within bounds.
-        unsafe {
-            let entry_ptr = (pt_virt as *mut u64).add(pt_idx);
-            *entry_ptr = host_phys | EPT_LEAF_FLAGS;
-        }
-        Ok(())
-    }
-
-    /// Identity-map ALL of guest physical `[0..2 MiB)` to a contiguous
-    /// host range starting at `host_base_phys`. Convenience for the
-    /// Phase B test which needs the guest page-table pages, payload,
-    /// and stack all reachable through EPT.
-    ///
-    /// Equivalent to calling `map_4k` 512 times.
-    #[allow(dead_code)]
-    pub fn identity_map_first_2m(&self, host_base_phys: u64) -> Result<(), VmxError> {
-        for i in 0..512 {
-            let gpa = (i as u64) * 4096;
-            let hpa = host_base_phys + gpa;
-            self.map_4k(gpa, hpa)?;
-        }
-        Ok(())
-    }
-
-    /// Build the EPTP value for the VMCS field.
-    ///
-    /// Format: pml4_phys | (page-walk-length-1 << 3) | memory-type
-    /// = pml4_phys | (3 << 3) | 6 (WB)
-    /// = pml4_phys | 0x1E
-    pub fn eptp(&self) -> u64 {
-        self.pml4_phys | (3 << 3) | 6
-    }
 }
 
 // ---------------------------------------------------------------------------

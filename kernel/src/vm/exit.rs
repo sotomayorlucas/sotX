@@ -24,7 +24,7 @@
 //! IO_INSTRUCTION, EXTERNAL_INTERRUPT, etc.
 
 use super::{KernelVCpuState, VmIntrospectEvent};
-use crate::arch::x86_64::vmx;
+use crate::arch::x86_64::vmx::{self, VMCS_GUEST_PHYSICAL_ADDRESS};
 use crate::kprintln;
 use crate::pool::PoolHandle;
 
@@ -50,7 +50,7 @@ const REASON_HLT: u16 = 12;
 const REASON_RDMSR: u16 = 31;
 const REASON_WRMSR: u16 = 32;
 #[allow(dead_code)] const REASON_VM_ENTRY_FAILURE_GUEST_STATE: u16 = 33;
-#[allow(dead_code)] const REASON_EPT_VIOLATION: u16 = 48;
+const REASON_EPT_VIOLATION: u16 = 48;
 #[allow(dead_code)] const REASON_EPT_MISCONFIG: u16 = 49;
 #[allow(dead_code)] const REASON_IO_INSTRUCTION: u16 = 30;
 
@@ -116,6 +116,7 @@ pub fn dispatch(
         REASON_RDMSR => handle_rdmsr(state, profile, vmcs_phys, vm_handle),
         REASON_WRMSR => handle_wrmsr(state, vmcs_phys, vm_handle),
         REASON_EXTERNAL_INTERRUPT => handle_external_interrupt(),
+        REASON_EPT_VIOLATION => handle_ept_violation(state, vmcs_phys, vm_handle),
         other => {
             kprintln!(
                 "  vm/exit: unhandled exit reason {} on vcpu {} — terminating",
@@ -225,6 +226,71 @@ fn handle_rdmsr(
             state.idx
         );
         ExitAction::Terminate
+    }
+}
+
+/// Phase D — handle a guest EPT_VIOLATION (reason 48). The guest
+/// touched a guest-physical page that has no leaf in the VM's EPT;
+/// we lazily allocate a fresh host frame, install a 4 KiB leaf, and
+/// `Resume` the guest. The dispatcher records the GPA + new HPA in
+/// the introspection ring so userspace can verify the lazy-fault
+/// counter at the end of the test.
+///
+/// Returns `Terminate` (and the vCPU bails out of the run loop) if
+/// the per-VM `mem_pages_limit` budget is exhausted or the host
+/// frame allocator is empty — those are unrecoverable for the
+/// current guest.
+fn handle_ept_violation(
+    state: &mut KernelVCpuState,
+    vmcs_phys: u64,
+    vm_handle: Option<PoolHandle>,
+) -> ExitAction {
+    let gpa = match vmx::vmread(VMCS_GUEST_PHYSICAL_ADDRESS, vmcs_phys) {
+        Ok(v) => v,
+        Err(e) => {
+            kprintln!("  vm/exit: ept_violation: vmread(GUEST_PA) failed: {:?}", e);
+            return ExitAction::Terminate;
+        }
+    };
+    let handle = match vm_handle {
+        Some(h) => h,
+        None => {
+            kprintln!("  vm/exit: ept_violation with no active VM handle");
+            return ExitAction::Terminate;
+        }
+    };
+    match super::handle_ept_lazy_fault(handle, gpa) {
+        Ok(()) => {
+            // Look up the new mem_pages_used so the introspection
+            // event records the post-alloc count (handy for the
+            // Phase D test's "exactly N pages" assertion). Walking
+            // the EPT to recover the host frame would be redundant
+            // because we just installed it; we leave `b` as the GPA's
+            // page-aligned value because that's the user-visible
+            // address space.
+            let pages = super::mem_pages_used(handle) as u64;
+            super::push_introspect_event(
+                handle,
+                VmIntrospectEvent {
+                    kind: VmIntrospectEvent::KIND_EPT_VIOLATION,
+                    _pad: 0,
+                    a: gpa & !0xFFF,
+                    b: 0, // host phys is intentionally hidden from userspace
+                    c: pages,
+                    d: 0,
+                },
+            );
+            let _ = state;
+            ExitAction::Resume
+        }
+        Err(e) => {
+            kprintln!(
+                "  vm/exit: ept_violation lazy-fault failed at gpa={:#x}: {:?} — terminating",
+                gpa,
+                e
+            );
+            ExitAction::Terminate
+        }
     }
 }
 

@@ -1,3 +1,4 @@
+pub mod ept;
 pub mod gdt;
 pub mod idt;
 pub mod io;

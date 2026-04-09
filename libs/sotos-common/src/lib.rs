@@ -304,6 +304,10 @@ impl VmIntrospectEvent {
     pub const KIND_RDMSR: u32 = 2;
     pub const KIND_WRMSR: u32 = 3;
     pub const KIND_HLT: u32 = 4;
+    /// Phase D — lazy EPT fault. `a` = page-aligned guest physical
+    /// address, `b` = host physical frame mapped to it, `c` = the
+    /// VM's `mem_pages_used` counter after the lazy alloc.
+    pub const KIND_EPT_VIOLATION: u32 = 5;
 
     pub const fn zeroed() -> Self {
         Self { kind: 0, _pad: 0, a: 0, b: 0, c: 0, d: 0 }

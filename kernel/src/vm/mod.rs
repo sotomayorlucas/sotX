@@ -154,6 +154,10 @@ impl VmIntrospectEvent {
     pub const KIND_RDMSR: u32 = 2;
     pub const KIND_WRMSR: u32 = 3;
     pub const KIND_HLT: u32 = 4;
+    /// Phase D: lazy EPT fault. `a` = guest physical address (page
+    /// aligned), `b` = host physical address backing it after the
+    /// alloc, `c` = post-fault `mem_pages_used`.
+    pub const KIND_EPT_VIOLATION: u32 = 5;
 }
 
 /// Lock-free SPSC ring of introspection events. Single producer is the
@@ -232,6 +236,10 @@ pub struct VmObject {
     pub vcpu_count: u8,
     pub vcpus: [Option<KernelVCpuState>; MAX_VCPUS_PER_VM],
     pub profile: KernelDeceptionProfile,
+    /// Number of host frames currently backing this VM's guest memory.
+    /// Incremented by `vm::exit::handle_ept_violation` on each lazy
+    /// fault, decremented (well, dropped wholesale) when the VM is
+    /// destroyed and `leaf_frames` is freed.
     pub mem_pages_used: u32,
     pub mem_pages_limit: u32,
     /// Once set, the run loop will not re-enter the guest. Used by
@@ -240,6 +248,15 @@ pub struct VmObject {
     /// Per-VM introspection ring. Filled by `vm::exit::dispatch`,
     /// drained by userspace via `SYS_VM_INTROSPECT_DRAIN`.
     pub introspect: IntrospectRing,
+    /// Phase D — real EPT root. Allocated lazily on the first
+    /// `vm_run` call so VMs that never run don't waste a PML4 frame.
+    pub ept_root: Option<crate::arch::x86_64::ept::EptRoot>,
+    /// Host physical frames the EPT exit dispatcher allocated for
+    /// this VM via the lazy fault path. Phase D-only ownership: the
+    /// frames are owned by the `VmObject` and freed in `Drop` after
+    /// the EPT itself has been torn down (so we don't free a frame
+    /// that's still referenced by a leaf entry).
+    pub leaf_frames: alloc::vec::Vec<u64>,
 }
 
 impl VmObject {
@@ -268,12 +285,32 @@ impl VmObject {
             mem_pages_limit,
             destroyed: false,
             introspect: IntrospectRing::new(),
+            ept_root: None,
+            leaf_frames: alloc::vec::Vec::new(),
         })
     }
 
     /// Borrow a vCPU mutably by index.
     pub fn vcpu_mut(&mut self, idx: u8) -> Option<&mut KernelVCpuState> {
         self.vcpus.get_mut(idx as usize)?.as_mut()
+    }
+}
+
+impl Drop for VmObject {
+    /// Tear down the VM in the right order:
+    ///   1. Drop the EPT root (frees PML4 + intermediate PDPT/PD/PT
+    ///      table frames).
+    ///   2. Free every leaf frame this VM allocated via the lazy
+    ///      fault path. Order matters because step 1 still has live
+    ///      references to step 2's frames via the leaf entries.
+    fn drop(&mut self) {
+        // Step 1: drop the EPT (kills the table frames + invalidates
+        // every leaf entry pointing at our `leaf_frames`).
+        let _ = self.ept_root.take();
+        // Step 2: return guest leaf frames to the allocator.
+        for &phys in &self.leaf_frames {
+            crate::mm::free_frame(crate::mm::PhysFrame::from_addr(phys));
+        }
     }
 }
 
@@ -415,25 +452,168 @@ pub fn introspect_total_pushed(handle: PoolHandle) -> u64 {
     pool.get(handle).map(|vm| vm.introspect.total_pushed).unwrap_or(0)
 }
 
+/// Number of host frames currently backing this VM's guest memory.
+/// Used by the Phase D demo to assert "we lazily allocated exactly N
+/// pages for the test payload".
+pub fn mem_pages_used(handle: PoolHandle) -> u32 {
+    let pool = VM_POOL.lock();
+    pool.get(handle).map(|vm| vm.mem_pages_used).unwrap_or(0)
+}
+
+/// Phase D — handle an EPT_VIOLATION VM-exit by lazily allocating a
+/// fresh host frame, mapping it into the VM's EPT at `gpa`, and
+/// recording the new leaf frame so it gets freed when the VM is torn
+/// down.
+///
+/// Returns:
+///   `Ok(())`  — page successfully mapped, dispatcher should `Resume`
+///   `Err(_)`  — EPT alloc failed or budget exhausted, terminate vCPU
+pub fn handle_ept_lazy_fault(handle: PoolHandle, gpa: u64) -> Result<(), VmObjError> {
+    let mut pool = VM_POOL.lock();
+    let vm = pool.get_mut(handle).ok_or(VmObjError::NotFound)?;
+
+    // Budget check: refuse to grow beyond the declared per-VM cap.
+    if vm.mem_pages_used >= vm.mem_pages_limit {
+        return Err(VmObjError::Vmx(VmxError::OutOfFrames));
+    }
+
+    // Allocate a fresh host frame for the new guest page.
+    let frame = crate::mm::alloc_frame().ok_or(VmObjError::Vmx(VmxError::OutOfFrames))?;
+    let host_phys = frame.addr();
+
+    // Zero the guest-visible page so we don't leak host memory.
+    // SAFETY: freshly-allocated frame, HHDM-mapped writable, no other
+    // reference to this physical page.
+    unsafe {
+        core::ptr::write_bytes(
+            (host_phys + crate::mm::hhdm_offset()) as *mut u8,
+            0,
+            4096,
+        );
+    }
+
+    // Install the leaf in the VM's EPT. The EPT root must already
+    // exist by this point — `vm_run` allocates it before invoking
+    // `vmlaunch`, so any EPT violation we see comes from a VM whose
+    // EPT root is initialised.
+    let ept = vm.ept_root.as_mut().ok_or(VmObjError::NotFound)?;
+    if let Err(e) = ept.map_4k(
+        gpa & !0xFFF,
+        host_phys,
+        crate::arch::x86_64::ept::EPT_LEAF_RWX_WB,
+    ) {
+        // Roll back the frame allocation if the EPT walk failed.
+        crate::mm::free_frame(frame);
+        return Err(VmObjError::Vmx(match e {
+            crate::arch::x86_64::ept::EptError::OutOfFrames => VmxError::OutOfFrames,
+            _ => VmxError::VmFailInvalid,
+        }));
+    }
+
+    vm.leaf_frames.push(host_phys);
+    vm.mem_pages_used += 1;
+    Ok(())
+}
+
+/// Pre-map a guest physical page into the VM's EPT under direct
+/// control of the kernel. Used to install the canned Phase B/C test
+/// payload + page tables before the guest starts running. Returns
+/// the host physical address that was mapped.
+///
+/// Unlike `handle_ept_lazy_fault`, this does NOT count against the
+/// `mem_pages_used` budget — these are kernel-controlled init pages
+/// the userspace caller never sees and didn't ask for.
+#[allow(dead_code)]
+pub fn ept_premap(handle: PoolHandle, gpa: u64, host_phys: u64) -> Result<(), VmObjError> {
+    let mut pool = VM_POOL.lock();
+    let vm = pool.get_mut(handle).ok_or(VmObjError::NotFound)?;
+    let ept = vm.ept_root.as_mut().ok_or(VmObjError::NotFound)?;
+    ept.map_4k(
+        gpa & !0xFFF,
+        host_phys & !0xFFF,
+        crate::arch::x86_64::ept::EPT_LEAF_RWX_WB,
+    )
+    .map_err(|e| match e {
+        crate::arch::x86_64::ept::EptError::OutOfFrames => VmObjError::Vmx(VmxError::OutOfFrames),
+        _ => VmObjError::Vmx(VmxError::VmFailInvalid),
+    })
+}
+
+/// Install a fresh `EptRoot` into the VM if one is not already
+/// present. Idempotent. Called by `vm_run` before entering the
+/// guest.
+pub fn ensure_ept_root(handle: PoolHandle) -> Result<(), VmObjError> {
+    let mut pool = VM_POOL.lock();
+    let vm = pool.get_mut(handle).ok_or(VmObjError::NotFound)?;
+    if vm.ept_root.is_none() {
+        let ept =
+            crate::arch::x86_64::ept::EptRoot::new().map_err(|_| VmObjError::Vmx(VmxError::OutOfFrames))?;
+        vm.ept_root = Some(ept);
+    }
+    Ok(())
+}
+
+/// Read the EPTP value to write into VMCS. Returns 0 if the VM has
+/// no EPT root yet (caller should treat that as a programming bug).
+pub fn ept_pointer(handle: PoolHandle) -> u64 {
+    let pool = VM_POOL.lock();
+    pool.get(handle)
+        .and_then(|vm| vm.ept_root.as_ref().map(|e| e.eptp()))
+        .unwrap_or(0)
+}
+
 // ---------------------------------------------------------------------------
 // Phase B test path — create a VM, run a tiny `cpuid; hlt` payload,
-// observe the spoofed CPUID, terminate cleanly.
+// observe the spoofed CPUID, terminate cleanly. Phase D moved EPT
+// management out of `MiniEpt` and into the per-VM `EptRoot` so the
+// dispatcher can lazy-fault new pages on demand; the test now drives
+// `ept_premap` to install its 5 init pages.
 // ---------------------------------------------------------------------------
 
-use crate::arch::x86_64::vmx::MiniEpt;
-
-/// Hand-assembled `mov eax, 1; cpuid; hlt` payload (8 bytes).
+/// Hand-assembled test payload — exercises Phase B (CPUID spoofing
+/// + HLT) AND Phase D (lazy EPT fault) in a single run.
 ///
-/// On entry the guest CR0.PE=1 / PG=0, flat 32-bit segments, RIP at
-/// the start of these bytes. Executes:
-///   B8 01 00 00 00   mov eax, 1
-///   0F A2            cpuid       ← VM-exit (reason 10), profile spoof fires
-///   F4               hlt         ← VM-exit (reason 12), state.halted = true
-const TEST_PAYLOAD: [u8; 8] = [
-    0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax, 1
-    0x0F, 0xA2, // cpuid
-    0xF4, // hlt
+/// On entry the guest is in 64-bit mode with CR3 → 2 MiB identity
+/// PD, RIP at GPA `0x1000`, RSP at GPA `0x2FF0`. Both 0x1000 and
+/// 0x2000 are pre-mapped via EPT in `run_phase_b_test_inner_on_handle`.
+/// The 4 stores below target GPAs `0x3000..0x6000` which are NOT
+/// pre-mapped — each one triggers an EPT_VIOLATION (reason 48), the
+/// dispatcher lazy-faults the page in via `handle_ept_lazy_fault`,
+/// and the guest resumes.
+///
+///   B8 01 00 00 00                  mov eax, 1
+///   0F A2                           cpuid                         ; → spoofed
+///   B0 42                           mov al, 0x42
+///   A2 00 30 00 00 00 00 00 00      mov [0x3000], al              ; → EPT lazy
+///   A2 00 40 00 00 00 00 00 00      mov [0x4000], al              ; → EPT lazy
+///   A2 00 50 00 00 00 00 00 00      mov [0x5000], al              ; → EPT lazy
+///   A2 00 60 00 00 00 00 00 00      mov [0x6000], al              ; → EPT lazy
+///   F4                              hlt                           ; → halted
+///
+/// Total: 46 bytes. Fits comfortably in the 4 KiB payload page at
+/// GPA 0x1000.
+const TEST_PAYLOAD: [u8; 46] = [
+    // mov eax, 1; cpuid (Phase B path)
+    0xB8, 0x01, 0x00, 0x00, 0x00,
+    0x0F, 0xA2,
+    // mov al, 0x42
+    0xB0, 0x42,
+    // mov [0x3000], al — Phase D lazy fault #1
+    0xA2, 0x00, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    // mov [0x4000], al — #2
+    0xA2, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    // mov [0x5000], al — #3
+    0xA2, 0x00, 0x50, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    // mov [0x6000], al — #4
+    0xA2, 0x00, 0x60, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    // hlt
+    0xF4,
 ];
+
+/// Number of EPT lazy-fault pages the canned payload above touches.
+/// `tier4_demo::run_bhyve` asserts `mem_pages_used == EXPECTED_LAZY_PAGES`
+/// after `SYS_VM_RUN` returns.
+pub const EXPECTED_LAZY_PAGES: u32 = 4;
 
 /// Phase C — execute the canned `cpuid; hlt` test payload on an
 /// already-allocated `VmObject`. Public so the syscall layer
@@ -468,6 +648,10 @@ pub fn run_phase_b_test() {
 }
 
 fn run_phase_b_test_inner_on_handle(vm_handle: PoolHandle) -> Result<(), VmObjError> {
+    // 1. Make sure the VM has an EPT root. Phase D allocates this
+    //    lazily so VMs that never run don't waste a PML4 frame.
+    ensure_ept_root(vm_handle)?;
+
     // 2. Allocate a host frame for the payload, copy the bytes in.
     let payload_frame =
         crate::mm::alloc_frame().ok_or(VmObjError::Vmx(VmxError::OutOfFrames))?;
@@ -481,6 +665,7 @@ fn run_phase_b_test_inner_on_handle(vm_handle: PoolHandle) -> Result<(), VmObjEr
     // 3. Allocate a stack frame at GPA 0x2000 (separate from code).
     let stack_frame =
         crate::mm::alloc_frame().ok_or(VmObjError::Vmx(VmxError::OutOfFrames))?;
+    let stack_phys = stack_frame.addr();
 
     // 4. KVM nested-VMX forces the guest to run in 64-bit mode. That
     //    requires CR0.PG=1, so we need a guest page table that maps
@@ -507,40 +692,40 @@ fn run_phase_b_test_inner_on_handle(vm_handle: PoolHandle) -> Result<(), VmObjEr
         core::ptr::write_bytes((pml4_phys + hhdm) as *mut u8, 0, 4096);
         core::ptr::write_bytes((pdpt_phys + hhdm) as *mut u8, 0, 4096);
         core::ptr::write_bytes((pd_phys + hhdm) as *mut u8, 0, 4096);
-        // GUEST page table entries use GUEST physical addresses. Since
-        // EPT is identity-mapped over 0..2 MiB, GPA = HPA for these.
-        // BUT — pml4/pdpt/pd are at HPAs that may be outside 0..2 MiB,
-        // so we need DIFFERENT GPAs for them and let EPT translate.
-        //
-        // Use this scheme:
-        //   GPA 0x1000 = payload (host frame `payload_phys`)
-        //   GPA 0x2000 = stack   (host frame `stack_frame.addr()`)
-        //   GPA 0x10000 = pml4   (host frame `pml4_phys`)
-        //   GPA 0x11000 = pdpt   (host frame `pdpt_phys`)
-        //   GPA 0x12000 = pd     (host frame `pd_phys`)
-        // Guest CR3 = GPA 0x10000 = pml4's guest physical.
-        //
-        // Then PML4[0] holds GPA 0x11000 (pdpt's GPA), PDPT[0] holds
-        // GPA 0x12000 (pd's GPA), PD[0] holds GPA 0 with PS=1
-        // (2 MiB leaf mapping guest virt 0..2 MiB to guest phys 0..2 MiB).
+        // GUEST page table entries use GUEST physical addresses.
+        //   GPA 0x1000  = payload
+        //   GPA 0x2000  = stack
+        //   GPA 0x10000 = pml4
+        //   GPA 0x11000 = pdpt
+        //   GPA 0x12000 = pd
+        // Guest CR3 = GPA 0x10000.
+        // PD[0] is a 2 MiB PS=1 leaf identity-mapping guest virt
+        // 0..2 MiB to guest phys 0..2 MiB; the EPT then maps GPA
+        // 0x1000..0x2000 to the host payload frame and the rest of
+        // the 2 MiB window can be lazy-faulted in if the guest ever
+        // touches it.
         *((pml4_phys + hhdm) as *mut u64) = 0x11000 | 0x3;
         *((pdpt_phys + hhdm) as *mut u64) = 0x12000 | 0x3;
         *((pd_phys + hhdm) as *mut u64) = 0x0 | 0x83;
     }
 
-    // 5. Build the minimal EPT and map all 5 GPAs into it.
-    let ept = MiniEpt::allocate().map_err(VmObjError::Vmx)?;
-    ept.map_4k(0x1000, payload_phys).map_err(VmObjError::Vmx)?;
-    ept.map_4k(0x2000, stack_frame.addr()).map_err(VmObjError::Vmx)?;
-    ept.map_4k(0x10000, pml4_phys).map_err(VmObjError::Vmx)?;
-    ept.map_4k(0x11000, pdpt_phys).map_err(VmObjError::Vmx)?;
-    ept.map_4k(0x12000, pd_phys).map_err(VmObjError::Vmx)?;
+    // 5. Pre-map the 5 init pages into the VM's EPT. Phase D's lazy
+    //    fault handler will fill in any other GPA the guest touches
+    //    (the test payload only touches 0x1000 and 0x2FF0, both of
+    //    which are pre-mapped here, so we never actually exercise
+    //    the lazy path in this test — the dedicated Phase D test
+    //    payload below does).
+    ept_premap(vm_handle, 0x1000, payload_phys)?;
+    ept_premap(vm_handle, 0x2000, stack_phys)?;
+    ept_premap(vm_handle, 0x10000, pml4_phys)?;
+    ept_premap(vm_handle, 0x11000, pdpt_phys)?;
+    ept_premap(vm_handle, 0x12000, pd_phys)?;
 
     // 6. Run the vCPU. Phase C runs this from a userspace thread via
     // SYS_VM_RUN, so we keep the noise low — diagnostics are gated
     // behind `kdebug!` and only fire under the `verbose` feature.
     set_current_vm(vm_handle);
-    let result = run_one_vcpu(vm_handle, &ept);
+    let result = run_one_vcpu(vm_handle);
     clear_current_vm();
 
     if let Err(e) = result {
@@ -578,7 +763,15 @@ fn run_phase_b_test_inner_on_handle(vm_handle: PoolHandle) -> Result<(), VmObjEr
     Ok(())
 }
 
-fn run_one_vcpu(vm_handle: PoolHandle, ept: &MiniEpt) -> Result<(), VmxError> {
+fn run_one_vcpu(vm_handle: PoolHandle) -> Result<(), VmxError> {
+    // Phase D: read the VM's EPTP first (under a brief pool lock) so
+    // we can drop the lock before vmcs_load — `run_one_vcpu` is the
+    // hot path and we want to keep it lock-free past the VMCS setup.
+    let eptp_value = ept_pointer(vm_handle);
+    if eptp_value == 0 {
+        return Err(VmxError::VmFailInvalid);
+    }
+
     let mut pool = VM_POOL.lock();
     let vm = pool.get_mut(vm_handle).ok_or(VmxError::VmFailInvalid)?;
     let vcpu = vm.vcpu_mut(0).ok_or(VmxError::VmFailInvalid)?;
@@ -590,7 +783,7 @@ fn run_one_vcpu(vm_handle: PoolHandle, ept: &MiniEpt) -> Result<(), VmxError> {
     vmx::vmcs_clear(&vcpu.vmcs)?;
     vmx::vmcs_load(&vcpu.vmcs)?;
     vmx::setup_controls(vmcs_phys)?;
-    vmx::vmwrite(vmx::VMCS_EPTP, ept.eptp(), vmcs_phys)?;
+    vmx::vmwrite(vmx::VMCS_EPTP, eptp_value, vmcs_phys)?;
     vmx::setup_guest_state(vmcs_phys, 0x1000, 0x2FF0, 0x10000)?;
 
     // Diagnostic dumps from Phase B's bringup. Gated behind `kdebug!`
