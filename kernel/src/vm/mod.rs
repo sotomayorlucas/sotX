@@ -578,36 +578,47 @@ pub fn ept_pointer(handle: PoolHandle) -> u64 {
 // ---------------------------------------------------------------------------
 
 /// Hand-assembled test payload — exercises Phase B (CPUID spoofing
-/// + HLT), Phase D (lazy EPT fault), AND Phase F.2 (COM1 TX through
-/// the in-kernel device model) in a single run.
+/// + HLT), Phase D (lazy EPT fault), Phase F.2 (COM1 TX through the
+/// in-kernel device model), AND Phase F.3 (CMOS read + PIC mask
+/// write through the new device handlers) in a single run.
 ///
 /// On entry the guest is in 64-bit mode with CR3 → 2 MiB identity
 /// PD, RIP at GPA `0x1000`, RSP at GPA `0x2FF0`. Both 0x1000 and
 /// 0x2000 are pre-mapped via EPT in `run_phase_b_test_inner_on_handle`.
 /// The 4 memory stores target GPAs `0x3000..0x6000` which are NOT
-/// pre-mapped — each one triggers an EPT_VIOLATION. The 4 OUT
-/// instructions hit COM1 (port 0x3F8) which the in-kernel devmodel
-/// pipes through to the host serial console with a `[GUEST]` prefix.
+/// pre-mapped — each one triggers an EPT_VIOLATION. The COM1 OUTs
+/// hit the in-kernel UART; the CMOS in/out and PIC mask out exercise
+/// the new Phase F.3 device handlers.
 ///
+///   ; --- Phase B ---
 ///   B8 01 00 00 00                  mov eax, 1
-///   0F A2                           cpuid                         ; Phase B
+///   0F A2                           cpuid                         ; spoofed
+///   ; --- Phase D ---
 ///   B0 42                           mov al, 0x42
-///   A2 00 30 00 00 00 00 00 00      mov [0x3000], al              ; Phase D
-///   A2 00 40 00 00 00 00 00 00      mov [0x4000], al              ; Phase D
-///   A2 00 50 00 00 00 00 00 00      mov [0x5000], al              ; Phase D
-///   A2 00 60 00 00 00 00 00 00      mov [0x6000], al              ; Phase D
-///   66 BA F8 03                     mov dx, 0x3F8                 ; COM1 base
+///   A2 00 30 00 00 00 00 00 00      mov [0x3000], al              ; lazy
+///   A2 00 40 00 00 00 00 00 00      mov [0x4000], al              ; lazy
+///   A2 00 50 00 00 00 00 00 00      mov [0x5000], al              ; lazy
+///   A2 00 60 00 00 00 00 00 00      mov [0x6000], al              ; lazy
+///   ; --- Phase F.2 (COM1 TX "Fx\n") ---
+///   66 BA F8 03                     mov dx, 0x3F8
 ///   B0 46                           mov al, 'F'
-///   EE                              out dx, al                    ; Phase F.2
+///   EE                              out dx, al
 ///   B0 78                           mov al, 'x'
-///   EE                              out dx, al                    ; Phase F.2
+///   EE                              out dx, al
 ///   B0 0A                           mov al, '\n'
-///   EE                              out dx, al                    ; flush
+///   EE                              out dx, al
+///   ; --- Phase F.3 (CMOS read + PIC mask) ---
+///   B0 0A                           mov al, 0x0A
+///   E6 70                           out 0x70, al                  ; CMOS index = Status A
+///   E4 71                           in  al, 0x71                  ; CMOS data read
+///   B0 FF                           mov al, 0xFF
+///   E6 21                           out 0x21, al                  ; PIC1 mask all IRQs
+///   ; --- Done ---
 ///   F4                              hlt
 ///
-/// Total: 59 bytes. Still fits in the 4 KiB payload page at GPA
+/// Total: 69 bytes. Still fits in the 4 KiB payload page at GPA
 /// 0x1000.
-const TEST_PAYLOAD: [u8; 59] = [
+const TEST_PAYLOAD: [u8; 69] = [
     // mov eax, 1; cpuid (Phase B path)
     0xB8, 0x01, 0x00, 0x00, 0x00,
     0x0F, 0xA2,
@@ -624,14 +635,17 @@ const TEST_PAYLOAD: [u8; 59] = [
     // mov dx, 0x3F8 (16-bit operand-size override 0x66 + opcode BA + imm16)
     0x66, 0xBA, 0xF8, 0x03,
     // mov al, 'F'; out dx, al
-    0xB0, 0x46,
-    0xEE,
+    0xB0, 0x46, 0xEE,
     // mov al, 'x'; out dx, al
-    0xB0, 0x78,
-    0xEE,
+    0xB0, 0x78, 0xEE,
     // mov al, '\n'; out dx, al
-    0xB0, 0x0A,
-    0xEE,
+    0xB0, 0x0A, 0xEE,
+    // mov al, 0x0A; out 0x70, al    ; CMOS index = Status A register
+    0xB0, 0x0A, 0xE6, 0x70,
+    // in al, 0x71                    ; CMOS data port read
+    0xE4, 0x71,
+    // mov al, 0xFF; out 0x21, al    ; mask all PIC1 IRQs
+    0xB0, 0xFF, 0xE6, 0x21,
     // hlt
     0xF4,
 ];
@@ -641,10 +655,17 @@ const TEST_PAYLOAD: [u8; 59] = [
 /// after `SYS_VM_RUN` returns.
 pub const EXPECTED_LAZY_PAGES: u32 = 4;
 
-/// Number of COM1 TX writes the canned payload performs. Userspace
-/// asserts the introspection ring contains exactly this many
-/// `KIND_IO_OUT` events.
-pub const EXPECTED_IO_OUT_EVENTS: u32 = 3;
+/// Number of COM1 TX + Phase F.3 device writes the canned payload
+/// performs:
+///   3 × COM1 TX           ('F','x','\n')
+///   1 × CMOS index write  (port 0x70)
+///   1 × PIC1 mask write   (port 0x21)
+/// = 5 KIND_IO_OUT events.
+pub const EXPECTED_IO_OUT_EVENTS: u32 = 5;
+
+/// Number of guest IN reads the canned payload performs (Phase F.3:
+/// one CMOS data-port read).
+pub const EXPECTED_IO_IN_EVENTS: u32 = 1;
 
 /// Phase C — execute the canned `cpuid; hlt` test payload on an
 /// already-allocated `VmObject`. Public so the syscall layer

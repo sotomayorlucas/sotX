@@ -219,10 +219,16 @@ fn run_bhyve() -> bool {
 /// Mirrors `kernel/src/vm/mod.rs::EXPECTED_LAZY_PAGES`.
 const EXPECTED_LAZY_PAGES: u64 = 4;
 
-/// Number of guest COM1 OUT writes the canned payload performs
-/// (Phase F.2 — `out 0x3F8, al` for 'F', 'x', '\n'). Mirrors
-/// `kernel/src/vm/mod.rs::EXPECTED_IO_OUT_EVENTS`.
-const EXPECTED_IO_OUT_EVENTS: u64 = 3;
+/// Number of guest OUT writes the canned payload performs:
+///   3 × COM1 TX  ('F', 'x', '\n')        — Phase F.2
+///   1 × CMOS index write (port 0x70)     — Phase F.3
+///   1 × PIC1 mask write  (port 0x21)     — Phase F.3
+/// Mirrors `kernel/src/vm/mod.rs::EXPECTED_IO_OUT_EVENTS`.
+const EXPECTED_IO_OUT_EVENTS: u64 = 5;
+
+/// Number of guest IN reads the canned payload performs (Phase F.3:
+/// one CMOS data-port read at 0x71).
+const EXPECTED_IO_IN_EVENTS: u64 = 1;
 
 /// Phase C/D kernel-backed run. Allocates a VM, installs the bare-metal
 /// Intel deception profile, runs the canned payload (`cpuid` + 4 stores
@@ -271,6 +277,8 @@ fn run_bhyve_kernel_backend() -> Result<(), vm_backend::BackendError> {
     let mut hlt_events = 0u64;
     let mut ept_events = 0u64;
     let mut io_out_events = 0u64;
+    let mut io_in_events = 0u64;
+    let mut cmos_status_a: u64 = 0;
     let mut max_pages_used = 0u64;
     let mut family_ok = false;
     for ev in events.iter().take(n) {
@@ -320,6 +328,19 @@ fn run_bhyve_kernel_backend() -> Result<(), vm_backend::BackendError> {
                 print_hex(ev.c);
                 print(b"\n");
             }
+            VmIntrospectEvent::KIND_IO_IN => {
+                io_in_events += 1;
+                print(b"    bhyve: guest IN  port=0x");
+                print_hex(ev.a);
+                print(b" width=");
+                print_u64(ev.b);
+                print(b" returned=0x");
+                print_hex(ev.d);
+                print(b"\n");
+                if ev.a == 0x71 {
+                    cmos_status_a = ev.d;
+                }
+            }
             VmIntrospectEvent::KIND_HLT => {
                 hlt_events += 1;
             }
@@ -364,15 +385,36 @@ fn run_bhyve_kernel_backend() -> Result<(), vm_backend::BackendError> {
         let _ = vm_backend::vm_destroy(vm);
         return Err(vm_backend::BackendError::KernelError(-1));
     }
+    if io_in_events != EXPECTED_IO_IN_EVENTS {
+        print(b"    bhyve: !! expected exactly ");
+        print_u64(EXPECTED_IO_IN_EVENTS);
+        print(b" KIND_IO_IN events, got ");
+        print_u64(io_in_events);
+        print(b"\n");
+        let _ = vm_backend::vm_destroy(vm);
+        return Err(vm_backend::BackendError::KernelError(-1));
+    }
+    // Phase F.3: the CMOS Status A register (index 0x0A) should
+    // return 0x26 — that's what `devmodel::handle_cmos` hard-codes
+    // for "32 KHz divider, no UIP in progress".
+    if cmos_status_a != 0x26 {
+        print(b"    bhyve: !! expected CMOS Status A = 0x26, got 0x");
+        print_hex(cmos_status_a);
+        print(b"\n");
+        let _ = vm_backend::vm_destroy(vm);
+        return Err(vm_backend::BackendError::KernelError(-1));
+    }
     print(b"    bhyve: ");
     print_u64(cpuid_events);
-    print(b" spoofed CPUID + ");
+    print(b" CPUID + ");
     print_u64(ept_events);
-    print(b" lazy EPT fault + ");
+    print(b" EPT + ");
     print_u64(io_out_events);
-    print(b" COM1 OUT + ");
+    print(b" OUT + ");
+    print_u64(io_in_events);
+    print(b" IN + ");
     print_u64(hlt_events);
-    print(b" HLT observed via introspection ring\n");
+    print(b" HLT (CMOS Status A=0x26) observed via introspection ring\n");
 
     // 5. Tear down. The Drop impl frees the EPT root, every
     //    intermediate table frame, and the 4 leaf frames the lazy

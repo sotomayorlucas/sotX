@@ -57,14 +57,70 @@ pub struct IoAccess {
     pub value: u32,
 }
 
-// COM1 register offsets relative to its 0x3F8 base. Phase F.2 only
-// implements TX-side ports; the rest return `0x00` for IN and drop
-// OUT silently (matching a "not connected" UART well enough for
-// printk-only Linux output).
-const COM1_BASE: u16 = 0x3F8;
+// ---------------------------------------------------------------------------
+// Port range constants
+// ---------------------------------------------------------------------------
+
+// COM1 — Phase F.2.
+#[allow(dead_code)] const COM1_BASE: u16 = 0x3F8;
 const COM1_END: u16 = 0x3FF;
-const COM1_TX_RX: u16 = 0x3F8; // TX register on write, RX on read
-const COM1_LINE_STATUS: u16 = 0x3FD; // bit 5 (THR empty) + bit 6 (TX shift empty) = 0x60
+const COM1_TX_RX: u16 = 0x3F8;
+const COM1_LINE_STATUS: u16 = 0x3FD;
+
+// 8259 PIC — Phase F.3.
+const PIC1_CMD: u16 = 0x20;
+const PIC1_DATA: u16 = 0x21;
+const PIC2_CMD: u16 = 0xA0;
+const PIC2_DATA: u16 = 0xA1;
+
+// PIT — Phase F.3.
+const PIT_CH0: u16 = 0x40;
+#[allow(dead_code)] const PIT_CH1: u16 = 0x41;
+#[allow(dead_code)] const PIT_CH2: u16 = 0x42;
+const PIT_MODE: u16 = 0x43;
+
+// CMOS / RTC — Phase F.3.
+const CMOS_INDEX: u16 = 0x70;
+const CMOS_DATA: u16 = 0x71;
+
+// POST diagnostic — Phase F.3.
+const POST_DIAG: u16 = 0x80;
+
+// PCI config space — Phase F.3.
+const PCI_CONFIG_ADDR: u16 = 0xCF8;
+const PCI_CONFIG_DATA: u16 = 0xCFC;
+
+// ---------------------------------------------------------------------------
+// Per-VM device state
+// ---------------------------------------------------------------------------
+//
+// Phase F is single-VM only — every test runs one guest at a time —
+// so a global `Mutex<DeviceState>` is enough. Phase G+ will move the
+// state into `VmObject` once we run multiple guests concurrently.
+
+struct DeviceState {
+    pic1_imr: u8,
+    pic2_imr: u8,
+    pit_counters: [u16; 3],
+    pit_mode: u8,
+    cmos_index: u8,
+    pci_config_addr: u32,
+}
+
+impl DeviceState {
+    const fn new() -> Self {
+        Self {
+            pic1_imr: 0xFF, // start with everything masked (Linux's first state too)
+            pic2_imr: 0xFF,
+            pit_counters: [0xFFFF; 3],
+            pit_mode: 0,
+            cmos_index: 0,
+            pci_config_addr: 0,
+        }
+    }
+}
+
+static DEVICE_STATE: spin::Mutex<DeviceState> = spin::Mutex::new(DeviceState::new());
 
 /// Hot-path entry called from `vm::exit::handle_io_instruction`.
 /// Looks at `access.port` and dispatches to the right device.
@@ -76,6 +132,16 @@ pub fn handle_io(
     let result = match access.port {
         // COM1 — Phase F.2.
         COM1_TX_RX..=COM1_END => handle_com1(access),
+        // 8259 PIC master/slave — Phase F.3.
+        PIC1_CMD | PIC1_DATA | PIC2_CMD | PIC2_DATA => handle_pic(access),
+        // PIT — Phase F.3.
+        PIT_CH0..=PIT_MODE => handle_pit(access),
+        // CMOS / RTC — Phase F.3.
+        CMOS_INDEX | CMOS_DATA => handle_cmos(access),
+        // POST diagnostic — Phase F.3.
+        POST_DIAG => handle_post(access),
+        // PCI config space — Phase F.3.
+        PCI_CONFIG_ADDR..=0xCFF => handle_pci_config(access),
         // Anything else: unmodeled.
         _ => IoResult::Unhandled,
     };
@@ -138,6 +204,167 @@ fn handle_com1(access: IoAccess) -> IoResult {
         // for a polling printk that never enables interrupts.
         (_, IoDir::Out) => IoResult::Ok { value: 0 },
         (_, IoDir::In) => IoResult::Ok { value: 0 },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase F.3 — 8259 PIC emulation
+// ---------------------------------------------------------------------------
+//
+// Linux's early init writes ICW1 (`out 0x20, 0x11`), then ICW2/3/4
+// to the data port, then masks every line with `out 0x21, 0xFF`.
+// Subsequent `in al, 0x21` reads return the IMR. We don't model the
+// ICW state machine — we just accept ICW writes as no-ops, latch the
+// IMR on data-port writes, and return the IMR on data-port reads.
+
+fn handle_pic(access: IoAccess) -> IoResult {
+    let mut state = DEVICE_STATE.lock();
+    match (access.port, access.direction) {
+        // Master command — ICW1, OCW2 (EOI), OCW3. We accept silently.
+        (PIC1_CMD, IoDir::Out) => IoResult::Ok { value: 0 },
+        // Master data — IMR or ICW2/3/4. Latch into the master IMR
+        // for the OCW1 case; ICW2/3/4 are accepted as no-ops because
+        // we don't model the state machine.
+        (PIC1_DATA, IoDir::Out) => {
+            state.pic1_imr = access.value as u8;
+            IoResult::Ok { value: 0 }
+        }
+        (PIC1_DATA, IoDir::In) => IoResult::Ok { value: state.pic1_imr as u32 },
+        (PIC1_CMD, IoDir::In) => IoResult::Ok { value: 0 },
+        // Slave — same shape as master.
+        (PIC2_CMD, IoDir::Out) => IoResult::Ok { value: 0 },
+        (PIC2_DATA, IoDir::Out) => {
+            state.pic2_imr = access.value as u8;
+            IoResult::Ok { value: 0 }
+        }
+        (PIC2_DATA, IoDir::In) => IoResult::Ok { value: state.pic2_imr as u32 },
+        (PIC2_CMD, IoDir::In) => IoResult::Ok { value: 0 },
+        _ => IoResult::Unhandled,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase F.3 — PIT (8254) emulation
+// ---------------------------------------------------------------------------
+//
+// We don't run a real timer for the guest — instead we return a
+// monotonically-decreasing counter for channel 0 reads so any
+// calibration loop in the guest sees "time passing" and converges.
+// The mode register at 0x43 just latches the most-recent write.
+
+fn handle_pit(access: IoAccess) -> IoResult {
+    let mut state = DEVICE_STATE.lock();
+    match (access.port, access.direction) {
+        (PIT_CH0..=PIT_CH2, IoDir::Out) => {
+            let ch = (access.port - PIT_CH0) as usize;
+            // 16-bit counter loaded as two 8-bit halves; we collapse
+            // them into the low 16 bits of `value` and store directly.
+            state.pit_counters[ch] = access.value as u16;
+            IoResult::Ok { value: 0 }
+        }
+        (PIT_CH0..=PIT_CH2, IoDir::In) => {
+            let ch = (access.port - PIT_CH0) as usize;
+            // Decrement the latched counter so successive reads see
+            // the timer "ticking down" — Linux's PIT calibration
+            // measures the delta between two reads.
+            let cur = state.pit_counters[ch];
+            let next = cur.wrapping_sub(0x100);
+            state.pit_counters[ch] = next;
+            IoResult::Ok { value: cur as u32 }
+        }
+        (PIT_MODE, IoDir::Out) => {
+            state.pit_mode = access.value as u8;
+            IoResult::Ok { value: 0 }
+        }
+        (PIT_MODE, IoDir::In) => IoResult::Ok { value: state.pit_mode as u32 },
+        _ => IoResult::Unhandled,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase F.3 — CMOS / RTC emulation
+// ---------------------------------------------------------------------------
+//
+// Linux reads CMOS registers 0x00..0x09 to bootstrap its time-of-day
+// clock and 0x0A/0x0B for RTC status. We return canned BCD values
+// (epoch ≈ 2024-01-01 00:00:00) and Status A bit 7 cleared (UIP not
+// in progress). Anything else returns 0.
+
+fn handle_cmos(access: IoAccess) -> IoResult {
+    let mut state = DEVICE_STATE.lock();
+    match (access.port, access.direction) {
+        (CMOS_INDEX, IoDir::Out) => {
+            // Bit 7 = NMI disable; we don't model NMI delivery so
+            // just keep the index value.
+            state.cmos_index = (access.value & 0x7F) as u8;
+            IoResult::Ok { value: 0 }
+        }
+        (CMOS_INDEX, IoDir::In) => IoResult::Ok { value: 0 },
+        (CMOS_DATA, IoDir::In) => {
+            let v = match state.cmos_index {
+                0x00 => 0x00, // seconds
+                0x02 => 0x00, // minutes
+                0x04 => 0x00, // hours (24h)
+                0x06 => 0x02, // day of week (Monday)
+                0x07 => 0x01, // day of month
+                0x08 => 0x01, // month
+                0x09 => 0x24, // year (BCD 24 = 2024)
+                0x0A => 0x26, // status A: 32 KHz divider, no UIP
+                0x0B => 0x02, // status B: 24-hour mode, BCD
+                0x0C => 0x00, // status C: no pending interrupts
+                0x0D => 0x80, // status D: valid RAM/time
+                0x32 => 0x20, // century (BCD 20 = 2000s)
+                _ => 0,
+            };
+            IoResult::Ok { value: v as u32 }
+        }
+        (CMOS_DATA, IoDir::Out) => {
+            // Phase F.3 doesn't need write-side persistence — Linux
+            // mostly writes to clear interrupts or program the alarm,
+            // neither of which matters for our boot path.
+            IoResult::Ok { value: 0 }
+        }
+        _ => IoResult::Unhandled,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase F.3 — POST diagnostic port
+// ---------------------------------------------------------------------------
+//
+// Linux uses `outb(0x80, 0)` as a ~1µs delay between bus operations
+// (the BIOS POST card behaviour is "the chipset will hold the bus
+// for one cycle"). Accept any byte silently.
+
+fn handle_post(access: IoAccess) -> IoResult {
+    match access.direction {
+        IoDir::Out => IoResult::Ok { value: 0 },
+        IoDir::In => IoResult::Ok { value: 0 },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase F.3 — PCI configuration space
+// ---------------------------------------------------------------------------
+//
+// We pretend "no PCI device exists" by always returning 0xFFFFFFFF
+// (the bus-line idle pattern) for any vendor-ID read. Linux's PCI
+// scan terminates after the first failed probe per slot. The
+// address register at 0xCF8 is just latched.
+
+fn handle_pci_config(access: IoAccess) -> IoResult {
+    let mut state = DEVICE_STATE.lock();
+    match (access.port, access.direction) {
+        (PCI_CONFIG_ADDR, IoDir::Out) => {
+            state.pci_config_addr = access.value;
+            IoResult::Ok { value: 0 }
+        }
+        (PCI_CONFIG_ADDR, IoDir::In) => IoResult::Ok { value: state.pci_config_addr },
+        // 0xCFC..0xCFF — data-port window. Reads return the no-device
+        // value; writes are accepted but discarded.
+        (PCI_CONFIG_DATA..=0xCFF, IoDir::Out) => IoResult::Ok { value: 0 },
+        (PCI_CONFIG_DATA..=0xCFF, IoDir::In) => IoResult::Ok { value: 0xFFFF_FFFF },
+        _ => IoResult::Unhandled,
     }
 }
 
