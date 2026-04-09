@@ -216,6 +216,9 @@ dependencies = [
 [[package]]
 name = "sot-bhyve"
 version = "0.1.0"
+dependencies = [
+ "sotos-common",
+]
 
 [[package]]
 name = "sot-crossbow"

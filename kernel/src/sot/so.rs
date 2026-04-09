@@ -74,6 +74,7 @@ impl CapObjectAdapter {
             CapObject::Domain { .. } => SOType::Domain,
             CapObject::AddrSpace { .. } => SOType::AddrSpace,
             CapObject::Interposed { .. } => SOType::Capability,
+            CapObject::Vm { .. } => SOType::Capability,
             CapObject::Null => SOType::Capability,
         }
     }

@@ -658,6 +658,7 @@ fn pack_cap_object(obj: &CapObject) -> u64 {
         CapObject::Domain { id } => (8u64 << 56) | (*id as u64),
         CapObject::AddrSpace { cr3 } => (9u64 << 56) | (*cr3 & 0x00FF_FFFF_FFFF_FFFF),
         CapObject::Interposed { original, .. } => (10u64 << 56) | (*original as u64),
+        CapObject::Vm { id } => (11u64 << 56) | (*id as u64),
         CapObject::Null => 0,
     }
 }

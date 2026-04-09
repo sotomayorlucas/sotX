@@ -20,6 +20,7 @@ mod service;
 mod shm;
 mod sot;
 mod thread;
+mod vm;
 
 use crate::arch::x86_64::syscall::TrapFrame;
 use crate::cap::{self as cap_mod, CapObject, Rights};
@@ -620,6 +621,7 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
         _ if shm::handle(frame, nr) => {}
         _ if debug::handle(frame, nr) => {}
         _ if sot::handle(frame, nr) => {}
+        _ if vm::handle(frame, nr) => {}
 
         // Unknown syscall
         _ => {

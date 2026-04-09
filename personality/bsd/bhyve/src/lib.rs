@@ -13,3 +13,6 @@ pub mod vcpu;
 pub mod vmcs;
 pub mod deception;
 pub mod introspect;
+
+#[cfg(feature = "kernel-backend")]
+pub mod backend;

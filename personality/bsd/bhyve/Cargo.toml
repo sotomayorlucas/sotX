@@ -5,4 +5,13 @@ edition = "2021"
 
 [workspace]
 
+[features]
+default = []
+# Phase C: route VM lifecycle through the kernel SYS_VM_* syscalls
+# instead of the in-process scaffolding. Consumers (e.g. services/init)
+# enable this; cargo test -p sot-bhyve runs without it so the host
+# unit tests still build against the type-level types.
+kernel-backend = ["dep:sotos-common"]
+
 [dependencies]
+sotos-common = { path = "../../../libs/sotos-common", optional = true }

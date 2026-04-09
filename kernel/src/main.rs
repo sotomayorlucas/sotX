@@ -304,11 +304,11 @@ extern "C" fn kmain() -> ! {
     // Only `just run-kvm` (with `-cpu host,+vmx`) will reach VMX root.
     arch::vmx::init_bsp();
 
-    // Phase B test path: create a tiny VM, run a `mov eax,1; cpuid; hlt`
-    // payload, observe the spoofed CPUID exit and the HLT termination.
-    // No-op under TCG/WHPX (gated behind `cpu_has_vmx`).
+    // Phase C: VM subsystem is now driven entirely by userspace via the
+    // SYS_VM_* syscall family. The kernel no longer auto-runs the Phase B
+    // smoke test at boot — `services/init/src/tier4_demo.rs::run_bhyve`
+    // owns the test VM lifecycle now.
     vm::init();
-    vm::run_phase_b_test();
 
     // Spawn init process (first userspace code).
     let user_cr3 = spawn_init_process();

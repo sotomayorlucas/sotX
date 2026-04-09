@@ -131,6 +131,100 @@ impl KernelVCpuState {
     }
 }
 
+/// Capacity of the per-VM introspection ring. Sized for the Phase B/C
+/// `cpuid; hlt` test (only a handful of events) plus headroom for the
+/// Phase F Linux boot's hot-path of CPUID / RDMSR / WRMSR exits.
+pub const INTROSPECT_RING_CAP: usize = 256;
+
+/// One introspection event captured by the kernel exit dispatcher.
+/// Mirrors the userspace `sotos_common::VmIntrospectEvent` layout.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct VmIntrospectEvent {
+    pub kind: u32,
+    pub _pad: u32,
+    pub a: u64,
+    pub b: u64,
+    pub c: u64,
+    pub d: u64,
+}
+
+impl VmIntrospectEvent {
+    pub const KIND_CPUID: u32 = 1;
+    pub const KIND_RDMSR: u32 = 2;
+    pub const KIND_WRMSR: u32 = 3;
+    pub const KIND_HLT: u32 = 4;
+}
+
+/// Lock-free SPSC ring of introspection events. Single producer is the
+/// vCPU thread inside `vm::exit::dispatch`; single consumer is whoever
+/// calls `SYS_VM_INTROSPECT_DRAIN`.
+///
+/// Phase C runs everything serially on the BSP so a plain head/tail
+/// `usize` pair behind the parent VM's pool lock is enough; Phase F
+/// will replace this with a real lock-free ring once vCPU threads run
+/// concurrently with the userspace drainer.
+pub struct IntrospectRing {
+    pub events: [VmIntrospectEvent; INTROSPECT_RING_CAP],
+    pub head: usize,
+    pub tail: usize,
+    /// Lifetime count of pushes (including drops on overflow). Useful
+    /// for the Tier 4 demo's "we observed N CPUIDs" assertion when the
+    /// ring would otherwise wrap.
+    pub total_pushed: u64,
+}
+
+impl IntrospectRing {
+    pub const fn new() -> Self {
+        const ZERO: VmIntrospectEvent = VmIntrospectEvent {
+            kind: 0, _pad: 0, a: 0, b: 0, c: 0, d: 0,
+        };
+        Self {
+            events: [ZERO; INTROSPECT_RING_CAP],
+            head: 0,
+            tail: 0,
+            total_pushed: 0,
+        }
+    }
+
+    /// Push an event. Drops the oldest entry on overflow (and bumps
+    /// `total_pushed` regardless, so consumers can detect drops).
+    pub fn push(&mut self, ev: VmIntrospectEvent) {
+        self.events[self.head] = ev;
+        self.head = (self.head + 1) % INTROSPECT_RING_CAP;
+        if self.head == self.tail {
+            // Overflow — drop oldest.
+            self.tail = (self.tail + 1) % INTROSPECT_RING_CAP;
+        }
+        self.total_pushed = self.total_pushed.wrapping_add(1);
+    }
+
+    /// Pop the oldest event, or `None` if the ring is empty.
+    pub fn pop(&mut self) -> Option<VmIntrospectEvent> {
+        if self.head == self.tail {
+            return None;
+        }
+        let ev = self.events[self.tail];
+        self.tail = (self.tail + 1) % INTROSPECT_RING_CAP;
+        Some(ev)
+    }
+
+    /// Drain at most `out.len()` events into `out`, returning N written.
+    pub fn drain_into(&mut self, out: &mut [VmIntrospectEvent]) -> usize {
+        let mut n = 0;
+        while n < out.len() {
+            match self.pop() {
+                Some(ev) => {
+                    out[n] = ev;
+                    n += 1;
+                }
+                None => break,
+            }
+        }
+        n
+    }
+}
+
 /// One guest VM. Owns its vCPUs and the deception profile that drives
 /// CPUID / MSR spoofing on every exit.
 pub struct VmObject {
@@ -143,6 +237,9 @@ pub struct VmObject {
     /// Once set, the run loop will not re-enter the guest. Used by
     /// `destroy()` and by terminal exits (triple fault, etc.).
     pub destroyed: bool,
+    /// Per-VM introspection ring. Filled by `vm::exit::dispatch`,
+    /// drained by userspace via `SYS_VM_INTROSPECT_DRAIN`.
+    pub introspect: IntrospectRing,
 }
 
 impl VmObject {
@@ -170,6 +267,7 @@ impl VmObject {
             mem_pages_used: 0,
             mem_pages_limit,
             destroyed: false,
+            introspect: IntrospectRing::new(),
         })
     }
 
@@ -287,6 +385,36 @@ pub fn profile_for(handle: PoolHandle) -> deception::KernelDeceptionProfile {
         .unwrap_or_else(deception::KernelDeceptionProfile::bare_metal_intel)
 }
 
+/// Push an introspection event into a VM's per-VM ring. Briefly locks
+/// `VM_POOL`; safe to call from the kernel-side exit dispatcher because
+/// the dispatcher itself does not hold the pool lock (we deliberately
+/// release it in `run_one_vcpu` before entering `vmx_run`).
+pub fn push_introspect_event(handle: PoolHandle, event: VmIntrospectEvent) {
+    let mut pool = VM_POOL.lock();
+    if let Some(vm) = pool.get_mut(handle) {
+        vm.introspect.push(event);
+    }
+}
+
+/// Drain at most `out.len()` events from a VM's introspection ring into
+/// `out`. Returns the number of events written. Used by the
+/// `SYS_VM_INTROSPECT_DRAIN` syscall handler.
+pub fn drain_introspect_events(handle: PoolHandle, out: &mut [VmIntrospectEvent]) -> usize {
+    let mut pool = VM_POOL.lock();
+    match pool.get_mut(handle) {
+        Some(vm) => vm.introspect.drain_into(out),
+        None => 0,
+    }
+}
+
+/// Total number of events pushed into a VM's ring (including overflow
+/// drops). Used by the Tier 4 demo to assert "we observed >= N CPUIDs"
+/// in environments where the ring would otherwise wrap.
+pub fn introspect_total_pushed(handle: PoolHandle) -> u64 {
+    let pool = VM_POOL.lock();
+    pool.get(handle).map(|vm| vm.introspect.total_pushed).unwrap_or(0)
+}
+
 // ---------------------------------------------------------------------------
 // Phase B test path — create a VM, run a tiny `cpuid; hlt` payload,
 // observe the spoofed CPUID, terminate cleanly.
@@ -307,35 +435,39 @@ const TEST_PAYLOAD: [u8; 8] = [
     0xF4, // hlt
 ];
 
-/// Phase B end-to-end test. Allocates a VM, builds an EPT mapping
-/// from GPA 0x1000 to a host frame containing `TEST_PAYLOAD`, sets
-/// up host/guest/control state, and calls `vmx::vmx_run`.
+/// Phase C — execute the canned `cpuid; hlt` test payload on an
+/// already-allocated `VmObject`. Public so the syscall layer
+/// (`syscall::vm::sys_vm_run`) can reach it; the Phase B in-kernel
+/// test path now goes through this same helper.
 ///
-/// Expected sequence:
-///   1. `vmlaunch` enters guest at GPA 0x1000
-///   2. `mov eax, 1` executes (no exit)
-///   3. `cpuid` traps → exit reason 10 → dispatcher writes spoofed
-///      Cascade Lake values from `bare_metal_intel`
-///   4. `vmresume` reloads guest GPRs, advances RIP +2, resumes
-///   5. `hlt` traps → exit reason 12 → dispatcher sets `state.halted`
-///   6. Trampoline `ret`s back to `vmx_run`
-///
-/// On success, prints
-///   `vmx-test: guest CPUID spoofed, HLT exit caught, vCPU terminated cleanly`
-/// On failure, prints the `VmxError` and continues.
+/// `vcpu_idx` is currently unused (Phase B/C only support vCPU 0) but
+/// is part of the syscall ABI so we keep it in the signature.
+pub fn run_payload_on_vm(vm_handle: PoolHandle, _vcpu_idx: u8) -> Result<(), VmObjError> {
+    run_phase_b_test_inner_on_handle(vm_handle)
+}
+
+/// Phase B end-to-end test, kept for direct kernel invocation in case
+/// we want a self-contained smoke test (currently unused — kmain stops
+/// driving the test at boot once Phase C lands the syscall path).
+#[allow(dead_code)]
 pub fn run_phase_b_test() {
     if !vmx::cpu_has_vmx() {
         return;
     }
-    if let Err(e) = run_phase_b_test_inner() {
+    let handle = match create_vm(1, 16) {
+        Ok(h) => h,
+        Err(e) => {
+            crate::kprintln!("  vmx-test: create_vm failed: {:?}", e);
+            return;
+        }
+    };
+    if let Err(e) = run_phase_b_test_inner_on_handle(handle) {
         crate::kprintln!("  vmx-test: FAILED: {:?}", e);
     }
+    let _ = destroy_vm(handle);
 }
 
-fn run_phase_b_test_inner() -> Result<(), VmObjError> {
-    // 1. Allocate the test VM.
-    let vm_handle = create_vm(1, 16)?;
-
+fn run_phase_b_test_inner_on_handle(vm_handle: PoolHandle) -> Result<(), VmObjError> {
     // 2. Allocate a host frame for the payload, copy the bytes in.
     let payload_frame =
         crate::mm::alloc_frame().ok_or(VmObjError::Vmx(VmxError::OutOfFrames))?;
@@ -404,66 +536,45 @@ fn run_phase_b_test_inner() -> Result<(), VmObjError> {
     ept.map_4k(0x11000, pdpt_phys).map_err(VmObjError::Vmx)?;
     ept.map_4k(0x12000, pd_phys).map_err(VmObjError::Vmx)?;
 
-    // 6. Configure the vCPU's VMCS and run.
+    // 6. Run the vCPU. Phase C runs this from a userspace thread via
+    // SYS_VM_RUN, so we keep the noise low — diagnostics are gated
+    // behind `kdebug!` and only fire under the `verbose` feature.
     set_current_vm(vm_handle);
     let result = run_one_vcpu(vm_handle, &ept);
     clear_current_vm();
 
-    // 6. Inspect the result and print the milestone marker.
-    match result {
-        Ok(()) => {
-            // Look up the vCPU again to read state.halted.
-            let halted = {
-                let mut pool = VM_POOL.lock();
-                pool.get_mut(vm_handle)
-                    .and_then(|vm| vm.vcpu_mut(0))
-                    .map(|v| v.halted)
-                    .unwrap_or(false)
-            };
-            if halted {
-                crate::kprintln!(
-                    "  vmx-test: guest CPUID spoofed, HLT exit caught, vCPU terminated cleanly"
-                );
-            } else {
-                // Try to read VM-instruction-error from the VMCS so we
-                // know what entry check failed. The VMCS may not still
-                // be the active one on this CPU; vmread will return
-                // VmFailInvalid in that case.
-                let mut pool = VM_POOL.lock();
-                let vmcs_phys = pool
-                    .get_mut(vm_handle)
-                    .and_then(|vm| vm.vcpu_mut(0))
-                    .map(|v| v.vcps_phys_for_diag())
-                    .unwrap_or(0);
-                drop(pool);
-                let err = vmx::vmread(vmx::VMCS_VM_INSTRUCTION_ERROR, vmcs_phys);
-                crate::kprintln!(
-                    "  vmx-test: vmx_run returned but vCPU not halted; vm_instruction_error={:?}",
-                    err
-                );
-                // Post-run field dump so we can see whether the controls
-                // and host state survived the vmx_run path.
-                let pin = vmx::vmread(vmx::VMCS_PIN_BASED_CTLS, vmcs_phys);
-                let p1 = vmx::vmread(vmx::VMCS_PROC_BASED_CTLS, vmcs_phys);
-                let p2 = vmx::vmread(vmx::VMCS_PROC_BASED_CTLS2, vmcs_phys);
-                let h_cr0 = vmx::vmread(vmx::VMCS_HOST_CR0, vmcs_phys);
-                let h_cr3 = vmx::vmread(vmx::VMCS_HOST_CR3, vmcs_phys);
-                let h_cr4 = vmx::vmread(vmx::VMCS_HOST_CR4, vmcs_phys);
-                let h_rip = vmx::vmread(vmx::VMCS_HOST_RIP, vmcs_phys);
-                let g_cr0 = vmx::vmread(vmx::VMCS_GUEST_CR0, vmcs_phys);
-                let g_rip = vmx::vmread(vmx::VMCS_GUEST_RIP, vmcs_phys);
-                crate::kprintln!(
-                    "  vmx-test POST: pin={:?} p1={:?} p2={:?} hcr0={:?} hcr3={:?} hcr4={:?} hrip={:?} gcr0={:?} grip={:?}",
-                    pin, p1, p2, h_cr0, h_cr3, h_cr4, h_rip, g_cr0, g_rip
-                );
-            }
-        }
-        Err(e) => {
-            crate::kprintln!("  vmx-test: vmx_run error: {:?}", e);
-        }
+    if let Err(e) = result {
+        crate::kprintln!("  vmx-test: vmx_run error: {:?}", e);
+        return Err(VmObjError::Vmx(e));
     }
 
-    let _ = destroy_vm(vm_handle);
+    // Check the vCPU actually halted (sanity — the dispatcher only
+    // returns Terminate after a HLT exit in the canned payload). If
+    // it didn't, dump the VM-instruction-error so the boot log shows
+    // what went wrong instead of just silently passing.
+    let halted = {
+        let mut pool = VM_POOL.lock();
+        pool.get_mut(vm_handle)
+            .and_then(|vm| vm.vcpu_mut(0))
+            .map(|v| v.halted)
+            .unwrap_or(false)
+    };
+    if !halted {
+        let mut pool = VM_POOL.lock();
+        let vmcs_phys = pool
+            .get_mut(vm_handle)
+            .and_then(|vm| vm.vcpu_mut(0))
+            .map(|v| v.vcps_phys_for_diag())
+            .unwrap_or(0);
+        drop(pool);
+        let err = vmx::vmread(vmx::VMCS_VM_INSTRUCTION_ERROR, vmcs_phys);
+        crate::kprintln!(
+            "  vmx-test: vmx_run returned but vCPU not halted; vm_instruction_error={:?}",
+            err
+        );
+        return Err(VmObjError::Vmx(VmxError::VmFailInvalid));
+    }
+
     Ok(())
 }
 
@@ -482,92 +593,32 @@ fn run_one_vcpu(vm_handle: PoolHandle, ept: &MiniEpt) -> Result<(), VmxError> {
     vmx::vmwrite(vmx::VMCS_EPTP, ept.eptp(), vmcs_phys)?;
     vmx::setup_guest_state(vmcs_phys, 0x1000, 0x2FF0, 0x10000)?;
 
-    // Diagnostic: read back the control fields the CPU actually accepted.
-    // VM-instruction-error 7 ("invalid control field") means one of these
-    // is bad — printing them lets us identify which on the next boot.
-    let pin = vmx::vmread(vmx::VMCS_PIN_BASED_CTLS, vmcs_phys);
-    let p1 = vmx::vmread(vmx::VMCS_PROC_BASED_CTLS, vmcs_phys);
-    let p2 = vmx::vmread(vmx::VMCS_PROC_BASED_CTLS2, vmcs_phys);
-    let exit = vmx::vmread(vmx::VMCS_EXIT_CTLS, vmcs_phys);
-    let entry = vmx::vmread(vmx::VMCS_ENTRY_CTLS, vmcs_phys);
-    let eptp = vmx::vmread(vmx::VMCS_EPTP, vmcs_phys);
-    crate::kprintln!(
-        "  vmx-test: pin={:?} proc1={:?} proc2={:?} exit={:?} entry={:?} eptp={:?}",
-        pin,
-        p1,
-        p2,
-        exit,
-        entry,
-        eptp
+    // Diagnostic dumps from Phase B's bringup. Gated behind `kdebug!`
+    // so they only fire under the `verbose` feature; the production
+    // boot path stays quiet on the serial console.
+    crate::kdebug!(
+        "  vmx-test: pin={:?} proc1={:?} proc2={:?} exit={:?} entry={:?}",
+        vmx::vmread(vmx::VMCS_PIN_BASED_CTLS, vmcs_phys),
+        vmx::vmread(vmx::VMCS_PROC_BASED_CTLS, vmcs_phys),
+        vmx::vmread(vmx::VMCS_PROC_BASED_CTLS2, vmcs_phys),
+        vmx::vmread(vmx::VMCS_EXIT_CTLS, vmcs_phys),
+        vmx::vmread(vmx::VMCS_ENTRY_CTLS, vmcs_phys),
     );
-
-    // Comprehensive dump of fields that could be the source of error 7.
-    // Read the bitmap addresses, the control-related fields, and the
-    // host CR0/CR3/CR4 to verify they round-trip correctly.
-    let msr_bm = vmx::vmread(vmx::VMCS_MSR_BITMAP, vmcs_phys);
-    let io_a = vmx::vmread(vmx::VMCS_IO_BITMAP_A, vmcs_phys);
-    let io_b = vmx::vmread(vmx::VMCS_IO_BITMAP_B, vmcs_phys);
-    let vapic = vmx::vmread(vmx::VMCS_VIRT_APIC_ADDR, vmcs_phys);
-    let tpr_thr = vmx::vmread(vmx::VMCS_TPR_THRESHOLD, vmcs_phys);
-    let vpid = vmx::vmread(vmx::VMCS_VPID, vmcs_phys);
-    let link = vmx::vmread(vmx::VMCS_VMCS_LINK_POINTER, vmcs_phys);
-    crate::kprintln!(
-        "  vmx-test: msr_bm={:?} io_a={:?} io_b={:?} vapic={:?} tpr={:?} vpid={:?} link={:?}",
-        msr_bm,
-        io_a,
-        io_b,
-        vapic,
-        tpr_thr,
-        vpid,
-        link
+    crate::kdebug!(
+        "  vmx-test: host cr0={:?} cr3={:?} cr4={:?} rip={:?} efer={:?}",
+        vmx::vmread(vmx::VMCS_HOST_CR0, vmcs_phys),
+        vmx::vmread(vmx::VMCS_HOST_CR3, vmcs_phys),
+        vmx::vmread(vmx::VMCS_HOST_CR4, vmcs_phys),
+        vmx::vmread(vmx::VMCS_HOST_RIP, vmcs_phys),
+        vmx::vmread(vmx::VMCS_HOST_IA32_EFER, vmcs_phys),
     );
-
-    let h_cr0 = vmx::vmread(vmx::VMCS_HOST_CR0, vmcs_phys);
-    let h_cr3 = vmx::vmread(vmx::VMCS_HOST_CR3, vmcs_phys);
-    let h_cr4 = vmx::vmread(vmx::VMCS_HOST_CR4, vmcs_phys);
-    let h_rsp = vmx::vmread(vmx::VMCS_HOST_RSP, vmcs_phys);
-    let h_rip = vmx::vmread(vmx::VMCS_HOST_RIP, vmcs_phys);
-    let h_efer = vmx::vmread(vmx::VMCS_HOST_IA32_EFER, vmcs_phys);
-    let h_pat = vmx::vmread(vmx::VMCS_HOST_IA32_PAT, vmcs_phys);
-    crate::kprintln!(
-        "  vmx-test: host cr0={:?} cr3={:?} cr4={:?} rsp={:?} rip={:?} efer={:?} pat={:?}",
-        h_cr0,
-        h_cr3,
-        h_cr4,
-        h_rsp,
-        h_rip,
-        h_efer,
-        h_pat
-    );
-
-    let g_cr0 = vmx::vmread(vmx::VMCS_GUEST_CR0, vmcs_phys);
-    let g_cr3 = vmx::vmread(vmx::VMCS_GUEST_CR3, vmcs_phys);
-    let g_cr4 = vmx::vmread(vmx::VMCS_GUEST_CR4, vmcs_phys);
-    let g_rip = vmx::vmread(vmx::VMCS_GUEST_RIP, vmcs_phys);
-    let g_rsp = vmx::vmread(vmx::VMCS_GUEST_RSP, vmcs_phys);
-    let g_rfl = vmx::vmread(vmx::VMCS_GUEST_RFLAGS, vmcs_phys);
-    let g_efer = vmx::vmread(vmx::VMCS_GUEST_IA32_EFER, vmcs_phys);
-    crate::kprintln!(
-        "  vmx-test: guest cr0={:?} cr3={:?} cr4={:?} rip={:?} rsp={:?} rfl={:?} efer={:?}",
-        g_cr0,
-        g_cr3,
-        g_cr4,
-        g_rip,
-        g_rsp,
-        g_rfl,
-        g_efer
-    );
-
-    let g_cs_sel = vmx::vmread(vmx::VMCS_GUEST_CS_SELECTOR, vmcs_phys);
-    let g_cs_ar = vmx::vmread(vmx::VMCS_GUEST_CS_ACCESS_RIGHTS, vmcs_phys);
-    let g_tr_ar = vmx::vmread(vmx::VMCS_GUEST_TR_ACCESS_RIGHTS, vmcs_phys);
-    let g_ldtr_ar = vmx::vmread(vmx::VMCS_GUEST_LDTR_ACCESS_RIGHTS, vmcs_phys);
-    crate::kprintln!(
-        "  vmx-test: guest cs_sel={:?} cs_ar={:?} tr_ar={:?} ldtr_ar={:?}",
-        g_cs_sel,
-        g_cs_ar,
-        g_tr_ar,
-        g_ldtr_ar
+    crate::kdebug!(
+        "  vmx-test: guest cr0={:?} cr4={:?} rip={:?} rsp={:?} efer={:?}",
+        vmx::vmread(vmx::VMCS_GUEST_CR0, vmcs_phys),
+        vmx::vmread(vmx::VMCS_GUEST_CR4, vmcs_phys),
+        vmx::vmread(vmx::VMCS_GUEST_RIP, vmcs_phys),
+        vmx::vmread(vmx::VMCS_GUEST_RSP, vmcs_phys),
+        vmx::vmread(vmx::VMCS_GUEST_IA32_EFER, vmcs_phys),
     );
 
     // Drop the pool lock before entering the VMX hot path — vmx_run

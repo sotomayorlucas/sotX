@@ -1211,7 +1211,7 @@ pub fn setup_host_state(vmcs_phys: u64, host_rsp: u64, host_rip: u64) -> Result<
     // PerCpu pointer; FS_BASE is normally 0 in kernel).
     let host_fs_base = rdmsr(IA32_FS_BASE);
     let host_gs_base = rdmsr(IA32_GS_BASE);
-    kprintln!(
+    crate::kdebug!(
         "  setup_host_state: HOST_FS_BASE={:#x} HOST_GS_BASE={:#x}",
         host_fs_base,
         host_gs_base
@@ -1681,7 +1681,7 @@ extern "C" fn vm_exit_handler_rust(state: *mut crate::vm::KernelVCpuState) -> u3
     let state_ref = unsafe { &mut *state };
     let vmcs_phys = state_ref.vmcs.phys;
     let reason_raw = vmread(VMCS_VM_EXIT_REASON, vmcs_phys);
-    crate::kprintln!(
+    crate::kdebug!(
         "  vm-exit: state={:#x} reason={:?}",
         state as u64,
         reason_raw
@@ -1691,9 +1691,10 @@ extern "C" fn vm_exit_handler_rust(state: *mut crate::vm::KernelVCpuState) -> u3
         Some(h) => {
             // Look up the VM's profile by handle, dispatch, return.
             // We re-borrow the pool's profile via a copy so we don't
-            // hold the pool lock across the dispatcher.
+            // hold the pool lock across the dispatcher (the dispatcher
+            // re-locks briefly to push introspection events).
             let profile = crate::vm::profile_for(h);
-            crate::vm::exit::dispatch(state_ref, &profile)
+            crate::vm::exit::dispatch(state_ref, &profile, Some(h))
         }
         None => {
             crate::kprintln!(
@@ -1703,7 +1704,6 @@ extern "C" fn vm_exit_handler_rust(state: *mut crate::vm::KernelVCpuState) -> u3
             crate::vm::exit::ExitAction::Terminate
         }
     };
-    crate::kprintln!("  vm-exit: action={:?}", action as u32);
     match action {
         crate::vm::exit::ExitAction::Resume => 0,
         crate::vm::exit::ExitAction::Terminate => 1,

@@ -16,7 +16,7 @@ sotos-provenance = { path = "../../personality/common/provenance" }
 sot-fma = { path = "../../libs/sot-fma" }
 sot-zfs = { path = "../../personality/bsd/zfs" }
 sot-hammer2 = { path = "../../personality/bsd/hammer2" }
-sot-bhyve = { path = "../../personality/bsd/bhyve" }
+sot-bhyve = { path = "../../personality/bsd/bhyve", features = ["kernel-backend"] }
 sot-network = { path = "../../personality/bsd/network" }
 sot-crossbow = { path = "../../libs/sot-crossbow" }
 sotos-pci = { path = "../../libs/sotos-pci" }

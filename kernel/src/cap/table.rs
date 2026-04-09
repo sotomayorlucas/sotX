@@ -105,6 +105,11 @@ pub enum CapObject {
         /// Interposition policy (see `InterpositionPolicy`).
         policy: u8,
     },
+    /// VT-x guest virtual machine. `id` is the public, KARL-randomised
+    /// VM identifier (assigned by `vm::create_vm`); the kernel maps it
+    /// to a `Pool<VmObject>` slot internally. RUN/PROFILE/INTROSPECT
+    /// gating uses the standard READ/WRITE Rights bits.
+    Vm { id: u32 },
     /// Null / empty slot.
     #[allow(dead_code)]
     Null,

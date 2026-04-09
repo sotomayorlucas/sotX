@@ -247,6 +247,97 @@ pub enum Syscall {
     TxAbort = 310,
     /// Tier 2 (MultiObject) two-phase commit: PREPARE phase.
     TxPrepare = 311,
+    /// Phase C — bhyve VT-x VM control plane.
+    /// rdi = vcpu_count, rsi = mem_pages → returns vm_cap (raw u32 in low 32 bits).
+    VmCreate = 200,
+    /// Set guest GPRs for a vCPU. rdi = vm_cap, rsi = vcpu_idx, rdx = &VCpuRegs.
+    VmSetRegs = 201,
+    /// Read guest GPRs for a vCPU. rdi = vm_cap, rsi = vcpu_idx, rdx = &mut VCpuRegs.
+    VmGetRegs = 202,
+    /// Install a deception profile. rdi = vm_cap, rsi = profile selector
+    /// (`VmProfileSelector` u8 — kernel keeps the profile tables in-line).
+    VmSetProfile = 203,
+    /// Promote the calling thread to a vCPU thread, run guest until terminated.
+    /// rdi = vm_cap, rsi = vcpu_idx. Blocks. Returns 0 on clean HLT, error otherwise.
+    VmRun = 204,
+    /// Inject a hardware interrupt into a vCPU. rdi = vm_cap, rsi = vcpu_idx, rdx = vector.
+    VmInjectIrq = 205,
+    /// Drain at most `max` introspection events into a userspace `[VmIntrospectEvent; max]`.
+    /// rdi = vm_cap, rsi = &mut events, rdx = max. Returns N events written.
+    VmIntrospectDrain = 206,
+    /// Tear down the VM and free its frames. rdi = vm_cap.
+    VmDestroy = 207,
+}
+
+/// Selector for a built-in deception profile installed via SYS_VM_SET_PROFILE.
+/// Phase C only ships `BareMetalIntel`; richer profiles land in Phase F.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VmProfileSelector {
+    /// `KernelDeceptionProfile::bare_metal_intel()` — the Cascade Lake
+    /// Xeon spoof used by the Phase B end-to-end test.
+    BareMetalIntel = 1,
+}
+
+/// One introspection event drained from a VM's per-VM kernel ring.
+///
+/// `kind` is one of:
+///   1 = CPUID exit       (a/b/c/d = leaf, subleaf, eax_spoofed, ebx_spoofed)
+///   2 = RDMSR            (a/b = msr, value_spoofed; c/d = 0)
+///   3 = WRMSR            (a/b/c = msr, value_lo, value_hi; d = 0)
+///   4 = HLT              (a/b/c/d = 0)
+///
+/// Layout is `#[repr(C)]` so kernel and userspace agree on offsets.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct VmIntrospectEvent {
+    pub kind: u32,
+    pub _pad: u32,
+    pub a: u64,
+    pub b: u64,
+    pub c: u64,
+    pub d: u64,
+}
+
+impl VmIntrospectEvent {
+    pub const KIND_CPUID: u32 = 1;
+    pub const KIND_RDMSR: u32 = 2;
+    pub const KIND_WRMSR: u32 = 3;
+    pub const KIND_HLT: u32 = 4;
+
+    pub const fn zeroed() -> Self {
+        Self { kind: 0, _pad: 0, a: 0, b: 0, c: 0, d: 0 }
+    }
+}
+
+/// Guest-visible CPU register file. Mirror of `sot_bhyve::vcpu::VCpuRegs`
+/// so userspace doesn't need to depend on the bhyve crate to call the
+/// VM control-plane syscalls. `#[repr(C)]` so the kernel reads/writes
+/// it via fixed offsets without ABI guesswork.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct VmGuestRegs {
+    pub rax: u64,
+    pub rbx: u64,
+    pub rcx: u64,
+    pub rdx: u64,
+    pub rsi: u64,
+    pub rdi: u64,
+    pub rbp: u64,
+    pub rsp: u64,
+    pub r8: u64,
+    pub r9: u64,
+    pub r10: u64,
+    pub r11: u64,
+    pub r12: u64,
+    pub r13: u64,
+    pub r14: u64,
+    pub r15: u64,
+    pub rip: u64,
+    pub rflags: u64,
+    pub cr0: u64,
+    pub cr3: u64,
+    pub cr4: u64,
 }
 
 /// Error codes returned by syscalls.
@@ -1830,5 +1921,98 @@ pub mod sys {
     #[inline(always)]
     pub fn tx_prepare(tx_id: u64) -> Result<(), i64> {
         check_unit(syscall1(super::Syscall::TxPrepare as u64, tx_id))
+    }
+
+    // ---------------------------------------------------------------------
+    // Phase C — bhyve VT-x VM control plane
+    // ---------------------------------------------------------------------
+    //
+    // These wrappers issue real syscalls only on `target_os = "none"` (the
+    // sotOS userspace target). On the host (e.g. `cargo test -p sot-bhyve`),
+    // they return `-ENOSYS` so that the type-level scaffolding still
+    // builds and passes its host unit tests, exactly as the Phase B plan
+    // requires.
+
+    /// Allocate a new guest VM with `vcpu_count` vCPUs and a budget of
+    /// `mem_pages` 4 KiB physical pages. Returns a `Vm` capability id.
+    #[cfg(target_os = "none")]
+    #[inline(always)]
+    pub fn vm_create(vcpu_count: u64, mem_pages: u64) -> Result<u64, i64> {
+        check_val(syscall2(super::Syscall::VmCreate as u64, vcpu_count, mem_pages))
+    }
+    #[cfg(not(target_os = "none"))]
+    #[inline(always)]
+    pub fn vm_create(_vcpu_count: u64, _mem_pages: u64) -> Result<u64, i64> {
+        Err(-38) // ENOSYS
+    }
+
+    /// Install a built-in deception profile on a VM. The selector matches
+    /// `VmProfileSelector` (Phase C only ships `BareMetalIntel`).
+    #[cfg(target_os = "none")]
+    #[inline(always)]
+    pub fn vm_set_profile(vm_cap: u64, selector: u64) -> Result<(), i64> {
+        check_unit(syscall2(super::Syscall::VmSetProfile as u64, vm_cap, selector))
+    }
+    #[cfg(not(target_os = "none"))]
+    #[inline(always)]
+    pub fn vm_set_profile(_vm_cap: u64, _selector: u64) -> Result<(), i64> {
+        Err(-38)
+    }
+
+    /// Enter the guest's run loop on the calling thread. Returns 0 on a
+    /// clean HLT exit, or a negative `SysError` on failure.
+    #[cfg(target_os = "none")]
+    #[inline(always)]
+    pub fn vm_run(vm_cap: u64, vcpu_idx: u64) -> Result<(), i64> {
+        check_unit(syscall2(super::Syscall::VmRun as u64, vm_cap, vcpu_idx))
+    }
+    #[cfg(not(target_os = "none"))]
+    #[inline(always)]
+    pub fn vm_run(_vm_cap: u64, _vcpu_idx: u64) -> Result<(), i64> {
+        Err(-38)
+    }
+
+    /// Drain up to `max` introspection events from the VM's per-VM ring
+    /// into the caller-provided slice. Returns the number written.
+    ///
+    /// # Safety
+    ///
+    /// `dest` must point at a writable slice of `max` `VmIntrospectEvent`
+    /// values. The kernel writes 48 bytes per event in `#[repr(C)]` order.
+    #[cfg(target_os = "none")]
+    #[inline(always)]
+    pub unsafe fn vm_introspect_drain(
+        vm_cap: u64,
+        dest: *mut super::VmIntrospectEvent,
+        max: u64,
+    ) -> Result<u64, i64> {
+        check_val(syscall3(
+            super::Syscall::VmIntrospectDrain as u64,
+            vm_cap,
+            dest as u64,
+            max,
+        ))
+    }
+    #[cfg(not(target_os = "none"))]
+    #[inline(always)]
+    pub unsafe fn vm_introspect_drain(
+        _vm_cap: u64,
+        _dest: *mut super::VmIntrospectEvent,
+        _max: u64,
+    ) -> Result<u64, i64> {
+        Err(-38)
+    }
+
+    /// Tear down a VM and free its frames. Subsequent capability use
+    /// returns `InvalidCap`.
+    #[cfg(target_os = "none")]
+    #[inline(always)]
+    pub fn vm_destroy(vm_cap: u64) -> Result<(), i64> {
+        check_unit(syscall1(super::Syscall::VmDestroy as u64, vm_cap))
+    }
+    #[cfg(not(target_os = "none"))]
+    #[inline(always)]
+    pub fn vm_destroy(_vm_cap: u64) -> Result<(), i64> {
+        Err(-38)
     }
 }

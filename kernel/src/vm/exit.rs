@@ -23,9 +23,10 @@
 //! Linux boot work in Phase F will fill in EPT_VIOLATION,
 //! IO_INSTRUCTION, EXTERNAL_INTERRUPT, etc.
 
-use super::KernelVCpuState;
+use super::{KernelVCpuState, VmIntrospectEvent};
 use crate::arch::x86_64::vmx;
 use crate::kprintln;
+use crate::pool::PoolHandle;
 
 /// What the vCPU run loop should do after `dispatch` returns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,7 +42,7 @@ pub enum ExitAction {
 // to the catchall `Terminate` arm with a kprintln.
 
 #[allow(dead_code)] const REASON_EXCEPTION_OR_NMI: u16 = 0;
-#[allow(dead_code)] const REASON_EXTERNAL_INTERRUPT: u16 = 1;
+const REASON_EXTERNAL_INTERRUPT: u16 = 1;
 #[allow(dead_code)] const REASON_TRIPLE_FAULT: u16 = 2;
 const REASON_CPUID: u16 = 10;
 const REASON_HLT: u16 = 12;
@@ -104,17 +105,17 @@ fn advance_rip(vmcs_phys: u64, bytes: u64) {
 pub fn dispatch(
     state: &mut KernelVCpuState,
     profile: &super::deception::KernelDeceptionProfile,
+    vm_handle: Option<PoolHandle>,
 ) -> ExitAction {
-    kprintln!("  dispatch: enter");
     let vmcs_phys = state.vmcs.phys;
     let reason = read_exit_reason(vmcs_phys);
-    kprintln!("  dispatch: reason={}", reason);
 
     match reason {
-        REASON_CPUID => handle_cpuid(state, profile, vmcs_phys),
-        REASON_HLT => handle_hlt(state),
-        REASON_RDMSR => handle_rdmsr(state, profile, vmcs_phys),
-        REASON_WRMSR => handle_wrmsr(state, vmcs_phys),
+        REASON_CPUID => handle_cpuid(state, profile, vmcs_phys, vm_handle),
+        REASON_HLT => handle_hlt(state, vm_handle),
+        REASON_RDMSR => handle_rdmsr(state, profile, vmcs_phys, vm_handle),
+        REASON_WRMSR => handle_wrmsr(state, vmcs_phys, vm_handle),
+        REASON_EXTERNAL_INTERRUPT => handle_external_interrupt(),
         other => {
             kprintln!(
                 "  vm/exit: unhandled exit reason {} on vcpu {} — terminating",
@@ -126,10 +127,19 @@ pub fn dispatch(
     }
 }
 
+/// Convenience: push an introspection event into the parent VM's ring.
+/// No-op if `vm_handle` is `None` (e.g. unit-test hot-path).
+fn record(vm_handle: Option<PoolHandle>, event: VmIntrospectEvent) {
+    if let Some(h) = vm_handle {
+        super::push_introspect_event(h, event);
+    }
+}
+
 fn handle_cpuid(
     state: &mut KernelVCpuState,
     profile: &super::deception::KernelDeceptionProfile,
     vmcs_phys: u64,
+    vm_handle: Option<PoolHandle>,
 ) -> ExitAction {
     let leaf = state.gprs.rax as u32;
     let subleaf = state.gprs.rcx as u32;
@@ -138,6 +148,20 @@ fn handle_cpuid(
         state.gprs.rbx = ebx as u64;
         state.gprs.rcx = ecx as u64;
         state.gprs.rdx = edx as u64;
+        // Phase C: spoofed CPUID exits go into the introspection ring
+        // so the userspace caller can prove the kernel did the spoof
+        // (rather than userspace's old in-process `handle_cpuid`).
+        record(
+            vm_handle,
+            VmIntrospectEvent {
+                kind: VmIntrospectEvent::KIND_CPUID,
+                _pad: 0,
+                a: ((subleaf as u64) << 32) | (leaf as u64),
+                b: ((ebx as u64) << 32) | (eax as u64),
+                c: ((edx as u64) << 32) | (ecx as u64),
+                d: 0,
+            },
+        );
     } else {
         // Passthrough: execute cpuid on the host and return the real
         // values. Most leaves are passthrough; the deception profile
@@ -152,8 +176,19 @@ fn handle_cpuid(
     ExitAction::Resume
 }
 
-fn handle_hlt(state: &mut KernelVCpuState) -> ExitAction {
+fn handle_hlt(state: &mut KernelVCpuState, vm_handle: Option<PoolHandle>) -> ExitAction {
     state.halted = true;
+    record(
+        vm_handle,
+        VmIntrospectEvent {
+            kind: VmIntrospectEvent::KIND_HLT,
+            _pad: 0,
+            a: 0,
+            b: 0,
+            c: 0,
+            d: 0,
+        },
+    );
     ExitAction::Terminate
 }
 
@@ -161,11 +196,23 @@ fn handle_rdmsr(
     state: &mut KernelVCpuState,
     profile: &super::deception::KernelDeceptionProfile,
     vmcs_phys: u64,
+    vm_handle: Option<PoolHandle>,
 ) -> ExitAction {
     let msr = state.gprs.rcx as u32;
     if let Some(value) = profile.handle_msr_read(msr) {
         state.gprs.rax = value & 0xFFFF_FFFF;
         state.gprs.rdx = value >> 32;
+        record(
+            vm_handle,
+            VmIntrospectEvent {
+                kind: VmIntrospectEvent::KIND_RDMSR,
+                _pad: 0,
+                a: msr as u64,
+                b: value,
+                c: 0,
+                d: 0,
+            },
+        );
         advance_rip(vmcs_phys, INSN_LEN_RDMSR);
         ExitAction::Resume
     } else {
@@ -181,13 +228,60 @@ fn handle_rdmsr(
     }
 }
 
-fn handle_wrmsr(state: &mut KernelVCpuState, vmcs_phys: u64) -> ExitAction {
+/// Handle a host external-interrupt VM-exit (reason 1).
+///
+/// We set `PIN_BASED.EXTINT_EXIT` so the LAPIC timer (and any other
+/// host interrupt) preempts the guest cleanly. The CPU did NOT
+/// acknowledge the interrupt because we leave EXIT_CTLS bit 15
+/// ("Acknowledge interrupt on exit") cleared, which means the host's
+/// LAPIC still has the vector pending. Briefly enabling IF lets the
+/// host IDT deliver it via the normal interrupt path; we then return
+/// `Resume` so the trampoline `vmresume`s back into the guest at the
+/// same RIP it was preempted on.
+///
+/// `sti; nop; cli` is the canonical "interrupt window" pattern: `sti`
+/// has a one-instruction delay before interrupts can fire, the `nop`
+/// is that one instruction, and `cli` re-disables IF before we return
+/// to the dispatcher's caller. The pending vector — if there is one —
+/// fires between the `nop` and the `cli`.
+fn handle_external_interrupt() -> ExitAction {
+    // SAFETY: only modifies the IF bit. The kernel exit-stack we are
+    // running on is distinct from any thread's kernel stack and the
+    // host IDT is loaded; an IRQ delivered through the IDT here is
+    // identical to one taken from the kernel idle loop.
+    unsafe {
+        core::arch::asm!(
+            "sti",
+            "nop",
+            "cli",
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    ExitAction::Resume
+}
+
+fn handle_wrmsr(
+    state: &mut KernelVCpuState,
+    vmcs_phys: u64,
+    vm_handle: Option<PoolHandle>,
+) -> ExitAction {
     let msr = state.gprs.rcx as u32;
-    let _value = (state.gprs.rax & 0xFFFF_FFFF) | (state.gprs.rdx << 32);
-    // Phase B: silently swallow guest WRMSRs. Real implementation in
-    // a later phase will validate against an MSR write whitelist and
-    // either passthrough, spoof, or inject #GP.
-    let _ = msr;
+    let value = (state.gprs.rax & 0xFFFF_FFFF) | (state.gprs.rdx << 32);
+    // Phase B/C: silently swallow guest WRMSRs but record them for the
+    // introspection ring. Real implementation in a later phase will
+    // validate against an MSR write whitelist and either passthrough,
+    // spoof, or inject #GP.
+    record(
+        vm_handle,
+        VmIntrospectEvent {
+            kind: VmIntrospectEvent::KIND_WRMSR,
+            _pad: 0,
+            a: msr as u64,
+            b: value & 0xFFFF_FFFF,
+            c: value >> 32,
+            d: 0,
+        },
+    );
     advance_rip(vmcs_phys, INSN_LEN_WRMSR);
     ExitAction::Resume
 }
