@@ -23,8 +23,9 @@
 //! Linux boot work in Phase F will fill in EPT_VIOLATION,
 //! IO_INSTRUCTION, EXTERNAL_INTERRUPT, etc.
 
+use super::devmodel::{self, IoAccess, IoDir, IoResult};
 use super::{KernelVCpuState, VmIntrospectEvent};
-use crate::arch::x86_64::vmx::{self, VMCS_GUEST_PHYSICAL_ADDRESS};
+use crate::arch::x86_64::vmx::{self, VMCS_EXIT_QUALIFICATION, VMCS_GUEST_PHYSICAL_ADDRESS};
 use crate::kprintln;
 use crate::pool::PoolHandle;
 
@@ -47,12 +48,12 @@ const REASON_EXTERNAL_INTERRUPT: u16 = 1;
 const REASON_CPUID: u16 = 10;
 const REASON_HLT: u16 = 12;
 #[allow(dead_code)] const REASON_INVLPG: u16 = 14;
+const REASON_IO_INSTRUCTION: u16 = 30;
 const REASON_RDMSR: u16 = 31;
 const REASON_WRMSR: u16 = 32;
 #[allow(dead_code)] const REASON_VM_ENTRY_FAILURE_GUEST_STATE: u16 = 33;
 const REASON_EPT_VIOLATION: u16 = 48;
 #[allow(dead_code)] const REASON_EPT_MISCONFIG: u16 = 49;
-#[allow(dead_code)] const REASON_IO_INSTRUCTION: u16 = 30;
 
 /// VMCS field encodings we read inside the dispatcher. Imported from
 /// the vmx module so the constants live in one place.
@@ -66,6 +67,15 @@ use crate::arch::x86_64::vmx::{
 const INSN_LEN_CPUID: u64 = 2;
 const INSN_LEN_RDMSR: u64 = 2;
 const INSN_LEN_WRMSR: u64 = 2;
+
+/// Read the VM-exit instruction length from VMCS field 0x440C. The
+/// CPU populates this on every "instruction exit" reason (CPUID,
+/// IO_INSTRUCTION, etc.) so we don't have to hard-code per-instruction
+/// sizes for variable-length encodings like `out dx, al` (1 byte) vs
+/// `in eax, dx` (1 byte) vs `outsb` (1 byte). For F.2's hand-crafted
+/// payload all I/O instructions are 1 byte, but using the VMCS field
+/// keeps the dispatcher correct for any future payload.
+const VMCS_VM_EXIT_INSTRUCTION_LENGTH: u64 = 0x440C;
 
 /// Read VMCS exit reason. Bits [15:0] are the basic exit reason; bits
 /// 31..28 hold flags we don't currently look at.
@@ -117,6 +127,7 @@ pub fn dispatch(
         REASON_WRMSR => handle_wrmsr(state, vmcs_phys, vm_handle),
         REASON_EXTERNAL_INTERRUPT => handle_external_interrupt(),
         REASON_EPT_VIOLATION => handle_ept_violation(state, vmcs_phys, vm_handle),
+        REASON_IO_INSTRUCTION => handle_io_instruction(state, vmcs_phys, vm_handle),
         other => {
             kprintln!(
                 "  vm/exit: unhandled exit reason {} on vcpu {} — terminating",
@@ -288,6 +299,99 @@ fn handle_ept_violation(
                 "  vm/exit: ept_violation lazy-fault failed at gpa={:#x}: {:?} — terminating",
                 gpa,
                 e
+            );
+            ExitAction::Terminate
+        }
+    }
+}
+
+/// Phase F.1 — handle a guest IN/OUT instruction trapped via
+/// `PROC_BASED.UNCONDITIONAL_IO_EXIT` (reason 30).
+///
+/// The CPU populates `EXIT_QUALIFICATION` (Intel SDM Vol 3C 27.2.1
+/// Table 27-5) with the decoded I/O access:
+///
+///   bits 0..2  Width-1 (0=1B, 1=2B, 3=4B)
+///   bit  3     Direction (0 = OUT, 1 = IN)
+///   bit  4     String op (INS/OUTS)        — Phase F.1 rejects
+///   bit  5     REP prefix                  — Phase F.1 rejects
+///   bit  6     Operand encoding            — 0=DX, 1=imm
+///   bits 16..31 Port (16 bits)
+///
+/// On success the dispatcher writes any `IN` result back into
+/// `state.gprs.rax` and advances `GUEST_RIP` by the VMCS-supplied
+/// instruction length, then returns `Resume`.
+fn handle_io_instruction(
+    state: &mut KernelVCpuState,
+    vmcs_phys: u64,
+    vm_handle: Option<PoolHandle>,
+) -> ExitAction {
+    let qual = match vmx::vmread(VMCS_EXIT_QUALIFICATION, vmcs_phys) {
+        Ok(v) => v,
+        Err(e) => {
+            kprintln!("  vm/exit: io: vmread(EXIT_QUAL) failed: {:?}", e);
+            return ExitAction::Terminate;
+        }
+    };
+    let insn_len = match vmx::vmread(VMCS_VM_EXIT_INSTRUCTION_LENGTH, vmcs_phys) {
+        Ok(v) => v,
+        Err(e) => {
+            kprintln!("  vm/exit: io: vmread(INSN_LEN) failed: {:?}", e);
+            return ExitAction::Terminate;
+        }
+    };
+
+    let width = match (qual & 0x7) as u8 {
+        0 => 1,
+        1 => 2,
+        3 => 4,
+        _ => {
+            kprintln!("  vm/exit: io: bad width encoding qual={:#x}", qual);
+            return ExitAction::Terminate;
+        }
+    };
+    let direction = if (qual >> 3) & 1 == 1 {
+        IoDir::In
+    } else {
+        IoDir::Out
+    };
+    if (qual >> 4) & 1 == 1 || (qual >> 5) & 1 == 1 {
+        kprintln!(
+            "  vm/exit: io: string/REP not supported (qual={:#x}) — terminating",
+            qual
+        );
+        return ExitAction::Terminate;
+    }
+    let port = ((qual >> 16) & 0xFFFF) as u16;
+    let value = match width {
+        1 => (state.gprs.rax & 0xFF) as u32,
+        2 => (state.gprs.rax & 0xFFFF) as u32,
+        4 => (state.gprs.rax & 0xFFFF_FFFF) as u32,
+        _ => 0,
+    };
+
+    let access = IoAccess { port, width, direction, value };
+    match devmodel::handle_io(state, vm_handle, access) {
+        IoResult::Ok { value: read_value } => {
+            if direction == IoDir::In {
+                let mask = match width {
+                    1 => 0xFFu64,
+                    2 => 0xFFFFu64,
+                    4 => 0xFFFF_FFFFu64,
+                    _ => 0,
+                };
+                state.gprs.rax = (state.gprs.rax & !mask) | (read_value as u64 & mask);
+            }
+            advance_rip(vmcs_phys, insn_len);
+            ExitAction::Resume
+        }
+        IoResult::Unhandled => {
+            kprintln!(
+                "  vm/exit: io: unhandled port={:#x} width={} dir={:?} value={:#x} — terminating",
+                port,
+                width,
+                direction,
+                value
             );
             ExitAction::Terminate
         }

@@ -308,6 +308,13 @@ impl VmIntrospectEvent {
     /// address, `b` = host physical frame mapped to it, `c` = the
     /// VM's `mem_pages_used` counter after the lazy alloc.
     pub const KIND_EPT_VIOLATION: u32 = 5;
+    /// Phase F — guest `OUT` instruction trapped via the in-kernel
+    /// device model. `a` = port, `b` = width (1/2/4), `c` = the
+    /// value the guest wrote, `d` = 0.
+    pub const KIND_IO_OUT: u32 = 6;
+    /// Phase F — guest `IN` instruction. `a` = port, `b` = width,
+    /// `c` = 0, `d` = value the kernel devmodel returned.
+    pub const KIND_IO_IN: u32 = 7;
 
     pub const fn zeroed() -> Self {
         Self { kind: 0, _pad: 0, a: 0, b: 0, c: 0, d: 0 }

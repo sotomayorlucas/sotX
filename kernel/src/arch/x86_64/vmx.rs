@@ -1301,10 +1301,11 @@ pub fn setup_controls(vmcs_phys: u64) -> Result<(), VmxError> {
     vmwrite(VMCS_PIN_BASED_CTLS, pin as u64, vmcs_phys)?;
 
     // Primary proc-based: HLT exit (so HLT terminates), MSR bitmaps
-    // disabled (so RDMSR/WRMSR always exit), and secondary controls
-    // enabled.
+    // disabled (so RDMSR/WRMSR always exit), unconditional I/O exit
+    // (Phase F: every IN/OUT traps so the in-kernel device model can
+    // handle them inline), and secondary controls enabled.
     let proc1 = adjust_controls(
-        (1 << 7) | (1 << 31), // HLT_EXIT | SECONDARY
+        (1 << 7) | (1 << 24) | (1 << 31), // HLT_EXIT | UNCONDITIONAL_IO_EXIT | SECONDARY
         IA32_VMX_TRUE_PROCBASED_CTLS,
     );
     vmwrite(VMCS_PROC_BASED_CTLS, proc1 as u64, vmcs_phys)?;

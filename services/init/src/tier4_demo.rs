@@ -219,6 +219,11 @@ fn run_bhyve() -> bool {
 /// Mirrors `kernel/src/vm/mod.rs::EXPECTED_LAZY_PAGES`.
 const EXPECTED_LAZY_PAGES: u64 = 4;
 
+/// Number of guest COM1 OUT writes the canned payload performs
+/// (Phase F.2 — `out 0x3F8, al` for 'F', 'x', '\n'). Mirrors
+/// `kernel/src/vm/mod.rs::EXPECTED_IO_OUT_EVENTS`.
+const EXPECTED_IO_OUT_EVENTS: u64 = 3;
+
 /// Phase C/D kernel-backed run. Allocates a VM, installs the bare-metal
 /// Intel deception profile, runs the canned payload (`cpuid` + 4 stores
 /// to unmapped GPAs + `hlt`), and drains the introspection ring to
@@ -265,6 +270,7 @@ fn run_bhyve_kernel_backend() -> Result<(), vm_backend::BackendError> {
     let mut cpuid_events = 0u64;
     let mut hlt_events = 0u64;
     let mut ept_events = 0u64;
+    let mut io_out_events = 0u64;
     let mut max_pages_used = 0u64;
     let mut family_ok = false;
     for ev in events.iter().take(n) {
@@ -304,6 +310,16 @@ fn run_bhyve_kernel_backend() -> Result<(), vm_backend::BackendError> {
                     max_pages_used = ev.c;
                 }
             }
+            VmIntrospectEvent::KIND_IO_OUT => {
+                io_out_events += 1;
+                print(b"    bhyve: guest OUT port=0x");
+                print_hex(ev.a);
+                print(b" width=");
+                print_u64(ev.b);
+                print(b" value=0x");
+                print_hex(ev.c);
+                print(b"\n");
+            }
             VmIntrospectEvent::KIND_HLT => {
                 hlt_events += 1;
             }
@@ -339,11 +355,22 @@ fn run_bhyve_kernel_backend() -> Result<(), vm_backend::BackendError> {
         let _ = vm_backend::vm_destroy(vm);
         return Err(vm_backend::BackendError::KernelError(-1));
     }
+    if io_out_events != EXPECTED_IO_OUT_EVENTS {
+        print(b"    bhyve: !! expected exactly ");
+        print_u64(EXPECTED_IO_OUT_EVENTS);
+        print(b" KIND_IO_OUT events, got ");
+        print_u64(io_out_events);
+        print(b"\n");
+        let _ = vm_backend::vm_destroy(vm);
+        return Err(vm_backend::BackendError::KernelError(-1));
+    }
     print(b"    bhyve: ");
     print_u64(cpuid_events);
     print(b" spoofed CPUID + ");
     print_u64(ept_events);
     print(b" lazy EPT fault + ");
+    print_u64(io_out_events);
+    print(b" COM1 OUT + ");
     print_u64(hlt_events);
     print(b" HLT observed via introspection ring\n");
 

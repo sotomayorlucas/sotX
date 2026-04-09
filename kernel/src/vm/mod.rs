@@ -18,6 +18,7 @@
 //! exit terminates the vCPU.
 
 pub mod deception;
+pub mod devmodel;
 pub mod exit;
 
 use crate::arch::x86_64::vmx::{self, VmcsRegion, VmxError};
@@ -158,6 +159,12 @@ impl VmIntrospectEvent {
     /// aligned), `b` = host physical address backing it after the
     /// alloc, `c` = post-fault `mem_pages_used`.
     pub const KIND_EPT_VIOLATION: u32 = 5;
+    /// Phase F: guest OUT instruction trapped via UNCONDITIONAL_IO_EXIT.
+    /// `a` = port, `b` = width (1/2/4), `c` = value written, `d` = 0.
+    pub const KIND_IO_OUT: u32 = 6;
+    /// Phase F: guest IN instruction. `a` = port, `b` = width,
+    /// `c` = 0, `d` = value the dispatcher returned to the guest.
+    pub const KIND_IO_IN: u32 = 7;
 }
 
 /// Lock-free SPSC ring of introspection events. Single producer is the
@@ -571,28 +578,36 @@ pub fn ept_pointer(handle: PoolHandle) -> u64 {
 // ---------------------------------------------------------------------------
 
 /// Hand-assembled test payload — exercises Phase B (CPUID spoofing
-/// + HLT) AND Phase D (lazy EPT fault) in a single run.
+/// + HLT), Phase D (lazy EPT fault), AND Phase F.2 (COM1 TX through
+/// the in-kernel device model) in a single run.
 ///
 /// On entry the guest is in 64-bit mode with CR3 → 2 MiB identity
 /// PD, RIP at GPA `0x1000`, RSP at GPA `0x2FF0`. Both 0x1000 and
 /// 0x2000 are pre-mapped via EPT in `run_phase_b_test_inner_on_handle`.
-/// The 4 stores below target GPAs `0x3000..0x6000` which are NOT
-/// pre-mapped — each one triggers an EPT_VIOLATION (reason 48), the
-/// dispatcher lazy-faults the page in via `handle_ept_lazy_fault`,
-/// and the guest resumes.
+/// The 4 memory stores target GPAs `0x3000..0x6000` which are NOT
+/// pre-mapped — each one triggers an EPT_VIOLATION. The 4 OUT
+/// instructions hit COM1 (port 0x3F8) which the in-kernel devmodel
+/// pipes through to the host serial console with a `[GUEST]` prefix.
 ///
 ///   B8 01 00 00 00                  mov eax, 1
-///   0F A2                           cpuid                         ; → spoofed
+///   0F A2                           cpuid                         ; Phase B
 ///   B0 42                           mov al, 0x42
-///   A2 00 30 00 00 00 00 00 00      mov [0x3000], al              ; → EPT lazy
-///   A2 00 40 00 00 00 00 00 00      mov [0x4000], al              ; → EPT lazy
-///   A2 00 50 00 00 00 00 00 00      mov [0x5000], al              ; → EPT lazy
-///   A2 00 60 00 00 00 00 00 00      mov [0x6000], al              ; → EPT lazy
-///   F4                              hlt                           ; → halted
+///   A2 00 30 00 00 00 00 00 00      mov [0x3000], al              ; Phase D
+///   A2 00 40 00 00 00 00 00 00      mov [0x4000], al              ; Phase D
+///   A2 00 50 00 00 00 00 00 00      mov [0x5000], al              ; Phase D
+///   A2 00 60 00 00 00 00 00 00      mov [0x6000], al              ; Phase D
+///   66 BA F8 03                     mov dx, 0x3F8                 ; COM1 base
+///   B0 46                           mov al, 'F'
+///   EE                              out dx, al                    ; Phase F.2
+///   B0 78                           mov al, 'x'
+///   EE                              out dx, al                    ; Phase F.2
+///   B0 0A                           mov al, '\n'
+///   EE                              out dx, al                    ; flush
+///   F4                              hlt
 ///
-/// Total: 46 bytes. Fits comfortably in the 4 KiB payload page at
-/// GPA 0x1000.
-const TEST_PAYLOAD: [u8; 46] = [
+/// Total: 59 bytes. Still fits in the 4 KiB payload page at GPA
+/// 0x1000.
+const TEST_PAYLOAD: [u8; 59] = [
     // mov eax, 1; cpuid (Phase B path)
     0xB8, 0x01, 0x00, 0x00, 0x00,
     0x0F, 0xA2,
@@ -606,6 +621,17 @@ const TEST_PAYLOAD: [u8; 46] = [
     0xA2, 0x00, 0x50, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     // mov [0x6000], al — #4
     0xA2, 0x00, 0x60, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    // mov dx, 0x3F8 (16-bit operand-size override 0x66 + opcode BA + imm16)
+    0x66, 0xBA, 0xF8, 0x03,
+    // mov al, 'F'; out dx, al
+    0xB0, 0x46,
+    0xEE,
+    // mov al, 'x'; out dx, al
+    0xB0, 0x78,
+    0xEE,
+    // mov al, '\n'; out dx, al
+    0xB0, 0x0A,
+    0xEE,
     // hlt
     0xF4,
 ];
@@ -614,6 +640,11 @@ const TEST_PAYLOAD: [u8; 46] = [
 /// `tier4_demo::run_bhyve` asserts `mem_pages_used == EXPECTED_LAZY_PAGES`
 /// after `SYS_VM_RUN` returns.
 pub const EXPECTED_LAZY_PAGES: u32 = 4;
+
+/// Number of COM1 TX writes the canned payload performs. Userspace
+/// asserts the introspection ring contains exactly this many
+/// `KIND_IO_OUT` events.
+pub const EXPECTED_IO_OUT_EVENTS: u32 = 3;
 
 /// Phase C — execute the canned `cpuid; hlt` test payload on an
 /// already-allocated `VmObject`. Public so the syscall layer
