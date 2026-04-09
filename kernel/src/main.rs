@@ -75,6 +75,7 @@ extern crate alloc;
 mod arch;
 mod boot_uefi;
 mod cap;
+pub mod dbg_diag;
 mod elf;
 mod fault;
 mod initrd;

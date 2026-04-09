@@ -318,14 +318,12 @@ unsafe fn vmxon(region_phys: u64) -> Result<(), VmxError> {
     }
 }
 
-/// Execute the `vmxoff` instruction. Currently unused — kept for the
-/// eventual `disable_vmx_on_current_cpu()` cleanup path.
+/// Execute the `vmxoff` instruction.
 ///
 /// # Safety
 ///
 /// CPU must currently be in VMX root operation.
-#[allow(dead_code)]
-unsafe fn vmxoff() {
+pub unsafe fn vmxoff() {
     // SAFETY: must be in VMX root; otherwise raises #UD.
     unsafe {
         core::arch::asm!("vmxoff", options(nomem, nostack));
@@ -1211,8 +1209,15 @@ pub fn setup_host_state(vmcs_phys: u64, host_rsp: u64, host_rip: u64) -> Result<
 
     // FS_BASE / GS_BASE come from MSRs (kernel uses GS_BASE for the
     // PerCpu pointer; FS_BASE is normally 0 in kernel).
-    vmwrite(VMCS_HOST_FS_BASE, rdmsr(IA32_FS_BASE), vmcs_phys)?;
-    vmwrite(VMCS_HOST_GS_BASE, rdmsr(IA32_GS_BASE), vmcs_phys)?;
+    let host_fs_base = rdmsr(IA32_FS_BASE);
+    let host_gs_base = rdmsr(IA32_GS_BASE);
+    kprintln!(
+        "  setup_host_state: HOST_FS_BASE={:#x} HOST_GS_BASE={:#x}",
+        host_fs_base,
+        host_gs_base
+    );
+    vmwrite(VMCS_HOST_FS_BASE, host_fs_base, vmcs_phys)?;
+    vmwrite(VMCS_HOST_GS_BASE, host_gs_base, vmcs_phys)?;
 
     // TR base — for our setup, the per-CPU TSS pointer in PerCpu is
     // the kernel virtual address of the TSS, which is what the GDT
@@ -1310,8 +1315,20 @@ pub fn setup_controls(vmcs_phys: u64) -> Result<(), VmxError> {
     );
     vmwrite(VMCS_PROC_BASED_CTLS2, proc2 as u64, vmcs_phys)?;
 
-    // VM-exit: host runs in 64-bit (HOST_ADDR_SPACE bit 9).
-    let exit = adjust_controls(1 << 9, IA32_VMX_TRUE_EXIT_CTLS);
+    // VM-exit:
+    //   bit  9 = HOST_ADDR_SPACE (host runs in 64-bit)
+    //   bit 19 = LOAD_IA32_PAT   (restore host PAT from VMCS_HOST_IA32_PAT)
+    //   bit 20 = SAVE_IA32_EFER  (save guest EFER for diagnostics)
+    //   bit 21 = LOAD_IA32_EFER  (CRITICAL: restore host EFER from VMCS_HOST_IA32_EFER)
+    //
+    // Without LOAD_IA32_EFER, the CPU only preserves LMA/LME on VM-exit
+    // and silently clears EFER.SCE — which then makes the next sysretq
+    // raise #UD inside the kernel and the boot dies in current_percpu
+    // because GS state was already mid-swapgs by then.
+    let exit = adjust_controls(
+        (1 << 9) | (1 << 19) | (1 << 20) | (1 << 21),
+        IA32_VMX_TRUE_EXIT_CTLS,
+    );
     vmwrite(VMCS_EXIT_CTLS, exit as u64, vmcs_phys)?;
 
     // VM-entry: 64-bit guest (IA-32e mode bit 9, FORCED on by KVM).
