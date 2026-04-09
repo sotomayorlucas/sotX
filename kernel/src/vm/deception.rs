@@ -176,6 +176,41 @@ impl KernelDeceptionProfile {
             value: 0x0000_0001,
         });
 
+        // IA32_MISC_ENABLE (0x1A0) — Linux reads this very early in
+        // boot to detect speedstep / no-execute / monitor support.
+        // The value below matches Cascade Lake Xeon defaults: bits 0
+        // (Fast strings), 3 (TM1), 7 (PEBS), 11 (BTS), 12 (PEBS),
+        // 16 (Enhanced SpeedStep), 18 (MONITOR/MWAIT), 22 (xTPR
+        // disable). Returning this lets Linux's early CPU detection
+        // proceed past the rdmsr.
+        msr.add(MsrSpoof {
+            msr: 0x1A0,
+            value: 0x0000_0000_0085_0089,
+        });
+
+        // IA32_PLATFORM_ID (0x17) — read by Linux for microcode
+        // selection. Cascade Lake reports platform ID = 1 in bits
+        // 50..52. We return 0x14_0000_0000_0000 (= bit 52 set).
+        msr.add(MsrSpoof {
+            msr: 0x17,
+            value: 0x0014_0000_0000_0000,
+        });
+
+        // IA32_BIOS_SIGN_ID (0x8B) — microcode revision. Linux reads
+        // this and prints "microcode: revision 0x..." Cascade Lake
+        // ucode rev 0x500003c is current at the time of writing.
+        msr.add(MsrSpoof {
+            msr: 0x8B,
+            value: 0x0500_003c_0000_0000,
+        });
+
+        // IA32_TSC (0x10) — read for time calibration. Returning 0
+        // is fine; Linux uses RDTSC directly for the hot path.
+        msr.add(MsrSpoof {
+            msr: 0x10,
+            value: 0,
+        });
+
         Self {
             cpuid_spoofs: cpuid,
             msr_spoofs: msr,

@@ -33,6 +33,7 @@ const SYS_VM_RUN: u64 = 204;
 const SYS_VM_INJECT_IRQ: u64 = 205;
 const SYS_VM_INTROSPECT_DRAIN: u64 = 206;
 const SYS_VM_DESTROY: u64 = 207;
+const SYS_VM_RUN_BZIMAGE: u64 = 208;
 
 const USER_ADDR_LIMIT: u64 = super::USER_ADDR_LIMIT;
 const MAX_DRAIN_EVENTS: u64 = 256;
@@ -61,6 +62,7 @@ pub fn handle(frame: &mut TrapFrame, nr: u64) -> bool {
         SYS_VM_INJECT_IRQ => sys_vm_inject_irq(frame),
         SYS_VM_INTROSPECT_DRAIN => sys_vm_introspect_drain(frame),
         SYS_VM_DESTROY => sys_vm_destroy(frame),
+        SYS_VM_RUN_BZIMAGE => sys_vm_run_bzimage(frame),
         _ => return false,
     }
     true
@@ -246,5 +248,31 @@ fn sys_vm_destroy(frame: &mut TrapFrame) {
     match crate::vm::destroy_vm(handle) {
         Ok(()) => frame.rax = 0,
         Err(_) => frame.rax = SysError::InvalidCap as i64 as u64,
+    }
+}
+
+/// Phase F.4 — load the registered bzImage and run it as the guest.
+/// Bypasses the canned Phase B/C/D test payload entirely; the guest
+/// memory layout, page tables, boot_params, and entry state are all
+/// computed by `vm::run_bzimage_on_vm` from the parsed bzImage.
+fn sys_vm_run_bzimage(frame: &mut TrapFrame) {
+    let handle = match validate_vm_cap(frame.rdi as u32, Rights::WRITE) {
+        Ok(h) => h,
+        Err(e) => {
+            frame.rax = e as i64 as u64;
+            return;
+        }
+    };
+    if !crate::arch::x86_64::vmx::cpu_has_vmx() {
+        frame.rax = SysError::NotFound as i64 as u64;
+        return;
+    }
+    match crate::vm::run_bzimage_on_vm(handle) {
+        Ok(()) => frame.rax = 0,
+        Err(crate::vm::VmObjError::NotFound) => {
+            // No bzImage registered (e.g. initrd lacks the file).
+            frame.rax = SysError::NotFound as i64 as u64;
+        }
+        Err(_) => frame.rax = SysError::OutOfResources as i64 as u64,
     }
 }

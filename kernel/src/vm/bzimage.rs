@@ -244,3 +244,132 @@ fn read_u64(bytes: &[u8], off: usize) -> u64 {
     buf.copy_from_slice(&bytes[off..off + 8]);
     u64::from_le_bytes(buf)
 }
+
+// ---------------------------------------------------------------------------
+// Phase F.4.2 — boot_params builder
+// ---------------------------------------------------------------------------
+//
+// `boot_params` is the contract between the bootloader (us) and the
+// Linux 64-bit entry point: a 4 KiB blob whose first 0x1F1 bytes hold
+// legacy fields we set to zero, then a copy of the bzImage's setup
+// header at 0x1F1, then E820 entries starting at 0x2D0.
+//
+// Linux's bootparam.h is the canonical reference; field offsets are
+// stable across kernel versions because they're part of the boot ABI.
+
+/// Offset of `e820_entries` (u8) inside boot_params.
+const BP_E820_ENTRIES: usize = 0x1E8;
+/// Offset of `sentinel` (u8) — must be 0 for newer kernels.
+#[allow(dead_code)] const BP_SENTINEL: usize = 0x1EF;
+/// Offset where the bzImage setup header starts inside boot_params.
+const BP_HDR_OFFSET: usize = 0x1F1;
+/// Length of the setup_header copy. boot_params reserves up to
+/// 0x290 - 0x1F1 = 0x9F bytes; we copy that many from the bzImage.
+const BP_HDR_LEN: usize = 0x290 - 0x1F1;
+/// Offset of `e820_table` inside boot_params.
+const BP_E820_TABLE: usize = 0x2D0;
+/// Each E820 entry is 20 bytes: addr u64, size u64, type u32.
+const E820_ENTRY_SIZE: usize = 20;
+/// Maximum number of E820 entries we'll write.
+pub const BP_E820_MAX: usize = 32;
+
+// setup_header offsets (relative to BP_HDR_OFFSET / 0x1F1).
+const HDR_OFF_TYPE_OF_LOADER: usize = 0x210 - BP_HDR_OFFSET;
+const HDR_OFF_RAMDISK_IMAGE: usize = 0x218 - BP_HDR_OFFSET;
+const HDR_OFF_RAMDISK_SIZE: usize = 0x21C - BP_HDR_OFFSET;
+const HDR_OFF_CMD_LINE_PTR: usize = 0x228 - BP_HDR_OFFSET;
+#[allow(dead_code)] const HDR_OFF_LOADFLAGS: usize = 0x211 - BP_HDR_OFFSET;
+
+/// Linux E820 type constants.
+#[allow(dead_code)]
+pub mod e820_type {
+    pub const USABLE: u32 = 1;
+    pub const RESERVED: u32 = 2;
+    pub const ACPI_RECLAIMABLE: u32 = 3;
+    pub const ACPI_NVS: u32 = 4;
+    pub const BAD_MEMORY: u32 = 5;
+}
+
+/// One E820 entry as the kernel expects it on the wire (20 bytes).
+#[derive(Debug, Clone, Copy)]
+pub struct E820Entry {
+    pub addr: u64,
+    pub size: u64,
+    pub typ: u32,
+}
+
+/// Populate a 4 KiB `boot_params` blob in `dst`, copying the setup
+/// header from `bz`, installing the supplied E820 entries, and
+/// pointing the cmdline at `cmd_line_gpa`.
+///
+/// `dst` must be at least 4096 bytes long; it is fully zeroed first
+/// so the caller doesn't need to worry about uninitialised legacy
+/// fields.
+///
+/// Linux requires:
+///   - `setup_header.type_of_loader` to be non-zero (we set 0xFF =
+///     "undefined" which Linux accepts unconditionally)
+///   - `cmd_line_ptr` to be in low memory (< 4 GiB) and point at a
+///     NUL-terminated string
+///   - At least one E820 entry covering the kernel's load address
+pub fn build_boot_params(
+    dst: &mut [u8],
+    bz: &BzImage<'_>,
+    cmd_line_gpa: u32,
+    e820: &[E820Entry],
+) -> Result<(), BzImageError> {
+    if dst.len() < 4096 {
+        return Err(BzImageError::Truncated);
+    }
+    if e820.len() > BP_E820_MAX {
+        return Err(BzImageError::Truncated);
+    }
+
+    // 1. Zero the buffer so legacy fields stay quiet.
+    for b in dst.iter_mut().take(4096) {
+        *b = 0;
+    }
+
+    // 2. Copy the bzImage setup header (0x1F1..0x290) into
+    //    boot_params at the same offset. This brings across the
+    //    entire setup_header (jump, header magic, version,
+    //    setup_sects, kernel_alignment, init_size, etc.) which
+    //    Linux's 64-bit entry validates before doing anything else.
+    let hdr_src = &bz.bytes[BP_HDR_OFFSET..BP_HDR_OFFSET + BP_HDR_LEN];
+    dst[BP_HDR_OFFSET..BP_HDR_OFFSET + BP_HDR_LEN].copy_from_slice(hdr_src);
+
+    // 3. Patch fields the bootloader controls.
+    //    type_of_loader: 0xFF = "undefined" (accepted everywhere)
+    dst[BP_HDR_OFFSET + HDR_OFF_TYPE_OF_LOADER] = 0xFF;
+    //    No initramfs in F.4 — phase G adds one.
+    write_u32_at(dst, BP_HDR_OFFSET + HDR_OFF_RAMDISK_IMAGE, 0);
+    write_u32_at(dst, BP_HDR_OFFSET + HDR_OFF_RAMDISK_SIZE, 0);
+    //    cmd_line_ptr is a 32-bit GPA (Linux's setup_header field
+    //    is 4 bytes; only legal in low memory but our cmdline lives
+    //    at GPA 0x20000 which fits comfortably).
+    write_u32_at(dst, BP_HDR_OFFSET + HDR_OFF_CMD_LINE_PTR, cmd_line_gpa);
+
+    // 4. Install the E820 map.
+    dst[BP_E820_ENTRIES] = e820.len() as u8;
+    let mut off = BP_E820_TABLE;
+    for entry in e820.iter() {
+        write_u64_at(dst, off, entry.addr);
+        write_u64_at(dst, off + 8, entry.size);
+        write_u32_at(dst, off + 16, entry.typ);
+        off += E820_ENTRY_SIZE;
+    }
+
+    Ok(())
+}
+
+#[inline]
+fn write_u32_at(buf: &mut [u8], off: usize, value: u32) {
+    let bytes = value.to_le_bytes();
+    buf[off..off + 4].copy_from_slice(&bytes);
+}
+
+#[inline]
+fn write_u64_at(buf: &mut [u8], off: usize, value: u64) {
+    let bytes = value.to_le_bytes();
+    buf[off..off + 8].copy_from_slice(&bytes);
+}

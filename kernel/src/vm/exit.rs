@@ -176,13 +176,31 @@ fn handle_cpuid(
         );
     } else {
         // Passthrough: execute cpuid on the host and return the real
-        // values. Most leaves are passthrough; the deception profile
-        // only overrides leaves 0, 1, and 0x40000000 by default.
+        // values. Phase F.4 records these too so we can see what
+        // leaves Linux is probing during boot. The kernel still
+        // hides the hypervisor bit because the host CPUID we
+        // execute happens INSIDE the L0 host where that bit is set;
+        // for the leaf-1 ECX value we mask bit 31 explicitly.
         let r = core::arch::x86_64::__cpuid_count(leaf, subleaf);
+        let mut ecx_out = r.ecx;
+        if leaf == 1 {
+            ecx_out &= !(1u32 << 31); // hide hypervisor bit
+        }
         state.gprs.rax = r.eax as u64;
         state.gprs.rbx = r.ebx as u64;
-        state.gprs.rcx = r.ecx as u64;
+        state.gprs.rcx = ecx_out as u64;
         state.gprs.rdx = r.edx as u64;
+        record(
+            vm_handle,
+            VmIntrospectEvent {
+                kind: VmIntrospectEvent::KIND_CPUID,
+                _pad: 0,
+                a: ((subleaf as u64) << 32) | (leaf as u64),
+                b: ((r.ebx as u64) << 32) | (r.eax as u64),
+                c: ((r.edx as u64) << 32) | (ecx_out as u64),
+                d: 0,
+            },
+        );
     }
     advance_rip(vmcs_phys, INSN_LEN_CPUID);
     ExitAction::Resume

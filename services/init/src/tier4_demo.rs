@@ -420,7 +420,116 @@ fn run_bhyve_kernel_backend() -> Result<(), vm_backend::BackendError> {
     //    intermediate table frame, and the 4 leaf frames the lazy
     //    fault path allocated.
     vm_backend::vm_destroy(vm)?;
+
+    // 6. Phase F.4 — try the bzImage path. This is exploratory:
+    //    we don't yet expect Linux to fully boot, just to see how
+    //    far it gets and what events the introspection ring
+    //    captures. Failure here is logged but does NOT fail the
+    //    Tier 4 demo (until F.5/F.6 land more devmodel handlers).
+    run_bhyve_bzimage_attempt();
     Ok(())
+}
+
+/// Phase F.4 — exploratory bzImage launch. Allocates a fresh VM,
+/// installs the bare-metal Intel profile, calls `vm_run_bzimage`,
+/// drains the introspection ring and prints what we observed.
+/// Soft-fails (prints a "skip" message) if VT-x isn't available or
+/// the kernel doesn't have a bzImage registered — Phase F.4 is
+/// still under construction so we don't gate Tier 4 on it.
+fn run_bhyve_bzimage_attempt() {
+    print(b"    bhyve [F.4]: attempting Linux bzImage boot\n");
+    let vm = match vm_backend::vm_create(2, 4096) {
+        // 2 vCPUs declared (we only run vCPU 0), 4096 frames = 16 MiB
+        // budget for the lazy-fault path. The actual loader uses
+        // pre-mapped frames OUTSIDE that budget, so the limit only
+        // matters if Linux triggers an EPT_VIOLATION on its own.
+        Ok(c) => c,
+        Err(vm_backend::BackendError::VmxUnavailable) => {
+            print(b"    bhyve [F.4]: VT-x unavailable -- skipping\n");
+            return;
+        }
+        Err(e) => {
+            print(b"    bhyve [F.4]: vm_create failed err=");
+            print_i64(match e {
+                vm_backend::BackendError::KernelError(c) => c,
+                _ => -1,
+            });
+            print(b"\n");
+            return;
+        }
+    };
+    if let Err(e) = vm_backend::vm_set_profile(vm, VmProfileSelector::BareMetalIntel) {
+        print(b"    bhyve [F.4]: vm_set_profile failed err=");
+        print_i64(match e {
+            vm_backend::BackendError::KernelError(c) => c,
+            _ => -1,
+        });
+        print(b"\n");
+        let _ = vm_backend::vm_destroy(vm);
+        return;
+    }
+    match vm_backend::vm_run_bzimage(vm) {
+        Ok(()) => print(b"    bhyve [F.4]: vm_run_bzimage returned cleanly\n"),
+        Err(vm_backend::BackendError::VmxUnavailable) => {
+            print(b"    bhyve [F.4]: bzImage not registered (initrd missing?) -- skipping\n");
+            let _ = vm_backend::vm_destroy(vm);
+            return;
+        }
+        Err(e) => {
+            print(b"    bhyve [F.4]: vm_run_bzimage err=");
+            print_i64(match e {
+                vm_backend::BackendError::KernelError(c) => c,
+                _ => -1,
+            });
+            print(b" (expected -- F.4 is incomplete)\n");
+        }
+    }
+
+    // Drain whatever introspection events the kernel captured. The
+    // counts here are exploratory: we don't assert specific values,
+    // we just print a histogram so we can see how far Linux got.
+    let mut events = [VmIntrospectEvent::zeroed(); 64];
+    let n = match vm_backend::vm_introspect_drain(vm, &mut events) {
+        Ok(n) => n,
+        Err(_) => 0,
+    };
+    let mut k_cpuid = 0u64;
+    let mut k_rdmsr = 0u64;
+    let mut k_wrmsr = 0u64;
+    let mut k_io_out = 0u64;
+    let mut k_io_in = 0u64;
+    let mut k_ept = 0u64;
+    let mut k_hlt = 0u64;
+    for ev in events.iter().take(n) {
+        match ev.kind {
+            VmIntrospectEvent::KIND_CPUID => k_cpuid += 1,
+            VmIntrospectEvent::KIND_RDMSR => k_rdmsr += 1,
+            VmIntrospectEvent::KIND_WRMSR => k_wrmsr += 1,
+            VmIntrospectEvent::KIND_IO_OUT => k_io_out += 1,
+            VmIntrospectEvent::KIND_IO_IN => k_io_in += 1,
+            VmIntrospectEvent::KIND_EPT_VIOLATION => k_ept += 1,
+            VmIntrospectEvent::KIND_HLT => k_hlt += 1,
+            _ => {}
+        }
+    }
+    print(b"    bhyve [F.4]: drained ");
+    print_u64(n as u64);
+    print(b" events: CPUID=");
+    print_u64(k_cpuid);
+    print(b" RDMSR=");
+    print_u64(k_rdmsr);
+    print(b" WRMSR=");
+    print_u64(k_wrmsr);
+    print(b" IO_OUT=");
+    print_u64(k_io_out);
+    print(b" IO_IN=");
+    print_u64(k_io_in);
+    print(b" EPT=");
+    print_u64(k_ept);
+    print(b" HLT=");
+    print_u64(k_hlt);
+    print(b"\n");
+    let _ = vm_backend::vm_destroy(vm);
 }
 
 /// Phase B-style in-process spoof verification, kept as a TCG/WHPX

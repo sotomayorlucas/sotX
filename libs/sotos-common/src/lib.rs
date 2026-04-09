@@ -267,6 +267,12 @@ pub enum Syscall {
     VmIntrospectDrain = 206,
     /// Tear down the VM and free its frames. rdi = vm_cap.
     VmDestroy = 207,
+    /// Phase F.4 — load the registered Linux bzImage and run it as
+    /// the guest. rdi = vm_cap. Blocks until the guest terminates.
+    /// Distinct from `VmRun` because the layout, entry state, and
+    /// boot protocol are completely different from the Phase B/C/D
+    /// canned payload.
+    VmRunBzImage = 208,
 }
 
 /// Selector for a built-in deception profile installed via SYS_VM_SET_PROFILE.
@@ -2024,6 +2030,20 @@ pub mod sys {
     #[cfg(not(target_os = "none"))]
     #[inline(always)]
     pub fn vm_destroy(_vm_cap: u64) -> Result<(), i64> {
+        Err(-38)
+    }
+
+    /// Phase F.4 — load the registered Linux bzImage and run it as
+    /// the guest. Blocks the calling thread inside the kernel until
+    /// the guest terminates (HLT, triple fault, or unhandled exit).
+    #[cfg(target_os = "none")]
+    #[inline(always)]
+    pub fn vm_run_bzimage(vm_cap: u64) -> Result<(), i64> {
+        check_unit(syscall1(super::Syscall::VmRunBzImage as u64, vm_cap))
+    }
+    #[cfg(not(target_os = "none"))]
+    #[inline(always)]
+    pub fn vm_run_bzimage(_vm_cap: u64) -> Result<(), i64> {
         Err(-38)
     }
 }

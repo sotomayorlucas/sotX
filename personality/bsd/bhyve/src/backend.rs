@@ -79,3 +79,12 @@ pub fn vm_introspect_drain(
 pub fn vm_destroy(cap: VmCap) -> Result<(), BackendError> {
     sys::vm_destroy(cap.0).map_err(BackendError::from)
 }
+
+/// Phase F.4 — load the registered Linux bzImage as the guest's
+/// payload and run. Blocks the calling thread inside the kernel
+/// until the guest terminates. Distinct from `vm_run` because the
+/// kernel uses a completely different memory layout, page tables,
+/// and entry state for the 64-bit Linux boot protocol.
+pub fn vm_run_bzimage(cap: VmCap) -> Result<(), BackendError> {
+    sys::vm_run_bzimage(cap.0).map_err(BackendError::from)
+}

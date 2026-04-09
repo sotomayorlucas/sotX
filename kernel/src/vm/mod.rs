@@ -717,6 +717,261 @@ pub fn run_payload_on_vm(vm_handle: PoolHandle, _vcpu_idx: u8) -> Result<(), VmO
     run_phase_b_test_inner_on_handle(vm_handle)
 }
 
+/// Phase F.4 — load the registered bzImage into the guest and run.
+/// Allocates host frames for the entire vmlinux + boot_params + page
+/// tables, builds an identity-mapped guest CR3 covering 0..1 GiB
+/// via a single 1 GiB PDPT entry, copies the protected-mode kernel
+/// payload to GPA `bz.pref_address`, programs the VMCS with the
+/// 64-bit boot protocol entry state, and calls `vmx_run`.
+pub fn run_bzimage_on_vm(vm_handle: PoolHandle) -> Result<(), VmObjError> {
+    let bz_bytes = match bzimage_slice() {
+        Some(b) => b,
+        None => {
+            crate::kprintln!("  vmx-f: no bzImage registered — initrd missing the file?");
+            return Err(VmObjError::NotFound);
+        }
+    };
+    let bz = match bzimage::BzImage::parse(bz_bytes) {
+        Ok(b) => b,
+        Err(e) => {
+            crate::kprintln!("  vmx-f: bzImage parse failed: {:?}", e);
+            return Err(VmObjError::Vmx(VmxError::VmFailInvalid));
+        }
+    };
+    crate::kprintln!(
+        "  vmx-f: launching bzImage prot_payload={:#x}+{:#x} pref_addr={:#x} init_size={:#x}",
+        bz.prot_payload_offset,
+        bz.prot_payload_len,
+        bz.pref_address,
+        bz.init_size
+    );
+
+    ensure_ept_root(vm_handle)?;
+
+    let hhdm = crate::mm::hhdm_offset();
+
+    // -----------------------------------------------------------------
+    // Guest physical layout (Phase F.4 — keep simple, fixed addresses)
+    // -----------------------------------------------------------------
+    //   GPA 0x0000..0x10000   = low memory (BIOS area, unused)
+    //   GPA 0x10000..0x11000  = boot_params  (1 frame, pre-mapped)
+    //   GPA 0x20000..0x21000  = cmdline      (1 frame, pre-mapped)
+    //   GPA 0x30000..0x31000  = guest PML4   (1 frame, pre-mapped)
+    //   GPA 0x31000..0x32000  = guest PDPT   (1 frame, pre-mapped, 1 GiB PS=1)
+    //   GPA 0x40000..0x50000  = initial stack (16 frames, pre-mapped)
+    //   GPA 0x1000000..       = vmlinux load region (init_size frames)
+
+    const BOOT_PARAMS_GPA: u64 = 0x10000;
+    const CMDLINE_GPA: u64 = 0x20000;
+    const PML4_GPA: u64 = 0x30000;
+    const PDPT_GPA: u64 = 0x31000;
+    const STACK_GPA_BASE: u64 = 0x40000;
+    const STACK_PAGES: usize = 16;
+
+    let pref_addr = bz.pref_address;
+    let init_size = bz.init_size as usize;
+    let vmlinux_pages = (init_size + 0xFFF) / 0x1000;
+
+    // Helper that allocates a fresh host frame, EPT-maps it at
+    // `gpa`, records it in the VM's leaf_frames so destroy() frees
+    // it, and returns the host phys for direct write access.
+    let alloc_and_map = |gpa: u64| -> Result<u64, VmObjError> {
+        let frame = crate::mm::alloc_frame().ok_or(VmObjError::Vmx(VmxError::OutOfFrames))?;
+        let phys = frame.addr();
+        // Zero through HHDM.
+        unsafe { core::ptr::write_bytes((phys + hhdm) as *mut u8, 0, 4096); }
+        ept_premap(vm_handle, gpa, phys)?;
+        // Track the leaf so VmObject::Drop frees it. Use the lock
+        // path that doesn't bump mem_pages_used (these are loader
+        // pages, not part of the userspace-declared budget).
+        {
+            let mut pool = VM_POOL.lock();
+            if let Some(vm) = pool.get_mut(vm_handle) {
+                vm.leaf_frames.push(phys);
+            }
+        }
+        Ok(phys)
+    };
+
+    // 1. boot_params + cmdline + page tables + stack frames.
+    let bp_phys = alloc_and_map(BOOT_PARAMS_GPA)?;
+    let cmd_phys = alloc_and_map(CMDLINE_GPA)?;
+    let pml4_phys = alloc_and_map(PML4_GPA)?;
+    let pdpt_phys = alloc_and_map(PDPT_GPA)?;
+    for i in 0..STACK_PAGES {
+        alloc_and_map(STACK_GPA_BASE + (i as u64) * 0x1000)?;
+    }
+
+    // 2. vmlinux load region — pre-map ONLY enough frames to hold
+    //    the protected-mode kernel payload, plus a few BSS pages
+    //    for the decompressor's scratch area. Linux's reads beyond
+    //    that range will trigger EPT_VIOLATION and the Phase D lazy
+    //    fault handler will fill them in on demand.
+    //
+    //    We do NOT pre-map the entire `init_size` (~9.6 MiB) up
+    //    front because allocating 2400+ frames in a tight loop
+    //    triggers heavy slab churn from the leaf_frames Vec growth
+    //    and risks tripping pre-existing slab edge cases under
+    //    pressure. The lazy fault path is exactly what Phase D
+    //    built for; let it do the work.
+    let payload = bz.prot_payload();
+    let payload_pages = (payload.len() + 0xFFF) / 0x1000;
+    let scratch_pages = 64; // ~256 KiB of zero'd scratch for the decompressor
+    let pre_map_pages = payload_pages + scratch_pages;
+    let _ = vmlinux_pages; // Phase D handles the rest
+
+    // Pre-allocate the leaf_frames Vec capacity once so the per-frame
+    // pushes below don't triggering doubling reallocs.
+    {
+        let mut pool = VM_POOL.lock();
+        if let Some(vm) = pool.get_mut(vm_handle) {
+            vm.leaf_frames.reserve(pre_map_pages + 24);
+        }
+    }
+
+    let mut vmlinux_phys: alloc::vec::Vec<u64> = alloc::vec::Vec::with_capacity(pre_map_pages);
+    for i in 0..pre_map_pages {
+        let gpa = pref_addr + (i as u64) * 0x1000;
+        let phys = alloc_and_map(gpa)?;
+        vmlinux_phys.push(phys);
+    }
+    crate::kprintln!(
+        "  vmx-f: pre-mapped {} pages for vmlinux at GPA {:#x} (rest = lazy)",
+        pre_map_pages,
+        pref_addr
+    );
+
+    // 3. Copy the protected-mode kernel payload into the first
+    //    `prot_payload_len` bytes of the load region. The rest of
+    //    the pre-mapped pages are BSS scratch, already zeroed.
+    let mut copied = 0usize;
+    while copied < payload.len() {
+        let page_idx = copied / 0x1000;
+        let off_in_page = copied % 0x1000;
+        let chunk = core::cmp::min(0x1000 - off_in_page, payload.len() - copied);
+        let dst_virt = vmlinux_phys[page_idx] + hhdm + off_in_page as u64;
+        // SAFETY: page is freshly allocated and HHDM-mapped writable;
+        // bounds checked above.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                payload[copied..copied + chunk].as_ptr(),
+                dst_virt as *mut u8,
+                chunk,
+            );
+        }
+        copied += chunk;
+    }
+    crate::kprintln!("  vmx-f: copied {} bytes of payload to GPA {:#x}", copied, pref_addr);
+
+    // 4. Build the guest page tables: PML4[0] -> PDPT, PDPT[0] = 0 |
+    //    PS(7) | RW(1) | P(0) = 0x83 mapping 0..1 GiB identity.
+    unsafe {
+        let pml4_virt = (pml4_phys + hhdm) as *mut u64;
+        let pdpt_virt = (pdpt_phys + hhdm) as *mut u64;
+        // PML4[0] -> PDPT_GPA (R+W+P)
+        *pml4_virt.add(0) = PDPT_GPA | 0x3;
+        // PDPT[0] = 0 | huge | R+W+P
+        *pdpt_virt.add(0) = 0x83;
+    }
+
+    // 5. Build the cmdline buffer at CMDLINE_GPA.
+    let cmdline = b"console=ttyS0,38400 earlyprintk=serial,ttyS0,38400 panic=1\0";
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            cmdline.as_ptr(),
+            (cmd_phys + hhdm) as *mut u8,
+            cmdline.len(),
+        );
+    }
+
+    // 6. Build the boot_params blob via the F.4.2 helper.
+    let e820 = [
+        // Single big "all RAM is usable" entry covering 0..1 GiB.
+        // Linux accepts it without complaint and Phase G can refine
+        // the layout once we need reserved holes (ACPI, EBDA, etc.)
+        bzimage::E820Entry {
+            addr: 0,
+            size: 0x4000_0000, // 1 GiB
+            typ: bzimage::e820_type::USABLE,
+        },
+    ];
+    let bp_buf_virt = (bp_phys + hhdm) as *mut u8;
+    let bp_buf =
+        unsafe { core::slice::from_raw_parts_mut(bp_buf_virt, 4096) };
+    if let Err(e) = bzimage::build_boot_params(bp_buf, &bz, CMDLINE_GPA as u32, &e820) {
+        crate::kprintln!("  vmx-f: build_boot_params failed: {:?}", e);
+        return Err(VmObjError::Vmx(VmxError::VmFailInvalid));
+    }
+
+    // 7. Configure the vCPU's VMCS for the 64-bit boot protocol:
+    //    RIP = pref_addr + 0x200 (skip the legacy 64-bit ELF trampoline header)
+    //    RSP = top of the stack region
+    //    RSI = boot_params GPA  (Linux's 64-bit entry expects boot_params here)
+    //    CR3 = our new PML4
+    let entry_rip = pref_addr + 0x200;
+    let entry_rsp = STACK_GPA_BASE + (STACK_PAGES as u64) * 0x1000 - 0x10;
+    let entry_cr3 = PML4_GPA;
+
+    // Pre-fill the vCPU GPRs with RSI = boot_params GPA. The
+    // trampoline reloads GPRs from `state.gprs` before vmlaunch.
+    {
+        let mut pool = VM_POOL.lock();
+        let vm = pool.get_mut(vm_handle).ok_or(VmObjError::NotFound)?;
+        let vcpu = vm.vcpu_mut(0).ok_or(VmObjError::NotFound)?;
+        vcpu.gprs.rsi = BOOT_PARAMS_GPA;
+        vcpu.launched = false;
+    }
+
+    // 8. Run the vCPU.
+    set_current_vm(vm_handle);
+    let result = run_one_vcpu_at(vm_handle, entry_rip, entry_rsp, entry_cr3);
+    clear_current_vm();
+
+    match result {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            crate::kprintln!("  vmx-f: run_one_vcpu_at error: {:?}", e);
+            Err(VmObjError::Vmx(e))
+        }
+    }
+}
+
+/// Run a vCPU with caller-supplied entry RIP/RSP/CR3 (Phase F.4).
+/// Distinct from `run_one_vcpu` which hard-codes the Phase B/C/D
+/// payload's entry state at GPA 0x1000.
+fn run_one_vcpu_at(
+    vm_handle: PoolHandle,
+    entry_rip: u64,
+    entry_rsp: u64,
+    entry_cr3: u64,
+) -> Result<(), VmxError> {
+    let eptp_value = ept_pointer(vm_handle);
+    if eptp_value == 0 {
+        return Err(VmxError::VmFailInvalid);
+    }
+
+    let mut pool = VM_POOL.lock();
+    let vm = pool.get_mut(vm_handle).ok_or(VmxError::VmFailInvalid)?;
+    let vcpu = vm.vcpu_mut(0).ok_or(VmxError::VmFailInvalid)?;
+    let vmcs_phys = vcpu.vmcs.phys;
+
+    vmx::vmcs_clear(&vcpu.vmcs)?;
+    vmx::vmcs_load(&vcpu.vmcs)?;
+    vmx::setup_controls(vmcs_phys)?;
+    vmx::vmwrite(vmx::VMCS_EPTP, eptp_value, vmcs_phys)?;
+    vmx::setup_guest_state(vmcs_phys, entry_rip, entry_rsp, entry_cr3)?;
+
+    let vcpu_ptr = vcpu as *mut KernelVCpuState;
+    drop(pool);
+
+    // SAFETY: Phase F is single-VM serial; nothing else holds a
+    // reference to this vCPU.
+    unsafe {
+        let state = &mut *vcpu_ptr;
+        vmx::vmx_run(state)
+    }
+}
+
 /// Phase B end-to-end test, kept for direct kernel invocation in case
 /// we want a self-contained smoke test (currently unused — kmain stops
 /// driving the test at boot once Phase C lands the syscall path).
