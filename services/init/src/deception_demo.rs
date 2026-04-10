@@ -357,6 +357,16 @@ pub fn run() {
     print(b"=== Tier 3 demo: PASS ===\n\n");
 
     // ------------------------------------------------------------------
+    // Phase H — attacker VM sandbox reroute verdict. The deception
+    // pipeline has detected domain 7 as an attacker and migrated it
+    // to the Ubuntu deception profile. We record the verdict here;
+    // the actual reroute into the L1 Linux guest happens in
+    // tier4_demo once the VM is alive.
+    // ------------------------------------------------------------------
+    print(b"[7] [DECEPTION] Attacker domain 7 flagged for VM sandbox reroute\n");
+    print(b"    (Phase H: reroute pending until L1 guest is running)\n");
+
+    // ------------------------------------------------------------------
     // Tier 3 follow-up #2: keep the pipeline alive after the one-shot
     // demo by spawning a watchdog thread that periodically drains the
     // ring and reports any new attacker activity. The thread shares
