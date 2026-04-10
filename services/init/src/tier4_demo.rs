@@ -438,11 +438,15 @@ fn run_bhyve_kernel_backend() -> Result<(), vm_backend::BackendError> {
 /// still under construction so we don't gate Tier 4 on it.
 fn run_bhyve_bzimage_attempt() {
     print(b"    bhyve [F.4]: attempting Linux bzImage boot\n");
-    let vm = match vm_backend::vm_create(2, 4096) {
-        // 2 vCPUs declared (we only run vCPU 0), 4096 frames = 16 MiB
-        // budget for the lazy-fault path. The actual loader uses
-        // pre-mapped frames OUTSIDE that budget, so the limit only
-        // matters if Linux triggers an EPT_VIOLATION on its own.
+    let vm = match vm_backend::vm_create(2, 65536) {
+        // 2 vCPUs declared (we only run vCPU 0), 65536 frames = 256 MiB
+        // budget for the lazy-fault path. Linux setup_arch generates
+        // thousands of EPT lazy faults during memblock setup; F.6
+        // raised the cap from 4096 (which terminated the guest mid-
+        // boot via "out of pages") to 65536 so Linux can complete
+        // its early page table allocations. The pre-mapped loader
+        // pages (boot_params, cmdline, PML4/PDPT, stack, GDT, vmlinux
+        // payload) live OUTSIDE this budget.
         Ok(c) => c,
         Err(vm_backend::BackendError::VmxUnavailable) => {
             print(b"    bhyve [F.4]: VT-x unavailable -- skipping\n");

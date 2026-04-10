@@ -257,6 +257,10 @@ fn read_u64(bytes: &[u8], off: usize) -> u64 {
 // Linux's bootparam.h is the canonical reference; field offsets are
 // stable across kernel versions because they're part of the boot ABI.
 
+/// Offset of `screen_info.ext_mem_k` (u16) — legacy BIOS-88 mem size.
+const BP_SCREEN_EXT_MEM_K: usize = 0x002;
+/// Offset of `alt_mem_k` (u32) — legacy BIOS-e801 alternate mem size.
+const BP_ALT_MEM_K: usize = 0x1E0;
 /// Offset of `e820_entries` (u8) inside boot_params.
 const BP_E820_ENTRIES: usize = 0x1E8;
 /// Offset of `sentinel` (u8) — must be 0 for newer kernels.
@@ -358,6 +362,41 @@ pub fn build_boot_params(
         write_u32_at(dst, off + 16, entry.typ);
         off += E820_ENTRY_SIZE;
     }
+
+    // F.6 — also populate the legacy BIOS-e801 / BIOS-88 fields as a
+    // safety net. Linux's `e820__memory_setup_default` falls back to
+    // these if for some reason `append_e820_table` returns -1
+    // (overflow check, > 128 entries, etc). Compute the total RAM
+    // size in KB above 1 MB by summing all USABLE entries that
+    // extend past 0x100000.
+    let mut high_mem_kb: u64 = 0;
+    for entry in e820.iter() {
+        if entry.typ != e820_type::USABLE {
+            continue;
+        }
+        let end = entry.addr.saturating_add(entry.size);
+        if end > 0x100000 {
+            let start = if entry.addr > 0x100000 { entry.addr } else { 0x100000 };
+            high_mem_kb += (end - start) / 1024;
+        }
+    }
+    // alt_mem_k is u32 — cap at u32::MAX to handle huge guests, though
+    // tinyconfig never reaches that size.
+    let alt_kb = if high_mem_kb > u32::MAX as u64 {
+        u32::MAX
+    } else {
+        high_mem_kb as u32
+    };
+    write_u32_at(dst, BP_ALT_MEM_K, alt_kb);
+    // ext_mem_k is u16 — capped at 64 MB on real PCs, just store the
+    // capped value so the BIOS-88 path also works.
+    let ext_kb = if high_mem_kb > 0xFFFF {
+        0xFFFFu16
+    } else {
+        high_mem_kb as u16
+    };
+    let ext_kb_bytes = ext_kb.to_le_bytes();
+    dst[BP_SCREEN_EXT_MEM_K..BP_SCREEN_EXT_MEM_K + 2].copy_from_slice(&ext_kb_bytes);
 
     Ok(())
 }

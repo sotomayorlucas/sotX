@@ -1328,12 +1328,23 @@ pub fn setup_controls(vmcs_phys: u64) -> Result<(), VmxError> {
     );
     vmwrite(VMCS_PROC_BASED_CTLS, proc1 as u64, vmcs_phys)?;
 
-    // Secondary: EPT, VPID, unrestricted guest. Adjusted against
-    // IA32_VMX_PROCBASED_CTLS2 — uses `adjust_controls2` because
-    // CTLS2 has no default-1 bits and KVM reports allowed_zero=0,
-    // which the standard formula misinterprets as "all bits required".
+    // Secondary: EPT, VPID, unrestricted guest, INVPCID. Adjusted
+    // against IA32_VMX_PROCBASED_CTLS2 — uses `adjust_controls2`
+    // because CTLS2 has no default-1 bits and KVM reports
+    // allowed_zero=0, which the standard formula misinterprets as
+    // "all bits required".
+    //
+    // Bit 12 (Enable INVPCID) is required because Linux's leaf-7
+    // CPUID passthrough sees the host's INVPCID bit set (Alder Lake
+    // / modern Intel reports it), and Linux's startup_64 calls
+    // INVPCID early to flush TLB during page table installation.
+    // Per Intel SDM Vol 3D 25.6.2: "If the 'enable INVPCID'
+    // VM-execution control is 0, any execution of INVPCID causes
+    // a #UD exception in VMX non-root operation." Without bit 12
+    // Linux triple-faults on its first invpcid in head_64.S.
     let proc2 = adjust_controls2(
-        (1 << 1) | (1 << 5) | (1 << 7), // EPT | VPID | UNRESTRICTED_GUEST
+        (1 << 1) | (1 << 5) | (1 << 7) | (1 << 12),
+        // EPT | VPID | UNRESTRICTED_GUEST | INVPCID
         IA32_VMX_PROCBASED_CTLS2,
     );
     vmwrite(VMCS_PROC_BASED_CTLS2, proc2 as u64, vmcs_phys)?;
@@ -1622,10 +1633,38 @@ extern "C" {
     fn vmx_run_inner(state: *mut crate::vm::KernelVCpuState);
 }
 
+/// Called from the asm trampoline immediately after a `vmresume`
+/// fall-through (failure path). Reads `VMCS_VM_INSTRUCTION_ERROR`
+/// from the active VMCS and logs it so we don't silently terminate.
+#[unsafe(no_mangle)]
+extern "C" fn vmresume_failed_diag() {
+    let state_ptr: *mut crate::vm::KernelVCpuState;
+    unsafe {
+        core::arch::asm!(
+            "mov {}, gs:[104]",
+            out(reg) state_ptr,
+            options(nostack, preserves_flags)
+        );
+    }
+    if state_ptr.is_null() {
+        crate::kprintln!("  vmx: vmresume failed; no active KernelVCpuState");
+        return;
+    }
+    let state = unsafe { &*state_ptr };
+    let vmcs_phys = state.vmcs.phys;
+    let inst_err = vmread(VMCS_VM_INSTRUCTION_ERROR, vmcs_phys).unwrap_or(0xFFFF);
+    let rip = vmread(VMCS_GUEST_RIP, vmcs_phys).unwrap_or(0);
+    let reason = vmread(VMCS_VM_EXIT_REASON, vmcs_phys).unwrap_or(0);
+    crate::kprintln!(
+        "  vmx: vmresume FAILED inst_err={} rip={:#x} last_reason={}",
+        inst_err, rip, reason & 0xFFFF
+    );
+}
+
 /// C-ABI dispatcher entry point invoked by the asm exit trampoline.
 /// `state` is a pointer to the `KernelVCpuState` whose VMCS is currently
 /// active. Returns `0` to resume, `1` to terminate.
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn vm_exit_handler_rust(state: *mut crate::vm::KernelVCpuState) -> u32 {
     // SAFETY: the trampoline passed us a pointer to the
     // currently-active vCPU's KernelVCpuState. The caller (Rust
@@ -1717,8 +1756,9 @@ core::arch::global_asm!(
     "    mov r15, [rax + 112]",
     "    mov rax, [rax]",           // rax LAST so we don't clobber the base
     "    vmresume",
-    // vmresume falls through ONLY on failure (CF or ZF set). Treat
-    // failure as Terminate.
+    // vmresume falls through ONLY on failure (CF or ZF set). Print
+    // diagnostics + treat failure as Terminate.
+    "    call vmresume_failed_diag",
     "2:",
     // === Terminate ===
     // RSP is currently somewhere on the vmx_exit_stack. The kernel
@@ -1835,6 +1875,19 @@ pub fn vmx_run(state: &mut crate::vm::KernelVCpuState) -> Result<(), VmxError> {
     unsafe {
         vmx_run_inner(state as *mut _);
     }
+
+    // F.6 — log the last exit so the boot log captures why vmx_run
+    // returned. This is the only signal in cases where the dispatcher
+    // terminated silently (e.g. via the EPT-budget-exhausted path)
+    // and is cheap (one vmread + one kprintln per VM termination).
+    let exit_reason = vmread(VMCS_VM_EXIT_REASON, state.vmcs.phys).unwrap_or(0xFFFF);
+    let rip = vmread(VMCS_GUEST_RIP, state.vmcs.phys).unwrap_or(0);
+    crate::kprintln!(
+        "  vmx_run: terminated last_reason={} rip={:#x} halted={}",
+        exit_reason & 0xFFFF,
+        rip,
+        state.halted
+    );
 
     // Mark launched so the next call uses vmresume.
     state.launched = true;
