@@ -1505,7 +1505,10 @@ pub fn setup_guest_state(
     // EFER: LME=1 (long mode enable) + LMA=1 (long mode active).
     // Bit 8 = LME, bit 10 = LMA. Bit 11 = NXE (no-execute) is also
     // typically required.
-    let efer = (1u64 << 8) | (1 << 10) | (1 << 11);
+    // SCE (bit 0) enables SYSCALL/SYSRET — without it, userspace
+    // `syscall` #UDs. Phase F.6.5 discovered this when the guest
+    // /init (a bare-metal ELF using syscall) crashed immediately.
+    let efer = 1u64 | (1 << 8) | (1 << 10) | (1 << 11);
     vmwrite(VMCS_GUEST_IA32_EFER, efer, vmcs_phys)?;
 
     // IA32_PAT — needed because ENTRY_CTLS bit 14 (Load IA32_PAT) is
