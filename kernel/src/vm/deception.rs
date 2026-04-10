@@ -169,6 +169,40 @@ impl KernelDeceptionProfile {
             edx: 0xBFEB_FBFF,
         });
 
+        // Leaf 0x15: Time Stamp Counter / Core Crystal Clock.
+        // Phase F.7 — this is the KEY unblocker for the LAPIC timer.
+        // Linux's `native_calibrate_tsc()` reads leaf 0x15 to compute
+        // tsc_khz = ECX * EBX / EAX. With tsc_khz known and CPUID.1
+        // ECX bit 24 (TSC-deadline) set, Linux registers the
+        // TSC-deadline clockevent without needing PIT calibration.
+        //
+        // Cascade Lake Xeon Platinum 8280 values:
+        //   EAX = denominator = 2
+        //   EBX = numerator   = 216 (0xD8)
+        //   ECX = crystal_hz  = 25000000 (25 MHz)
+        //   tsc_hz = 25000000 * 216 / 2 = 2,700,000,000 (2.7 GHz)
+        cpuid.add(CpuidSpoof {
+            leaf: 0x15,
+            subleaf: 0xFFFF_FFFF,
+            eax: 2,
+            ebx: 216,
+            ecx: 25_000_000,
+            edx: 0,
+        });
+
+        // Leaf 0x16: Processor Frequency Information.
+        //   EAX = base frequency MHz  = 2700
+        //   EBX = max frequency MHz   = 4000
+        //   ECX = bus frequency MHz   = 2700
+        cpuid.add(CpuidSpoof {
+            leaf: 0x16,
+            subleaf: 0xFFFF_FFFF,
+            eax: 2700,
+            ebx: 4000,
+            ecx: 2700,
+            edx: 0,
+        });
+
         // Leaf 0x40000000: zeroed (hide hypervisor leaves entirely).
         // Same any-subleaf rule.
         cpuid.add(CpuidSpoof {

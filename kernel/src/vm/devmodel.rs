@@ -67,6 +67,14 @@ const COM1_END: u16 = 0x3FF;
 const COM1_TX_RX: u16 = 0x3F8;
 const COM1_LINE_STATUS: u16 = 0x3FD;
 
+// COM2/3/4 — Phase F.7 stub (serial driver probes all 4 during init).
+const COM2_BASE: u16 = 0x2F8;
+const COM2_END: u16 = 0x2FF;
+const COM3_BASE: u16 = 0x3E8;
+const COM3_END: u16 = 0x3EF;
+const COM4_BASE: u16 = 0x2E8;
+const COM4_END: u16 = 0x2EF;
+
 // 8259 PIC — Phase F.3.
 const PIC1_CMD: u16 = 0x20;
 const PIC1_DATA: u16 = 0x21;
@@ -214,6 +222,15 @@ pub fn handle_io(
     let result = match access.port {
         // COM1 — Phase F.2.
         COM1_TX_RX..=COM1_END => handle_com1(access),
+        // COM2/3/4 stubs — accept writes, return 0 on reads. Linux's
+        // 8250 driver probes all 4 COM ports during init; returning 0
+        // makes the probe fail gracefully ("no UART detected").
+        COM2_BASE..=COM2_END | COM3_BASE..=COM3_END | COM4_BASE..=COM4_END => {
+            match access.direction {
+                IoDir::Out => IoResult::Ok { value: 0 },
+                IoDir::In => IoResult::Ok { value: 0xFF }, // 0xFF = "no UART"
+            }
+        }
         // 8259 PIC master/slave — Phase F.3.
         PIC1_CMD | PIC1_DATA | PIC2_CMD | PIC2_DATA => handle_pic(access),
         // PIT — Phase F.3.

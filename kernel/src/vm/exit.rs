@@ -193,6 +193,12 @@ fn handle_cpuid(
         if leaf == 1 {
             ecx_out &= !(1u32 << 31); // hide hypervisor bit
         }
+        // Leaf 7 sub 0: mask host features that require VMX controls
+        // we don't emulate yet. Without this, Linux detects WAITPKG
+        // and calls TPAUSE which needs CR4.UMWAIT — #UD in our guest.
+        if leaf == 7 {
+            ecx_out &= !(1u32 << 5); // clear WAITPKG
+        }
         state.gprs.rax = r.eax as u64;
         state.gprs.rbx = r.ebx as u64;
         state.gprs.rcx = ecx_out as u64;
@@ -530,8 +536,32 @@ fn handle_external_interrupt(
                     }
                 }
                 if vector == 0 {
-                    // Fallback: Linux 6.6 LOCAL_TIMER_VECTOR = 0xEC
-                    vector = 0xEC;
+                    // Fallback: Linux 6.6 LOCAL_TIMER_VECTOR = 0xEF
+                    // (FIRST_SYSTEM_VECTOR - 1 = 0xF0 - 1 per
+                    // arch/x86/include/asm/irq_vectors.h).
+                    vector = 0xEF;
+                }
+                // Set the ISR (In-Service Register) bit for the vector
+                // in the guest's LAPIC MMIO page before injecting.
+                // Without this, Linux's spurious-interrupt check reads
+                // ISR[vector] = 0, considers the interrupt "not pending",
+                // and discards it.
+                //
+                // ISR is at LAPIC offsets 0x100..0x170 (8 × 32-bit regs,
+                // each covering 32 vectors, spaced 0x10 apart).
+                // vector / 32 = register index, vector % 32 = bit.
+                if let Some(handle) = vm_handle {
+                    let pool = super::VM_POOL.lock();
+                    if let Some(vm) = pool.get(handle) {
+                        let phys = vm.lapic_mmio_phys;
+                        if phys != 0 {
+                            let hhdm = crate::mm::hhdm_offset();
+                            let isr_reg_off = 0x100 + ((vector / 32) * 0x10) as u64;
+                            let bit = 1u32 << (vector % 32);
+                            let isr_ptr = (phys + hhdm + isr_reg_off) as *mut u32;
+                            unsafe { *isr_ptr |= bit; }
+                        }
+                    }
                 }
                 let intr_info: u64 = (vector as u64) | (1u64 << 31);
                 let _ = vmx::vmwrite(vmx::VMCS_VM_ENTRY_INTR_INFO, intr_info, vmcs_phys);

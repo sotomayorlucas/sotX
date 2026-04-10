@@ -1348,8 +1348,8 @@ pub fn setup_controls(vmcs_phys: u64) -> Result<(), VmxError> {
     // this bit is 0, VM-exit reason 55 fires. Enabling it lets
     // the guest XSAVES/XRSTORS pass through natively.
     let proc2 = adjust_controls2(
-        (1 << 1) | (1 << 5) | (1 << 7) | (1 << 12) | (1 << 20),
-        // EPT | VPID | UNRESTRICTED_GUEST | INVPCID | XSAVES
+        (1 << 1) | (1 << 3) | (1 << 5) | (1 << 7) | (1 << 12) | (1 << 20),
+        // EPT | RDTSCP | VPID | UNRESTRICTED_GUEST | INVPCID | XSAVES
         IA32_VMX_PROCBASED_CTLS2,
     );
     vmwrite(VMCS_PROC_BASED_CTLS2, proc2 as u64, vmcs_phys)?;
