@@ -321,6 +321,8 @@ pub fn build_boot_params(
     bz: &BzImage<'_>,
     cmd_line_gpa: u32,
     e820: &[E820Entry],
+    ramdisk_gpa: u32,
+    ramdisk_size: u32,
 ) -> Result<(), BzImageError> {
     if dst.len() < 4096 {
         return Err(BzImageError::Truncated);
@@ -345,9 +347,9 @@ pub fn build_boot_params(
     // 3. Patch fields the bootloader controls.
     //    type_of_loader: 0xFF = "undefined" (accepted everywhere)
     dst[BP_HDR_OFFSET + HDR_OFF_TYPE_OF_LOADER] = 0xFF;
-    //    No initramfs in F.4 — phase G adds one.
-    write_u32_at(dst, BP_HDR_OFFSET + HDR_OFF_RAMDISK_IMAGE, 0);
-    write_u32_at(dst, BP_HDR_OFFSET + HDR_OFF_RAMDISK_SIZE, 0);
+    //    Phase F.6.3 — ramdisk GPA + size (0 = no initramfs).
+    write_u32_at(dst, BP_HDR_OFFSET + HDR_OFF_RAMDISK_IMAGE, ramdisk_gpa);
+    write_u32_at(dst, BP_HDR_OFFSET + HDR_OFF_RAMDISK_SIZE, ramdisk_size);
     //    cmd_line_ptr is a 32-bit GPA (Linux's setup_header field
     //    is 4 bytes; only legal in low memory but our cmdline lives
     //    at GPA 0x20000 which fits comfortably).

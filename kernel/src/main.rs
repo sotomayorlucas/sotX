@@ -946,10 +946,11 @@ fn load_initrd(cr3: u64) {
         "compositor",
         "hello-gui",
         "bzImage",
+        "guest-initramfs",
     ];
     let found = initrd::find_all(module_data, &names);
     // Indices: 0=init, 1=shell, 2=vmm, 3=kbd, 4=net, 5=nvme, 6=xhci,
-    //          7=compositor, 8=hello-gui, 9=bzImage (Phase F.4)
+    //          7=compositor, 8=hello-gui, 9=bzImage, 10=guest-initramfs
 
     // Phase F.4 — stash the bzImage slice's physical pointer + length
     // in a kernel global so the VM subsystem (`vm::run_payload_on_vm`)
@@ -957,13 +958,15 @@ fn load_initrd(cr3: u64) {
     if let Some(bz) = found[9] {
         crate::vm::set_bzimage(bz);
         kdebug!("  initrd: found 'bzImage' ({} bytes)", bz.len());
-        // Phase F.4.1 — parse the setup header at boot as a smoke
-        // check. The actual loader runs from sys_vm_run and uses
-        // `crate::vm::bzimage_slice()` to grab the bytes again.
         match crate::vm::bzimage::BzImage::parse(bz) {
             Ok(parsed) => parsed.dump(),
             Err(e) => kprintln!("  bzImage: parse failed: {:?}", e),
         }
+    }
+    // Phase F.6.3 — stash the guest initramfs (cpio.gz).
+    if let Some(rd) = found[10] {
+        crate::vm::set_guest_initramfs(rd);
+        kdebug!("  initrd: found 'guest-initramfs' ({} bytes)", rd.len());
     }
 
     let elf_data = match found[0] {

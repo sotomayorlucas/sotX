@@ -398,6 +398,27 @@ pub fn bzimage_slice() -> Option<&'static [u8]> {
     Some(unsafe { core::slice::from_raw_parts(ptr as *const u8, len) })
 }
 
+// Phase F.6.3 — guest initramfs stash. Same pattern as bzImage above:
+// `load_initrd` finds `guest-initramfs` in the CPIO scan and calls
+// `set_guest_initramfs`. The loader in `run_bzimage_on_vm` reads it
+// through `guest_initramfs_slice` and copies it into the guest EPT.
+static GUEST_INITRAMFS_PTR: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static GUEST_INITRAMFS_LEN: AtomicUsize = AtomicUsize::new(0);
+
+pub fn set_guest_initramfs(bytes: &'static [u8]) {
+    GUEST_INITRAMFS_PTR.store(bytes.as_ptr() as u64, AOrd::Release);
+    GUEST_INITRAMFS_LEN.store(bytes.len(), AOrd::Release);
+}
+
+pub fn guest_initramfs_slice() -> Option<&'static [u8]> {
+    let ptr = GUEST_INITRAMFS_PTR.load(AOrd::Acquire);
+    let len = GUEST_INITRAMFS_LEN.load(AOrd::Acquire);
+    if ptr == 0 || len == 0 {
+        return None;
+    }
+    Some(unsafe { core::slice::from_raw_parts(ptr as *const u8, len) })
+}
+
 /// Create a new VM. Returns an opaque pool handle on success; the
 /// handle is later passed to `vcpu_thread_entry` (Phase B.5) and to
 /// the syscall layer (Phase C).
@@ -1015,6 +1036,36 @@ pub fn run_bzimage_on_vm(vm_handle: PoolHandle) -> Result<(), VmObjError> {
     }
     crate::kprintln!("  vmx-f: copied {} bytes of payload to GPA {:#x}", copied, pref_addr);
 
+    // 3b. Load guest initramfs (cpio.gz) into guest physical memory at
+    //     GPA 0x2000000 (32 MiB), well above vmlinux's ceiling at
+    //     ~0x1999000. The initramfs is optional — without it Linux boots
+    //     to "No working init found", which we've already proved works.
+    const INITRAMFS_GPA: u64 = 0x200_0000;
+    let (initramfs_gpa, initramfs_size) = if let Some(data) = guest_initramfs_slice() {
+        let pages = (data.len() + 0xFFF) / 0x1000;
+        for i in 0..pages {
+            let gpa = INITRAMFS_GPA + (i as u64) * 0x1000;
+            let phys = alloc_and_map(gpa)?;
+            let off = i * 0x1000;
+            let chunk = core::cmp::min(0x1000, data.len() - off);
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    data[off..off + chunk].as_ptr(),
+                    (phys + hhdm) as *mut u8,
+                    chunk,
+                );
+            }
+        }
+        crate::kprintln!(
+            "  vmx-f: loaded {} bytes guest initramfs at GPA {:#x}",
+            data.len(),
+            INITRAMFS_GPA
+        );
+        (INITRAMFS_GPA, data.len() as u32)
+    } else {
+        (0u64, 0u32)
+    };
+
     // 4. Build the guest page tables: PML4[0] -> PDPT, PDPT[0] = 0 |
     //    PS(7) | RW(1) | P(0) = 0x83 mapping 0..1 GiB identity.
     unsafe {
@@ -1031,7 +1082,7 @@ pub fn run_bzimage_on_vm(vm_handle: PoolHandle) -> Result<(), VmObjError> {
     // (which hangs because our PIT/LAPIC timer isn't delivering real
     // jiffies-incrementing interrupts yet). `tsc=reliable` tells Linux
     // to trust the TSC clocksource without calibration.
-    let cmdline = b"console=ttyS0,38400 earlyprintk=serial,ttyS0,38400 panic=1 lpj=1000000 tsc=reliable\0";
+    let cmdline = b"console=ttyS0,38400 earlyprintk=serial,ttyS0,38400 panic=1 lpj=1000000 tsc=reliable rdinit=/init\0";
     unsafe {
         core::ptr::copy_nonoverlapping(
             cmdline.as_ptr(),
@@ -1054,7 +1105,10 @@ pub fn run_bzimage_on_vm(vm_handle: PoolHandle) -> Result<(), VmObjError> {
     let bp_buf_virt = (bp_phys + hhdm) as *mut u8;
     let bp_buf =
         unsafe { core::slice::from_raw_parts_mut(bp_buf_virt, 4096) };
-    if let Err(e) = bzimage::build_boot_params(bp_buf, &bz, CMDLINE_GPA as u32, &e820) {
+    if let Err(e) = bzimage::build_boot_params(
+        bp_buf, &bz, CMDLINE_GPA as u32, &e820,
+        initramfs_gpa as u32, initramfs_size,
+    ) {
         crate::kprintln!("  vmx-f: build_boot_params failed: {:?}", e);
         return Err(VmObjError::Vmx(VmxError::VmFailInvalid));
     }
