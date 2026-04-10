@@ -121,12 +121,22 @@ pub fn dispatch(
     profile: &super::deception::KernelDeceptionProfile,
     vm_handle: Option<PoolHandle>,
 ) -> ExitAction {
+    // Phase G — exit counter for auto-timeout.
+    state.exit_count += 1;
+    if state.exit_limit > 0 && state.exit_count >= state.exit_limit {
+        kprintln!(
+            "  vm/exit: exit limit {} reached — terminating persistent guest",
+            state.exit_limit
+        );
+        return ExitAction::Terminate;
+    }
+
     let vmcs_phys = state.vmcs.phys;
     let reason = read_exit_reason(vmcs_phys);
 
     match reason {
         REASON_CPUID => handle_cpuid(state, profile, vmcs_phys, vm_handle),
-        REASON_HLT => handle_hlt(state, vm_handle),
+        REASON_HLT => handle_hlt(state, vm_handle, vmcs_phys),
         REASON_RDMSR => handle_rdmsr(state, profile, vmcs_phys, vm_handle),
         REASON_WRMSR => handle_wrmsr(state, vmcs_phys, vm_handle),
         REASON_EXTERNAL_INTERRUPT => handle_external_interrupt(vmcs_phys, vm_handle),
@@ -219,8 +229,7 @@ fn handle_cpuid(
     ExitAction::Resume
 }
 
-fn handle_hlt(state: &mut KernelVCpuState, vm_handle: Option<PoolHandle>) -> ExitAction {
-    state.halted = true;
+fn handle_hlt(state: &mut KernelVCpuState, vm_handle: Option<PoolHandle>, vmcs_phys: u64) -> ExitAction {
     record(
         vm_handle,
         VmIntrospectEvent {
@@ -232,7 +241,21 @@ fn handle_hlt(state: &mut KernelVCpuState, vm_handle: Option<PoolHandle>) -> Exi
             d: 0,
         },
     );
-    ExitAction::Terminate
+    // Phase G — persistent mode. If the guest is a Linux bzImage with
+    // a running /init, HLT should NOT terminate — it's just the idle
+    // loop waiting for a timer interrupt. Advance RIP past the 1-byte
+    // HLT and Resume. Non-persistent guests (Phase B test payload)
+    // still terminate on HLT as before.
+    if state.exit_limit > 0 {
+        // Persistent guest: keep alive.
+        advance_rip(vmcs_phys, 1);
+        core::hint::spin_loop();
+        ExitAction::Resume
+    } else {
+        // Non-persistent (Phase B test): HLT = done.
+        state.halted = true;
+        ExitAction::Terminate
+    }
 }
 
 fn handle_rdmsr(

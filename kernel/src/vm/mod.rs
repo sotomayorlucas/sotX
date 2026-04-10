@@ -118,6 +118,12 @@ pub struct KernelVCpuState {
     pub guest_lstar: u64,
     pub guest_cstar: u64,
     pub guest_sfmask: u64,
+    /// Phase G — total VM-exit count. The dispatcher increments this
+    /// on every exit and terminates the guest when it exceeds
+    /// `exit_limit`. This prevents the persistent guest from blocking
+    /// the tier4_demo test forever.
+    pub exit_count: u64,
+    pub exit_limit: u64,
     /// Host syscall MSR values, saved once at vmx_run entry.
     pub host_star: u64,
     pub host_lstar: u64,
@@ -140,6 +146,8 @@ impl KernelVCpuState {
             guest_lstar: 0,
             guest_cstar: 0,
             guest_sfmask: 0,
+            exit_count: 0,
+            exit_limit: 0, // 0 = non-persistent (HLT terminates). Set >0 for persistent.
             host_star: 0,
             host_lstar: 0,
             host_cstar: 0,
@@ -1152,6 +1160,9 @@ pub fn run_bzimage_on_vm(vm_handle: PoolHandle) -> Result<(), VmObjError> {
         let vcpu = vm.vcpu_mut(0).ok_or(VmObjError::NotFound)?;
         vcpu.gprs.rsi = BOOT_PARAMS_GPA;
         vcpu.launched = false;
+        // Phase G — persistent guest: HLT resumes instead of terminating.
+        // The exit limit caps the run so the tier4_demo test doesn't hang.
+        vcpu.exit_limit = 2_000_000;
     }
 
     // 8. Run the vCPU. We pass `Some(GDT_GPA)` so run_one_vcpu_at
