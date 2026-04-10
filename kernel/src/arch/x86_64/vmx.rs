@@ -1318,12 +1318,15 @@ pub fn setup_controls(vmcs_phys: u64) -> Result<(), VmxError> {
     );
     vmwrite(VMCS_PIN_BASED_CTLS, pin as u64, vmcs_phys)?;
 
-    // Primary proc-based: HLT exit (so HLT terminates), MSR bitmaps
-    // disabled (so RDMSR/WRMSR always exit), unconditional I/O exit
-    // (Phase F: every IN/OUT traps so the in-kernel device model can
-    // handle them inline), and secondary controls enabled.
+    // Primary proc-based: HLT exit, unconditional I/O exit, secondary.
+    // NOTE: bit 28 (USE_MSR_BITMAPS) is intentionally NOT set — we trap
+    // ALL RDMSR/WRMSR and dispatch them in handle_rdmsr/handle_wrmsr.
+    // Passthrough was tried but broke the host (guest WRMSR LSTAR
+    // overwrites the host's syscall entry point → host #PF). Instead
+    // we use VM-entry/exit MSR load areas for LSTAR/STAR/SFMASK/CSTAR.
     let proc1 = adjust_controls(
-        (1 << 7) | (1 << 24) | (1 << 31), // HLT_EXIT | UNCONDITIONAL_IO_EXIT | SECONDARY
+        (1 << 7) | (1 << 24) | (1 << 31),
+        // HLT_EXIT | UNCONDITIONAL_IO_EXIT | SECONDARY
         IA32_VMX_TRUE_PROCBASED_CTLS,
     );
     vmwrite(VMCS_PROC_BASED_CTLS, proc1 as u64, vmcs_phys)?;
@@ -1645,6 +1648,27 @@ extern "C" {
     fn vmx_run_inner(state: *mut crate::vm::KernelVCpuState);
 }
 
+/// Load the guest's syscall MSRs (STAR, LSTAR, CSTAR, SFMASK) into
+/// hardware right before vmresume. Called from the asm trampoline's
+/// Resume path.
+#[unsafe(no_mangle)]
+extern "C" fn load_guest_syscall_msrs() {
+    let state_ptr: *const crate::vm::KernelVCpuState;
+    unsafe {
+        core::arch::asm!("mov {}, gs:[104]", out(reg) state_ptr, options(nostack, preserves_flags));
+    }
+    if state_ptr.is_null() { return; }
+    let state = unsafe { &*state_ptr };
+    if state.guest_lstar != 0 {
+        unsafe {
+            wrmsr(0xC000_0081, state.guest_star);
+            wrmsr(0xC000_0082, state.guest_lstar);
+            wrmsr(0xC000_0083, state.guest_cstar);
+            wrmsr(0xC000_0084, state.guest_sfmask);
+        }
+    }
+}
+
 /// Called from the asm trampoline immediately after a `vmresume`
 /// fall-through (failure path). Reads `VMCS_VM_INSTRUCTION_ERROR`
 /// from the active VMCS and logs it so we don't silently terminate.
@@ -1683,6 +1707,19 @@ extern "C" fn vm_exit_handler_rust(state: *mut crate::vm::KernelVCpuState) -> u3
     // `vmx_run`) holds the only mutable reference to it for the
     // duration of this VM execution.
     let state_ref = unsafe { &mut *state };
+
+    // Phase G — restore host syscall MSRs BEFORE dispatching.
+    // handle_external_interrupt's sti+nop+cli may invoke host ISRs
+    // that eventually do syscall/sysret, so LSTAR/STAR must be the
+    // host's values during the entire dispatch.
+    if state_ref.guest_lstar != 0 {
+        unsafe {
+            wrmsr(0xC000_0081, state_ref.host_star);
+            wrmsr(0xC000_0082, state_ref.host_lstar);
+            wrmsr(0xC000_0083, state_ref.host_cstar);
+            wrmsr(0xC000_0084, state_ref.host_sfmask);
+        }
+    }
     let vmcs_phys = state_ref.vmcs.phys;
     let reason_raw = vmread(VMCS_VM_EXIT_REASON, vmcs_phys);
     crate::kdebug!(
@@ -1750,6 +1787,8 @@ core::arch::global_asm!(
     "    test eax, eax",
     "    jne 2f",                   // non-zero → terminate
     // === Resume ===
+    // Load guest syscall MSRs (LSTAR/STAR/SFMASK/CSTAR) before vmresume.
+    "    call load_guest_syscall_msrs",
     // Reload guest GPRs from state.gprs (state ptr is back in gs:[104]).
     "    mov rax, gs:[104]",
     "    mov rbx, [rax + 8]",
@@ -1880,6 +1919,16 @@ pub fn vmx_run(state: &mut crate::vm::KernelVCpuState) -> Result<(), VmxError> {
         exit_top - 8,
         vmx_exit_trampoline as *const () as u64,
     )?;
+
+    // Phase G — save the host's syscall MSR values so we can restore
+    // them after each VM-exit (before the sti+nop+cli in
+    // handle_external_interrupt which may invoke host ISRs that need
+    // the correct LSTAR). The guest's values are loaded right before
+    // vmresume by load_guest_syscall_msrs().
+    state.host_star = rdmsr(0xC000_0081);
+    state.host_lstar = rdmsr(0xC000_0082);
+    state.host_cstar = rdmsr(0xC000_0083);
+    state.host_sfmask = rdmsr(0xC000_0084);
 
     // SAFETY: state is borrowed mutably for the duration of this call,
     // so the asm side has exclusive access. The trampoline finds it

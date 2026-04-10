@@ -579,10 +579,30 @@ fn handle_wrmsr(
 ) -> ExitAction {
     let msr = state.gprs.rcx as u32;
     let value = (state.gprs.rax & 0xFFFF_FFFF) | (state.gprs.rdx << 32);
-    // Phase B/C: silently swallow guest WRMSRs but record them for the
-    // introspection ring. Real implementation in a later phase will
-    // validate against an MSR write whitelist and either passthrough,
-    // spoof, or inject #GP.
+
+    // Phase G — syscall MSRs must be written to the ACTUAL hardware
+    // MSR, then restored to the HOST's value on VM-exit. We save the
+    // host value, write the guest value, and schedule restoration.
+    // For MSRs backed by VMCS fields (FS_BASE, GS_BASE, EFER), we
+    // update the VMCS directly.
+    match msr {
+        // Syscall MSRs — save guest value in the vCPU struct. The asm
+        // trampoline loads them before vmresume and restores host values
+        // after VM-exit. We can't wrmsr here because host code between
+        // exits (scheduler, serial driver, ISRs via sti+nop+cli) depends
+        // on the host's LSTAR/STAR being correct.
+        0xC000_0081 => { state.guest_star = value; }     // STAR
+        0xC000_0082 => { state.guest_lstar = value; }    // LSTAR
+        0xC000_0083 => { state.guest_cstar = value; }    // CSTAR
+        0xC000_0084 => { state.guest_sfmask = value; }   // SFMASK
+        // VMCS-backed MSRs: update the VMCS guest field.
+        0xC000_0080 => { let _ = vmx::vmwrite(vmx::VMCS_GUEST_IA32_EFER, value, vmcs_phys); }
+        0xC000_0100 => { let _ = vmx::vmwrite(vmx::VMCS_GUEST_FS_BASE, value, vmcs_phys); }
+        0xC000_0101 => { let _ = vmx::vmwrite(vmx::VMCS_GUEST_GS_BASE, value, vmcs_phys); }
+        // Everything else: silently swallow.
+        _ => {}
+    }
+
     record(
         vm_handle,
         VmIntrospectEvent {

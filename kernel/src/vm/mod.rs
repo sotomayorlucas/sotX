@@ -109,6 +109,20 @@ pub struct KernelVCpuState {
     /// terminated. The vCPU thread checks this after the dispatcher
     /// returns and exits the run loop.
     pub halted: bool,
+    /// Guest syscall MSRs — saved by handle_wrmsr, loaded into hardware
+    /// before vmresume and restored to host values after VM-exit by
+    /// the vmx_run wrapper. These CANNOT be written to hardware in
+    /// handle_wrmsr because host code (ISRs, scheduler) runs between
+    /// exits and depends on the host's LSTAR/STAR values.
+    pub guest_star: u64,
+    pub guest_lstar: u64,
+    pub guest_cstar: u64,
+    pub guest_sfmask: u64,
+    /// Host syscall MSR values, saved once at vmx_run entry.
+    pub host_star: u64,
+    pub host_lstar: u64,
+    pub host_cstar: u64,
+    pub host_sfmask: u64,
 }
 
 impl KernelVCpuState {
@@ -122,6 +136,14 @@ impl KernelVCpuState {
             gprs: GuestGprs::default(),
             launched: false,
             halted: false,
+            guest_star: 0,
+            guest_lstar: 0,
+            guest_cstar: 0,
+            guest_sfmask: 0,
+            host_star: 0,
+            host_lstar: 0,
+            host_cstar: 0,
+            host_sfmask: 0,
         })
     }
 
