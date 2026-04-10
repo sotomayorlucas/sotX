@@ -602,6 +602,20 @@ extern "C" fn blk_handler() -> ! {
 fn spawn_process(name: &[u8]) -> Option<u64> {
     use sotos_common::elf;
 
+    // Phase I — attacker reroute hook. When the deception pipeline
+    // has flagged a binary for VM sandbox reroute, this is where the
+    // intercept would happen: instead of loading the ELF on the host,
+    // we'd forward the exec request to the L1 Linux guest via vsock.
+    //
+    // For the demo, we detect the "attacker" binary by name and log
+    // the intercept. The binary still runs on the host (it needs to
+    // emit provenance events for the Tier 3 demo to detect), but the
+    // log shows the hook point where real reroute would fire.
+    if name == b"attacker" {
+        print(b"[PHASE-I] exec hook: intercepted 'attacker' binary\n");
+        print(b"[PHASE-I] VM sandbox reroute point (demo: proceeding on host)\n");
+    }
+
     print(b"SPAWN: loading '");
     print(name);
     print(b"' from initrd...\n");
