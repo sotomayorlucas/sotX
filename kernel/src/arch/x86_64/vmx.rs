@@ -1342,9 +1342,14 @@ pub fn setup_controls(vmcs_phys: u64) -> Result<(), VmxError> {
     // VM-execution control is 0, any execution of INVPCID causes
     // a #UD exception in VMX non-root operation." Without bit 12
     // Linux triple-faults on its first invpcid in head_64.S.
+    //
+    // Bit 20 (Enable XSAVES/XRSTORS) — same story: Linux's
+    // Spectre v2 mitigation calls XSAVES to save CPU state; if
+    // this bit is 0, VM-exit reason 55 fires. Enabling it lets
+    // the guest XSAVES/XRSTORS pass through natively.
     let proc2 = adjust_controls2(
-        (1 << 1) | (1 << 5) | (1 << 7) | (1 << 12),
-        // EPT | VPID | UNRESTRICTED_GUEST | INVPCID
+        (1 << 1) | (1 << 5) | (1 << 7) | (1 << 12) | (1 << 20),
+        // EPT | VPID | UNRESTRICTED_GUEST | INVPCID | XSAVES
         IA32_VMX_PROCBASED_CTLS2,
     );
     vmwrite(VMCS_PROC_BASED_CTLS2, proc2 as u64, vmcs_phys)?;
@@ -1399,6 +1404,10 @@ pub fn setup_controls(vmcs_phys: u64) -> Result<(), VmxError> {
     vmwrite(VMCS_PAGE_FAULT_ERROR_CODE_MASK, 0, vmcs_phys)?;
     vmwrite(VMCS_PAGE_FAULT_ERROR_CODE_MATCH, 0, vmcs_phys)?;
     vmwrite(VMCS_TSC_OFFSET, 0, vmcs_phys)?;
+
+    // XSS-exiting bitmap: all-zero means "no XSAVES/XRSTORS exit for
+    // any XSS component". Required when bit 20 is set in CTLS2.
+    vmwrite(0x202C, 0, vmcs_phys)?;
 
     // KVM-required bitmap pages. Allocate empty (all-zero) bitmaps:
     // - MSR bitmap: zero = trap NO MSR (default RDMSR/WRMSR behavior).

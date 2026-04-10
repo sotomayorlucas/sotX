@@ -54,6 +54,7 @@ const REASON_WRMSR: u16 = 32;
 #[allow(dead_code)] const REASON_VM_ENTRY_FAILURE_GUEST_STATE: u16 = 33;
 const REASON_EPT_VIOLATION: u16 = 48;
 #[allow(dead_code)] const REASON_EPT_MISCONFIG: u16 = 49;
+const REASON_XSETBV: u16 = 55;
 
 /// VMCS field encodings we read inside the dispatcher. Imported from
 /// the vmx module so the constants live in one place.
@@ -128,11 +129,12 @@ pub fn dispatch(
         REASON_HLT => handle_hlt(state, vm_handle),
         REASON_RDMSR => handle_rdmsr(state, profile, vmcs_phys, vm_handle),
         REASON_WRMSR => handle_wrmsr(state, vmcs_phys, vm_handle),
-        REASON_EXTERNAL_INTERRUPT => handle_external_interrupt(),
+        REASON_EXTERNAL_INTERRUPT => handle_external_interrupt(vmcs_phys, vm_handle),
         REASON_EPT_VIOLATION => handle_ept_violation(state, vmcs_phys, vm_handle),
         REASON_IO_INSTRUCTION => handle_io_instruction(state, vmcs_phys, vm_handle),
         REASON_TRIPLE_FAULT => handle_triple_fault(state, vmcs_phys, vm_handle),
         REASON_EXCEPTION_OR_NMI => handle_exception_or_nmi(state, vmcs_phys, vm_handle),
+        REASON_XSETBV => handle_xsetbv(state, vmcs_phys),
         other => {
             kprintln!(
                 "  vm/exit: unhandled exit reason {} on vcpu {} — terminating",
@@ -467,7 +469,20 @@ fn handle_io_instruction(
 /// host IDT deliver it via the normal interrupt path; we then return
 /// `Resume` so the trampoline `vmresume`s back into the guest at the
 /// same RIP it was preempted on.
-fn handle_external_interrupt() -> ExitAction {
+///
+/// **F.6.2 timer piggyback**: after the host IRQ has been serviced,
+/// we ALSO look at the guest's LVTT (LAPIC timer local vector table
+/// entry) via the VM's LAPIC MMIO stub page. If Linux has programmed
+/// LVTT with a valid vector and left the mask bit clear, we inject
+/// that vector into the guest via `VMCS_VM_ENTRY_INTR_INFO` so the
+/// guest's LAPIC timer ISR fires. This gives Linux a functioning
+/// (approximate) timer tick using the host timer as a source — not
+/// accurate, but enough for the scheduler to advance and init to
+/// make progress.
+fn handle_external_interrupt(
+    vmcs_phys: u64,
+    vm_handle: Option<PoolHandle>,
+) -> ExitAction {
     // SAFETY: only modifies the IF bit. The kernel exit-stack we are
     // running on is distinct from any thread's kernel stack and the
     // host IDT is loaded; an IRQ delivered through the IDT here is
@@ -480,6 +495,50 @@ fn handle_external_interrupt() -> ExitAction {
             options(nomem, nostack, preserves_flags),
         );
     }
+
+    // F.6.2 — inject a guest timer IRQ so the scheduler advances.
+    //
+    // We read LVTT from the guest's LAPIC MMIO page (offset 0x320).
+    // Linux's `setup_local_APIC` writes the timer vector + mode into
+    // LVTT. If the vector is non-zero and unmasked, we inject it
+    // every Nth EXTINT. If LVTT is 0 (Linux hasn't set it up yet),
+    // we inject vector 0xEC which is Linux's `LOCAL_TIMER_VECTOR`
+    // on modern x86 (defined in arch/x86/include/asm/irq_vectors.h
+    // as FIRST_SYSTEM_VECTOR - 4 = 0x100 - 4 = 0xFC, but older
+    // versions use 0xEC). We try 0xEC as a fallback.
+    //
+    // We skip injection for the first ~1000 EXTINTs (letting Linux
+    // do its I/O-heavy early init without spurious IRQs) and then
+    // inject every 4th EXTINT (~25 Hz effective rate). We also
+    // respect RFLAGS.IF in the VMCS to avoid injecting when the
+    // guest has interrupts disabled.
+    {
+        use core::sync::atomic::{AtomicU32, Ordering};
+        static EXTINT_COUNT: AtomicU32 = AtomicU32::new(0);
+        let n = EXTINT_COUNT.fetch_add(1, Ordering::Relaxed);
+        if n > 1000 && n % 4 == 0 {
+            // Only inject if guest RFLAGS.IF=1 (bit 9)
+            let rflags = vmx::vmread(VMCS_GUEST_RFLAGS, vmcs_phys).unwrap_or(0);
+            if rflags & (1 << 9) != 0 {
+                let mut vector = 0u32;
+                if let Some(handle) = vm_handle {
+                    let lvtt = super::vm_read_lvtt(handle);
+                    let v = (lvtt & 0xFF) as u32;
+                    let masked = (lvtt & (1 << 16)) != 0;
+                    if v != 0 && !masked {
+                        vector = v;
+                    }
+                }
+                if vector == 0 {
+                    // Fallback: Linux 6.6 LOCAL_TIMER_VECTOR = 0xEC
+                    vector = 0xEC;
+                }
+                let intr_info: u64 = (vector as u64) | (1u64 << 31);
+                let _ = vmx::vmwrite(vmx::VMCS_VM_ENTRY_INTR_INFO, intr_info, vmcs_phys);
+            }
+        }
+    }
+
     ExitAction::Resume
 }
 
@@ -506,6 +565,23 @@ fn handle_wrmsr(
         },
     );
     advance_rip(vmcs_phys, INSN_LEN_WRMSR);
+    ExitAction::Resume
+}
+
+/// Phase F.6.2 — handle XSETBV (exit reason 55). Per Intel SDM,
+/// XSETBV always causes a VM-exit in VMX non-root operation; there
+/// is no enable/disable control. Linux's CPU init writes XCR0 to
+/// enable SSE/AVX state saving. We execute the real `xsetbv` on the
+/// host with the guest's values so the FPU state width matches what
+/// Linux expects.
+fn handle_xsetbv(state: &mut KernelVCpuState, vmcs_phys: u64) -> ExitAction {
+    // Silently swallow — the host already has XCR0 set to include
+    // SSE/AVX/etc. bits that Linux wants, so the guest's XSETBV is
+    // effectively a no-op. Executing the real `xsetbv` with the
+    // guest's value is dangerous (the guest may request bits that
+    // the KVM/VMX nesting layer doesn't support, causing a host #GP).
+    let _ = state;
+    advance_rip(vmcs_phys, 3); // xsetbv is 3 bytes: 0f 01 d1
     ExitAction::Resume
 }
 

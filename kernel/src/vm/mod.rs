@@ -268,6 +268,13 @@ pub struct VmObject {
     /// Per-VM introspection ring. Filled by `vm::exit::dispatch`,
     /// drained by userspace via `SYS_VM_INTROSPECT_DRAIN`.
     pub introspect: IntrospectRing,
+    /// Phase F.6.2 — host physical address of the per-VM LAPIC MMIO
+    /// stub page, or 0 if this VM doesn't have one. The exit
+    /// dispatcher uses this to peek at the guest's LVTT register
+    /// (MMIO offset 0x320) and decide which vector to inject when
+    /// piggybacking the host LAPIC timer for guest timer IRQ
+    /// emulation.
+    pub lapic_mmio_phys: u64,
     /// Phase D — real EPT root. Allocated lazily on the first
     /// `vm_run` call so VMs that never run don't waste a PML4 frame.
     pub ept_root: Option<crate::arch::x86_64::ept::EptRoot>,
@@ -305,6 +312,7 @@ impl VmObject {
             mem_pages_limit,
             destroyed: false,
             introspect: IntrospectRing::new(),
+            lapic_mmio_phys: 0,
             ept_root: None,
             leaf_frames: alloc::vec::Vec::new(),
         })
@@ -620,6 +628,36 @@ pub fn ept_pointer(handle: PoolHandle) -> u64 {
         .unwrap_or(0)
 }
 
+/// Peek at the guest's LVTT register (LAPIC Local Vector Table for
+/// Timer) inside the LAPIC MMIO stub page. Returns the 32-bit LVTT
+/// value (or 0 if the VM has no LAPIC MMIO page, which should only
+/// happen for the Phase B/D test guests). The exit dispatcher uses
+/// this on external-interrupt VM-exits to piggyback the host LAPIC
+/// timer and deliver a virtual timer IRQ to the guest.
+///
+/// LVTT layout (Intel SDM Vol 3A 10.5.1):
+///   bits  0..7   Vector
+///   bits  8..10  Delivery mode (fixed, SMI, NMI, ExtINT, etc.)
+///   bit  12      Delivery status (RO)
+///   bit  16      Mask (1 = masked)
+///   bits 17..18  Timer mode (0 = one-shot, 1 = periodic, 2 = TSC deadline)
+pub fn vm_read_lvtt(handle: PoolHandle) -> u32 {
+    let pool = VM_POOL.lock();
+    let phys = match pool.get(handle) {
+        Some(vm) => vm.lapic_mmio_phys,
+        None => return 0,
+    };
+    if phys == 0 {
+        return 0;
+    }
+    // LVTT is at MMIO offset 0x320.
+    let virt = (phys + crate::mm::hhdm_offset() + 0x320) as *const u32;
+    // SAFETY: `phys` was stored by run_bzimage_on_vm after allocating
+    // a fresh frame for the LAPIC MMIO stub; the HHDM mapping is
+    // always valid for any host RAM frame.
+    unsafe { core::ptr::read_volatile(virt) }
+}
+
 /// Walk the VM's EPT to translate a guest physical address to a host
 /// physical address, then read N bytes from that GPA into `out`.
 /// Returns the number of bytes actually read (0 if the GPA is
@@ -810,6 +848,7 @@ pub fn run_bzimage_on_vm(vm_handle: PoolHandle) -> Result<(), VmObjError> {
     //   GPA 0x40000..0x50000  = initial stack (16 frames, pre-mapped)
     //   GPA 0x60000..0x61000  = guest GDT    (Phase F.5.4, 1 frame)
     //   GPA 0x1000000..       = vmlinux load region (init_size frames)
+    //   GPA 0xFEE00000..      = LAPIC MMIO stub (Phase F.6.2, 1 frame)
 
     const BOOT_PARAMS_GPA: u64 = 0x10000;
     const CMDLINE_GPA: u64 = 0x20000;
@@ -818,6 +857,7 @@ pub fn run_bzimage_on_vm(vm_handle: PoolHandle) -> Result<(), VmObjError> {
     const STACK_GPA_BASE: u64 = 0x40000;
     const STACK_PAGES: usize = 16;
     const GDT_GPA: u64 = 0x60000;
+    const LAPIC_MMIO_GPA: u64 = 0xFEE0_0000;
 
     let pref_addr = bz.pref_address;
     let init_size = bz.init_size as usize;
@@ -854,7 +894,20 @@ pub fn run_bzimage_on_vm(vm_handle: PoolHandle) -> Result<(), VmObjError> {
     }
     let gdt_phys = alloc_and_map(GDT_GPA)?;
 
-    // F.5.4 — Linux 6.6 `startup_64` (head_64.S) does an `lretq`
+    // F.6.2 — LAPIC MMIO stub. Linux switches to "virtual wire mode"
+    // early in boot (no ACPI MADT = no IO-APIC) and then pokes the
+    // LAPIC at 0xFEE00000 for calibration, EOI, vector programming,
+    // etc. We pre-map one zeroed frame at that GPA so reads/writes
+    // don't EPT-fault, and we track the host physical frame in
+    // VmObject so the exit dispatcher can peek at LVTT / ICR /
+    // etc. to drive timer IRQ injection.
+    let lapic_phys = alloc_and_map(LAPIC_MMIO_GPA)?;
+    {
+        let mut pool = VM_POOL.lock();
+        if let Some(vm) = pool.get_mut(vm_handle) {
+            vm.lapic_mmio_phys = lapic_phys;
+        }
+    }
     // very early to load `__KERNEL_CS = 0x10` and jump to its
     // long-mode trampoline. The `lretq` triggers a CPU descriptor
     // load against GDTR — so we MUST have a real GDT in guest
@@ -974,7 +1027,11 @@ pub fn run_bzimage_on_vm(vm_handle: PoolHandle) -> Result<(), VmObjError> {
     }
 
     // 5. Build the cmdline buffer at CMDLINE_GPA.
-    let cmdline = b"console=ttyS0,38400 earlyprintk=serial,ttyS0,38400 panic=1\0";
+    // F.6 cmdline. `lpj=1000000` skips the delay loop calibration
+    // (which hangs because our PIT/LAPIC timer isn't delivering real
+    // jiffies-incrementing interrupts yet). `tsc=reliable` tells Linux
+    // to trust the TSC clocksource without calibration.
+    let cmdline = b"console=ttyS0,38400 earlyprintk=serial,ttyS0,38400 panic=1 lpj=1000000 tsc=reliable\0";
     unsafe {
         core::ptr::copy_nonoverlapping(
             cmdline.as_ptr(),

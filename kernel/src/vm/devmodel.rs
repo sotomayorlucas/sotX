@@ -157,6 +157,14 @@ struct DeviceState {
     /// the bit to flip; we just XOR a counter so each read sees a
     /// different value.
     port_61_toggle: u8,
+    /// Port 0x61 bit 5 (PIT channel 2 OUT) emulation. Linux's LAPIC
+    /// calibration programs PIT channel 2 and then spin-reads
+    /// `port 0x61 & 0x20` until the bit is set, meaning counter 2
+    /// reached terminal count. We don't run a real PIT, so we fake
+    /// it: this counts up on each `IN 0x61` while the bit is clear,
+    /// and flips bit 5 to 1 after ~4 reads. The count resets when
+    /// Linux writes to PIT channel 2 (via port 0x42) to reload.
+    port_61_ch2_out_count: u32,
 }
 
 impl DeviceState {
@@ -170,6 +178,7 @@ impl DeviceState {
             cmos_index: 0,
             pci_config_addr: 0,
             port_61_toggle: 0,
+            port_61_ch2_out_count: 0,
         }
     }
 }
@@ -183,6 +192,25 @@ pub fn handle_io(
     vm_handle: Option<PoolHandle>,
     access: IoAccess,
 ) -> IoResult {
+    // F.6 trace — print one line per NEW non-COM1 port. COM1 is
+    // noisy (one I/O per byte of printk) so we skip it, everything
+    // else is interesting.
+    {
+        use core::sync::atomic::{AtomicU16, Ordering};
+        static LAST_NON_COM1_PORT: AtomicU16 = AtomicU16::new(0xFFFF);
+        let p = access.port;
+        let is_com1 = (COM1_TX_RX..=COM1_END).contains(&p);
+        if !is_com1 {
+            let prev = LAST_NON_COM1_PORT.swap(p, Ordering::Relaxed);
+            if prev != p {
+                crate::kprintln!(
+                    "  vm/io: port={:#06x} w={} dir={:?} v={:#x}",
+                    p, access.width, access.direction, access.value
+                );
+            }
+        }
+    }
+
     let result = match access.port {
         // COM1 — Phase F.2.
         COM1_TX_RX..=COM1_END => handle_com1(access),
@@ -336,6 +364,12 @@ fn handle_pit(access: IoAccess) -> IoResult {
     match (access.port, access.direction) {
         (PIT_CH0..=PIT_CH2, IoDir::Out) => {
             let ch = (access.port - PIT_CH0) as usize;
+            // If Linux is reloading channel 2, reset the 0x61 bit 5
+            // fake OUT counter so the next poll sequence waits the
+            // full 4 reads again.
+            if ch == 2 {
+                state.port_61_ch2_out_count = 0;
+            }
             let chan = &mut state.pit_channels[ch];
             let byte = (access.value & 0xFF) as u16;
             match chan.access_mode {
@@ -527,12 +561,44 @@ fn handle_port_61(access: IoAccess) -> IoResult {
     let mut state = DEVICE_STATE.lock();
     match access.direction {
         IoDir::In => {
-            state.port_61_toggle ^= 0x10; // flip bit 4 each read
-            IoResult::Ok { value: state.port_61_toggle as u32 }
+            // Bit 4 (refresh toggle) — flip on every read.
+            state.port_61_toggle ^= 0x10;
+            // Bit 5 (PIT channel 2 OUT): Linux's `pit_calibrate_tsc`
+            // spins on `(inb(0x61) & 0x20) == 0` after arming PIT
+            // channel 2 and counts loop iterations. If the loop
+            // count is below `loopmin` (~10-20 per arch/x86/kernel/
+            // tsc.c), Linux rejects the calibration as "SMI hit us"
+            // and retries or marks TSC unstable.
+            //
+            // We therefore return bit 5 CLEAR for the first N reads
+            // and latch HIGH afterwards so Linux sees both "time
+            // passing" (TSC delta > 0) and "enough iterations"
+            // (loopcount >= loopmin). N = 64 gives ~6x loopmin so
+            // Linux accepts the calibration even if one or two
+            // reads are skipped by preemption.
+            //
+            // The count resets on writes to PIT channel 2 reload
+            // (port 0x42), meaning each retry gets a fresh 64-read
+            // window.
+            const PIT_CH2_OUT_DELAY: u32 = 64;
+            let mut byte = state.port_61_toggle;
+            if state.port_61_ch2_out_count < PIT_CH2_OUT_DELAY {
+                state.port_61_ch2_out_count += 1;
+            } else {
+                byte |= 0x20;
+            }
+            IoResult::Ok { value: byte as u32 }
         }
         IoDir::Out => {
             // Writes update bits 0..3 (timer/speaker/parity/iochk).
-            // We don't model any of those side effects.
+            // We don't model any of those side effects, but the
+            // gate bit (bit 0) transitioning 0->1 is the canonical
+            // "start counter 2" signal — reset the OUT-count so
+            // the next poll sequence goes through the fresh 4-read
+            // delay.
+            if access.value & 0x1 != 0 {
+                state.port_61_ch2_out_count = 0;
+            }
             IoResult::Ok { value: 0 }
         }
     }
