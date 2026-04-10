@@ -321,6 +321,18 @@ impl VmIntrospectEvent {
     /// Phase F — guest `IN` instruction. `a` = port, `b` = width,
     /// `c` = 0, `d` = value the kernel devmodel returned.
     pub const KIND_IO_IN: u32 = 7;
+    /// Phase F.5 — guest hit a triple fault (exit reason 2). The
+    /// dispatcher captures the dying CPU state so userspace can
+    /// reconstruct what Linux was doing.
+    /// `a` = guest RIP, `b` = guest CS selector, `c` = guest CR3,
+    /// `d` = IDT_VECTORING_INFO (the original exception that
+    /// started the fault chain).
+    pub const KIND_TRIPLE_FAULT: u32 = 8;
+    /// Phase F.5 — guest took an exception we trapped (exit reason 0).
+    /// `a` = exception vector (low byte of VM_EXIT_INTR_INFO),
+    /// `b` = error code (if any), `c` = guest RIP,
+    /// `d` = exit qualification (CR2 for #PF).
+    pub const KIND_EXCEPTION: u32 = 9;
 
     pub const fn zeroed() -> Self {
         Self { kind: 0, _pad: 0, a: 0, b: 0, c: 0, d: 0 }

@@ -741,6 +741,10 @@ pub const VMCS_TPR_THRESHOLD: u64 = 0x401C;
 
 // 32-bit control fields
 #[allow(dead_code)]
+pub const VMCS_CR0_GUEST_HOST_MASK: u64 = 0x6000;
+pub const VMCS_CR4_GUEST_HOST_MASK: u64 = 0x6002;
+pub const VMCS_CR0_READ_SHADOW: u64 = 0x6004;
+pub const VMCS_CR4_READ_SHADOW: u64 = 0x6006;
 pub const VMCS_PIN_BASED_CTLS: u64 = 0x4000;
 #[allow(dead_code)]
 pub const VMCS_PROC_BASED_CTLS: u64 = 0x4002;
@@ -781,6 +785,20 @@ pub const VMCS_VM_ENTRY_INSTRUCTION_LENGTH: u64 = 0x401A;
 pub const VMCS_TSC_OFFSET: u64 = 0x2010;
 #[allow(dead_code)]
 pub const VMCS_VM_EXIT_INTR_INFO: u64 = 0x4404;
+/// 32-bit read-only: error code pushed by the most recent VM-exit
+/// exception (only meaningful when `VM_EXIT_INTR_INFO.valid` is set
+/// and the vector has an error code, e.g. #PF / #GP / #DF).
+#[allow(dead_code)]
+pub const VMCS_VM_EXIT_INTR_ERROR_CODE: u64 = 0x4406;
+/// 32-bit read-only: information about the *original* exception that
+/// the CPU was trying to deliver when the VM-exit fired. The CPU
+/// populates this on triple-fault and on nested exception delivery
+/// so the host hypervisor can reconstruct the cause chain.
+#[allow(dead_code)]
+pub const VMCS_IDT_VECTORING_INFO_FIELD: u64 = 0x4408;
+/// 32-bit read-only: error code for the original exception above.
+#[allow(dead_code)]
+pub const VMCS_IDT_VECTORING_ERROR_CODE: u64 = 0x440A;
 #[allow(dead_code)]
 pub const VMCS_EXIT_QUALIFICATION: u64 = 0x6400;
 /// 64-bit read-only field: guest-physical address of the access that
@@ -1434,6 +1452,35 @@ pub fn setup_guest_state(
     vmwrite(VMCS_GUEST_CR3, cr3_gpa, vmcs_phys)?;
     // CR4: PAE | VMXE = 0x2020 (KVM requires VMXE; SDM doesn't)
     vmwrite(VMCS_GUEST_CR4, 0x2020, vmcs_phys)?;
+
+    // F.5.4 — CR0/CR4 guest/host masks + read shadows.
+    //
+    // Linux's `startup_64` clears the VMXE bit by writing `CR4 = PAE|PGE`
+    // (it has no idea KVM forced VMXE on at VMENTER and would not
+    // expect it to be set). Per Intel SDM Vol 3C 3.4.4, software cannot
+    // clear CR4.VMXE while in VMX operation — attempting to do so
+    // triggers a #GP, which immediately escalates through #DF to a
+    // triple fault inside the guest because Linux's IDT isn't yet
+    // installed at this point.
+    //
+    // The fix is the canonical VMX trick: mark VMXE as host-owned
+    // (mask bit 13) and present a read-shadow that has VMXE clear.
+    // Then:
+    //   - Guest reads CR4 -> bit 13 comes from READ_SHADOW = 0
+    //     (Linux's `mov rax, cr4` returns VMXE=0)
+    //   - Guest writes CR4 with bit 13 = 0 -> matches shadow,
+    //     no VM-exit, and the actual CR4 keeps VMXE set.
+    //   - Other bits (PAE, PGE, etc.) are guest-owned and pass
+    //     through the write directly.
+    //
+    // For CR0, we mask CR0.NE (bit 5) for the same reason: KVM
+    // requires NE=1 in guest CR0, but Linux's early `startup_64`
+    // recomputes CR0 from scratch and may clear NE. The mask hides
+    // the underlying NE bit.
+    vmwrite(VMCS_CR0_GUEST_HOST_MASK, 0x0000_0020, vmcs_phys)?; // mask CR0.NE
+    vmwrite(VMCS_CR0_READ_SHADOW, 0x8000_0031, vmcs_phys)?; // what guest sees
+    vmwrite(VMCS_CR4_GUEST_HOST_MASK, 0x0000_2000, vmcs_phys)?; // mask CR4.VMXE
+    vmwrite(VMCS_CR4_READ_SHADOW, 0x0000_0020, vmcs_phys)?; // PAE; VMXE shown as 0
 
     // EFER: LME=1 (long mode enable) + LMA=1 (long mode active).
     // Bit 8 = LME, bit 10 = LMA. Bit 11 = NXE (no-execute) is also

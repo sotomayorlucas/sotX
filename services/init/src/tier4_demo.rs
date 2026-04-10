@@ -485,14 +485,14 @@ fn run_bhyve_bzimage_attempt() {
         }
     }
 
-    // Drain whatever introspection events the kernel captured. The
-    // counts here are exploratory: we don't assert specific values,
-    // we just print a histogram so we can see how far Linux got.
-    let mut events = [VmIntrospectEvent::zeroed(); 64];
-    let n = match vm_backend::vm_introspect_drain(vm, &mut events) {
-        Ok(n) => n,
-        Err(_) => 0,
-    };
+    // Phase F.5 — drain the WHOLE introspection ring, not just the
+    // first 64 events. Linux generates thousands of EPT faults during
+    // boot and the early CPUID / I/O / MSR events were getting lost
+    // in the tail. We pull events in 256-element chunks until the
+    // kernel returns 0 or we hit the safety cap, building a histogram
+    // and surfacing any TRIPLE_FAULT / EXCEPTION fields immediately.
+    let mut events = [VmIntrospectEvent::zeroed(); 256];
+    let mut total = 0u64;
     let mut k_cpuid = 0u64;
     let mut k_rdmsr = 0u64;
     let mut k_wrmsr = 0u64;
@@ -500,20 +500,65 @@ fn run_bhyve_bzimage_attempt() {
     let mut k_io_in = 0u64;
     let mut k_ept = 0u64;
     let mut k_hlt = 0u64;
-    for ev in events.iter().take(n) {
-        match ev.kind {
-            VmIntrospectEvent::KIND_CPUID => k_cpuid += 1,
-            VmIntrospectEvent::KIND_RDMSR => k_rdmsr += 1,
-            VmIntrospectEvent::KIND_WRMSR => k_wrmsr += 1,
-            VmIntrospectEvent::KIND_IO_OUT => k_io_out += 1,
-            VmIntrospectEvent::KIND_IO_IN => k_io_in += 1,
-            VmIntrospectEvent::KIND_EPT_VIOLATION => k_ept += 1,
-            VmIntrospectEvent::KIND_HLT => k_hlt += 1,
-            _ => {}
+    let mut k_triple = 0u64;
+    let mut k_exception = 0u64;
+    const DRAIN_CAP: u64 = 4096;
+    loop {
+        let n = match vm_backend::vm_introspect_drain(vm, &mut events) {
+            Ok(n) => n,
+            Err(_) => 0,
+        };
+        if n == 0 {
+            break;
+        }
+        for ev in events.iter().take(n) {
+            match ev.kind {
+                VmIntrospectEvent::KIND_CPUID => k_cpuid += 1,
+                VmIntrospectEvent::KIND_RDMSR => k_rdmsr += 1,
+                VmIntrospectEvent::KIND_WRMSR => k_wrmsr += 1,
+                VmIntrospectEvent::KIND_IO_OUT => k_io_out += 1,
+                VmIntrospectEvent::KIND_IO_IN => k_io_in += 1,
+                VmIntrospectEvent::KIND_EPT_VIOLATION => k_ept += 1,
+                VmIntrospectEvent::KIND_HLT => k_hlt += 1,
+                VmIntrospectEvent::KIND_TRIPLE_FAULT => {
+                    k_triple += 1;
+                    print(b"    bhyve [F.4]:   triple_fault rip=0x");
+                    print_hex(ev.a);
+                    print(b" cs=0x");
+                    print_hex(ev.b);
+                    print(b" cr3=0x");
+                    print_hex(ev.c);
+                    print(b" idt_vec=0x");
+                    print_hex(ev.d);
+                    print(b"\n");
+                }
+                VmIntrospectEvent::KIND_EXCEPTION => {
+                    k_exception += 1;
+                    print(b"    bhyve [F.4]:   exception vec=");
+                    print_u64(ev.a);
+                    print(b" err=0x");
+                    print_hex(ev.b);
+                    print(b" rip=0x");
+                    print_hex(ev.c);
+                    print(b" qual=0x");
+                    print_hex(ev.d);
+                    print(b"\n");
+                }
+                _ => {}
+            }
+        }
+        total += n as u64;
+        if total >= DRAIN_CAP {
+            print(b"    bhyve [F.4]: drain cap reached, more events may remain\n");
+            break;
+        }
+        // If the kernel returned a partial chunk, we're done.
+        if (n as usize) < events.len() {
+            break;
         }
     }
     print(b"    bhyve [F.4]: drained ");
-    print_u64(n as u64);
+    print_u64(total);
     print(b" events: CPUID=");
     print_u64(k_cpuid);
     print(b" RDMSR=");
@@ -528,6 +573,10 @@ fn run_bhyve_bzimage_attempt() {
     print_u64(k_ept);
     print(b" HLT=");
     print_u64(k_hlt);
+    print(b" TRIPLE=");
+    print_u64(k_triple);
+    print(b" EXC=");
+    print_u64(k_exception);
     print(b"\n");
     let _ = vm_backend::vm_destroy(vm);
 }

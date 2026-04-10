@@ -166,6 +166,18 @@ impl VmIntrospectEvent {
     /// Phase F: guest IN instruction. `a` = port, `b` = width,
     /// `c` = 0, `d` = value the dispatcher returned to the guest.
     pub const KIND_IO_IN: u32 = 7;
+    /// Phase F.5: guest hit a triple fault (exit reason 2). The
+    /// dispatcher captures the dying CPU state so userspace can
+    /// reconstruct what Linux was doing.
+    /// `a` = guest RIP, `b` = guest CS selector, `c` = guest CR3,
+    /// `d` = IDT_VECTORING_INFO (the original exception that
+    /// started the fault chain).
+    pub const KIND_TRIPLE_FAULT: u32 = 8;
+    /// Phase F.5: guest took an exception we trapped (exit reason 0).
+    /// `a` = exception vector (low byte of VM_EXIT_INTR_INFO),
+    /// `b` = error code (if any), `c` = guest RIP,
+    /// `d` = exit qualification (CR2 for #PF).
+    pub const KIND_EXCEPTION: u32 = 9;
 }
 
 /// Lock-free SPSC ring of introspection events. Single producer is the
@@ -608,6 +620,43 @@ pub fn ept_pointer(handle: PoolHandle) -> u64 {
         .unwrap_or(0)
 }
 
+/// Walk the VM's EPT to translate a guest physical address to a host
+/// physical address, then read N bytes from that GPA into `out`.
+/// Returns the number of bytes actually read (0 if the GPA is
+/// unmapped or has no EPT root). Used by F.5 diagnostic handlers
+/// (handle_triple_fault) to dump guest instruction bytes.
+pub fn vm_read_gpa(handle: PoolHandle, gpa: u64, out: &mut [u8]) -> usize {
+    let pool = VM_POOL.lock();
+    let vm = match pool.get(handle) {
+        Some(v) => v,
+        None => return 0,
+    };
+    let ept = match vm.ept_root.as_ref() {
+        Some(e) => e,
+        None => return 0,
+    };
+    let mut copied = 0usize;
+    while copied < out.len() {
+        let cur_gpa = gpa + copied as u64;
+        let page_gpa = cur_gpa & !0xFFF;
+        let off = (cur_gpa - page_gpa) as usize;
+        let host_phys = match ept.walk(page_gpa) {
+            Some(hp) => hp,
+            None => return copied,
+        };
+        let chunk = core::cmp::min(0x1000 - off, out.len() - copied);
+        let virt = (host_phys + crate::mm::hhdm_offset() + off as u64) as *const u8;
+        // SAFETY: host_phys was returned by `ept.walk` which only
+        // gives us frames installed via map_4k/ept_premap; those
+        // are real RAM mapped via HHDM.
+        unsafe {
+            core::ptr::copy_nonoverlapping(virt, out[copied..].as_mut_ptr(), chunk);
+        }
+        copied += chunk;
+    }
+    copied
+}
+
 // ---------------------------------------------------------------------------
 // Phase B test path — create a VM, run a tiny `cpuid; hlt` payload,
 // observe the spoofed CPUID, terminate cleanly. Phase D moved EPT
@@ -759,6 +808,7 @@ pub fn run_bzimage_on_vm(vm_handle: PoolHandle) -> Result<(), VmObjError> {
     //   GPA 0x30000..0x31000  = guest PML4   (1 frame, pre-mapped)
     //   GPA 0x31000..0x32000  = guest PDPT   (1 frame, pre-mapped, 1 GiB PS=1)
     //   GPA 0x40000..0x50000  = initial stack (16 frames, pre-mapped)
+    //   GPA 0x60000..0x61000  = guest GDT    (Phase F.5.4, 1 frame)
     //   GPA 0x1000000..       = vmlinux load region (init_size frames)
 
     const BOOT_PARAMS_GPA: u64 = 0x10000;
@@ -767,6 +817,7 @@ pub fn run_bzimage_on_vm(vm_handle: PoolHandle) -> Result<(), VmObjError> {
     const PDPT_GPA: u64 = 0x31000;
     const STACK_GPA_BASE: u64 = 0x40000;
     const STACK_PAGES: usize = 16;
+    const GDT_GPA: u64 = 0x60000;
 
     let pref_addr = bz.pref_address;
     let init_size = bz.init_size as usize;
@@ -793,13 +844,61 @@ pub fn run_bzimage_on_vm(vm_handle: PoolHandle) -> Result<(), VmObjError> {
         Ok(phys)
     };
 
-    // 1. boot_params + cmdline + page tables + stack frames.
+    // 1. boot_params + cmdline + page tables + stack frames + GDT.
     let bp_phys = alloc_and_map(BOOT_PARAMS_GPA)?;
     let cmd_phys = alloc_and_map(CMDLINE_GPA)?;
     let pml4_phys = alloc_and_map(PML4_GPA)?;
     let pdpt_phys = alloc_and_map(PDPT_GPA)?;
     for i in 0..STACK_PAGES {
         alloc_and_map(STACK_GPA_BASE + (i as u64) * 0x1000)?;
+    }
+    let gdt_phys = alloc_and_map(GDT_GPA)?;
+
+    // F.5.4 — Linux 6.6 `startup_64` (head_64.S) does an `lretq`
+    // very early to load `__KERNEL_CS = 0x10` and jump to its
+    // long-mode trampoline. The `lretq` triggers a CPU descriptor
+    // load against GDTR — so we MUST have a real GDT in guest
+    // physical memory before VMENTER, with valid descriptors at
+    // selectors 0x10 (code) and 0x18 (data).
+    //
+    // The Phase B/D in-kernel test guest didn't need this because
+    // its hand-coded payload never touched any segment instruction
+    // that re-loads from GDTR; the cached values written by VMX
+    // entry were enough. Linux's lretq forces a real fetch.
+    //
+    // GDT layout (entry index = selector >> 3):
+    //   [0] null
+    //   [1] unused
+    //   [2] kernel CS — long mode, code, present, DPL=0
+    //                  selector = 0x10
+    //   [3] kernel DS — data, present, DPL=0
+    //                  selector = 0x18
+    //
+    // Descriptor encoding (Intel SDM Vol 3A 3.4.5):
+    //   bits  0..15  segment limit [15:0]
+    //   bits 16..39  base [23:0]
+    //   bits 40..47  access byte (P|DPL|S|type)
+    //   bits 48..51  segment limit [19:16]
+    //   bits 52..55  flags (G|D/B|L|AVL)
+    //   bits 56..63  base [31:24]
+    //
+    // Kernel CS (long mode):
+    //   limit = 0xFFFFF, base = 0
+    //   access = 0x9B = P=1, DPL=0, S=1, type=Code/RX/Acc
+    //   flags  = 0xA  = G=1, D/B=0, L=1, AVL=0
+    //   => 0x00AF_9B00_0000_FFFF
+    //
+    // Kernel DS (long-mode flat):
+    //   limit = 0xFFFFF, base = 0
+    //   access = 0x93 = P=1, DPL=0, S=1, type=Data/RW/Acc
+    //   flags  = 0xC  = G=1, D/B=1, L=0, AVL=0
+    //   => 0x00CF_9300_0000_FFFF
+    unsafe {
+        let gdt_virt = (gdt_phys + hhdm) as *mut u64;
+        *gdt_virt.add(0) = 0; // null descriptor
+        *gdt_virt.add(1) = 0; // unused
+        *gdt_virt.add(2) = 0x00AF_9B00_0000_FFFF; // kernel CS, selector 0x10
+        *gdt_virt.add(3) = 0x00CF_9300_0000_FFFF; // kernel DS, selector 0x18
     }
 
     // 2. vmlinux load region — pre-map ONLY enough frames to hold
@@ -922,9 +1021,11 @@ pub fn run_bzimage_on_vm(vm_handle: PoolHandle) -> Result<(), VmObjError> {
         vcpu.launched = false;
     }
 
-    // 8. Run the vCPU.
+    // 8. Run the vCPU. We pass `Some(GDT_GPA)` so run_one_vcpu_at
+    //    overrides the Phase B test segment selectors with the
+    //    Linux-expected layout (CS=0x10, DS=0x18, GDTR=GDT_GPA).
     set_current_vm(vm_handle);
-    let result = run_one_vcpu_at(vm_handle, entry_rip, entry_rsp, entry_cr3);
+    let result = run_one_vcpu_at(vm_handle, entry_rip, entry_rsp, entry_cr3, Some(GDT_GPA));
     clear_current_vm();
 
     match result {
@@ -939,11 +1040,20 @@ pub fn run_bzimage_on_vm(vm_handle: PoolHandle) -> Result<(), VmObjError> {
 /// Run a vCPU with caller-supplied entry RIP/RSP/CR3 (Phase F.4).
 /// Distinct from `run_one_vcpu` which hard-codes the Phase B/C/D
 /// payload's entry state at GPA 0x1000.
+///
+/// `linux_gdt_gpa`: when `Some(gpa)`, the dispatcher applies the
+/// Phase F.5.4 segment overrides — CS=0x10, DS/ES/SS/FS/GS=0x18,
+/// GDTR_BASE=gpa, GDTR_LIMIT=0x1F — so a real Linux bzImage that
+/// does an `lretq` early in `startup_64` finds a valid descriptor
+/// in the guest GDT instead of triple-faulting on garbage. The
+/// caller (currently only `run_bzimage_on_vm`) must have already
+/// written valid 8-byte descriptors to that GPA.
 fn run_one_vcpu_at(
     vm_handle: PoolHandle,
     entry_rip: u64,
     entry_rsp: u64,
     entry_cr3: u64,
+    linux_gdt_gpa: Option<u64>,
 ) -> Result<(), VmxError> {
     let eptp_value = ept_pointer(vm_handle);
     if eptp_value == 0 {
@@ -960,6 +1070,31 @@ fn run_one_vcpu_at(
     vmx::setup_controls(vmcs_phys)?;
     vmx::vmwrite(vmx::VMCS_EPTP, eptp_value, vmcs_phys)?;
     vmx::setup_guest_state(vmcs_phys, entry_rip, entry_rsp, entry_cr3)?;
+
+    // F.5.4 — segment selector + GDTR overrides for the Linux
+    // bzImage path. We keep the cached BASE/LIMIT/ACCESS_RIGHTS
+    // from setup_guest_state (flat 64-bit, present, long mode),
+    // we only fix the SELECTOR fields and the GDTR pointer so that
+    // any guest-side instruction that re-loads from GDTR (`lretq`,
+    // `mov ax, ds`, etc.) finds a real descriptor.
+    if let Some(gdt_gpa) = linux_gdt_gpa {
+        // Linux 6.6 segment.h:
+        //   __KERNEL_CS = GDT_ENTRY_KERNEL_CS * 8 = 2 * 8 = 0x10
+        //   __KERNEL_DS = GDT_ENTRY_KERNEL_DS * 8 = 3 * 8 = 0x18
+        vmx::vmwrite(vmx::VMCS_GUEST_CS_SELECTOR, 0x10, vmcs_phys)?;
+        for sel_field in [
+            vmx::VMCS_GUEST_DS_SELECTOR,
+            vmx::VMCS_GUEST_ES_SELECTOR,
+            vmx::VMCS_GUEST_SS_SELECTOR,
+            vmx::VMCS_GUEST_FS_SELECTOR,
+            vmx::VMCS_GUEST_GS_SELECTOR,
+        ] {
+            vmx::vmwrite(sel_field, 0x18, vmcs_phys)?;
+        }
+        vmx::vmwrite(vmx::VMCS_GUEST_GDTR_BASE, gdt_gpa, vmcs_phys)?;
+        // 4 entries × 8 bytes − 1 = 0x1F
+        vmx::vmwrite(vmx::VMCS_GUEST_GDTR_LIMIT, 0x1F, vmcs_phys)?;
+    }
 
     let vcpu_ptr = vcpu as *mut KernelVCpuState;
     drop(pool);

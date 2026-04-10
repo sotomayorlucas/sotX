@@ -139,9 +139,19 @@ impl KernelDeceptionProfile {
         }
 
         // Leaf 0: vendor = "GenuineIntel", max leaf = 0x1F
+        //
+        // **subleaf = 0xFFFF_FFFF (any-subleaf)** because real CPUID
+        // ignores ECX for leaves that are not subleaf-aware, and Linux
+        // does NOT zero RCX before every cpuid — startup_64 just calls
+        // `cpuid` with whatever happens to be in ECX from the previous
+        // op. If we matched on `subleaf == 0` Linux's garbage RCX would
+        // miss the spoof entirely and fall through to host passthrough,
+        // which on a non-Cascade-Lake host returns the wrong vendor /
+        // family / model and triple-faults Linux a few instructions
+        // later. F.5.4 — discovered by tracing each cpuid individually.
         cpuid.add(CpuidSpoof {
             leaf: 0,
-            subleaf: 0,
+            subleaf: 0xFFFF_FFFF,
             eax: 0x0000_001F,
             ebx: pack4(b'G', b'e', b'n', b'u'),
             edx: pack4(b'i', b'n', b'e', b'I'),
@@ -149,20 +159,21 @@ impl KernelDeceptionProfile {
         });
 
         // Leaf 1: family/model/stepping for Xeon Platinum 8280 (Cascade Lake)
-        // ECX bit 31 (hypervisor) cleared.
+        // ECX bit 31 (hypervisor) cleared. Same any-subleaf rule as leaf 0.
         cpuid.add(CpuidSpoof {
             leaf: 1,
-            subleaf: 0,
+            subleaf: 0xFFFF_FFFF,
             eax: 0x0005_0657, // Family 6, Model 85, Stepping 7
             ebx: 0x0010_0800,
             ecx: 0x7FFA_3203, // bit 31 OFF
             edx: 0xBFEB_FBFF,
         });
 
-        // Leaf 0x40000000: zeroed (hide hypervisor leaves entirely)
+        // Leaf 0x40000000: zeroed (hide hypervisor leaves entirely).
+        // Same any-subleaf rule.
         cpuid.add(CpuidSpoof {
             leaf: 0x4000_0000,
-            subleaf: 0,
+            subleaf: 0xFFFF_FFFF,
             eax: 0,
             ebx: 0,
             ecx: 0,
