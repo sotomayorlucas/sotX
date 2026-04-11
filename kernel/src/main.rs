@@ -947,10 +947,12 @@ fn load_initrd(cr3: u64) {
         "hello-gui",
         "bzImage",
         "guest-initramfs",
+        "sot-launcher",
     ];
     let found = initrd::find_all(module_data, &names);
     // Indices: 0=init, 1=shell, 2=vmm, 3=kbd, 4=net, 5=nvme, 6=xhci,
-    //          7=compositor, 8=hello-gui, 9=bzImage, 10=guest-initramfs
+    //          7=compositor, 8=hello-gui, 9=bzImage, 10=guest-initramfs,
+    //          11=sot-launcher
 
     // Phase F.4 — stash the bzImage slice's physical pointer + length
     // in a kernel global so the VM subsystem (`vm::run_payload_on_vm`)
@@ -1050,6 +1052,13 @@ fn load_initrd(cr3: u64) {
     if let Some(gui_data) = found[8] {
         kdebug!("  initrd: found 'hello-gui' ({} bytes)", gui_data.len());
         load_hello_gui_process(gui_data);
+    }
+    if let Some(launcher_data) = found[11] {
+        kdebug!(
+            "  initrd: found 'sot-launcher' ({} bytes)",
+            launcher_data.len()
+        );
+        load_sot_launcher_process(launcher_data);
     }
 }
 
@@ -1500,4 +1509,58 @@ fn write_hello_gui_boot_info(gui_as: &mm::paging::AddressSpace) {
 
     write_bootinfo(phys, &info);
     kdebug!("  hello-gui bootinfo: 1 cap at {:#x}", BOOT_INFO_ADDR);
+}
+
+// ---------------------------------------------------------------------------
+// sot-launcher (UX Unit 19) — keyboard-driven application launcher.
+//
+// Same bootstrap pattern as hello-gui: the launcher lives in its own
+// address space, looks up the compositor via svc_lookup, and needs a
+// self-AS cap so it can `shm_map` its own SHM pool. No IPC endpoint is
+// pre-granted -- the launcher is purely a client of the compositor.
+// ---------------------------------------------------------------------------
+
+/// Load sot-launcher as a separate user process.
+fn load_sot_launcher_process(launcher_data: &[u8]) {
+    let proc = match load_service(&ProcessSpec {
+        name: "sot-launcher",
+        data: launcher_data,
+        stack_pages: 4,
+    }) {
+        Some(p) => p,
+        None => return,
+    };
+    write_sot_launcher_boot_info(&proc.addr_space);
+    proc.spawn();
+    kdebug!("  sot-launcher: separate process, cr3={:#x}", proc.cr3);
+}
+
+/// Write BootInfo for the sot-launcher process.
+///
+/// Cap 0: AddrSpace (launcher's own CR3) -- for shm_map into self.
+fn write_sot_launcher_boot_info(launcher_as: &mm::paging::AddressSpace) {
+    use sotos_common::{BootInfo, BOOT_INFO_ADDR, BOOT_INFO_MAGIC};
+
+    let phys = alloc_bootinfo_page(launcher_as, "sot-launcher");
+
+    let launcher_as_cap = cap::insert(
+        cap::CapObject::AddrSpace { cr3: launcher_as.cr3() },
+        cap::Rights::ALL,
+        None,
+    )
+    .expect("failed to create sot-launcher AS cap");
+    kdebug!(
+        "  sot-launcher cap {}: addr_space (self, cr3={:#x})",
+        launcher_as_cap.raw(),
+        launcher_as.cr3()
+    );
+
+    let mut info = BootInfo::empty();
+    info.magic = BOOT_INFO_MAGIC;
+    info.cap_count = 1;
+    info.caps[0] = launcher_as_cap.raw() as u64;
+    info.self_as_cap = launcher_as_cap.raw() as u64;
+
+    write_bootinfo(phys, &info);
+    kdebug!("  sot-launcher bootinfo: 1 cap at {:#x}", BOOT_INFO_ADDR);
 }

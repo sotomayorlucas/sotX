@@ -315,6 +315,15 @@ pub extern "C" fn _start() -> ! {
     // child's AS cap (or once kernel-side spawn lands like compositor).
     // spawn_process(b"sot-statusbar");
 
+    // --- Phase 6a2: sot-launcher (UX Unit 19) ---
+    // Keyboard-driven Wayland launcher. Same story as the statusbar --
+    // it needs a valid self_as_cap to map its SHM pool, which init's
+    // spawn_process can't forward yet. The kernel path in
+    // kernel/src/main.rs (load_sot_launcher_process) spawns it
+    // directly with a proper AS cap, so init has nothing to do here.
+    // Intentional no-op kept for roadmap visibility:
+    // spawn_process(b"sot-launcher");
+
     // --- Phase 6b: STYX exokernel syscall validation (Tier 1.2) ---
     // Validates SOT syscalls 300-310 from userspace. Output goes to serial.
     spawn_process(b"styx-test");
