@@ -1,0 +1,2183 @@
+\documentclass[11pt,a4paper,twoside]{report}
+
+% --- packages -----------------------------------------------------------------
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[a4paper,margin=2.4cm]{geometry}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{tabularx}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{parskip}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,calc,shapes.geometric,fit,
+                 decorations.pathreplacing,backgrounds,chains}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{multicol}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{makeidx}
+
+% --- colours (Tokyo Night palette) --------------------------------------------
+\definecolor{tnbg}{HTML}{1A1B26}
+\definecolor{tnfg}{HTML}{C0CAF5}
+\definecolor{tnblue}{HTML}{7AA2F7}
+\definecolor{tnred}{HTML}{F7768E}
+\definecolor{tnyellow}{HTML}{E0AF68}
+\definecolor{tngreen}{HTML}{73DACA}
+\definecolor{tnpurple}{HTML}{BB9AF7}
+\definecolor{tnorange}{HTML}{FF9E64}
+\definecolor{tncomment}{HTML}{565F89}
+\definecolor{linkcolor}{HTML}{2C5AA0}
+\definecolor{lightgray}{HTML}{EAEAEA}
+\definecolor{midgray}{HTML}{AAAAAA}
+
+% --- hyperref -----------------------------------------------------------------
+\hypersetup{
+  colorlinks=true,
+  linkcolor=linkcolor,
+  urlcolor=linkcolor,
+  citecolor=linkcolor,
+  pdftitle={sotBSD System Manual},
+  pdfauthor={Lucas Sotomayor (BASE4 Security)},
+  pdfsubject={Comprehensive system manual for the sotBSD microkernel OS},
+  pdfkeywords={microkernel, Rust, capability, exokernel, BSD, deception, sotFS}
+}
+
+% --- listings -----------------------------------------------------------------
+\lstdefinelanguage{rustlang}{
+  keywords={fn,let,mut,pub,struct,enum,impl,trait,if,else,for,while,loop,
+            match,return,use,mod,as,where,self,Self,const,static,unsafe,
+            extern,move,async,await,break,continue,crate,dyn,false,true,
+            in,ref,type},
+  keywordstyle=\color{tnblue}\bfseries,
+  ndkeywords={u8,u16,u32,u64,usize,i8,i16,i32,i64,isize,bool,char,str,
+              Option,Result,Vec,Box,String,CapId,Rights,SoHandle,Message},
+  ndkeywordstyle=\color{tngreen}\bfseries,
+  identifierstyle=\color{black},
+  sensitive=true,
+  comment=[l]{//},
+  morecomment=[s]{/*}{*/},
+  commentstyle=\color{tncomment}\itshape,
+  stringstyle=\color{tnred},
+  morestring=[b]",
+  morestring=[b]',
+}
+
+\lstdefinelanguage{tlaplus}{
+  keywords={MODULE,EXTENDS,CONSTANTS,VARIABLES,Init,Next,Spec,THEOREM,
+            UNCHANGED,ENABLED,TRUE,FALSE,IF,THEN,ELSE,LET,IN,CHOOSE,
+            DOMAIN,SUBSET,UNION,EXCEPT},
+  keywordstyle=\color{tnblue}\bfseries,
+  sensitive=true,
+  comment=[l]{\\*},
+  morecomment=[s]{(*}{*)},
+  commentstyle=\color{tncomment}\itshape,
+  stringstyle=\color{tnred},
+  morestring=[b]",
+}
+
+\lstset{
+  language=rustlang,
+  basicstyle=\ttfamily\footnotesize,
+  numbers=left,
+  numberstyle=\tiny\color{tncomment},
+  numbersep=8pt,
+  frame=single,
+  framesep=4pt,
+  rulecolor=\color{lightgray},
+  backgroundcolor=\color{lightgray!30},
+  showstringspaces=false,
+  breaklines=true,
+  tabsize=2,
+  captionpos=b,
+  xleftmargin=1.5em,
+  aboveskip=1em,
+  belowskip=1em,
+}
+
+% --- titlesec -----------------------------------------------------------------
+\titleformat{\chapter}[display]
+  {\normalfont\huge\bfseries\color{tnblue}}
+  {\chaptertitlename\ \thechapter}{20pt}{\Huge}
+\titleformat{\section}
+  {\normalfont\Large\bfseries\color{tnblue}}
+  {\thesection}{1em}{}
+\titleformat{\subsection}
+  {\normalfont\large\bfseries\color{tnblue!80!black}}
+  {\thesubsection}{1em}{}
+\titleformat{\subsubsection}
+  {\normalfont\normalsize\bfseries\color{tnblue!60!black}}
+  {\thesubsubsection}{1em}{}
+
+% --- header / footer ----------------------------------------------------------
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[LE]{\textit{sotBSD System Manual}}
+\fancyhead[RO]{\textit{\leftmark}}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.3pt}
+
+% --- theorem environments -----------------------------------------------------
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}[chapter]
+\newtheorem{theorem}{Theorem}[chapter]
+\newtheorem{invariant}{Invariant}[chapter]
+
+% --- convenience macros -------------------------------------------------------
+\newcommand{\sotOS}{\texttt{sotOS}}
+\newcommand{\sotBSD}{\texttt{sotBSD}}
+\newcommand{\sotFS}{\texttt{sotFS}}
+\newcommand{\LUCAS}{\textsc{lucas}}
+\newcommand{\syscall}[1]{\texttt{#1}}
+\newcommand{\reg}[1]{\texttt{#1}}
+\newcommand{\hex}[1]{\texttt{0x#1}}
+\newcommand{\file}[1]{\texttt{#1}}
+\newcommand{\cmark}{\color{tngreen}\checkmark}
+\newcommand{\TODO}[1]{\textcolor{tnred}{\textbf{TODO:} #1}}
+
+% ==============================================================================
+\begin{document}
+% ==============================================================================
+
+% --- Title page ---------------------------------------------------------------
+\begin{titlepage}
+\centering
+\vspace*{3cm}
+
+{\Huge\bfseries\color{tnblue} sotBSD System Manual\par}
+\vspace{0.8cm}
+{\Large\color{tnblue!70!black} The SOT Exokernel, sotBSD Microkernel,\\
+ and sotFS Filesystem\par}
+\vspace{0.5cm}
+{\large Version 0.2.0 --- Codename: Project STYX\par}
+
+\vspace{2cm}
+
+\begin{tikzpicture}[
+  layer/.style={draw=tnblue, fill=tnblue!8, minimum width=10cm,
+                minimum height=0.9cm, font=\sffamily\small,
+                rounded corners=3pt, thick},
+]
+  \node[layer] (hw) at (0,0) {Hardware (x86\_64, LAPIC, IOAPIC, PCI)};
+  \node[layer] (kern) at (0,1.2) {SOT Microkernel (5 primitives, 12 SOT syscalls)};
+  \node[layer, minimum width=4.8cm] (sotfs) at (-2.6,2.4) {sotFS};
+  \node[layer, minimum width=4.8cm] (dec) at (2.6,2.4) {Deception Engine};
+  \node[layer, minimum width=4.8cm] (lucas) at (-2.6,3.6) {LUCAS (Linux ABI)};
+  \node[layer, minimum width=4.8cm] (rump) at (2.6,3.6) {rump / BSD};
+  \node[layer] (app) at (0,4.8) {Applications (busybox, git, nano, links, wget)};
+\end{tikzpicture}
+
+\vspace{2cm}
+
+{\large Lucas Sotomayor\\
+\texttt{lucas@base4.io}\\
+BASE4 Security\par}
+
+\vspace{1cm}
+{\normalsize 2026-04-10\par}
+\end{titlepage}
+
+% --- Front matter -------------------------------------------------------------
+\pagenumbering{roman}
+\tableofcontents
+\newpage
+\listoffigures
+\newpage
+\listoftables
+\newpage
+\lstlistoflistings
+\newpage
+
+% ==============================================================================
+% PART I --- ARCHITECTURE
+% ==============================================================================
+\pagenumbering{arabic}
+\part{Architecture}
+
+% ------------------------------------------------------------------------------
+\chapter{Introduction}
+\label{ch:intro}
+% ------------------------------------------------------------------------------
+
+\section{What is sotBSD?}
+
+\sotBSD{} is a verified microkernel operating system written from scratch in
+Rust, designed around five core principles: minimal kernel surface, capability-based
+security, transactional secure objects, deception-aware personality layers, and
+formal verifiability. The system runs on the \texttt{x86\_64-unknown-none}
+bare-metal target and boots via the Limine~v8 BIOS protocol.
+
+The name reflects two layers: the SOT (Secure Object Transaction) exokernel
+that provides the fundamental abstraction for all kernel objects, and the BSD
+personality layer that presents a POSIX-compatible interface to userspace
+programs. In practice, the system also hosts a full Linux ABI compatibility
+layer called \LUCAS{} (Linux User-mode Compatibility And Syscall translation),
+allowing real musl-static and glibc-linked binaries to run unmodified.
+
+\section{Design Philosophy}
+
+The architecture follows a strict separation of concerns:
+
+\begin{enumerate}[leftmargin=1.4em]
+  \item \textbf{Minimal kernel.} The microkernel implements exactly five
+        primitives: scheduling, IPC, capabilities, frame allocation, and IRQ
+        virtualization. Everything else---virtual memory, filesystems, drivers,
+        networking---lives in userspace servers.
+  \item \textbf{Capabilities as the sole access mechanism.} Every kernel object
+        is referenced through a capability. There are no ambient authorities,
+        no root user, no global namespaces.
+  \item \textbf{Transactional objects.} The SOT exokernel wraps kernel objects
+        in transactional envelopes with three consistency tiers, enabling
+        atomic multi-object operations with provenance tracking.
+  \item \textbf{Deception as a first-class primitive.} Capability interposition
+        enables transparent rewriting of system call results, allowing the OS
+        to present fabricated views of its own identity to adversaries.
+  \item \textbf{Formal foundations.} Six TLA+ specifications cover the core
+        subsystems, and the sotFS filesystem is verified through DPO rewriting
+        rules with bounded treewidth guarantees.
+\end{enumerate}
+
+\section{Document Organization}
+
+This manual is organized into five parts:
+
+\begin{description}[leftmargin=1.4em]
+  \item[Part~I: Architecture] (Chapters~\ref{ch:intro}--\ref{ch:memory})
+    covers the system-level design, boot process, memory layout, and the
+    SOT exokernel model.
+  \item[Part~II: Subsystems] (Chapters~\ref{ch:caps}--\ref{ch:security})
+    details the capability system, IPC mechanisms, scheduler, and security
+    infrastructure.
+  \item[Part~III: Personalities] (Chapters~\ref{ch:lucas}--\ref{ch:deception})
+    describes the Linux ABI compatibility layer, the BSD/rump personality,
+    and the deception engine.
+  \item[Part~IV: Services \& Drivers] (Chapters~\ref{ch:sotfs}--\ref{ch:net})
+    covers the sotFS filesystem, device drivers, and the networking stack.
+  \item[Part~V: Operations] (Chapters~\ref{ch:build}--\ref{ch:formal})
+    provides build instructions, debugging guides, a complete syscall
+    reference, and formal verification details.
+\end{description}
+
+\section{Conventions Used in This Manual}
+
+\begin{itemize}[leftmargin=1.4em]
+  \item System call names are set in \syscall{monospace}.
+  \item Register names use the \reg{rdi}, \reg{rsi}, \reg{rdx} convention.
+  \item Hexadecimal addresses are prefixed: \hex{B00000}.
+  \item Code listings use the Rust language unless otherwise noted.
+  \item The symbol \cmark{} indicates a feature that has been verified
+        end-to-end in the boot test pipeline.
+\end{itemize}
+
+
+% ------------------------------------------------------------------------------
+\chapter{System Architecture}
+\label{ch:arch}
+% ------------------------------------------------------------------------------
+
+\section{Architectural Overview}
+
+\sotBSD{} is structured as a layered system with a minimal microkernel at its
+core. Figure~\ref{fig:arch-stack} shows the complete architecture stack from
+hardware to applications.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  layer/.style={draw=tnblue, thick, minimum height=1.1cm,
+                font=\sffamily\small, rounded corners=2pt, align=center},
+  hw/.style={layer, fill=tnred!10, minimum width=13cm},
+  kern/.style={layer, fill=tnblue!10, minimum width=13cm},
+  mid/.style={layer, fill=tngreen!10},
+  upper/.style={layer, fill=tnyellow!10},
+  app/.style={layer, fill=tnpurple!10, minimum width=13cm},
+  arr/.style={-{Stealth[length=3mm]}, thick, tnblue!70},
+]
+  % Hardware
+  \node[hw] (hw) at (0,0) {%
+    \textbf{Hardware}\\[-2pt]
+    {\footnotesize x86\_64 CPU, LAPIC, IOAPIC, PCI bus, NVMe, xHCI, virtio}};
+
+  % Kernel
+  \node[kern] (kern) at (0,1.6) {%
+    \textbf{SOT Microkernel} (Ring~0, ${\sim}$10K LOC)\\[-2pt]
+    {\footnotesize Sched\,|\,IPC\,|\,Caps\,|\,Frames\,|\,IRQ virt\,|\,%
+     12 SOT syscalls\,|\,Provenance}};
+
+  % Middle layer
+  \node[mid, minimum width=3.1cm] (vmm) at (-5,3.3)
+    {\textbf{VMM}\\[-2pt]{\footnotesize Paging}};
+  \node[mid, minimum width=3.1cm] (sotfs) at (-1.7,3.3)
+    {\textbf{sotFS}\\[-2pt]{\footnotesize VFS + ObjStore}};
+  \node[mid, minimum width=3.1cm] (dec) at (1.7,3.3)
+    {\textbf{Deception}\\[-2pt]{\footnotesize Interposition}};
+  \node[mid, minimum width=3.1cm] (drv) at (5,3.3)
+    {\textbf{Drivers}\\[-2pt]{\footnotesize blk/net/usb}};
+
+  % Upper layer
+  \node[upper, minimum width=4.2cm] (lucas) at (-3.3,5)
+    {\textbf{LUCAS}\\[-2pt]{\footnotesize Linux ABI (127+ syscalls)}};
+  \node[upper, minimum width=4.2cm] (rump) at (1.1,5)
+    {\textbf{rump kernel}\\[-2pt]{\footnotesize NetBSD personality}};
+  \node[upper, minimum width=3.6cm] (illumos) at (5,5)
+    {\textbf{Illumos}\\[-2pt]{\footnotesize SMF/Crossbow/FMA}};
+
+  % Applications
+  \node[app] (apps) at (0,6.6) {%
+    \textbf{Applications}\\[-2pt]
+    {\footnotesize busybox, git, nano, links, wget, alpine packages,
+     custom services}};
+
+  % Arrows
+  \draw[arr] (hw) -- (kern);
+  \draw[arr] (kern) -- (vmm);
+  \draw[arr] (kern) -- (sotfs);
+  \draw[arr] (kern) -- (dec);
+  \draw[arr] (kern) -- (drv);
+  \draw[arr] (vmm) -- (lucas);
+  \draw[arr] (sotfs) -- (lucas);
+  \draw[arr] (sotfs) -- (rump);
+  \draw[arr] (dec) -- (lucas);
+  \draw[arr] (dec) -- (rump);
+  \draw[arr] (drv) -- (illumos);
+  \draw[arr] (lucas) -- (apps);
+  \draw[arr] (rump) -- (apps);
+  \draw[arr] (illumos) -- (apps);
+\end{tikzpicture}
+\caption{sotBSD architecture stack. The microkernel provides five primitives;
+         everything above runs in Ring~3 as capability-holding services.}
+\label{fig:arch-stack}
+\end{figure}
+
+\section{The Five Kernel Primitives}
+
+The microkernel implements exactly five primitives. All other OS functionality
+is built on top of these through userspace services communicating via IPC.
+
+\begin{description}[leftmargin=1.4em]
+  \item[Scheduling.] A four-level priority Multi-Level Queue (MLQ) scheduler
+    with per-core Chase-Lev work-stealing deques. Priority levels are:
+    \textit{realtime} (0), \textit{high} (1), \textit{normal} (2), and
+    \textit{low} (3). The scheduler supports up to 16 CPUs via SMP with
+    LAPIC timer-driven preemption and IPI-based cross-core wakeup.
+
+  \item[IPC.] Two mechanisms: synchronous endpoints (L4-style rendezvous
+    where sender blocks until receiver calls) and asynchronous channels
+    (lock-free SPSC ring buffers for high-throughput data transfer). IPC
+    also supports capability transfer in the message registers.
+
+  \item[Capabilities.] All kernel objects are accessed through capabilities.
+    A Capability Derivation Tree (CDT) tracks parent-child relationships
+    for delegation and epoch-based O(1) revocation. A rights bitmask
+    (Read/Write/eXecute/Grant/Revoke) provides monotonic attenuation.
+
+  \item[Frame Allocation.] A bitmap-based physical frame allocator manages
+    all physical memory. A slab allocator built on top provides efficient
+    allocation for fixed-size kernel objects (thread control blocks,
+    capability entries, endpoint structures).
+
+  \item[IRQ Virtualization.] Hardware interrupts are demultiplexed by the
+    kernel and delivered as IPC messages to registered userspace handlers.
+    This allows device drivers to run entirely in Ring~3 without any
+    kernel-mode driver code.
+\end{description}
+
+\section{The SOT Exokernel Layer}
+
+On top of the five primitives, the SOT (Secure Object Transaction) layer
+provides 12 additional syscalls (numbers 300--311) that implement:
+
+\begin{itemize}[leftmargin=1.4em]
+  \item \textbf{Secure Objects (SO):} opaque, typed blobs that serve as the
+    universal container for all named kernel resources.
+  \item \textbf{Transactions:} three tiers of consistency---Tier~0 (RCU
+    read-only snapshots), Tier~1 (WAL single-object writes), and Tier~2
+    (two-phase commit for multi-object atomic operations).
+  \item \textbf{Provenance:} per-CPU SPSC ring buffers (4096 entries each)
+    that record a SHA-256 hash-linked DAG of all SO mutations, enabling
+    full audit trails and tamper detection.
+\end{itemize}
+
+\subsection{Category-Theoretic Foundations}
+
+The SOT model is grounded in five categories with three functors:
+
+\begin{definition}[SOT Categories]
+The system defines five categories:
+\begin{align}
+  \mathbf{SO}   &: \text{Secure Objects (morphisms = capability derivations)} \\
+  \mathbf{Dom}  &: \text{Protection Domains (morphisms = domain transitions)} \\
+  \mathbf{Chan} &: \text{Channels (morphisms = message flows)} \\
+  \mathbf{Tx}   &: \text{Transactions (morphisms = commit/abort)} \\
+  \mathbf{Prov} &: \text{Provenance (morphisms = hash-chain links)}
+\end{align}
+\end{definition}
+
+Three functors connect these categories:
+\begin{itemize}[leftmargin=1.4em]
+  \item $F_{\text{Access}} : \mathbf{Dom} \to \mathbf{SO}$ maps domain
+    transitions to capability derivations.
+  \item $F_{\text{Prov}} : \mathbf{Tx} \to \mathbf{Prov}$ maps transaction
+    commits to provenance entries.
+  \item $F_{\text{Deception}} : \mathbf{SO} \to \mathbf{SO}$ is an
+    endofunctor that transparently rewrites SO contents for deception.
+\end{itemize}
+
+\section{The 12 SOT Syscalls}
+
+Table~\ref{tab:sot-syscalls} lists the complete SOT syscall interface.
+
+\begin{table}[H]
+\centering
+\caption{SOT exokernel syscalls (numbers 300--311).}
+\label{tab:sot-syscalls}
+\begin{tabularx}{\textwidth}{c l l X}
+\toprule
+\textbf{\#} & \textbf{Name} & \textbf{Args} & \textbf{Description} \\
+\midrule
+300 & \syscall{so\_create}    & type, size, data  & Create a new Secure Object \\
+301 & \syscall{so\_read}      & so\_cap, off, len & Read bytes from an SO \\
+302 & \syscall{so\_write}     & so\_cap, off, data & Write bytes to an SO \\
+303 & \syscall{so\_destroy}   & so\_cap           & Destroy an SO and free storage \\
+304 & \syscall{cap\_derive}   & src\_cap, rights   & Derive child cap with restricted rights \\
+305 & \syscall{cap\_revoke}   & cap               & Revoke cap and all descendants in CDT \\
+306 & \syscall{chan\_send}     & chan\_cap, msg     & Send message on async channel \\
+307 & \syscall{chan\_recv}     & chan\_cap          & Receive message from async channel \\
+308 & \syscall{domain\_enter}  & dom\_cap          & Enter a protection domain \\
+309 & \syscall{domain\_yield}  &                   & Yield back to calling domain \\
+310 & \syscall{tx\_commit}     & tx\_handle        & Commit a transaction (Tier 1 or 2) \\
+311 & \syscall{tx\_abort}      & tx\_handle        & Abort a transaction, discard writes \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+% ------------------------------------------------------------------------------
+\chapter{Boot Process}
+\label{ch:boot}
+% ------------------------------------------------------------------------------
+
+\section{Boot Sequence Overview}
+
+The system boots through four distinct phases, illustrated in
+Figure~\ref{fig:boot-sequence}.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  phase/.style={draw=tnblue, thick, fill=tnblue!8, minimum width=3cm,
+                minimum height=1.4cm, rounded corners=3pt,
+                font=\sffamily\small, align=center},
+  arr/.style={-{Stealth[length=3mm]}, very thick, tnblue!70},
+  note/.style={font=\sffamily\scriptsize\color{tncomment}, align=left},
+]
+  \node[phase] (bios) at (0,0)   {\textbf{BIOS/Limine}\\firmware};
+  \node[phase] (kern) at (4,0)   {\textbf{Kernel}\\kmain()};
+  \node[phase] (init) at (8,0)   {\textbf{Init}\\services/init};
+  \node[phase] (svc) at (12,0)   {\textbf{Services}\\VMM, FS, Net};
+  \node[phase] (shell) at (12,-2.5) {\textbf{LUCAS Shell}\\interactive};
+
+  \draw[arr] (bios) -- (kern);
+  \draw[arr] (kern) -- (init);
+  \draw[arr] (init) -- (svc);
+  \draw[arr] (svc) -- (shell);
+
+  \node[note, above=0.3cm of bios] {Limine v8 BIOS\\loads ELF kernel};
+  \node[note, above=0.3cm of kern] {GDT, IDT, serial\\frame alloc, SMP};
+  \node[note, above=0.3cm of init] {spawn VMM, kbd\\net, NVMe, xHCI};
+  \node[note, above=0.3cm of svc] {register services\\via SvcRegister};
+  \node[note, right=0.3cm of shell] {busybox, git,\\nano, wget};
+\end{tikzpicture}
+\caption{Boot sequence from firmware through kernel initialization to the
+         interactive \LUCAS{} shell.}
+\label{fig:boot-sequence}
+\end{figure}
+
+\subsection{Phase 1: Firmware and Bootloader}
+
+The Limine~v8 BIOS bootloader loads the kernel ELF binary from a GPT+FAT32
+disk image. The kernel must be compiled as \texttt{ET\_EXEC} (not
+\texttt{ET\_DYN}), which requires the \texttt{-C relocation-model=static}
+flag. Limine passes control to \texttt{kmain()} with a set of boot
+information structures describing available memory, framebuffer, and the
+CPIO initrd archive.
+
+The boot configuration lives in \file{boot/limine.conf}:
+\begin{lstlisting}[language={},caption={Limine boot configuration (excerpt).}]
+serial: yes
+timeout: 0
+
+/sotOS
+  protocol: limine
+  kernel_path: boot():/sotos-kernel
+  module_path: boot():/initrd.cpio
+\end{lstlisting}
+
+\subsection{Phase 2: Kernel Initialization}
+
+The kernel initialization sequence in \texttt{kmain()} follows a strict order:
+
+\begin{enumerate}[leftmargin=1.4em]
+  \item \textbf{Serial FIRST.} Initialize COM1 serial output before any
+    assertions or debug prints. This is a critical invariant---panics
+    before serial is initialized produce no diagnostics.
+  \item \textbf{GDT and IDT.} Load the Global Descriptor Table and
+    Interrupt Descriptor Table. Configure IST entries: \#DF (index~0),
+    \#GP (index~2), misc (index~3). \textit{Note:} \#PF does not use IST
+    to avoid corruption when multiple threads fault simultaneously.
+  \item \textbf{Frame allocator.} Initialize the bitmap-based physical
+    frame allocator from the Limine memory map.
+  \item \textbf{Slab allocator.} Initialize the kernel slab allocator on
+    top of the frame allocator.
+  \item \textbf{Capability tables.} Initialize the global capability table
+    and CDT structures.
+  \item \textbf{Scheduler.} Initialize per-CPU run queues and the
+    Chase-Lev work-stealing deques.
+  \item \textbf{SMP.} Wake Application Processors (APs) via INIT-SIPI-SIPI.
+    Enable SSE on all CPUs (CR0.EM=0, CR4.OSFXSR, CR4.OSXMMEXCPT).
+  \item \textbf{LAPIC timer.} Calibrate and start the Local APIC timer for
+    preemptive scheduling.
+  \item \textbf{Init process.} Load the \texttt{init} service from the
+    initrd CPIO archive and create the first userspace thread.
+\end{enumerate}
+
+\subsection{Phase 3: Init Service}
+
+The \file{services/init} process is the first userspace program. It reads
+BootInfo from \hex{B00000} to obtain root capabilities, then spawns the
+core services:
+
+\begin{itemize}[leftmargin=1.4em]
+  \item \textbf{VMM server:} manages page tables and handles \#PF
+    (page faults) for all user processes.
+  \item \textbf{Keyboard driver:} reads PS/2 scan codes and distributes
+    input events via a shared ring buffer at \hex{510000}.
+  \item \textbf{Network service:} implements the IP/TCP/UDP/ICMP stack.
+  \item \textbf{NVMe driver:} communicates with NVMe SSDs via PRP lists
+    and IPC.
+  \item \textbf{xHCI driver:} manages USB host controllers and HID
+    devices.
+\end{itemize}
+
+Each service registers itself with the kernel's service registry via
+\syscall{SvcRegister} (syscall~130), making its endpoint discoverable by
+other services through \syscall{SvcLookup} (syscall~131).
+
+\subsection{Phase 4: Shell and Applications}
+
+After services are running, init launches the \LUCAS{} shell, which provides
+a POSIX-like command-line interface supporting pipes (up to 10 commands),
+background jobs, environment variables, and scripting. Real Linux binaries
+such as \texttt{busybox}, \texttt{git}, \texttt{nano}, and \texttt{links}
+run through the Linux ABI compatibility layer.
+
+
+% ------------------------------------------------------------------------------
+\chapter{Memory Architecture}
+\label{ch:memory}
+% ------------------------------------------------------------------------------
+
+\section{Physical Memory Management}
+
+Physical memory is managed by a bitmap-based frame allocator. Each bit in the
+bitmap represents a single 4\,KiB frame. The allocator is initialized from
+the Limine memory map, which marks usable regions. A spinlock
+(\texttt{spin::Mutex}) protects concurrent access.
+
+The slab allocator provides efficient allocation for fixed-size kernel objects,
+reducing fragmentation for frequently allocated structures such as thread
+control blocks and capability entries.
+
+\section{Virtual Address Space Layout}
+
+Each process has its own address space (CR3). The init process uses the
+layout shown in Table~\ref{tab:addr-layout}.
+
+\begin{table}[H]
+\centering
+\caption{Init process virtual address space layout.}
+\label{tab:addr-layout}
+\begin{tabularx}{\textwidth}{l l X}
+\toprule
+\textbf{Address} & \textbf{Size} & \textbf{Content} \\
+\midrule
+\hex{200000}   & variable & ELF \texttt{.text} (kernel or service code) \\
+\hex{510000}   & 4\,KiB  & Keyboard ring buffer \\
+\hex{520000}   & 4\,KiB  & Mouse ring buffer \\
+\hex{900000}   & 16\,KiB & Stack (4 pages) \\
+\hex{A00000}   & 4\,KiB  & SPSC ring (IPC) \\
+\hex{B00000}   & 4\,KiB  & BootInfo page (root caps) \\
+\hex{B80000}   & 4\,KiB  & vDSO page (R+X) \\
+\hex{C00000}+  & variable & Virtio/MMIO device regions (UC mapped) \\
+\hex{D00000}+  & variable & ObjectStore + VFS data \\
+\hex{E30000}+  & variable & Child process stacks \\
+\hex{2000000}  & 1\,MiB  & \texttt{brk} heap \\
+\hex{3000000}  & variable & \texttt{mmap} region \\
+\hex{6000000}  & variable & \texttt{INTERP\_LOAD\_BASE} (dynamic linker) \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{Copy-on-Write Fork}
+
+The \syscall{SYS\_AS\_CLONE} (syscall~125) implements real copy-on-write fork:
+
+\begin{enumerate}[leftmargin=1.4em]
+  \item The \texttt{clone\_cow()} function walks all user-space PTEs in the
+    parent's page tables.
+  \item Both parent and child PTEs are marked read-only.
+  \item A per-frame reference count (\texttt{FRAME\_REFCOUNT}) is incremented.
+  \item On write fault (error code \texttt{\& 0x03 == 0x03}), the VMM
+    allocates a new frame, copies the data via HHDM (Higher Half Direct
+    Map), and remaps the page as writable.
+\end{enumerate}
+
+A critical implementation detail: \#PF (page fault) must \emph{not} use an
+IST (Interrupt Stack Table) entry, because shared IST stacks corrupt when
+multiple threads fault simultaneously during CoW fork. Instead, \#PF uses
+the per-thread kernel stack (TSS RSP0).
+
+\section{Guard Pages and W\^{}X}
+
+Every thread stack is bounded by guard pages---unmapped pages that trigger
+immediate \#PF on stack overflow rather than silently corrupting adjacent
+memory. The kernel enforces W\^{}X (Write XOR Execute): no page may be
+simultaneously writable and executable. The \syscall{SYS\_PROTECT}
+(syscall~134) provides \texttt{mprotect}-like functionality with W\^{}X
+enforcement.
+
+
+% ==============================================================================
+% PART II --- SUBSYSTEMS
+% ==============================================================================
+\part{Subsystems}
+
+% ------------------------------------------------------------------------------
+\chapter{Capability System}
+\label{ch:caps}
+% ------------------------------------------------------------------------------
+
+\section{Capability Model}
+
+Every kernel object is accessed through a capability. A capability is a
+protected reference that bundles an object identity with an access rights
+mask. There are no ambient authorities in the system---the only way to
+perform any operation is to present a valid capability.
+
+\subsection{CapId Format}
+
+A \texttt{CapId} is a 32-bit value composed of two fields:
+
+\begin{center}
+\begin{tikzpicture}[font=\ttfamily\small]
+  \draw[thick] (0,0) rectangle (8,0.8);
+  \draw[thick] (5,0) -- (5,0.8);
+  \node at (2.5,0.4) {index (20 bits)};
+  \node at (6.5,0.4) {generation (12 bits)};
+  \node[above] at (0,0.8) {\footnotesize bit 31};
+  \node[above] at (5,0.8) {\footnotesize bit 12};
+  \node[above] at (8,0.8) {\footnotesize bit 0};
+\end{tikzpicture}
+\end{center}
+
+The 20-bit index allows up to $2^{20} = 1{,}048{,}576$ simultaneous
+capabilities. The 12-bit generation counter prevents use-after-free
+attacks: when a capability is revoked, the generation is bumped, and any
+stale \texttt{CapId} with the old generation is rejected.
+
+\subsection{Rights Bitmask}
+
+Each capability carries a 5-bit rights mask:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{c l l}
+\toprule
+\textbf{Bit} & \textbf{Name} & \textbf{Meaning} \\
+\midrule
+0 & Read    & Read object contents \\
+1 & Write   & Modify object contents \\
+2 & Execute & Execute/invoke the object \\
+3 & Grant   & Derive child capabilities \\
+4 & Revoke  & Revoke child capabilities \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Rights are \emph{monotonically attenuated}: a derived capability can only
+have a subset of its parent's rights. The \texttt{Rights::restrict()} method
+enforces this invariant.
+
+\section{Capability Derivation Tree}
+
+The CDT (Capability Derivation Tree) tracks the parent-child relationship
+between capabilities. Each capability entry stores a parent pointer. When
+a capability is revoked via \syscall{cap\_revoke}, the revocation propagates
+to all descendants through an epoch-based mechanism that achieves O(1)
+amortized cost.
+
+Figure~\ref{fig:cdt} shows a typical derivation tree with progressive
+attenuation.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  capnode/.style={draw=tnblue, thick, fill=tnblue!10, rounded corners=3pt,
+              minimum width=2.2cm, minimum height=0.8cm, align=center,
+              font=\sffamily\small},
+  arr/.style={-{Stealth[length=2.5mm]}, thick, tnblue!70},
+  revoked/.style={capnode, draw=tnred, fill=tnred!10, dashed},
+]
+  % Root
+  \node[capnode] (root) at (0,0) {Root\\{\scriptsize RWXGR}};
+
+  % Level 1
+  \node[capnode] (fs) at (-3,-1.8) {FS Server\\{\scriptsize RWXG-}};
+  \node[capnode] (net) at (0,-1.8) {Net Server\\{\scriptsize RW-G-}};
+  \node[capnode] (drv) at (3,-1.8) {Driver\\{\scriptsize R-X--}};
+
+  % Level 2
+  \node[capnode] (app1) at (-4.5,-3.6) {App~A\\{\scriptsize R-X--}};
+  \node[capnode] (app2) at (-1.5,-3.6) {App~B\\{\scriptsize R----}};
+  \node[revoked] (rev) at (1.5,-3.6) {Revoked\\{\scriptsize -----}};
+
+  % Edges
+  \draw[arr] (root) -- (fs) node[midway,left,font=\scriptsize] {derive};
+  \draw[arr] (root) -- (net) node[midway,left,font=\scriptsize] {derive};
+  \draw[arr] (root) -- (drv) node[midway,right,font=\scriptsize] {derive};
+  \draw[arr] (fs) -- (app1) node[midway,left,font=\scriptsize] {restrict};
+  \draw[arr] (fs) -- (app2) node[midway,right,font=\scriptsize] {restrict};
+  \draw[arr] (net) -- (rev) node[midway,right,font=\scriptsize] {revoke};
+
+  % Annotation
+  \draw[decorate,decoration={brace,amplitude=8pt,raise=4pt},tncomment]
+    (-5,-3.9) -- (-0.5,-3.9) node[midway,below=12pt,font=\sffamily\scriptsize\color{tncomment}]
+    {Monotonic attenuation: children $\subseteq$ parent rights};
+\end{tikzpicture}
+\caption{Capability Derivation Tree with monotonic attenuation. The dashed
+         node shows a revoked capability---all descendants are also invalidated.}
+\label{fig:cdt}
+\end{figure}
+
+\section{Interposition Policies}
+
+The capability system supports four interposition policies that control how
+operations on a capability are handled:
+
+\begin{description}[leftmargin=1.4em]
+  \item[Passthrough.] The operation proceeds directly to the underlying
+    object with no modification.
+  \item[Inspect.] The operation is logged to the provenance subsystem
+    before proceeding.
+  \item[Redirect.] The operation is transparently forwarded to a
+    different object (used by the deception engine).
+  \item[Fabricate.] The result is synthesized without touching the real
+    object (used for honeypot responses).
+\end{description}
+
+\section{Capability Derive and Revoke Example}
+
+Listing~\ref{lst:cap-derive} shows how a service derives a restricted
+capability and later revokes it.
+
+\begin{lstlisting}[caption={Capability derivation and revocation.},
+                   label={lst:cap-derive}]
+use sotos_common::sys;
+use sotos_common::cap::{CapId, Rights};
+
+// Derive a read-only capability from our full-access cap
+let full_cap: CapId = my_resource_cap;
+let ro_rights = Rights::READ;
+let ro_cap = sys::cap_derive(full_cap, ro_rights)
+    .expect("cap_derive failed");
+
+// Grant the read-only cap to a client via IPC
+let mut msg = Message::new();
+msg.set_cap(0, ro_cap);
+sys::send(client_ep, &msg);
+
+// Later: revoke the client's capability (and all its children)
+sys::cap_revoke(ro_cap)
+    .expect("cap_revoke failed");
+// ro_cap and any caps derived from it are now invalid
+\end{lstlisting}
+
+
+% ------------------------------------------------------------------------------
+\chapter{IPC Mechanisms}
+\label{ch:ipc}
+% ------------------------------------------------------------------------------
+
+\section{Synchronous Endpoints}
+
+Synchronous IPC follows the L4 rendezvous model: the sender blocks until
+a receiver is ready, and vice versa. This provides zero-copy message
+transfer with a context switch directly from sender to receiver.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  proc/.style={draw=tnblue, thick, fill=tnblue!10, minimum width=2.5cm,
+               minimum height=3.5cm, rounded corners=3pt},
+  state/.style={font=\sffamily\scriptsize, fill=white, draw=tnblue!50,
+                rounded corners=2pt, minimum width=1.8cm,
+                minimum height=0.5cm},
+  arr/.style={-{Stealth[length=2.5mm]}, thick},
+  msg/.style={font=\sffamily\scriptsize},
+]
+  % Sender
+  \node[proc, label={above:\textbf{Sender}}] (S) at (0,0) {};
+  \node[state] (s1) at (0,1) {Running};
+  \node[state, fill=tnyellow!20] (s2) at (0,0) {Blocked};
+  \node[state] (s3) at (0,-1) {Running};
+
+  % Receiver
+  \node[proc, label={above:\textbf{Receiver}}] (R) at (6,0) {};
+  \node[state, fill=tnyellow!20] (r1) at (6,1) {Blocked};
+  \node[state] (r2) at (6,0) {Running};
+  \node[state, fill=tnyellow!20] (r3) at (6,-1) {Blocked};
+
+  % Kernel
+  \node[font=\sffamily\small\color{tncomment}] at (3,2) {\textbf{Kernel (rendezvous)}};
+
+  % Arrows
+  \draw[arr, tnblue] (s1.east) -- (r1.west)
+    node[midway, above, msg] {send(ep, msg)};
+  \draw[arr, tngreen] (r1.south east) -- (r2.north east)
+    node[right, msg] {recv(ep)};
+  \draw[arr, tnorange, dashed] (3,0.3) -- (3,-0.3)
+    node[right, msg] {copy regs};
+  \draw[arr, tnred] (r2.west) -- (s3.east)
+    node[midway, below, msg] {reply(msg)};
+
+  % Timeline
+  \draw[very thin, tncomment] (-2,1.5) -- (-2,-1.5)
+    node[below, font=\scriptsize] {time};
+  \draw[-{Stealth[length=2mm]}, thin, tncomment] (-2,1.5) -- (-2,-1.5);
+\end{tikzpicture}
+\caption{Synchronous IPC flow. The sender blocks on \texttt{send()}, the
+         receiver blocks on \texttt{recv()}, and the kernel performs a
+         direct register-to-register copy at the rendezvous point.}
+\label{fig:ipc-sync}
+\end{figure}
+
+A message consists of up to 8 general-purpose registers (64 bytes total of
+inline data) plus optional capability transfers in dedicated capability
+registers. For bulk data, the channel mechanism (Section~\ref{sec:async})
+is used instead.
+
+\subsection{IPC Timeout}
+
+The \syscall{sys::call\_timeout(cap, msg, ticks)} interface allows a caller
+to set a deadline on an IPC call. If the callee does not reply within the
+specified number of scheduler ticks, the kernel wakes the blocked caller
+with an error code.
+
+\section{Asynchronous Channels}
+\label{sec:async}
+
+Asynchronous channels use lock-free single-producer single-consumer (SPSC)
+ring buffers for high-throughput, non-blocking data transfer. Each channel
+is a page-sized ring buffer (\hex{A00000}) with separate read and write
+cursors.
+
+The channel interface provides two operations:
+\begin{itemize}[leftmargin=1.4em]
+  \item \syscall{chan\_send(chan\_cap, msg)}: enqueue a message. Returns
+    immediately; fails if the ring is full.
+  \item \syscall{chan\_recv(chan\_cap)}: dequeue a message. Returns
+    immediately; fails if the ring is empty.
+\end{itemize}
+
+\section{Service Registry}
+
+The kernel maintains a name-to-endpoint map that allows services to discover
+each other:
+
+\begin{itemize}[leftmargin=1.4em]
+  \item \syscall{SvcRegister} (syscall~130): register a string name with
+    an endpoint capability.
+  \item \syscall{SvcLookup} (syscall~131): look up a name and receive a
+    derived endpoint capability.
+\end{itemize}
+
+\section{IPC Data Layout}
+
+IPC messages carry data in registers with the following layout constraints:
+
+\begin{itemize}[leftmargin=1.4em]
+  \item \textbf{Send}: up to 40 bytes of inline data (registers 3--7,
+    5 registers at 8 bytes each).
+  \item \textbf{Receive}: up to 64 bytes (registers 0--7, 8 registers at
+    8 bytes each), with the byte count in the tag field.
+  \item For larger transfers, the \LUCAS{} layer uses a multi-chunk IPC
+    loop that reassembles data 64 bytes at a time (used for TCP/HTTP).
+\end{itemize}
+
+
+% ------------------------------------------------------------------------------
+\chapter{Scheduler}
+\label{ch:sched}
+% ------------------------------------------------------------------------------
+
+\section{Multi-Level Queue Design}
+
+The scheduler implements a four-level priority MLQ with the following queues:
+
+\begin{table}[H]
+\centering
+\caption{Scheduler priority levels.}
+\begin{tabular}{c l l l}
+\toprule
+\textbf{Level} & \textbf{Name} & \textbf{Use Case} & \textbf{Policy} \\
+\midrule
+0 & Realtime & IRQ handlers, timer ISR & Fixed priority, no preemption \\
+1 & High     & VMM, FS server          & Round-robin, short quantum \\
+2 & Normal   & Applications            & Round-robin, standard quantum \\
+3 & Low      & Background tasks        & Best-effort, long quantum \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Work Stealing}
+
+Each CPU maintains a Chase-Lev work-stealing deque
+(\file{kernel/src/sched/wsdeque.rs}). When a CPU's local run queue is empty,
+it attempts to steal threads from other CPUs' deques. This provides
+automatic load balancing across cores without centralized coordination.
+
+The Chase-Lev deque provides:
+\begin{itemize}[leftmargin=1.4em]
+  \item O(1) local push/pop (LIFO for cache locality).
+  \item O(1) remote steal (FIFO for fairness).
+  \item Lock-free operation using atomic compare-and-swap.
+\end{itemize}
+
+\section{Resource Limits}
+
+Each process has configurable resource limits enforced by the scheduler
+and frame allocator:
+\begin{itemize}[leftmargin=1.4em]
+  \item \textbf{CPU ticks}: maximum number of scheduler ticks before
+    the process is descheduled. Enforced via \syscall{SYS\_RESOURCE\_LIMIT}
+    (syscall~141).
+  \item \textbf{Memory pages}: maximum number of physical frames a process
+    may allocate. Enforced in the frame allocator.
+\end{itemize}
+
+\section{SMP Support}
+
+The kernel supports up to 16 CPUs. Each Application Processor (AP) is woken
+via the standard INIT-SIPI-SIPI IPI sequence. Key SMP details:
+
+\begin{itemize}[leftmargin=1.4em]
+  \item Each CPU has its own LAPIC timer for preemption.
+  \item Cross-core wakeup uses IPIs (Inter-Processor Interrupts).
+  \item Per-CPU data is accessed via a per-CPU segment or the LAPIC ID.
+  \item SSE must be enabled on \emph{all} CPUs (BSP and APs), as musl and
+    Rust binaries use SSE instructions (e.g., \texttt{movaps}).
+  \item The LAPIC timer is calibrated using the PIT (Programmable Interval
+    Timer) with a CPUID.15H/TSC fallback chain for hypervisors.
+\end{itemize}
+
+
+% ------------------------------------------------------------------------------
+\chapter{Security}
+\label{ch:security}
+% ------------------------------------------------------------------------------
+
+\section{Threat Model}
+
+\sotBSD{} defends against:
+\begin{itemize}[leftmargin=1.4em]
+  \item Compromised userspace services (no ambient authority).
+  \item Capability confusion attacks (generation counters).
+  \item Stack-based exploits (guard pages, canaries, W\^{}X).
+  \item Address space layout attacks (ASLR).
+  \item Adversarial reconnaissance (deception engine, Chapter~\ref{ch:deception}).
+\end{itemize}
+
+\section{W\^{}X Enforcement}
+
+The kernel enforces Write XOR Execute at the page table level. No page may
+have both the writable (W) and executable (X) bits set simultaneously. The
+\syscall{SYS\_PROTECT} syscall rejects any request that violates this
+invariant.
+
+\section{Stack Security}
+
+Three mechanisms protect stacks:
+\begin{description}[leftmargin=1.4em]
+  \item[Guard pages.] An unmapped page below each stack triggers \#PF on
+    overflow.
+  \item[Stack canaries.] A fixed compile-time sentinel value is placed
+    between the return address and local variables. The kernel checks this
+    value on context switch.
+  \item[ASLR.] Stack base addresses are randomized within a configurable
+    range.
+\end{description}
+
+\section{Signed Boot Chain}
+
+Every binary in the initrd CPIO archive is Ed25519-signed. The public key
+is compiled into the init service via
+\file{services/init/src/sigkey\_generated.rs}. At boot, each binary's SHA-256
+hash is verified against its Ed25519 signature before loading. Public-key
+pinning rejects swap-with-self-signed attempts.
+
+\section{Provenance Tracking}
+
+The SOT provenance subsystem maintains a SHA-256 hash-linked DAG of all
+object mutations. Each CPU has a dedicated 4096-entry SPSC ring buffer that
+records provenance events. The hash chain ensures that any tampering with
+the provenance log is detectable.
+
+
+% ==============================================================================
+% PART III --- PERSONALITIES
+% ==============================================================================
+\part{Personalities}
+
+% ------------------------------------------------------------------------------
+\chapter{LUCAS: Linux ABI Compatibility}
+\label{ch:lucas}
+% ------------------------------------------------------------------------------
+
+\section{Architecture}
+
+\LUCAS{} (Linux User-mode Compatibility And Syscall translation) implements
+a comprehensive Linux system call interface on top of the \sotBSD{} kernel.
+Rather than emulating a Linux kernel, \LUCAS{} translates Linux syscalls
+into sequences of \sotBSD{} IPC calls and local operations within the init
+service's \texttt{child\_handler}.
+
+The key architectural insight is that the kernel intercepts
+\texttt{arch\_prctl} at the syscall level (for TLS/FS\_BASE management) and
+redirects all other Linux syscalls via IPC to the init service, which
+handles them in the context of the calling process.
+
+\section{Supported Syscalls}
+
+\LUCAS{} implements 127+ Linux syscall match arms in the \texttt{child\_handler}
+function. Table~\ref{tab:lucas-syscalls} lists the major categories.
+
+\begin{longtable}{l p{9cm}}
+\caption{LUCAS Linux syscall categories.} \label{tab:lucas-syscalls} \\
+\toprule
+\textbf{Category} & \textbf{Syscalls} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Category} & \textbf{Syscalls} \\
+\midrule
+\endhead
+\midrule
+\multicolumn{2}{r}{\textit{Continued on next page}} \\
+\endfoot
+\bottomrule
+\endlastfoot
+File I/O & open, openat, read, write, close, lseek, pread64, pwrite64,
+           readv, writev, preadv, pwritev, dup, dup2, dup3, fcntl \\
+Directory & mkdir, mkdirat, rmdir, unlink, unlinkat, rename, renameat,
+            renameat2, getdents64 \\
+File metadata & stat, fstat, fstatat, lstat, statfs, fstatfs, access,
+                faccessat, faccessat2, readlink, readlinkat \\
+Process & fork (clone CoW), execve, exit, exit\_group, wait4, waitid,
+          getpid, gettid, getppid, clone (CLONE\_THREAD) \\
+Memory & brk, mmap, munmap, mprotect, mremap, madvise \\
+Signals & rt\_sigaction, rt\_sigprocmask, rt\_sigreturn, rt\_sigpending,
+          rt\_sigsuspend, rt\_sigtimedwait, tgkill, sigaltstack \\
+Sockets & socket, bind, connect, send, recv, sendto, recvfrom, recvmsg,
+          poll, epoll\_create1, epoll\_ctl, epoll\_wait, socketpair \\
+Threading & clone (CLONE\_VM/FILES/SIGHAND/THREAD), futex, set\_tid\_address,
+            gettid \\
+Time & clock\_gettime, clock\_getres, clock\_nanosleep, gettimeofday, time,
+       nanosleep \\
+Identity & getuid, getgid, geteuid, getegid, getresuid, getresgid, setuid,
+           setgid, getgroups, setgroups \\
+IPC & pipe, pipe2, eventfd, timerfd\_create, timerfd\_settime, signalfd,
+      shmget, shmat, shmctl \\
+System & uname, sysinfo, prctl, arch\_prctl, personality, getrandom,
+         prlimit64, getrusage \\
+File ops & ftruncate, fsync, fdatasync, fallocate, flock \\
+Special & ioctl, select, pselect6, memfd\_create, inotify\_init1 \\
+\end{longtable}
+
+\section{Process Model}
+
+\LUCAS{} supports the full Unix process lifecycle:
+
+\subsection{Fork}
+
+\texttt{fork()} is implemented via \syscall{SYS\_AS\_CLONE} (syscall~125),
+which creates a real copy-on-write address space clone. Three critical bugs
+were fixed in the fork implementation:
+
+\begin{enumerate}[leftmargin=1.4em]
+  \item \textbf{Stack save/restore}: The parent's 4\,KiB stack at
+    \texttt{fork\_rsp} is saved to a static buffer (\texttt{FORK\_STACK\_BUF})
+    before entering the fork-child loop, and restored after exec/exit. This
+    prevents the vfork child from corrupting the parent's stack.
+  \item \textbf{FD state restoration}: Parent FD state is always restored
+    after the fork-child phase completes.
+  \item \textbf{Pipe reference counting}: \texttt{PIPE\_WRITE\_REFS} and
+    \texttt{PIPE\_READ\_REFS} arrays prevent premature EOF from child close.
+\end{enumerate}
+
+\subsection{Exec}
+
+\texttt{execve()} loads ELF binaries from either the initrd CPIO archive or
+the VFS. The \texttt{exec\_loaded\_elf()} function in \file{services/init/src/exec.rs}
+is the shared ELF loader that handles both static and dynamically-linked
+binaries:
+
+\begin{itemize}[leftmargin=1.4em]
+  \item Static musl binaries: loaded directly at their ELF load address.
+  \item Dynamic binaries: the PT\_INTERP segment is read to find the
+    interpreter (e.g., \texttt{ld-musl-x86\_64.so.1}), which is loaded at
+    \texttt{INTERP\_LOAD\_BASE} (\hex{6000000}). The auxiliary vector
+    includes \texttt{AT\_BASE} so the linker knows its own load address.
+\end{itemize}
+
+\subsection{Thread Groups}
+
+\LUCAS{} implements thread groups for multi-threaded applications:
+
+\begin{itemize}[leftmargin=1.4em]
+  \item \texttt{PROC\_TGID}: maps threads to their thread group leader.
+  \item \texttt{PROC\_FD\_GROUP}: threads in the same group share file
+    descriptors.
+  \item \texttt{PROC\_MEM\_GROUP}: threads share the address space.
+  \item \texttt{PROC\_SIG\_GROUP}: threads share signal handlers.
+\end{itemize}
+
+\texttt{clone()} with \texttt{CLONE\_THREAD | CLONE\_VM | CLONE\_FILES |
+CLONE\_SIGHAND} creates a new thread in the same group, using a clone
+trampoline that sets up TLS via \texttt{arch\_prctl}.
+
+\section{vDSO}
+
+The virtual Dynamic Shared Object (vDSO) is a minimal ELF shared library
+(\texttt{ET\_DYN}) injected as a single 4\,KiB page at \hex{B80000}. It
+exports:
+
+\begin{itemize}[leftmargin=1.4em]
+  \item \texttt{\_\_vdso\_clock\_gettime}: RDTSC-based time, assuming 2\,GHz.
+  \item Stubs for \texttt{gettimeofday}, \texttt{time}, \texttt{getcpu}.
+  \item Fork-restore trampoline at \hex{B80140}.
+  \item Signal trampoline at \hex{B80700}.
+  \item Signal return stub at \hex{B80710}.
+  \item Exit stub at \hex{B80730}.
+\end{itemize}
+
+The vDSO includes a full ELF structure: \texttt{PT\_LOAD}, \texttt{PT\_DYNAMIC},
+\texttt{.dynsym}, \texttt{.dynstr}, SysV \texttt{.hash},
+\texttt{.gnu.version}, and \texttt{.gnu.version\_d} with the
+\texttt{LINUX\_2.6} version tag. \texttt{AT\_SYSINFO\_EHDR} (auxv type~33)
+points every child process to the vDSO.
+
+\section{/proc Emulation}
+
+\texttt{child\_handler} intercepts \texttt{openat} calls to \texttt{/proc/}
+and \texttt{/sys/} paths, returning virtual file descriptors (kind=15) whose
+contents are generated on-the-fly. Supported paths include:
+
+\begin{multicols}{2}
+\begin{itemize}[leftmargin=1em,itemsep=0pt]
+  \item \texttt{/proc/self/maps}
+  \item \texttt{/proc/self/status}
+  \item \texttt{/proc/self/stat}
+  \item \texttt{/proc/self/auxv}
+  \item \texttt{/proc/self/environ}
+  \item \texttt{/proc/self/exe} (readlinkat)
+  \item \texttt{/proc/cpuinfo}
+  \item \texttt{/proc/meminfo}
+  \item \texttt{/proc/N/status}
+  \item \texttt{/sys/devices/system/cpu/online}
+\end{itemize}
+\end{multicols}
+
+
+% ------------------------------------------------------------------------------
+\chapter{BSD and rump Kernel Personality}
+\label{ch:bsd}
+% ------------------------------------------------------------------------------
+
+\section{rump Kernel Integration}
+
+The BSD personality uses a real NetBSD rump kernel linked into a freestanding
+\sotOS{} service. The rump kernel provides a complete NetBSD kernel
+environment including VFS, device drivers, and protocol stacks, running
+entirely in userspace.
+
+The integration comprises:
+\begin{itemize}[leftmargin=1.4em]
+  \item \textbf{Libraries:} \texttt{librump.a}, \texttt{librumpvfs.a},
+    \texttt{librumpfs\_ffs.a}, \texttt{librumpdev.a},
+    \texttt{librumpdev\_disk.a} (approximately 2\,MiB total).
+  \item \textbf{Hypercalls:} 60 hand-rolled \texttt{rumpuser\_*} functions
+    in \texttt{rumpuser\_sot.c} that bridge the rump kernel to \sotBSD{}
+    IPC and memory management.
+  \item \textbf{Block device:} Connected to the virtio-blk or NVMe driver
+    via IPC for persistent storage.
+\end{itemize}
+
+\section{Illumos Heirlooms}
+
+The v0.2.0+ release includes three Illumos-inspired subsystems:
+
+\subsection{SMF: Service Management Facility}
+
+SMF provides dependency-tracked service management with automatic respawn:
+
+\begin{itemize}[leftmargin=1.4em]
+  \item Services declare dependencies as a topological DAG.
+  \item The SMF manager starts services in dependency order.
+  \item Failed services are automatically restarted via
+    \syscall{SYS\_THREAD\_NOTIFY} (syscall~143).
+  \item Cascade failures propagate through the dependency graph.
+\end{itemize}
+
+\subsection{Crossbow: Virtual Networking}
+
+Project Crossbow provides:
+\begin{itemize}[leftmargin=1.4em]
+  \item O(1) VNIC provisioning and revocation.
+  \item Per-port token-bucket rate limiting.
+  \item Locally-administered MAC address generation.
+  \item Virtual switch with multiple forwarding modes.
+\end{itemize}
+
+\subsection{FMA: Fault Management Architecture}
+
+The Fault Management Architecture provides predictive self-healing across
+five scenarios:
+
+\begin{enumerate}[leftmargin=1.4em]
+  \item Disk retry threshold exceeded.
+  \item ECC correctable memory errors above threshold.
+  \item ECC uncorrectable memory errors (immediate response).
+  \item Thermal events (CPU throttling or shutdown).
+  \item PCI link degradation (lane width reduction).
+\end{enumerate}
+
+Six prioritized correlation rules process events from disk, memory, thermal,
+and PCI subsystems, combined with provenance anomaly counters.
+
+
+% ------------------------------------------------------------------------------
+\chapter{Deception Engine}
+\label{ch:deception}
+% ------------------------------------------------------------------------------
+
+\section{Capability Interposition Pipeline}
+
+The deception engine operates through capability interposition: when a
+syscall traverses a capability marked with a deception policy, the engine
+transforms the request or response according to the active deception
+profile.
+
+The pipeline processes four stages:
+\begin{enumerate}[leftmargin=1.4em]
+  \item \textbf{Intercept}: The capability's interposition policy
+    (Section~\ref{ch:caps}) triggers the deception handler.
+  \item \textbf{Profile lookup}: The active deception profile determines
+    what fabrication to apply.
+  \item \textbf{Transform}: The response is rewritten according to the
+    profile's rules.
+  \item \textbf{Consistency check}: The consistency engine verifies
+    cross-channel coherence before delivering the result.
+\end{enumerate}
+
+\section{Deception Profiles}
+
+The engine includes five built-in profiles:
+
+\begin{table}[H]
+\centering
+\caption{Built-in deception profiles.}
+\begin{tabularx}{\textwidth}{l X}
+\toprule
+\textbf{Profile} & \textbf{Description} \\
+\midrule
+Ubuntu 22.04  & Emulates a standard Ubuntu webserver with Apache \\
+Debian        & Mimics Debian stable with default packages \\
+CentOS        & Presents as a CentOS/RHEL database server \\
+FreeBSD       & Emulates a FreeBSD server \\
+Alpine        & Lightweight Alpine Linux container \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+Each profile defines consistent responses for:
+\begin{itemize}[leftmargin=1.4em]
+  \item \texttt{uname} syscall (kernel version, hostname, architecture).
+  \item \texttt{/proc/version} and \texttt{/proc/cpuinfo} contents.
+  \item \texttt{/etc/os-release} and \texttt{/etc/hostname}.
+  \item File system layout and installed packages.
+  \item Network service banners (SSH, HTTP, etc.).
+\end{itemize}
+
+\section{Live Migration}
+
+The deception engine supports live profile migration with the following
+guarantees:
+
+\begin{itemize}[leftmargin=1.4em]
+  \item \textbf{Atomic CSpace swap}: The entire capability space is swapped
+    atomically, ensuring no inconsistent intermediate state.
+  \item \textbf{Sub-10\,$\mu$s latency}: The swap is performed in under
+    10 microseconds, making it undetectable by timing analysis.
+  \item \textbf{Connection preservation}: Active network connections are
+    maintained across profile switches.
+\end{itemize}
+
+\section{Consistency Engine}
+
+The consistency engine ensures cross-channel coherence. When the deception
+profile claims to be ``Ubuntu 22.04'', all channels must agree:
+
+\begin{itemize}[leftmargin=1.4em]
+  \item \texttt{uname -r} returns the correct kernel version.
+  \item \texttt{/etc/os-release} matches.
+  \item \texttt{/proc/version} is consistent.
+  \item Network banners use appropriate version strings.
+  \item File timestamps and package lists are plausible.
+\end{itemize}
+
+\section{Detection Resistance}
+
+To resist timing-based detection, the engine employs:
+\begin{itemize}[leftmargin=1.4em]
+  \item Calibrated delays matching the expected profile's syscall latency.
+  \item Random jitter added to response times.
+  \item Cache-line isolation to prevent microarchitectural side channels.
+\end{itemize}
+
+
+% ==============================================================================
+% PART IV --- SERVICES AND DRIVERS
+% ==============================================================================
+\part{Services \& Drivers}
+
+% ------------------------------------------------------------------------------
+\chapter{sotFS: The Filesystem}
+\label{ch:sotfs}
+% ------------------------------------------------------------------------------
+
+\section{Overview}
+
+\sotFS{} is the native filesystem for \sotBSD{}, designed around a type graph
+model with formal verification guarantees. The implementation consists of 7
+Rust crates, 76 tests, and a mountable FUSE prototype for Linux development.
+
+\section{Type Graph Model}
+
+The filesystem state is represented as a directed graph $TG = (V, E)$ where
+nodes and edges are typed. The type graph has 6 node types and 6 edge types.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  nodetype/.style={draw=tnblue, thick, fill=tnblue!10, circle,
+                   minimum size=1.4cm, font=\sffamily\small, align=center},
+  edge/.style={-{Stealth[length=2.5mm]}, thick},
+]
+  % Nodes
+  \node[nodetype] (inode) at (0,3)    {Inode};
+  \node[nodetype] (dir)   at (4,3)    {Dir};
+  \node[nodetype, fill=tngreen!15] (cap) at (8,3) {Cap};
+  \node[nodetype, fill=tnyellow!15] (tx) at (0,0) {Tx};
+  \node[nodetype, fill=tnpurple!15] (ver) at (4,0) {Version};
+  \node[nodetype, fill=tnorange!15] (blk) at (8,0) {Block};
+
+  % Edges
+  \draw[edge, tnblue] (dir) -- (inode)
+    node[midway, above, font=\scriptsize] {contains};
+  \draw[edge, tngreen] (cap) -- (inode)
+    node[midway, above, font=\scriptsize] {authorizes};
+  \draw[edge, tnred] (dir) to[bend left=20] (dir)
+    node[midway, right, font=\scriptsize] {parent};
+  \draw[edge, tnyellow] (tx) -- (inode)
+    node[midway, left, font=\scriptsize] {modifies};
+  \draw[edge, tnpurple] (inode) -- (ver)
+    node[midway, above, font=\scriptsize] {has\_version};
+  \draw[edge, tnorange] (ver) -- (blk)
+    node[midway, above, font=\scriptsize] {maps\_to};
+
+  % Legend
+  \node[font=\sffamily\scriptsize\color{tncomment}, anchor=north west]
+    at (-1.5,-1.5) {
+    \begin{tabular}{@{}ll@{}}
+    \textbf{Node types:} & Inode, Directory, Capability, Transaction, Version, Block \\
+    \textbf{Edge types:} & contains, authorizes, parent, modifies, has\_version, maps\_to \\
+    \end{tabular}};
+\end{tikzpicture}
+\caption{sotFS type graph with 6 node types and 6 edge types. Edges show
+         the relationships between filesystem entities.}
+\label{fig:sotfs-typegraph}
+\end{figure}
+
+\section{DPO Rewriting Rules}
+
+POSIX filesystem operations are modeled as Double Pushout (DPO) graph
+rewriting rules. Each rule specifies a left-hand side (pattern to match),
+a right-hand side (replacement), and an interface (preserved context).
+
+\begin{definition}[DPO Rule for CREATE]
+\label{def:dpo-create}
+Given a directory node $d$ and a fresh inode $i$, the CREATE operation is
+the DPO rule:
+\[
+  L \xleftarrow{l} K \xrightarrow{r} R
+\]
+where:
+\begin{itemize}[leftmargin=1.4em]
+  \item $L = \{d : \text{Dir}\}$ --- the left-hand side contains only the
+    parent directory.
+  \item $K = \{d : \text{Dir}\}$ --- the interface preserves the directory.
+  \item $R = \{d : \text{Dir},\; i : \text{Inode},\;
+    (d \xrightarrow{\text{contains}} i)\}$ --- the right-hand side adds
+    the new inode and a ``contains'' edge.
+\end{itemize}
+The rule is applied in context $G$ (the current filesystem state) to produce
+$H$ (the new state): $G \Rightarrow_{\text{CREATE}} H$.
+\end{definition}
+
+Table~\ref{tab:dpo-rules} lists all DPO rules.
+
+\begin{table}[H]
+\centering
+\caption{POSIX operations as DPO rewriting rules.}
+\label{tab:dpo-rules}
+\begin{tabularx}{\textwidth}{l X}
+\toprule
+\textbf{VfsOp} & \textbf{DPO Rule Description} \\
+\midrule
+CREATE  & Add Inode node, add ``contains'' edge from Dir \\
+MKDIR   & Add Dir node, add ``contains'' and ``parent'' edges \\
+RMDIR   & Remove Dir node (requires empty), remove edges \\
+LINK    & Add ``contains'' edge from target Dir to existing Inode \\
+UNLINK  & Remove ``contains'' edge (remove Inode if link count = 0) \\
+RENAME  & Remove ``contains'' from source Dir, add to target Dir \\
+WRITE   & Add Version node, add ``has\_version'' edge, add Block nodes \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{Bounded Treewidth}
+
+\begin{theorem}[Bounded Treewidth]
+The treewidth of the sotFS type graph $TG$ satisfies:
+\[
+  \mathrm{tw}(TG) \leq \mathrm{LINK\_MAX} + O(1)
+\]
+Without hard links, the bound tightens to $\mathrm{tw}(TG) \leq 6$.
+\end{theorem}
+
+This bounded treewidth guarantee ensures that graph algorithms on the
+filesystem state (such as anomaly detection) run in linear time.
+
+\section{Ollivier-Ricci Curvature}
+
+\sotFS{} uses Ollivier-Ricci curvature as an anomaly detection metric. The
+discrete curvature of an edge $(u, v)$ measures how well-connected the
+neighborhoods of $u$ and $v$ are. Anomalous filesystem activity (e.g.,
+ransomware creating many files in a flat directory) produces edges with
+strongly negative curvature, triggering alerts.
+
+\section{Deceptive Subgraph Projections}
+
+The deception functor $D_{FS} : \mathbf{TG} \to \mathbf{TG}$ produces a
+projected view of the filesystem for deception targets. This functor can:
+\begin{itemize}[leftmargin=1.4em]
+  \item Hide real files while presenting fabricated directory listings.
+  \item Inject honeypot files that trigger alerts when accessed.
+  \item Present a plausible filesystem layout matching the active deception
+    profile.
+\end{itemize}
+
+\section{Implementation Quality}
+
+The \sotFS{} implementation has been verified through:
+\begin{itemize}[leftmargin=1.4em]
+  \item \textbf{4 TLA+ specifications} checked with TLC.
+  \item \textbf{Typestate enforcement} at compile time.
+  \item \textbf{loom concurrency tests} for lock-free data structures.
+  \item \textbf{proptest}: property-based testing that found 2 bugs.
+  \item \textbf{cargo-fuzz}: 300K runs with 0 crashes.
+  \item \textbf{criterion}: performance benchmarks for all operations.
+  \item \textbf{76 unit and integration tests}.
+  \item \textbf{FUSE prototype}: mountable on Linux for real-world testing.
+\end{itemize}
+
+
+% ------------------------------------------------------------------------------
+\chapter{Device Drivers}
+\label{ch:drivers}
+% ------------------------------------------------------------------------------
+
+\section{Driver Architecture}
+
+All device drivers run in Ring~3 as capability-holding services. The kernel
+provides IRQ virtualization: hardware interrupts are demultiplexed and
+delivered as IPC messages to registered handlers. This architecture ensures
+that a buggy or compromised driver cannot crash the kernel.
+
+\section{PCI Enumeration}
+
+The \texttt{sotos-pci} library provides PCI bus enumeration. It scans the
+configuration space to discover devices and their BARs (Base Address
+Registers), then maps MMIO regions into the driver's address space with
+UC (Uncacheable) flags.
+
+\section{virtio Drivers}
+
+\subsection{virtio-blk}
+
+The virtio-blk driver provides block device access through virtio's split
+virtqueue mechanism. It handles read and write requests from the filesystem
+and other services via IPC.
+
+\subsection{virtio-net}
+
+The virtio-net driver provides network interface access. It integrates with
+the networking stack (Chapter~\ref{ch:net}) to send and receive Ethernet
+frames.
+
+\section{NVMe Driver}
+
+The NVMe driver (\texttt{sotos-nvme}) communicates with NVMe SSDs using:
+\begin{itemize}[leftmargin=1.4em]
+  \item Admin and I/O submission/completion queue pairs.
+  \item PRP (Physical Region Page) lists for scatter-gather DMA.
+  \item IPC-based interface for filesystem requests.
+\end{itemize}
+
+\section{xHCI USB Driver}
+
+The xHCI driver (\texttt{sotos-xhci}) manages USB 3.x host controllers:
+\begin{itemize}[leftmargin=1.4em]
+  \item Device slot allocation and endpoint configuration.
+  \item Transfer ring management (command, event, transfer rings).
+  \item HID keyboard support: USB keyboard events are translated and
+    delivered to the keyboard ring buffer.
+\end{itemize}
+
+\section{PS/2 Keyboard and Mouse}
+
+The PS/2 driver handles legacy keyboard and mouse input:
+\begin{itemize}[leftmargin=1.4em]
+  \item Keyboard: scan code set 1/2 translation, key-up/key-down events
+    written to the ring buffer at \hex{510000}.
+  \item Mouse: PS/2 mouse protocol with movement and button events
+    written to the ring buffer at \hex{520000}.
+\end{itemize}
+
+\section{AC97 Audio}
+
+The AC97 audio driver provides basic audio output through the AC97 codec
+interface, supporting PCM playback at standard sample rates.
+
+\section{Minimal Service Skeleton}
+
+Listing~\ref{lst:service-skeleton} shows the minimal code to create a
+new service that registers with the service registry and enters an IPC
+loop.
+
+\begin{lstlisting}[caption={Minimal service skeleton.},label={lst:service-skeleton}]
+#![no_std]
+#![no_main]
+
+use sotos_common::sys;
+use sotos_common::ipc::Message;
+
+#[no_mangle]
+pub extern "C" fn _start() -> ! {
+    // Read our capabilities from BootInfo
+    let boot_info = unsafe { &*(0xB00000 as *const BootInfo) };
+    let root_cap = boot_info.root_cap;
+
+    // Create an endpoint for receiving requests
+    let ep = sys::endpoint_create()
+        .expect("endpoint_create failed");
+
+    // Register our service name so others can find us
+    sys::svc_register("my_service", ep)
+        .expect("svc_register failed");
+
+    // Main IPC loop: receive requests and send replies
+    loop {
+        let mut request = Message::new();
+        let badge = sys::recv(ep, &mut request);
+
+        // Dispatch based on the message tag
+        let mut reply = Message::new();
+        match request.tag() {
+            1 => { /* handle command 1 */ }
+            2 => { /* handle command 2 */ }
+            _ => { reply.set_error(-1); }
+        }
+
+        sys::reply(badge, &reply);
+    }
+}
+\end{lstlisting}
+
+
+% ------------------------------------------------------------------------------
+\chapter{Networking Stack}
+\label{ch:net}
+% ------------------------------------------------------------------------------
+
+\section{Protocol Stack}
+
+The networking stack is implemented as a userspace service with the following
+layers:
+
+\begin{description}[leftmargin=1.4em]
+  \item[Layer 2: Ethernet.] Frame transmission and reception via
+    virtio-net driver.
+  \item[ARP.] Address Resolution Protocol with dynamic cache.
+  \item[DHCP.] Dynamic host configuration with random transaction IDs.
+  \item[Layer 3: IP.] IPv4 packet routing and fragmentation.
+  \item[ICMP.] Ping echo request/reply and error messages.
+  \item[Layer 4: UDP.] Connectionless datagram transport. Used for DNS.
+  \item[Layer 4: TCP.] Connection-oriented transport with:
+    \begin{itemize}[leftmargin=1em]
+      \item Three-way handshake (SYN, SYN-ACK, ACK).
+      \item Retransmission with exponential backoff.
+      \item RST handling for connection reset.
+      \item TCP Reno congestion control.
+      \item 16\,KiB receive buffer.
+    \end{itemize}
+  \item[DNS.] Domain name resolution via UDP to configured resolver
+    (default: \texttt{10.0.2.3} under QEMU SLIRP).
+\end{description}
+
+\section{Socket API}
+
+\LUCAS{} exposes a BSD socket API to Linux binaries:
+
+\begin{itemize}[leftmargin=1.4em]
+  \item \texttt{socket(AF\_INET, SOCK\_STREAM|SOCK\_DGRAM, 0)}: creates
+    TCP or UDP socket FDs.
+  \item \texttt{bind}, \texttt{connect}, \texttt{listen}, \texttt{accept}.
+  \item \texttt{send}, \texttt{recv}, \texttt{sendto}, \texttt{recvfrom},
+    \texttt{recvmsg}.
+  \item \texttt{poll}, \texttt{epoll\_create1}, \texttt{epoll\_ctl},
+    \texttt{epoll\_wait}.
+\end{itemize}
+
+The socket proxy translates these into IPC messages to the net service:
+\begin{itemize}[leftmargin=1.4em]
+  \item TCP send: \texttt{regs=[conn\_id, 0, data\_len, data...]} (data
+    in regs[3..], 40 bytes max per message).
+  \item UDP sendto: \texttt{regs=[dst\_ip, dst\_port, src\_port, data\_len,
+    data...]} (data in regs[4..]).
+  \item Receive: reply tag = byte count, data in regs[0..7] (64 bytes max).
+\end{itemize}
+
+\section{HTTP Client}
+
+The networking stack supports HTTP/1.1 GET requests sufficient for tools
+like \texttt{busybox wget}. Multi-chunk IPC assembly handles responses
+larger than 64 bytes by looping the receive call.
+
+
+% ==============================================================================
+% PART V --- OPERATIONS
+% ==============================================================================
+\part{Operations}
+
+% ------------------------------------------------------------------------------
+\chapter{Building and Running}
+\label{ch:build}
+% ------------------------------------------------------------------------------
+
+\section{Prerequisites}
+
+\begin{itemize}[leftmargin=1.4em]
+  \item Rust nightly toolchain (for \texttt{build-std} and
+    \texttt{abi\_x86\_interrupt}).
+  \item \texttt{x86\_64-unknown-none} target:
+    \texttt{rustup target add x86\_64-unknown-none}.
+  \item Python 3 (invoked as \texttt{python} on Windows).
+  \item QEMU (at \texttt{C:\textbackslash Program Files\textbackslash qemu\textbackslash}
+    on Windows).
+  \item \texttt{just} command runner.
+\end{itemize}
+
+\section{Build Commands}
+
+\begin{table}[H]
+\centering
+\caption{Build and run commands.}
+\begin{tabularx}{\textwidth}{l X}
+\toprule
+\textbf{Command} & \textbf{Description} \\
+\midrule
+\texttt{just build}     & Compile kernel and all services \\
+\texttt{just run}       & Build + create disk image + boot QEMU (serial) \\
+\texttt{just run-gui}   & Same as \texttt{run} but with QEMU display window \\
+\texttt{just run-net}   & Boot with virtio-net enabled \\
+\texttt{just run-nvme}  & Boot with NVMe device \\
+\texttt{just run-xhci}  & Boot with xHCI USB controller \\
+\texttt{just run-fast}  & Boot with WHPX acceleration (${\sim}$25s to Tier~5) \\
+\texttt{just debug}     & Boot with GDB server (\texttt{target remote :1234}) \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{Manual Build Steps}
+
+\begin{lstlisting}[language={},caption={Manual build and boot sequence.}]
+# Compile the kernel
+cargo build --package sotos-kernel
+
+# Create the disk image (GPT + FAT32 with LFN)
+python scripts/mkimage.py
+
+# Boot in QEMU (2048M RAM, serial to terminal)
+"C:/Program Files/qemu/qemu-system-x86_64.exe" \
+  -drive format=raw,file=target/sotos.img \
+  -serial stdio -display none -no-reboot -m 2048M
+\end{lstlisting}
+
+\section{Disk Image}
+
+The disk image is built by \file{scripts/mkimage.py}, a pure-Python GPT +
+FAT32 image builder with Long File Name (LFN) support. It creates a raw
+disk image containing:
+
+\begin{itemize}[leftmargin=1.4em]
+  \item A GPT partition table with an EFI System Partition.
+  \item The Limine bootloader (BIOS stage 1 and 2).
+  \item The kernel ELF binary.
+  \item The initrd CPIO archive containing all services.
+  \item The \texttt{limine.conf} boot configuration.
+\end{itemize}
+
+
+% ------------------------------------------------------------------------------
+\chapter{Debugging}
+\label{ch:debug}
+% ------------------------------------------------------------------------------
+
+\section{Serial Output}
+
+All kernel debug output goes through COM1 serial (\texttt{kprintln!()} macro).
+QEMU's \texttt{-serial stdio} flag redirects this to the terminal. The
+\texttt{kdebug!()} macro is gated behind the \texttt{verbose} feature flag,
+allowing conditional debug output.
+
+\textbf{Critical invariant}: Serial must be initialized \emph{first} in
+\texttt{kmain()}, before any assertions or debug prints. A panic before
+serial initialization produces no diagnostics.
+
+\section{GDB Debugging}
+
+\begin{lstlisting}[language={},caption={GDB debugging session.}]
+# Terminal 1: boot with GDB server
+just debug
+
+# Terminal 2: connect GDB
+gdb -ex "target remote :1234"
+(gdb) break kmain
+(gdb) continue
+\end{lstlisting}
+
+\section{Common Gotchas}
+
+\begin{description}[leftmargin=1.4em]
+  \item[ET\_DYN rejection.] Limine rejects dynamically-linked ELF files.
+    Ensure \texttt{-C relocation-model=static} is set.
+  \item[Cargo config merging.] Child crate builds inherit parent
+    \texttt{.cargo/config.toml}. Use \texttt{CARGO\_ENCODED\_RUSTFLAGS}
+    to override.
+  \item[TCG spin deadlock.] Under QEMU TCG (software emulation), tight
+    spin loops may deadlock. Use \texttt{yield} or \texttt{hlt}.
+  \item[WHPX strict mode.] WHPX (Windows Hypervisor Platform) enforces
+    strict x86 semantics (FXRSTOR reserved bits, MXCSR validation) that
+    TCG ignores.
+  \item[IST and \#PF.] Never assign an IST entry to \#PF---shared IST
+    stacks corrupt under concurrent CoW faults.
+  \item[Init stack size.] Use 4 pages (16\,KiB), not 1. Smaller stacks
+    overflow during service initialization.
+  \item[MMIO UC flags.] Device MMIO pages must be mapped with Uncacheable
+    flags to prevent CPU write-back caching.
+  \item[compiler\_builtins memcmp.] In debug builds, \texttt{compiler\_builtins}
+    \texttt{memcmp} triggers UB checks. Use byte-by-byte comparison in
+    \file{kernel/src/initrd.rs}.
+  \item[Atomic thread redirect.] Use \texttt{spawn\_user\_with\_redirect()}
+    ---setting redirect\_ep after thread creation races with early syscalls.
+\end{description}
+
+
+% ------------------------------------------------------------------------------
+\chapter{Syscall Reference}
+\label{ch:syscalls}
+% ------------------------------------------------------------------------------
+
+\section{Kernel Syscalls}
+
+Table~\ref{tab:kern-syscalls} lists all kernel-native syscalls.
+
+\begin{longtable}{c l p{3.5cm} p{5cm}}
+\caption{Kernel syscall reference.} \label{tab:kern-syscalls} \\
+\toprule
+\textbf{\#} & \textbf{Name} & \textbf{Arguments} & \textbf{Returns / Description} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{\#} & \textbf{Name} & \textbf{Arguments} & \textbf{Returns / Description} \\
+\midrule
+\endhead
+\midrule
+\multicolumn{4}{r}{\textit{Continued on next page}} \\
+\endfoot
+\bottomrule
+\endlastfoot
+24  & UnmapFree      & vaddr          & Unmap page + free frame \\
+130 & SvcRegister    & name, ep\_cap   & Register service name \\
+131 & SvcLookup      & name           & Returns derived ep cap \\
+132 & InitrdRead     & filename, buf  & Read file from initrd CPIO \\
+133 & BootInfoWrite  & as\_cap, addr   & Write BootInfo into target AS \\
+134 & Protect        & addr, len, prot & mprotect with W\^{}X \\
+135 & CallTimeout    & cap, msg, ticks & IPC call with timeout \\
+140 & ThreadInfo     &                & Get tid/priority/ticks/mem \\
+141 & ResourceLimit  & ticks, pages   & Set CPU/memory limits \\
+142 & ThreadCount    &                & Get total thread count \\
+143 & ThreadNotify   & tid            & Wake thread (for SMF) \\
+160 & SetFsBase      & addr           & Set FS\_BASE MSR (TLS) \\
+161 & GetFsBase      &                & Get FS\_BASE MSR \\
+172 & GetThreadRegs  & raw\_tid        & Read saved registers \\
+173 & SignalEntry    & thread\_cap, addr & Set signal trampoline \\
+174 & SignalInject   & raw\_tid, signum & Set pending signal bit \\
+252 & DebugFreeFrames &               & Return free frame count \\
+\end{longtable}
+
+\section{SOT Syscalls}
+
+See Table~\ref{tab:sot-syscalls} in Chapter~\ref{ch:arch} for the 12 SOT
+exokernel syscalls (numbers 300--311).
+
+\section{FD Kind Codes}
+
+Table~\ref{tab:fd-kinds} lists the file descriptor kind codes used by
+\LUCAS{} to dispatch operations to the correct handler.
+
+\begin{table}[H]
+\centering
+\caption{File descriptor kind codes.}
+\label{tab:fd-kinds}
+\begin{tabular}{c l l}
+\toprule
+\textbf{Kind} & \textbf{Name} & \textbf{Description} \\
+\midrule
+1  & Stdin      & Standard input (keyboard ring) \\
+2  & Stdout     & Standard output (serial) \\
+3  & Stderr     & Standard error (serial) \\
+8  & Null       & \texttt{/dev/null} \\
+9  & Zero       & \texttt{/dev/zero} \\
+10 & PipeRead   & Read end of a pipe \\
+11 & PipeWrite  & Write end of a pipe \\
+13 & VfsFile    & VFS-backed regular file \\
+14 & VfsDir     & VFS-backed directory \\
+15 & ProcFs     & Virtual /proc or /sys file \\
+16 & TcpSocket  & TCP socket (via net IPC) \\
+17 & UdpSocket  & UDP socket (via net IPC) \\
+18 & Initrd     & File backed by initrd CPIO \\
+22 & EventFd    & eventfd counter \\
+23 & TimerFd    & timerfd (TSC-based) \\
+25 & MemFd      & memfd (anonymous page-backed) \\
+27 & UnixA      & socketpair end A \\
+28 & UnixB      & socketpair end B \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+% ------------------------------------------------------------------------------
+\chapter{Formal Verification}
+\label{ch:formal}
+% ------------------------------------------------------------------------------
+
+\section{TLA+ Specifications}
+
+Six TLA+ specifications cover the core kernel subsystems. Each has a
+matching TLC model-checking configuration file.
+
+\begin{table}[H]
+\centering
+\caption{TLA+ specifications and their coverage.}
+\begin{tabularx}{\textwidth}{l X}
+\toprule
+\textbf{Specification} & \textbf{Coverage} \\
+\midrule
+capabilities        & CDT derivation, revocation, rights attenuation \\
+ipc                 & Endpoint send/recv rendezvous, deadlock freedom \\
+scheduler           & MLQ priority inversion freedom, work stealing \\
+sot\_capabilities    & SOT layer cap derive/revoke with interposition \\
+sot\_provenance      & Hash-chain integrity, ring buffer overflow \\
+sot\_transactions    & Tier 0/1/2 commit/abort, serialization \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+All specifications are checked via \texttt{just tlc-mc}, which runs TLC on
+each spec and reports per-specification state counts.
+
+\section{sotFS Formal Methods}
+
+The \sotFS{} filesystem uses multiple formal verification approaches:
+
+\begin{description}[leftmargin=1.4em]
+  \item[DPO Rewriting.] Each POSIX operation is modeled as a Double Pushout
+    rule on the type graph (see Section~\ref{def:dpo-create}).
+  \item[Bounded Treewidth.] Proved that $\mathrm{tw}(TG) \leq 6$ without
+    hard links, ensuring linear-time graph algorithms.
+  \item[Typestate.] Rust's type system enforces valid state transitions at
+    compile time (e.g., a transaction handle cannot be used after commit).
+  \item[loom.] Concurrency testing for lock-free data structures.
+  \item[proptest.] Property-based testing (found 2 bugs: an off-by-one in
+    directory iteration and a missing EOF marker).
+  \item[cargo-fuzz.] Coverage-guided fuzzing: 300K runs, 0 crashes.
+\end{description}
+
+\section{Invariants}
+
+The following invariants are maintained by the system and checked by the
+TLA+ specifications:
+
+\begin{invariant}[Capability Monotonicity]
+For any capability $c$ derived from $p$:
+$\text{rights}(c) \subseteq \text{rights}(p)$.
+\end{invariant}
+
+\begin{invariant}[IPC Deadlock Freedom]
+No cycle exists in the endpoint wait graph.
+\end{invariant}
+
+\begin{invariant}[Transaction Serializability]
+The commit order of Tier~2 transactions is equivalent to some serial
+execution.
+\end{invariant}
+
+\begin{invariant}[Provenance Integrity]
+The SHA-256 hash chain in the provenance ring is tamper-evident:
+$h_i = \text{SHA256}(h_{i-1} \| \text{event}_i)$.
+\end{invariant}
+
+\begin{invariant}[W\^{}X]
+For all pages $p$ in any address space:
+$\neg(\text{writable}(p) \land \text{executable}(p))$.
+\end{invariant}
+
+
+% ==============================================================================
+% APPENDICES
+% ==============================================================================
+\appendix
+
+% ------------------------------------------------------------------------------
+\chapter{Linux ABI Constants}
+\label{app:linux-abi}
+% ------------------------------------------------------------------------------
+
+The \texttt{sotos-common::linux\_abi} module defines 198
+\texttt{SYS\_*} constants for Linux system call numbers. Key structures
+defined in this module:
+
+\begin{table}[H]
+\centering
+\caption{Linux ABI structures in sotos-common.}
+\begin{tabularx}{\textwidth}{l c X}
+\toprule
+\textbf{Struct} & \textbf{Size} & \textbf{Description} \\
+\midrule
+\texttt{Stat}             & 144\,B & File status (matches Linux x86\_64) \\
+\texttt{Termios}          & 44\,B  & Terminal I/O settings \\
+\texttt{Winsize}          & 8\,B   & Terminal window size \\
+\texttt{KernelSigaction}  & 32\,B  & Signal action (24 + sigsetsize) \\
+\texttt{LinuxDirent64}    & var    & Directory entry \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+Important ABI notes:
+\begin{itemize}[leftmargin=1.4em]
+  \item \texttt{rt\_sigaction}: The kernel sigaction struct is 32 bytes
+    (24 + 8-byte sigset), \emph{not} 152. Writing 152 bytes to
+    \texttt{oldact} corrupts stack return addresses.
+  \item \texttt{TCGETS} ioctl: reads 36 bytes (not 60).
+  \item \texttt{fstat} on kind=14 (VfsDir): returns \texttt{S\_IFDIR}.
+\end{itemize}
+
+
+% ------------------------------------------------------------------------------
+\chapter{Project Structure}
+\label{app:structure}
+% ------------------------------------------------------------------------------
+
+\begin{description}[leftmargin=0em]
+  \item[\texttt{kernel/}] The microkernel (Ring~0)
+    \begin{description}[leftmargin=1em]
+      \item[\texttt{arch/x86\_64/}] CPU-specific: serial, GDT, IDT, LAPIC,
+        SMP boot, SYSCALL/SYSRET
+      \item[\texttt{mm/}] Physical frame allocator (bitmap), slab allocator
+      \item[\texttt{cap/}] Capability table + CDT
+      \item[\texttt{ipc/}] Endpoints (sync) + Channels (async)
+      \item[\texttt{sched/}] Thread management, MLQ scheduler, Chase-Lev
+        deque
+    \end{description}
+  \item[\texttt{libs/}] Shared libraries
+    \begin{description}[leftmargin=1em]
+      \item[\texttt{sotos-common/}] Kernel-userspace ABI, syscall numbers,
+        linux\_abi module
+      \item[\texttt{sotos-pci/}] PCI bus enumeration
+      \item[\texttt{sotos-virtio/}] virtio device drivers
+      \item[\texttt{sotos-net/}] IP/TCP/UDP/ICMP networking
+      \item[\texttt{sotos-nvme/}] NVMe SSD driver
+      \item[\texttt{sotos-xhci/}] xHCI USB driver
+      \item[\texttt{sotos-objstore/}] Object store + VFS
+      \item[\texttt{sotos-ld/}] Dynamic linker
+    \end{description}
+  \item[\texttt{services/}] Userspace servers
+    \begin{description}[leftmargin=1em]
+      \item[\texttt{init/}] First userspace process (spawns all others)
+      \item[\texttt{vmm/}] Virtual memory manager (paging, CoW)
+      \item[\texttt{kbd/}] Keyboard driver service
+      \item[\texttt{net/}] Network service
+      \item[\texttt{nvme/}] NVMe driver service
+      \item[\texttt{xhci/}] xHCI USB driver service
+    \end{description}
+  \item[\texttt{personality/}] OS personality layers
+    \begin{description}[leftmargin=1em]
+      \item[\texttt{bsd/}] NetBSD rump kernel integration
+      \item[\texttt{linux/}] Linux compatibility (LUCAS, LKL)
+      \item[\texttt{common/deception/}] Deception engine
+    \end{description}
+  \item[\texttt{boot/}] Bootloader configuration (\texttt{limine.conf})
+  \item[\texttt{scripts/}] Build tools (\texttt{mkimage.py}, test scripts)
+  \item[\texttt{docs/}] Documentation and specifications
+  \item[\texttt{specs/}] TLA+ formal specifications
+\end{description}
+
+
+% ------------------------------------------------------------------------------
+\chapter{VfsOp to DPO Rule Mapping}
+\label{app:vfsop}
+% ------------------------------------------------------------------------------
+
+Table~\ref{tab:vfsop-dpo} provides the complete mapping from VFS operations
+to their DPO rewriting rules, including the graph elements affected.
+
+\begin{longtable}{l l l l l}
+\caption{Complete VfsOp to DPO rule mapping.} \label{tab:vfsop-dpo} \\
+\toprule
+\textbf{VfsOp} & \textbf{L (match)} & \textbf{K (keep)} & \textbf{R (produce)} & \textbf{Gluing} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{VfsOp} & \textbf{L (match)} & \textbf{K (keep)} & \textbf{R (produce)} & \textbf{Gluing} \\
+\midrule
+\endhead
+\bottomrule
+\endlastfoot
+CREATE & Dir $d$ & Dir $d$ & $d$, Inode $i$, $d \to i$ & $d$ identity \\
+MKDIR  & Dir $d$ & Dir $d$ & $d$, Dir $d'$, $d \to d'$, $d' \to d$ & $d$ identity \\
+RMDIR  & Dir $d$, Dir $d'$, $d \to d'$ & Dir $d$ & Dir $d$ & empty $d'$ \\
+LINK   & Dir $d$, Inode $i$ & $d$, $i$ & $d$, $i$, $d \to i$ & $d$, $i$ id \\
+UNLINK & Dir $d$, $d \to i$ & Dir $d$ & Dir $d$ & nlink check \\
+RENAME & Dir $s$, $s \to i$, Dir $t$ & $s$, $i$, $t$ & $s$, $i$, $t$, $t \to i$ & $s$, $t$ id \\
+WRITE  & Inode $i$ & Inode $i$ & $i$, Ver $v$, Blk $b$, edges & $i$ identity \\
+\end{longtable}
+
+
+% ------------------------------------------------------------------------------
+\chapter{Configuration Reference}
+\label{app:config}
+% ------------------------------------------------------------------------------
+
+\section{QEMU Flags}
+
+\begin{longtable}{l p{8cm}}
+\caption{Common QEMU flags used with sotBSD.} \\
+\toprule
+\textbf{Flag} & \textbf{Purpose} \\
+\midrule
+\endfirsthead
+\endhead
+\bottomrule
+\endlastfoot
+\texttt{-serial stdio}         & Redirect COM1 to terminal \\
+\texttt{-display none}         & Headless (serial-only) \\
+\texttt{-no-reboot}            & Halt on triple fault \\
+\texttt{-m 2048M}              & 2\,GiB RAM \\
+\texttt{-smp N}                & N CPU cores \\
+\texttt{-accel whpx}           & Windows Hypervisor (fast) \\
+\texttt{-accel tcg}            & Software emulation (slow) \\
+\texttt{-s}                    & GDB server on port 1234 \\
+\texttt{-device virtio-net-pci}& virtio network adapter \\
+\texttt{-device nvme}          & NVMe SSD controller \\
+\texttt{-device qemu-xhci}     & xHCI USB 3.0 controller \\
+\texttt{-netdev user,id=n0}    & SLIRP user-mode networking \\
+\end{longtable}
+
+\section{Key Compile Flags}
+
+\begin{description}[leftmargin=1.4em]
+  \item[\texttt{-C relocation-model=static}] Required: Limine rejects
+    \texttt{ET\_DYN}.
+  \item[\texttt{-Z build-std=core,alloc}] Build \texttt{core} and
+    \texttt{alloc} from source for the bare-metal target.
+  \item[\texttt{-C code-model=kernel}] Place code in the upper 2\,GiB
+    (optional, for HHDM compatibility).
+  \item[\texttt{CARGO\_ENCODED\_RUSTFLAGS}] Override parent
+    \texttt{.cargo/config.toml} for userspace crate builds.
+\end{description}
+
+
+% ==============================================================================
+% BACK MATTER
+% ==============================================================================
+
+\chapter*{Glossary}
+\addcontentsline{toc}{chapter}{Glossary}
+
+\begin{description}[leftmargin=0em]
+  \item[AP] Application Processor (non-boot CPU in SMP).
+  \item[BSP] Bootstrap Processor (the CPU that runs firmware).
+  \item[CDT] Capability Derivation Tree.
+  \item[CoW] Copy-on-Write.
+  \item[DPO] Double Pushout (graph rewriting framework).
+  \item[FMA] Fault Management Architecture.
+  \item[HHDM] Higher Half Direct Map.
+  \item[IPC] Inter-Process Communication.
+  \item[IST] Interrupt Stack Table.
+  \item[LAPIC] Local Advanced Programmable Interrupt Controller.
+  \item[LUCAS] Linux User-mode Compatibility And Syscall translation.
+  \item[MLQ] Multi-Level Queue (scheduler).
+  \item[PRP] Physical Region Page (NVMe scatter-gather).
+  \item[SMF] Service Management Facility.
+  \item[SO] Secure Object.
+  \item[SOT] Secure Object Transaction.
+  \item[SPSC] Single-Producer Single-Consumer (ring buffer).
+  \item[TLC] TLA+ model checker.
+  \item[UC] Uncacheable (memory type for MMIO).
+  \item[vDSO] virtual Dynamic Shared Object.
+  \item[VNIC] Virtual Network Interface Card.
+  \item[VFS] Virtual File System.
+  \item[VMM] Virtual Memory Manager.
+  \item[W\^{}X] Write XOR Execute.
+\end{description}
+
+\end{document}
