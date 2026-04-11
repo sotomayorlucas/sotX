@@ -1,8 +1,7 @@
-# sotBSD — a verified microkernel personality OS
+# sotX — a verified microkernel personality OS
 
-**sotBSD** is the BSD-personality branch of [sotOS](https://github.com/sotomayorlucas/sotOS),
-a microkernel operating system written from scratch in Rust. The kernel
-itself is `sotos-kernel`; sotBSD is what you get when you boot it with the
+**sotX** a microkernel operating system written from scratch in Rust. The kernel
+itself is `sotos-kernel`; sotX is what you get when you boot it with the
 SOT exokernel layer, the deception subsystem, the BSD personality
 services, and the production-hardening pipeline all wired together.
 
