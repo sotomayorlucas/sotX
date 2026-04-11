@@ -1,0 +1,7 @@
+# Override parent config completely.
+# cargo-fuzz manages its own target and flags.
+[build]
+target = "x86_64-pc-windows-msvc"
+rustflags = []
+
+[unstable]

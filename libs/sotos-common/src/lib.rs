@@ -93,6 +93,8 @@ pub enum Syscall {
     ChannelClose = 7,
     /// Create a new IPC endpoint.
     EndpointCreate = 10,
+    /// Close/destroy an IPC endpoint, freeing its pool slot.
+    EndpointClose = 11,
     /// Allocate a physical frame.
     FrameAlloc = 20,
     /// Free a physical frame.
@@ -1204,6 +1206,12 @@ pub mod sys {
     #[inline(always)]
     pub fn endpoint_create() -> Result<u64, i64> {
         check_val(syscall0(super::Syscall::EndpointCreate as u64))
+    }
+
+    /// Close/destroy an IPC endpoint, freeing its per-core pool slot.
+    #[inline(always)]
+    pub fn endpoint_close(cap: u64) -> Result<(), i64> {
+        check_unit(syscall1(super::Syscall::EndpointClose as u64, cap))
     }
 
     // ---------------------------------------------------------------

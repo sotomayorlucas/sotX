@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = [
+    "sotfs-graph",
+    "sotfs-storage",
+    "sotfs-ops",
+    "sotfs-tx",
+    "sotfs-fuse",
+    "sotfs-monitor",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Lucas Sotomayor <lucas@base4.io>"]
+license = "MIT"
+
+[workspace.dependencies]
+sotfs-graph = { path = "sotfs-graph", default-features = false }
+sotfs-storage = { path = "sotfs-storage" }
+sotfs-ops = { path = "sotfs-ops" }
+sotfs-tx = { path = "sotfs-tx" }
+thiserror = "1"
+serde = { version = "=1.0.219", default-features = false, features = ["derive", "alloc"] }

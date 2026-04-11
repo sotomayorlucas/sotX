@@ -1,0 +1,17 @@
+[package]
+name = "sotfs-storage"
+description = "Persistence layer for sotFS (redb-backed)"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+sotfs-graph = { workspace = true }
+sotfs-ops = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = "1"
+redb = "=2.1.0"
+
+[dev-dependencies]
+tempfile = "3"

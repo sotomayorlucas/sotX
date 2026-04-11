@@ -63,6 +63,7 @@ pub(crate) fn close_fd_internal(ctx: &mut SyscallContext, fd: usize) -> bool {
         10 => super::fs_pipe::close_pipe_read(ctx, fd),
         26 => super::fs_pipe::close_unix_listener(ctx, fd),
         27 | 28 => super::fs_pipe::close_unix_socket(ctx, fd),
+        36 | 37 => super::fs_sotfs::close_sotfs_slot(fd),
         _ => {}
     }
     ctx.child_fds[fd] = 0;

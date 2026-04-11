@@ -97,6 +97,25 @@ scripts/__pycache__/
 target/sigkey.bin
 target/sigmanifest
 
+# Debug / boot logs
+bootlog_*.txt
+run.log
+
+# Claude Code worktrees
+.claude/worktrees/
+
+# Temporary test/diagnostic scripts (dev-only)
+scripts/test_*.py
+scripts/diag_*.py
+
+# Library Cargo.lock files (only workspace root's is tracked)
+drivers/*/Cargo.lock
+libs/*/Cargo.lock
+personality/**/Cargo.lock
+services/*/Cargo.lock
+sotfs/Cargo.lock
+sotfs/fuzz/Cargo.lock
+
 # Editor / OS noise
 .DS_Store
 

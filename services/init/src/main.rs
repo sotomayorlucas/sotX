@@ -331,12 +331,27 @@ pub extern "C" fn _start() -> ! {
     spawn_process(b"kernel-test");
     for _ in 0..3000 { sys::yield_now(); }
 
+    // --- QA kernel test services (early, before slow demos) ---
+    spawn_process(b"cap-escalation-test");
+    for _ in 0..2000 { sys::yield_now(); }
+    spawn_process(b"ipc-storm");
+    for _ in 0..4000 { sys::yield_now(); }
+    spawn_process(b"smp-stress");
+    for _ in 0..4000 { sys::yield_now(); }
+
     // --- Phase 6c: BSD personality stub (Tier 2.2) ---
     // Spawn rump-vfs server, give it time to register, then exercise the
     // OPEN/READ/CLOSE protocol against /etc/passwd from this process.
     spawn_process(b"rump-vfs");
     for _ in 0..200 { sys::yield_now(); }
     test_rump_vfs();
+
+    // --- Phase 6c2: sotFS graph-structured filesystem service ---
+    // Spawn the sotFS service which implements the type graph engine with
+    // DPO rewriting rules. Registers as "sotfs" in the service registry.
+    // Can be mounted as FsType::SotFs via the VFS mount table.
+    spawn_process(b"sotfs");
+    for _ in 0..200 { sys::yield_now(); }
 
     // --- Phase 6d: Deception live demo (Tier 3) ---
     // First spawn the "attacker" binary so it produces real provenance
@@ -395,6 +410,8 @@ pub extern "C" fn _start() -> ! {
     // when done. Driven from CI by scripts/abi_fuzz.py.
     spawn_process(b"abi-fuzz");
     for _ in 0..4000 { sys::yield_now(); }
+
+    // QA kernel test services moved to right after kernel-test (see below)
 
     // --- Phase 6g: Tier 6 PANDORA Task 1 — DTrace integration ---
     // Spawn the sot-dtrace service first, give it time to register,

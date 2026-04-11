@@ -9,8 +9,8 @@ use sotos_common::SysError;
 
 use super::{
     msg_from_frame, msg_to_frame, SYS_CALL, SYS_CALL_TIMEOUT, SYS_CHANNEL_CLOSE,
-    SYS_CHANNEL_CREATE, SYS_CHANNEL_RECV, SYS_CHANNEL_SEND, SYS_ENDPOINT_CREATE, SYS_RECV,
-    SYS_RECV_TIMEOUT, SYS_SEND,
+    SYS_CHANNEL_CREATE, SYS_CHANNEL_RECV, SYS_CHANNEL_SEND, SYS_ENDPOINT_CLOSE,
+    SYS_ENDPOINT_CREATE, SYS_RECV, SYS_RECV_TIMEOUT, SYS_SEND,
 };
 
 /// Handle IPC syscalls. Returns `true` if the syscall was handled.
@@ -166,6 +166,17 @@ pub fn handle(frame: &mut TrapFrame, nr: u64) -> bool {
                 }
             }
             None => frame.rax = SysError::OutOfResources as i64 as u64,
+        },
+
+        // SYS_ENDPOINT_CLOSE — destroy endpoint and free pool slot (cap_id in rdi)
+        SYS_ENDPOINT_CLOSE => match cap::validate(frame.rdi as u32, Rights::REVOKE) {
+            Ok(CapObject::Endpoint { id }) => {
+                endpoint::close(PoolHandle::from_raw(id));
+                cap::revoke(CapId::new(frame.rdi as u32));
+                frame.rax = 0;
+            }
+            Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
+            Err(e) => frame.rax = e as i64 as u64,
         },
 
         _ => return false,

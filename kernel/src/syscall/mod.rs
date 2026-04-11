@@ -60,6 +60,7 @@ pub(super) const SYS_CHANNEL_RECV: u64 = 6;
 pub(super) const SYS_CHANNEL_CLOSE: u64 = 7;
 
 pub(super) const SYS_ENDPOINT_CREATE: u64 = 10;
+pub(super) const SYS_ENDPOINT_CLOSE: u64 = 11;
 
 /// Syscall numbers — memory management.
 pub(super) const SYS_FRAME_ALLOC: u64 = 20;

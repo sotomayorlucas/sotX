@@ -25,6 +25,8 @@ pub enum FsType {
     Devfs = 4,
     /// Process filesystem (/proc).
     Procfs = 5,
+    /// sotFS — graph-structured filesystem with DPO rewriting.
+    SotFs = 6,
 }
 
 /// A single mount point entry.

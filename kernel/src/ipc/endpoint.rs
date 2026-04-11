@@ -32,7 +32,7 @@ const CALLER_BIT: u32 = 0x8000_0000;
 
 // --- Per-core pool constants ---
 use sotos_common::MAX_CPUS;
-const MAX_EP_PER_CORE: usize = 64;
+const MAX_EP_PER_CORE: usize = 256;
 
 /// Handle encoding constants.
 const CORE_SHIFT: u32 = 28;
@@ -180,7 +180,6 @@ impl CoreEndpointPool {
     }
 
     /// Free an endpoint slot and bump its generation.
-    #[allow(dead_code)]
     fn free(&mut self, local_bits: u32) -> bool {
         let idx = (local_bits & IDX_MASK) as usize;
         let gen = ((local_bits >> GEN_SHIFT) & GEN_MASK_8) as u8;
@@ -258,6 +257,18 @@ pub fn create() -> Option<EndpointId> {
     let mut pool = PER_CORE_ENDPOINTS[core].lock();
     let raw = pool.alloc(core as u32)?;
     Some(EndpointId(PoolHandle::from_raw(raw)))
+}
+
+/// Close an endpoint, freeing its per-core pool slot.
+pub fn close(ep_handle: PoolHandle) -> bool {
+    let raw = ep_handle.raw();
+    let core_id = ((raw >> CORE_SHIFT) & CORE_MASK) as usize;
+    let local = raw & !(CORE_MASK << CORE_SHIFT);
+    if core_id >= MAX_CPUS {
+        return false;
+    }
+    let mut pool = PER_CORE_ENDPOINTS[core_id].lock();
+    pool.free(local as u32)
 }
 
 /// Synchronous send: block until a receiver is ready, transfer message.

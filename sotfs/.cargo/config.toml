@@ -1,0 +1,6 @@
+# Override parent .cargo/config.toml which targets bare-metal x86_64-unknown-none.
+# Must reset target to host and clear rustflags.
+
+[build]
+target = "x86_64-pc-windows-msvc"
+rustflags = []

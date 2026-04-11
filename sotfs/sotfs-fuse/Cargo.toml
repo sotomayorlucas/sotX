@@ -1,0 +1,18 @@
+[package]
+name = "sotfs-fuse"
+description = "FUSE binding for sotFS (Linux-only)"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+sotfs-graph = { workspace = true }
+sotfs-ops = { workspace = true }
+sotfs-tx = { workspace = true }
+sotfs-storage = { workspace = true }
+libc = "0.2"
+log = "0.4"
+env_logger = "0.11"
+
+[target.'cfg(unix)'.dependencies]
+fuser = "0.15"

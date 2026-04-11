@@ -1,0 +1,14 @@
+[package]
+name = "sotfs-tx"
+description = "Graph-level transaction manager (GTXN)"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+sotfs-graph = { workspace = true }
+sotfs-ops = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+loom = "0.7"

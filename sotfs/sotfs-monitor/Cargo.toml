@@ -1,0 +1,17 @@
+[package]
+name = "sotfs-monitor"
+description = "Structural monitors for sotFS: treewidth, Ollivier-Ricci curvature, deceptive projections"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+sotfs-graph = { workspace = true }
+
+[dev-dependencies]
+sotfs-ops = { workspace = true }
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "monitor_bench"
+harness = false

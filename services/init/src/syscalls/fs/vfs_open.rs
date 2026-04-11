@@ -40,6 +40,21 @@ pub(crate) fn sys_open(ctx: &mut SyscallContext, msg: &IpcMsg) {
     };
     let name = &path[..path_len];
 
+    // --- sotFS mount point intercept (SYS_OPEN) ---
+    if super::fs_sotfs::is_sotfs_path(name) {
+        match super::fs_sotfs::sotfs_open(name, flags as u64) {
+            Ok((inode_id, is_dir, size)) => {
+                if let Some(fd) = super::fs_sotfs::sotfs_assign_fd(ctx, inode_id, is_dir, size) {
+                    reply_val(ctx.ep_cap, fd as i64);
+                } else {
+                    reply_val(ctx.ep_cap, -EMFILE);
+                }
+            }
+            Err(e) => reply_val(ctx.ep_cap, e),
+        }
+        return;
+    }
+
     // Synthetic directory open: /dev/dri/, /dev/input/
     if name == b"/dev/dri" || name == b"/dev/dri/" {
         let mut fd = None;
@@ -570,6 +585,21 @@ pub(crate) fn sys_openat(ctx: &mut SyscallContext, msg: &IpcMsg) {
         }
     };
     let name = &path[..path_len];
+
+    // --- sotFS mount point intercept (SYS_OPENAT) ---
+    if super::fs_sotfs::is_sotfs_path(name) {
+        match super::fs_sotfs::sotfs_open(name, flags as u64) {
+            Ok((inode_id, is_dir, size)) => {
+                if let Some(fd) = super::fs_sotfs::sotfs_assign_fd(ctx, inode_id, is_dir, size) {
+                    reply_val(ctx.ep_cap, fd as i64);
+                } else {
+                    reply_val(ctx.ep_cap, -EMFILE);
+                }
+            }
+            Err(e) => reply_val(ctx.ep_cap, e),
+        }
+        return;
+    }
 
     // Synthetic directory open: /dev/dri/, /dev/input/
     if name == b"/dev/dri" || name == b"/dev/dri/" {

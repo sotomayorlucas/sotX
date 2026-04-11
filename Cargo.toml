@@ -47,6 +47,10 @@ exclude = [
     "services/sot-cheri",
     "services/sot-statusbar",
     "services/abi-fuzz",
+    "services/sotfs",
+    "services/cap-escalation-test",
+    "services/ipc-storm",
+    "services/smp-stress",
     "libs/sotos-testlib",
     "tools/sotctl",
     "tools/capctl",
@@ -57,6 +61,7 @@ exclude = [
     "tests/security",
     "tests/posix",
     "tests/deception",
+    "sotfs",
 ]
 
 [profile.dev]

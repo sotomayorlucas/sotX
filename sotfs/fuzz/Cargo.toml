@@ -1,0 +1,32 @@
+[package]
+name = "sotfs-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+sotfs-graph = { path = "../sotfs-graph" }
+sotfs-ops = { path = "../sotfs-ops" }
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "fuzz_op_sequence"
+path = "fuzz_targets/fuzz_op_sequence.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_path_resolution"
+path = "fuzz_targets/fuzz_path_resolution.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_ipc_parser"
+path = "fuzz_targets/fuzz_ipc_parser.rs"
+doc = false

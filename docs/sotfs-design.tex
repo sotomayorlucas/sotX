@@ -1,0 +1,893 @@
+\documentclass[11pt,a4paper]{article}
+
+% --- packages -----------------------------------------------------------------
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[a4paper,margin=2.4cm]{geometry}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{tabularx}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{parskip}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{tikz}
+\usetikzlibrary{shapes,arrows.meta,positioning,calc,fit,decorations.pathreplacing}
+\usepackage{tikz-cd}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{multicol}
+
+% --- colours ------------------------------------------------------------------
+\definecolor{tnblue}{HTML}{7AA2F7}
+\definecolor{tnred}{HTML}{F7768E}
+\definecolor{tngreen}{HTML}{73DACA}
+\definecolor{tncomment}{HTML}{565F89}
+\definecolor{linkcolor}{HTML}{2C5AA0}
+\definecolor{lightgray}{HTML}{EAEAEA}
+\definecolor{nodecol}{HTML}{E8F0FE}
+\definecolor{edgecol}{HTML}{1A73E8}
+\definecolor{delcol}{HTML}{EA4335}
+\definecolor{addcol}{HTML}{34A853}
+
+% --- hyperref -----------------------------------------------------------------
+\hypersetup{
+  colorlinks=true,
+  linkcolor=linkcolor,
+  urlcolor=linkcolor,
+  citecolor=linkcolor,
+  pdftitle={sotFS: A Graph-Structured Filesystem with DPO Rewriting and Bounded Treewidth},
+  pdfauthor={Lucas Sotomayor},
+}
+
+% --- listings -----------------------------------------------------------------
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  numbers=left,
+  numberstyle=\tiny\color{tncomment},
+  numbersep=8pt,
+  frame=single,
+  framesep=4pt,
+  rulecolor=\color{lightgray},
+  backgroundcolor=\color{lightgray!30},
+  showstringspaces=false,
+  breaklines=true,
+  tabsize=2,
+  captionpos=b,
+  keywordstyle=\color{tnblue}\bfseries,
+  commentstyle=\color{tncomment}\itshape,
+  stringstyle=\color{tnred},
+}
+
+% --- titlesec -----------------------------------------------------------------
+\titleformat{\section}
+  {\normalfont\Large\bfseries\color{tnblue}}
+  {\thesection}{1em}{}
+\titleformat{\subsection}
+  {\normalfont\large\bfseries\color{tnblue!80!black}}
+  {\thesubsection}{1em}{}
+\titleformat{\subsubsection}
+  {\normalfont\normalsize\bfseries}
+  {\thesubsubsection}{1em}{}
+
+% --- header / footer ----------------------------------------------------------
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\textit{sotFS Design Document v1.0}}
+\fancyhead[R]{\textit{April 2026}}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.3pt}
+
+% --- theorem environments -----------------------------------------------------
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}[section]
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{invariant}{Invariant}[section]
+\newtheorem{constraint}{Constraint}[section]
+\newtheorem{property}{Property}[section]
+
+% --- custom commands ----------------------------------------------------------
+\newcommand{\TG}{\ensuremath{\mathcal{TG}}}
+\newcommand{\sotfs}{\textsc{sotFS}}
+\newcommand{\sotos}{\textsc{sotOS}}
+\newcommand{\GTXN}{\textsc{gtxn}}
+\newcommand{\DPO}{\textsc{dpo}}
+\newcommand{\MSO}{\textsc{mso}}
+\newcommand{\WAL}{\textsc{wal}}
+\newcommand{\CDT}{\textsc{cdt}}
+\newcommand{\TPC}{\textsc{2pc}}
+\newcommand{\NodeType}{\texttt{NodeType}}
+\newcommand{\EdgeType}{\texttt{EdgeType}}
+\newcommand{\tw}{\ensuremath{\mathrm{tw}}}
+
+% --- title metadata -----------------------------------------------------------
+\title{
+  \vspace{-1.5cm}
+  \textbf{sotFS} \\[0.4em]
+  \large A Graph-Structured Filesystem with \\
+  DPO Rewriting, Bounded Treewidth, and \\
+  Capability-Gated Deceptive Projections \\[0.6em]
+  \normalsize Design Document v1.0
+}
+\author{
+  Lucas Sotomayor \\
+  \texttt{lucas@base4.io} \\
+  BASE4 Security
+}
+\date{April 2026}
+
+% =============================================================================
+\begin{document}
+% =============================================================================
+
+\maketitle
+\thispagestyle{empty}
+
+\begin{abstract}
+\noindent
+Filesystem metadata is inherently a graph: inodes link to directories,
+capabilities reference files, hard links create shared substructure, and
+version histories form DAGs. Yet every major filesystem treats metadata as
+flat tables or implicit trees, losing the graph structure that could enable
+powerful queries, anomaly detection, and formal reasoning about correctness.
+
+\sotfs{} makes this graph structure explicit. It represents filesystem
+metadata as a \emph{typed graph} with six node types and six edge types,
+and defines POSIX operations as \emph{Double Pushout (DPO) graph rewriting
+rules}---algebraic transformations with mathematically precise preconditions,
+postconditions, and gluing constraints.
+
+This formalization yields three structural properties unavailable in
+conventional filesystems: (1)~\textbf{bounded treewidth}, enabling any
+MSO-definable query to execute in \emph{linear time} via Courcelle's
+theorem; (2)~\textbf{Ollivier--Ricci curvature monitoring}, detecting
+structural anomalies in real time; and (3)~\textbf{deceptive subgraph
+views}, where different security domains see different projections of the
+filesystem graph.
+
+\sotfs{} is designed for \sotos{}, a capability-based microkernel written
+in Rust. It runs as a userspace server domain, communicating via IPC and
+persisting state through the SOT exokernel's transactional Secure Object
+primitives. A four-layer verification plan---TLA+ model checking, crash
+refinement, Rust typestate, and Coq/Perennial proofs---provides graduated
+formal assurance.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+% =============================================================================
+\section{Introduction and Motivation}
+% =============================================================================
+
+\subsection{The Problem: Filesystems as Implicit Graphs}
+
+Every filesystem manages a graph. A directory tree is trivially a graph.
+Hard links make it a DAG. Symbolic links add arbitrary edges. Mount points
+graft subtrees. Access control lists associate permission sets with inodes.
+Snapshots create version DAGs. Transactions group operations into atomic
+units referencing multiple nodes.
+
+Yet no production filesystem treats this graph as a first-class data
+structure:
+
+\begin{itemize}[nosep]
+  \item \textbf{ext4} stores metadata in superblocks, group descriptors,
+    inode tables, and directory entry blocks---flat structures connected by
+    implicit integer references (inode numbers).
+  \item \textbf{ZFS} uses a Merkle-like tree of block pointers where the
+    graph structure is implicit in pointer chains.
+  \item \textbf{Btrfs} uses B-trees with composite keys encoding path
+    information, with backreferences for deduplication.
+  \item \textbf{HAMMER2} uses a radix tree with embedded block references
+    and snapshot chains forming implicit DAGs.
+\end{itemize}
+
+This implicit representation has three consequences: (1)~queries are slow
+(graph queries forced through non-graph interfaces), (2)~formal reasoning
+is hard (invariants must be reconstructed from code), and (3)~security
+monitoring is blind (namespace structure must be inferred from syscall traces).
+
+\subsection{Thesis Statement}
+
+\begin{quote}
+\itshape
+Filesystem metadata is a typed graph. By formalizing POSIX operations as
+DPO graph rewriting rules and maintaining the metadata graph as an explicit
+first-class data structure, we can prove that operations preserve structural
+invariants by verifying the DPO rules once, enable MSO-definable security
+queries in linear time, detect structural anomalies via Ollivier--Ricci
+curvature, and implement capability-gated graph projections for cyber
+deception.
+\end{quote}
+
+\subsection{Contributions}
+
+\begin{enumerate}[nosep]
+  \item \textbf{Type Graph \TG:} A formal definition of filesystem metadata
+    as a typed graph with six node types and six edge types, with precise
+    local and global invariants (\S\ref{sec:typegraph}).
+  \item \textbf{DPO Rule Set:} A complete specification of core POSIX
+    operations as DPO graph rewriting rules with explicit gluing conditions
+    (\S\ref{sec:dpo}).
+  \item \textbf{Treewidth Preservation:} A proof that the DPO rules preserve
+    bounded treewidth, enabling linear-time MSO queries via Courcelle's
+    theorem (\S\ref{sec:treewidth}).
+  \item \textbf{Curvature Monitor:} An incremental Ollivier--Ricci curvature
+    computation scheme for real-time anomaly detection (\S\ref{sec:curvature}).
+  \item \textbf{Deceptive Projections:} Capability-gated subgraph views
+    formalized as a graph endofunctor (\S\ref{sec:deception}).
+  \item \textbf{\GTXN{} Protocol:} A graph-level transaction manager composing
+    the SOT kernel's tiered transactions with graph-specific invariant
+    checking (\S\ref{sec:transactions}).
+\end{enumerate}
+
+% =============================================================================
+\section{Background and Related Work}
+% =============================================================================
+
+\subsection{Double Pushout Graph Rewriting}
+
+DPO graph rewriting, developed by Ehrig, Pfender, and Schneider~(1973) and
+formalized in Ehrig et al.~\cite{ehrig2006}, is a categorical approach to
+graph transformation. A \textbf{DPO rule} $\rho = (L \xleftarrow{l} K
+\xrightarrow{r} R)$ consists of a left-hand side~$L$ (pattern to match),
+an interface~$K$ (preserved portion), and a right-hand side~$R$ (replacement).
+
+Application of~$\rho$ to a host graph~$G$ via a match $m\colon L \to G$
+produces a result~$H$ through two pushout squares:
+
+\begin{equation}\label{eq:dpo}
+\begin{tikzcd}
+  L \arrow[d, "m"'] & K \arrow[l, "l"'] \arrow[r, "r"] \arrow[d, "d"] & R \arrow[d, "m^*"] \\
+  G & D \arrow[l, "l^*"] \arrow[r, "r^*"'] & H
+\end{tikzcd}
+\end{equation}
+
+The \textbf{gluing conditions} ensure applicability:
+\begin{enumerate}[nosep]
+  \item \emph{Identification condition:} $m$ must not identify elements in
+    $L \setminus l(K)$.
+  \item \emph{Dangling condition:} Removing $m(L \setminus K)$ must not
+    leave edges with missing endpoints.
+\end{enumerate}
+
+\subsection{Courcelle's Theorem and Bounded Treewidth}
+
+\textbf{Treewidth}~\cite{robertson1986} measures how ``tree-like'' a graph
+is. A tree has treewidth~1; a complete graph~$K_n$ has treewidth~$n-1$.
+
+\begin{theorem}[Courcelle, 1990~\cite{courcelle1990}]
+Every graph property definable in Monadic Second-Order logic (\MSO{}$_2$)
+can be decided in time $O(f(|\varphi|, k) \cdot n)$ on graphs of treewidth
+$\le k$, where $n = |V|$.
+\end{theorem}
+
+\MSO{}$_2$ can express reachability, cycle detection, $k$-colorability,
+dominating sets, and many security-relevant properties.
+
+\subsection{Ollivier--Ricci Curvature on Graphs}
+
+Ollivier~\cite{ollivier2009} defined Ricci curvature for metric spaces via
+optimal transport. Lin, Lu, and Yau~\cite{linluyau2011} adapted it to graphs:
+
+\begin{equation}\label{eq:curvature}
+\kappa(u,v) = 1 - \frac{W_1(\mu_u, \mu_v)}{d(u,v)}
+\end{equation}
+
+where $W_1$ is the Wasserstein-1 distance between probability measures
+$\mu_u$, $\mu_v$ on the neighborhoods of $u$ and $v$.
+
+\subsection{Comparison with Existing Systems}
+
+\begin{table}[h]
+\centering
+\caption{Feature comparison of \sotfs{} with production filesystems.}
+\label{tab:comparison}
+\footnotesize
+\begin{tabularx}{\textwidth}{l*{5}{>{\centering\arraybackslash}X}c}
+\toprule
+\textbf{Feature} & \textbf{ext4} & \textbf{ZFS} & \textbf{Btrfs} & \textbf{HAMMER2} & \textbf{SquirrelFS} & \textbf{\sotfs{}} \\
+\midrule
+Metadata model & tables & Merkle & B-trees & radix & Rust types & \textbf{typed graph} \\
+Formal ops & --- & --- & --- & --- & typestate & \textbf{DPO rules} \\
+Treewidth bound & --- & --- & --- & --- & --- & \textbf{$\le k$} \\
+MSO queries & --- & --- & --- & --- & --- & \textbf{$O(n)$} \\
+Anomaly detect. & --- & --- & --- & --- & --- & \textbf{Ollivier--Ricci} \\
+Cap. integration & DAC & DAC & DAC & DAC & --- & \textbf{graph edges} \\
+Deception & --- & --- & --- & --- & --- & \textbf{subgraph views} \\
+Verification & tested & tested & tested & tested & typestate & \textbf{TLA+$\to$Coq} \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+% =============================================================================
+\section{Architecture Overview}
+% =============================================================================
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+  box/.style={draw, rounded corners, minimum width=11cm, minimum height=1cm,
+              fill=nodecol, font=\footnotesize},
+  lbl/.style={font=\footnotesize\bfseries, anchor=west},
+  arr/.style={-{Stealth[length=3mm]}, thick}
+]
+  \node[box] (app) at (0,6) {Application (POSIX binary via LUCAS/rump)};
+  \node[box] (lucas) at (0,4.5) {LUCAS / rump VFS layer};
+  \node[box, minimum height=3.2cm, fill=addcol!15] (sotfs) at (0,2) {};
+  \node[lbl] at (-5.2,3.2) {\sotfs{} Server Domain (Ring~3)};
+  \node[font=\scriptsize, anchor=north west] at (-4.8,2.9) {
+    \begin{tabular}{l}
+    VfsOp dispatcher \\
+    \GTXN{} engine (DPO matcher + gluing check + treewidth verifier) \\
+    Curvature monitor \\
+    Persistence layer (graph $\to$ sectors, \WAL{}, bitmap)
+    \end{tabular}
+  };
+  \node[box, fill=tnred!15] (kernel) at (0,-0.3) {\sotos{} Microkernel (Ring~0): IPC $|$ Scheduling $|$ Frames $|$ Caps};
+  \node[box, fill=lightgray] (hw) at (0,-1.8) {Hardware (NVMe / virtio-blk)};
+
+  \draw[arr] (app) -- (lucas) node[midway,right,font=\scriptsize] {syscall};
+  \draw[arr] (lucas) -- (sotfs.north) node[midway,right,font=\scriptsize] {VfsOp IPC};
+  \draw[arr] (sotfs.south) -- (kernel) node[midway,right,font=\scriptsize] {SOT Tier 1/2};
+  \draw[arr] (kernel) -- (hw);
+\end{tikzpicture}
+\caption{\sotfs{} within the \sotos{} stack.}
+\label{fig:arch}
+\end{figure}
+
+The \sotfs{} server domain contains five components: (1)~VfsOp Dispatcher,
+(2)~\GTXN{} Engine, (3)~Type Graph Store, (4)~Curvature Monitor, and
+(5)~Persistence Layer (extending the existing \texttt{ObjectStore} layout).
+
+% =============================================================================
+\section{Type Graph Formalization}\label{sec:typegraph}
+% =============================================================================
+
+\begin{definition}[Type Graph]\label{def:tg}
+The \sotfs{} type graph is a tuple
+\[
+  \TG = (V, E, \mathrm{src}, \mathrm{tgt}, \tau_V, \tau_E, \mathrm{attr})
+\]
+where $V$ is a finite set of nodes, $E$ is a finite set of edges,
+$\mathrm{src}, \mathrm{tgt}\colon E \to V$ map edges to endpoints,
+$\tau_V\colon V \to \NodeType$ and $\tau_E\colon E \to \EdgeType$ assign
+types, and $\mathrm{attr}\colon V \cup E \to \texttt{Attributes}$ assigns
+typed attribute records.
+\end{definition}
+
+The type sets are:
+\begin{align*}
+  \NodeType &= \{\texttt{Inode},\; \texttt{Directory},\; \texttt{Capability},\; \texttt{Transaction},\; \texttt{Version},\; \texttt{Block}\} \\
+  \EdgeType &= \{\texttt{contains},\; \texttt{grants},\; \texttt{delegates},\; \texttt{derivesFrom},\; \texttt{supersedes},\; \texttt{pointsTo}\}
+\end{align*}
+
+\subsection{Node Types}
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+  node/.style={draw, rounded corners=3pt, minimum width=2.2cm,
+               minimum height=0.8cm, font=\footnotesize\bfseries,
+               fill=nodecol},
+  edge/.style={-{Stealth[length=2mm]}, thick, color=edgecol},
+  elbl/.style={font=\scriptsize, color=edgecol, midway, above, sloped}
+]
+  \node[node] (dir) at (0,3) {Directory};
+  \node[node] (inode) at (4,3) {Inode};
+  \node[node] (cap) at (8,3) {Capability};
+  \node[node] (block) at (4,0) {Block};
+  \node[node] (ver) at (0,0) {Version};
+  \node[node] (tx) at (8,0) {Transaction};
+
+  \draw[edge] (dir) -- (inode) node[elbl] {contains};
+  \draw[edge] (cap) -- (inode) node[elbl] {grants};
+  \draw[edge] (cap) to[bend left=25] node[elbl] {delegates} ++(0,1.2) to[bend left=25] (cap);
+  \draw[edge] (inode) -- (block) node[elbl] {pointsTo};
+  \draw[edge] (ver) to[loop left] node[font=\scriptsize,color=edgecol,left] {derivesFrom} (ver);
+  \draw[edge, dashed] (inode) to[bend right=15] node[elbl,below,sloped] {supersedes} ++(2,-0.7) to[bend right=15] (inode);
+\end{tikzpicture}
+\caption{Node types and edge types of the \sotfs{} type graph \TG{}.}
+\label{fig:typegraph}
+\end{figure}
+
+Each node type carries typed attributes:
+
+\begin{center}
+\footnotesize
+\begin{tabularx}{\textwidth}{l l X}
+\toprule
+\textbf{Node Type} & \textbf{Key Attributes} & \textbf{Maps To (existing)} \\
+\midrule
+\texttt{Inode} & id, vtype, perms, uid, gid, size, link\_count, timestamps & \texttt{Vnode} in \texttt{vnode.rs} \\
+\texttt{Directory} & id & Paired with \texttt{Inode\{vtype=Directory\}} \\
+\texttt{Capability} & cap\_id, rights, epoch & \texttt{CapEntry} in \texttt{cap/table.rs} \\
+\texttt{Transaction} & txn\_id, tier, state, read\_set, write\_set & State machine in \texttt{sot\_transactions.tla} \\
+\texttt{Version} & version\_id, timestamp, root\_oid & \texttt{SnapMeta} in \texttt{layout.rs} \\
+\texttt{Block} & block\_id, sector\_start, sector\_count, refcount & \texttt{DirEntry} sectors in \texttt{layout.rs} \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{Edge Types and Constraints}
+
+\begin{center}
+\footnotesize
+\begin{tabularx}{\textwidth}{l l l X}
+\toprule
+\textbf{Edge Type} & \textbf{Source $\to$ Target} & \textbf{Attribute} & \textbf{Constraint} \\
+\midrule
+\texttt{contains} & Directory $\to$ Inode & name: String & Unique name per Directory \\
+\texttt{grants} & Capability $\to$ Inode & rights: Rights & Monotonic via delegation \\
+\texttt{delegates} & Capability $\to$ Capability & --- & \CDT{} parent--child (forest) \\
+\texttt{derivesFrom} & Version $\to$ Version & --- & DAG (no cycles) \\
+\texttt{supersedes} & Inode $\to$ Inode & --- & Acyclic \\
+\texttt{pointsTo} & Inode $\to$ Block & offset: u64 & Non-overlapping extents \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{Invariants}\label{sec:invariants}
+
+\subsubsection{Local Invariants}
+
+\begin{invariant}[Link Count]\label{inv:linkcount}
+For every Inode $i$: $\mathrm{link\_count}(i) = |\{e \in E : \tau_E(e) = \texttt{contains} \land \mathrm{tgt}(e) = i \land \mathrm{attr}(e).\mathrm{name} \ne \text{``..''}\}|$.
+\end{invariant}
+
+\begin{invariant}[Directory Self-Reference]\label{inv:selfref}
+Every Directory node $d$ has exactly one outgoing \texttt{contains} edge with $\mathrm{name} = \text{``.''}$ pointing to its paired Inode.
+\end{invariant}
+
+\begin{invariant}[Unique Names]\label{inv:uniquenames}
+For every Directory $d$, the names on outgoing \texttt{contains} edges form a set (no duplicates).
+\end{invariant}
+
+\begin{invariant}[Capability Exactness]\label{inv:capexact}
+Every Capability node $c$ has exactly one outgoing \texttt{grants} edge.
+\end{invariant}
+
+\begin{invariant}[Block Refcount]\label{inv:blockref}
+For every Block $b$: $\mathrm{refcount}(b) = |\{e \in E : \tau_E(e) = \texttt{pointsTo} \land \mathrm{tgt}(e) = b\}|$.
+\end{invariant}
+
+\begin{invariant}[Non-Overlapping Sectors]\label{inv:sectors}
+For any two Block nodes $b_1 \ne b_2$, their sector ranges are disjoint.
+\end{invariant}
+
+\subsubsection{Global Invariants}
+
+\begin{invariant}[No Orphan Inodes]\label{inv:noorphan}
+Every Inode with $\mathrm{link\_count} > 0$ is reachable from the root Inode via \texttt{contains} edges.
+\end{invariant}
+
+\begin{invariant}[No Dangling Edges]\label{inv:nodangle}
+$\forall e \in E: \mathrm{src}(e) \in V \land \mathrm{tgt}(e) \in V$.
+\end{invariant}
+
+\begin{invariant}[Capability Monotonicity]\label{inv:monotone}
+For every path $c_0 \xrightarrow{\texttt{delegates}} c_1 \xrightarrow{\texttt{delegates}} \cdots \xrightarrow{\texttt{delegates}} c_n$: $\mathrm{rights}(c_n) \subseteq \mathrm{rights}(c_{n-1}) \subseteq \cdots \subseteq \mathrm{rights}(c_0)$.
+\end{invariant}
+
+\begin{invariant}[No Directory Cycles]\label{inv:nocycle}
+The \texttt{contains} subgraph restricted to \texttt{Directory} $\to$ \texttt{Inode\{vtype=Directory\}} edges (excluding ``\texttt{.}'' and ``\texttt{..}'') is acyclic.
+\end{invariant}
+
+\begin{invariant}[Treewidth Bound]\label{inv:treewidth}
+$\tw(\TG) \le k$ for a configurable constant $k$ (see Theorem~\ref{thm:treewidth}).
+\end{invariant}
+
+% =============================================================================
+\section{DPO Rules for POSIX Operations}\label{sec:dpo}
+% =============================================================================
+
+We specify 7 mutating DPO rules. Read-only operations (\texttt{OPEN},
+\texttt{READ}, \texttt{CLOSE}, \texttt{STAT}) are graph morphism
+queries---they do not mutate \TG{}.
+
+\subsection{CREATE$(d, \mathrm{name}, \mathrm{vtype})$}
+
+Creates a new file or directory entry.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+  gnode/.style={draw, circle, minimum size=6mm, font=\scriptsize\bfseries, fill=nodecol},
+  gedge/.style={-{Stealth[length=2mm]}, thick},
+  del/.style={gedge, color=delcol, dashed},
+  add/.style={gedge, color=addcol},
+  lbl/.style={font=\scriptsize, midway, above}
+]
+  % L
+  \node[gnode] (Ld) at (0,0) {$d$};
+  \node[font=\footnotesize\bfseries, above=3mm] at (0,0.5) {$L$};
+
+  % K
+  \node[gnode] (Kd) at (3,0) {$d$};
+  \node[font=\footnotesize\bfseries, above=3mm] at (3,0.5) {$K$};
+
+  % R
+  \node[gnode] (Rd) at (6,0) {$d$};
+  \node[gnode, fill=addcol!20] (Ri) at (8,0) {$i$};
+  \draw[add] (Rd) -- (Ri) node[lbl] {\texttt{name}};
+  \node[font=\footnotesize\bfseries, above=3mm] at (7,0.5) {$R$};
+
+  % arrows
+  \draw[{Stealth[length=2mm]}-, thick] (Ld) -- (Kd) node[midway,above,font=\scriptsize] {$l$};
+  \draw[-{Stealth[length=2mm]}, thick] (Kd) -- (Rd) node[midway,above,font=\scriptsize] {$r$};
+\end{tikzpicture}
+\caption{\DPO{} rule for \textsc{create} (file). Green = added.}
+\label{fig:create}
+\end{figure}
+
+\textbf{Gluing conditions:} (GC1)~No existing \texttt{contains} edge from
+$m(d)$ with this name. (GC2)~The match is unique.
+
+\textbf{Invariant preservation:} Invariant~\ref{inv:noorphan}: $i$ is
+reachable from root via $d$. Invariant~\ref{inv:linkcount}:
+$\mathrm{link\_count}(i) = 1$. Invariant~\ref{inv:treewidth}: adding a
+leaf to a tree preserves treewidth. \hfill$\square$
+
+\subsection{MKDIR$(d, \mathrm{name})$}
+
+Creates a new directory: adds Inode ($\mathrm{vtype}=\texttt{Directory}$),
+Directory node, and three \texttt{contains} edges
+(\texttt{name}, ``\texttt{.}'', ``\texttt{..}'').
+
+\textbf{Tier:} SOT Tier~1 (single Directory SO).
+
+\subsection{RMDIR$(d, \mathrm{name})$}
+
+Removes an empty directory. $L$ includes the target Directory, its Inode,
+and all three \texttt{contains} edges. $K$ retains only the parent.
+
+\textbf{Gluing:} Target must be empty (only ``\texttt{.}'' and
+``\texttt{..}'' edges).
+
+\subsection{LINK$(d, \mathrm{name}, i_{\mathrm{target}})$}
+
+Creates a hard link---a new \texttt{contains} edge to an existing Inode.
+Side effect: $\mathrm{link\_count}(i_{\mathrm{target}}) \mathrel{+}= 1$.
+
+\textbf{Gluing:} (GC1)~$\mathrm{vtype}(i_{\mathrm{target}}) \ne
+\texttt{Directory}$. (GC2)~$\mathrm{link\_count} < \texttt{LINK\_MAX}$
+(critical for treewidth bound).
+
+\subsection{UNLINK$(d, \mathrm{name})$}
+
+Removes a \texttt{contains} edge and decrements $\mathrm{link\_count}$.
+If $\mathrm{link\_count}$ reaches 0, garbage-collects the Inode and its
+Block nodes.
+
+\subsection{RENAME}
+
+The most complex rule, with four cases:
+\begin{center}
+\footnotesize
+\begin{tabular}{lcc}
+\toprule
+\textbf{Case} & \textbf{Same dir?} & \textbf{Target exists?} \\
+\midrule
+A & yes & no \\
+B & yes & yes (replace) \\
+C & no & no \\
+D & no & yes (replace) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Cases~C and~D touch two Directory SOs, requiring SOT Tier~2 (\TPC{}).
+Case~B/D adds a \texttt{supersedes} edge and decrements the replaced
+Inode's $\mathrm{link\_count}$.
+
+\textbf{Gluing (GC-RENAME-2):} If the source is a directory and the
+destination is a descendant of the source, the rename would create a
+cycle---reject.
+
+\subsection{WRITE$(i, \mathrm{offset}, \mathrm{data})$}
+
+Updates file data by adding or replacing Block nodes and \texttt{pointsTo}
+edges. CoW: if a Block's refcount $> 1$, allocate a new block.
+
+\subsection{Treewidth Impact per Rule}
+
+\begin{center}
+\footnotesize
+\begin{tabular}{lccc}
+\toprule
+\textbf{Rule} & \textbf{Nodes added} & \textbf{Edges added} & \textbf{$\tw$ impact} \\
+\midrule
+\textsc{create} (file) & 1 Inode & 1 \texttt{contains} & $+0$ \\
+\textsc{mkdir} & 1 Inode + 1 Dir & 3 \texttt{contains} & $+0$ \\
+\textsc{rmdir} & $-1$ Inode $-1$ Dir & $-3$ \texttt{contains} & $\le 0$ \\
+\textsc{link} & 0 & 1 \texttt{contains} & $0$ to $+1$ \\
+\textsc{unlink} & $0$ to $-1$ & $-1$ \texttt{contains} & $\le 0$ \\
+\textsc{rename} & 0 & net 0 & $+0$ \\
+\textsc{write} & $0$--$1$ Block & $0$--$1$ \texttt{pointsTo} & $+0$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Only \textsc{link} can increase treewidth, bounded by \texttt{LINK\_MAX}.
+
+% =============================================================================
+\section{Capabilities and Transactions}\label{sec:transactions}
+% =============================================================================
+
+\subsection{Capabilities as Typed Graph Edges}
+
+Capabilities are nodes in \TG{} connected by two edge types:
+\begin{itemize}[nosep]
+  \item $\texttt{grants}(c, i)$: authorizes access to Inode~$i$ with rights
+    $\mathrm{rights}(c)$.
+  \item $\texttt{delegates}(c_{\mathrm{parent}}, c_{\mathrm{child}})$:
+    represents \CDT{} derivation with $\mathrm{rights}(c_{\mathrm{child}})
+    \subseteq \mathrm{rights}(c_{\mathrm{parent}})$.
+\end{itemize}
+
+Capability attenuation is edge relabeling in the \texttt{grants} subgraph:
+the monotonicity invariant~(\ref{inv:monotone}) is a statement about
+non-increasing labeling along paths in the \texttt{delegates} subgraph.
+
+\subsection{Graph Transactions (\GTXN{})}
+
+A \GTXN{} wraps DPO rule applications into an atomic unit (ADR-001):
+
+\begin{enumerate}[nosep]
+  \item Verify DPO gluing conditions on host graph $G$.
+  \item Verify treewidth bound preserved.
+  \item Begin SOT Tier~1 or Tier~2 transaction.
+  \item Apply $L \to K \to R$ morphisms.
+  \item Verify post-conditions (global invariants).
+  \item \textbf{Commit:} persist via \WAL{}, update curvature, emit provenance.
+  \item \textbf{Rollback:} SOT abort, discard in-memory changes.
+\end{enumerate}
+
+\begin{center}
+\footnotesize
+\begin{tabular}{lcc}
+\toprule
+\textbf{DPO Rule} & \textbf{SOs touched} & \textbf{SOT Tier} \\
+\midrule
+\textsc{create}, \textsc{mkdir}, \textsc{rmdir} & 1 Dir + 1 Inode & Tier~1 \\
+\textsc{link}, \textsc{unlink} & 1 Dir + 1 Inode & Tier~1 \\
+\textsc{write} & 1 Inode + $0$--$n$ Blocks & Tier~1 \\
+\textsc{rename} (same dir) & 1 Dir + $1$--$2$ Inodes & Tier~1 \\
+\textsc{rename} (cross-dir) & 2 Dirs + $1$--$2$ Inodes & \textbf{Tier~2 (\TPC{})} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+% =============================================================================
+\section{Bounded Treewidth and MSO Queries}\label{sec:treewidth}
+% =============================================================================
+
+\begin{theorem}[Treewidth Bound]\label{thm:treewidth}
+Let \TG{} be a \sotfs{} type graph produced by any finite sequence of DPO
+rule applications from the \textsc{create-root} initial graph. If the hard
+link count per inode is bounded by \texttt{LINK\_MAX}, then
+\[
+  \tw(\TG) \le \texttt{LINK\_MAX} + O(1).
+\]
+\end{theorem}
+
+\begin{proof}[Proof sketch]
+Decompose \TG{} by edge type:
+\begin{enumerate}[nosep]
+  \item \textbf{\texttt{contains}} subgraph: without hard links, a forest
+    ($\tw = 1$). Each hard link adds one back-edge, increasing $\tw$ by at
+    most~1. With $\le \texttt{LINK\_MAX}$ links per inode:
+    $\tw(\texttt{contains}) \le \texttt{LINK\_MAX} + 1$.
+  \item \textbf{\texttt{grants}}: bipartite, degree~1 on Capability side.
+    $\tw = 1$.
+  \item \textbf{\texttt{delegates}}: forest (\CDT{}). $\tw = 1$.
+  \item \textbf{\texttt{derivesFrom}}: DAG with bounded in-degree. $\tw \le 2$.
+  \item \textbf{\texttt{pointsTo}}: stars from Inodes to Blocks. $\tw = 1$.
+  \item \textbf{\texttt{supersedes}}: acyclic, out-degree~$\le 1$. $\tw = 1$.
+\end{enumerate}
+The \texttt{contains} subgraph dominates. By the tree decomposition merging
+lemma~\cite{bodlaender1998}: $\tw(\TG) \le \texttt{LINK\_MAX} + O(1)$.
+\end{proof}
+
+\begin{corollary}
+For filesystems without hard links, $\tw(\TG) \le 6$.
+\end{corollary}
+
+\textbf{MSO query examples} (all $O(n)$ when $\tw$ is bounded):
+
+\begin{center}
+\footnotesize
+\begin{tabularx}{\textwidth}{lX}
+\toprule
+\textbf{Query} & \textbf{\MSO{}$_2$ Description} \\
+\midrule
+Q1: Can domain $D$ read file $F$? & Reachability in \texttt{delegates}/\texttt{grants} subgraph \\
+Q2: Cycle in directory structure? & Cycle detection in \texttt{contains} subgraph \\
+Q3: Orphan inodes? & $\exists\, i\colon \neg\mathrm{reachable}(\mathrm{root}, i) \land \mathrm{link\_count}(i) > 0$ \\
+Q4: Files derived from version $V$? & Transitive closure in \texttt{derivesFrom} subgraph \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+% =============================================================================
+\section{Ollivier--Ricci Curvature Monitor}\label{sec:curvature}
+% =============================================================================
+
+We compute Ollivier--Ricci curvature $\kappa(u,v)$
+(Eq.~\ref{eq:curvature}) with lazy random walk measure
+$\mu_x(z) = \alpha \cdot \mathbf{1}_{z=x} + \frac{1-\alpha}{\deg(x)} \cdot
+\mathbf{1}_{z \in N(x)}$, $\alpha = 0.5$.
+
+\subsection{Anomaly Signatures}
+
+\begin{center}
+\footnotesize
+\begin{tabularx}{\textwidth}{lX}
+\toprule
+\textbf{Attack Pattern} & \textbf{Curvature Signature} \\
+\midrule
+Mass file creation (zip bomb) & Positive $\kappa$ spike on victim directory edge \\
+Symbolic link bomb & Strong positive $\kappa$ on target inode's edges \\
+Deep directory chain & Sustained $\kappa \approx -1.0$ (maximally tree-like) \\
+Directory structure manipulation & Sudden $\kappa$ change on previously stable edges \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{Incremental Computation}
+
+Each DPO rule changes $O(1)$ edges. We recompute $\kappa$ only for changed
+edges and their 1-hop neighbors ($|\Delta^*| \le 20$ for most operations).
+Amortized cost: $O(d_{\max}^2)$ per rule application, where $d_{\max}$ is
+the maximum degree of touched nodes.
+
+% =============================================================================
+\section{Deceptive Subgraph Views}\label{sec:deception}
+% =============================================================================
+
+\begin{definition}[Graph Projection]\label{def:projection}
+A projection $\pi$ for domain $D$ is a typed graph morphism
+$\pi\colon \TG|_D \to \TG_D$, where $\TG|_D$ is the subgraph reachable
+from $D$'s root capability and $\TG_D$ is the visible type graph.
+$\pi$ may omit, add, or relabel nodes and edges.
+\end{definition}
+
+We extend the existing deception functor $D\colon \mathbf{SO} \to
+\mathbf{SO}$ to a graph endofunctor:
+\[
+  D_{\mathrm{FS}}\colon \mathbf{TGraph} \to \mathbf{TGraph}
+\]
+
+The four interposition policies map to functor behavior:
+\textbf{Passthrough} = identity, \textbf{Inspect} = identity + provenance
+logging, \textbf{Redirect} = node relabeling, \textbf{Fabricate} =
+synthetic node/edge injection.
+
+\textbf{Consistency requirement:} $D_{\mathrm{FS}}(\TG)$ must satisfy all
+invariants (I1--I11, G1--G7). Since $D_{\mathrm{FS}}$ preserves the
+tree-like structure, $D_{\mathrm{FS}}(\TG)$ also has bounded treewidth,
+and consistency constraints are checkable as MSO queries in $O(n)$.
+
+% =============================================================================
+\section{Verification Plan}\label{sec:verification}
+% =============================================================================
+
+\begin{table}[h]
+\centering
+\caption{Four-layer verification plan with effort estimates.}
+\label{tab:verification}
+\footnotesize
+\begin{tabularx}{\textwidth}{c l X c c}
+\toprule
+\textbf{Layer} & \textbf{Tool} & \textbf{Properties} & \textbf{Effort} & \textbf{Confidence} \\
+\midrule
+1 & TLA+/TLC & Graph invariants, DPO rules, \GTXN{} protocol & 2--3 wk & Model-checked \\
+2 & SMT (Z3) & Crash refinement, \WAL{} correctness & 3--4 wk & Push-button \\
+3 & Rust types & State machine transitions, lifetime safety & 4--6 wk & Compile-time \\
+4 & Coq/Perennial & Atomicity, unforgeability, treewidth & 6--12 mo & Mechanized proof \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\textbf{Layer~1} is complete: four TLA+ specifications in \texttt{formal/}
+model the core graph (\texttt{sotfs\_graph.tla}), \GTXN{} protocol
+(\texttt{sotfs\_transactions.tla}), capability delegation
+(\texttt{sotfs\_capabilities.tla}), and crash recovery
+(\texttt{sotfs\_crash.tla}).
+
+% =============================================================================
+\section{Conclusion and Future Work}
+% =============================================================================
+
+\sotfs{} demonstrates that treating filesystem metadata as an explicit typed
+graph, with operations formalized as algebraic DPO rewriting rules, unlocks
+structural properties---bounded treewidth, discrete curvature monitoring,
+and capability-gated projections---that are impossible in conventional
+implicit-graph designs.
+
+The immediate next steps are: (Phase~2) FUSE prototype on Linux implementing
+the type graph and DPO engine as Rust crates; (Phase~3) integration with
+\sotos{} as a native filesystem server; (Phase~4) incremental formal
+verification; (Phase~5) structural differentiators (treewidth enforcement,
+curvature monitoring, deceptive projections).
+
+% =============================================================================
+% References
+% =============================================================================
+
+\begin{thebibliography}{99}
+
+\bibitem{ehrig2006}
+H.~Ehrig, K.~Ehrig, U.~Prange, G.~Taentzer.
+\emph{Fundamentals of Algebraic Graph Transformation}.
+Springer, 2006.
+
+\bibitem{courcelle1990}
+B.~Courcelle.
+``The Monadic Second-Order Logic of Graphs~I: Recognizable Sets of Finite Graphs.''
+\emph{Information and Computation}, 85(1):12--75, 1990.
+
+\bibitem{ollivier2009}
+Y.~Ollivier.
+``Ricci Curvature of Markov Chains on Metric Spaces.''
+\emph{Journal of Functional Analysis}, 256(3):810--864, 2009.
+
+\bibitem{linluyau2011}
+Y.~Lin, L.~Lu, S.-T.~Yau.
+``Ricci Curvature of Graphs.''
+\emph{Tohoku Mathematical Journal}, 63(4):605--627, 2011.
+
+\bibitem{chen2015}
+H.~Chen, D.~Ziegler, T.~Chajed, A.~Chlipala, M.~F.~Kaashoek, N.~Zeldovich.
+``Using Crash Hoare Logic for Certifying the FSCQ File System.''
+\emph{SOSP}, 2015.
+
+\bibitem{sigurbjarnarson2016}
+H.~Sigurbjarnarson, J.~Bornholt, E.~Torlak, X.~Wang.
+``Push-Button Verification of File Systems via Crash Refinement.''
+\emph{OSDI}, 2016.
+
+\bibitem{kadekodi2024}
+S.~Kadekodi, A.~Ramanathan, V.~Narayanan.
+``SquirrelFS: Using the Rust Compiler to Check File-System Crash Consistency.''
+\emph{OSDI}, 2024.
+
+\bibitem{watson2010}
+R.~N.~M.~Watson, J.~Anderson, B.~Laurie, K.~Kennaway.
+``Capsicum: Practical Capabilities for UNIX.''
+\emph{USENIX Security}, 2010.
+
+\bibitem{klein2009}
+G.~Klein, K.~Elphinstone, G.~Heiser, et al.
+``seL4: Formal Verification of an OS Kernel.''
+\emph{SOSP}, 2009.
+
+\bibitem{chajed2019}
+T.~Chajed, J.~Tassarotti, M.~Theng, R.~Jung, M.~F.~Kaashoek, N.~Zeldovich.
+``Verifying Concurrent, Crash-Safe Systems with Perennial.''
+\emph{SOSP}, 2019.
+
+\bibitem{robertson1986}
+N.~Robertson, P.~D.~Seymour.
+``Graph Minors.~II. Algorithmic Aspects of Tree-Width.''
+\emph{Journal of Algorithms}, 7(3):309--322, 1986.
+
+\bibitem{bodlaender1998}
+H.~L.~Bodlaender.
+``A Partial $k$-Arboretum of Graphs with Bounded Treewidth.''
+\emph{Theoretical Computer Science}, 209(1--2):1--45, 1998.
+
+\end{thebibliography}
+
+\end{document}

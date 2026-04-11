@@ -1350,10 +1350,22 @@ fn apply_relr_to_buf(
     if rela_off != 0 && rela_sz != 0 {
         let mut rp = rela_off as usize;
         let rela_end = (rp + rela_sz as usize).min(elf_data.len());
+        // Loop bound rp + 24 <= rela_end <= elf_data.len() keeps the three
+        // 8-byte reads below in range; inlined byte construction avoids a
+        // fallible try_into + unwrap.
         while rp + 24 <= rela_end {
-            let r_offset = u64::from_le_bytes(elf_data[rp..rp+8].try_into().unwrap());
-            let r_info = u64::from_le_bytes(elf_data[rp+8..rp+16].try_into().unwrap());
-            let r_addend = u64::from_le_bytes(elf_data[rp+16..rp+24].try_into().unwrap());
+            let r_offset = u64::from_le_bytes([
+                elf_data[rp], elf_data[rp+1], elf_data[rp+2], elf_data[rp+3],
+                elf_data[rp+4], elf_data[rp+5], elf_data[rp+6], elf_data[rp+7],
+            ]);
+            let r_info = u64::from_le_bytes([
+                elf_data[rp+8], elf_data[rp+9], elf_data[rp+10], elf_data[rp+11],
+                elf_data[rp+12], elf_data[rp+13], elf_data[rp+14], elf_data[rp+15],
+            ]);
+            let r_addend = u64::from_le_bytes([
+                elf_data[rp+16], elf_data[rp+17], elf_data[rp+18], elf_data[rp+19],
+                elf_data[rp+20], elf_data[rp+21], elf_data[rp+22], elf_data[rp+23],
+            ]);
             if (r_info & 0xFFFFFFFF) == 8 { // R_X86_64_RELATIVE
                 if let Some(foff) = vaddr_to_file_offset(r_offset, segments, seg_count) {
                     if foff + 8 <= elf_data.len() {

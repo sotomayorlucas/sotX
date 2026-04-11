@@ -1,0 +1,21 @@
+[package]
+name = "sotfs-ops"
+description = "DPO graph rewriting rules for POSIX operations"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[features]
+default = ["std"]
+std = ["sotfs-graph/std"]
+
+[dependencies]
+sotfs-graph = { workspace = true, default-features = false }
+
+[dev-dependencies]
+proptest = "1"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "dpo_bench"
+harness = false

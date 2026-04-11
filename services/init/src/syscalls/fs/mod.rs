@@ -16,6 +16,7 @@ pub(crate) mod fs_dir;
 pub(crate) mod fs_stdio;
 pub(crate) mod fs_initrd;
 pub(crate) mod fs_fd;
+pub(crate) mod fs_sotfs;
 
 use sotos_common::linux_abi::*;
 use sotos_common::IpcMsg;
@@ -113,6 +114,7 @@ pub(crate) fn sys_read(ctx: &mut SyscallContext, msg: &IpcMsg) {
             reply_val(ctx.ep_cap, ret);
         }
         34 => reply_val(ctx.ep_cap, -11), // netlink dummy: -EAGAIN
+        36 => fs_sotfs::read_sotfs(ctx, fd, buf_ptr, len),  // sotFS file
         _  => reply_val(ctx.ep_cap, -EBADF),
     }
 }
@@ -138,6 +140,7 @@ pub(crate) fn sys_write(ctx: &mut SyscallContext, msg: &IpcMsg) {
         17 => fs_vfs::write_udp(ctx, fd, buf_ptr, len),
         11 => fs_pipe::write_pipe(ctx, fd, buf_ptr, len),
         13 => fs_vfs::write_vfs(ctx, fd, buf_ptr, len),
+        36 => fs_sotfs::write_sotfs(ctx, fd, buf_ptr, len),  // sotFS file
         27 | 28 => fs_pipe::write_unix_socket(ctx, fd, buf_ptr, len),
         33 => { // seatd socket
             let ret = crate::seatd::seatd_write(ctx, fd, buf_ptr, len as u64);
