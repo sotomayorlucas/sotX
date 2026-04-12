@@ -233,20 +233,28 @@ pub extern "C" fn _start() -> ! {
         unsafe { framebuffer::drain_console_ring(); }
     }
 
+    // Clear kernel boot splash on serial and show Tokyo Night init header.
+    // Box-drawing uses ASCII-safe substitutes (+, -, |) for maximum
+    // terminal compatibility (serial consoles may not have Unicode).
+    {
+        fn serial_str(s: &[u8]) {
+            for &b in s { sys::debug_print(b); }
+        }
+        // Clear screen + cursor home
+        serial_str(b"\x1b[2J\x1b[H");
+        // Tokyo Night blue + bold
+        serial_str(b"\x1b[1;38;2;122;162;247m");
+        // Top border
+        serial_str(b"+------------------------------------+\r\n");
+        serial_str(b"|  sotOS init -- Tokyo Night         |\r\n");
+        serial_str(b"+------------------------------------+\r\n");
+        // Reset
+        serial_str(b"\x1b[0m");
+    }
+
     print(b"INIT: boot complete, ");
     print_u64(cap_count);
     print(b" caps received\n");
-
-    // Diagnostic: print addresses of pipe state for corruption analysis
-    print(b"PIPE-ADDRS: PWC=");
-    print_u64(fd::PIPE_WRITE_CLOSED.as_ptr() as u64);
-    print(b" WREFS=");
-    print_u64(fd::PIPE_WRITE_REFS.as_ptr() as u64);
-    print(b" RREFS=");
-    print_u64(fd::PIPE_READ_REFS.as_ptr() as u64);
-    print(b" TG=");
-    print_u64(unsafe { fd::THREAD_GROUPS.as_ptr() as u64 });
-    print(b"\n");
 
     // Store init's own AS cap for CoW fork support.
     if boot_info.self_as_cap != 0 {

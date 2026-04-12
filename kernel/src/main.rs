@@ -74,6 +74,7 @@ extern crate alloc;
 
 mod acpi;
 mod arch;
+pub mod boot_splash;
 mod boot_uefi;
 mod cap;
 pub mod dbg_diag;
@@ -205,8 +206,13 @@ fn enable_sse() {
 extern "C" fn kmain() -> ! {
     // Serial MUST be first — we need debug output before anything else.
     arch::serial::init();
-    kprintln!("sotOS v0.1.0 — microkernel booting...");
-    kprintln!("  sotBSD/STYX exokernel v0.1.0");
+
+    // Suppress verbose output during splash (kinfo!/kdebug! become no-ops).
+    // Errors still print via kerror!/kerr!.
+    boot_splash::VERBOSE.store(false, Ordering::Release);
+
+    // Show centered Tokyo Night boot splash with empty progress bar.
+    boot_splash::show();
 
     // KARL-style per-boot ID seed -- derived from RDTSC + a fixed
     // mixer. Read by tx, sched, and other id pools so that visible
@@ -214,9 +220,14 @@ extern "C" fn kmain() -> ! {
     karl::init();
 
     if !BASE_REVISION.is_supported() {
-        kprintln!("FATAL: Limine base revision not supported");
+        kerr!("FATAL: Limine base revision not supported");
         arch::halt_loop();
     }
+
+    // ---------------------------------------------------------------
+    // Stage 0: CPU + memory
+    // ---------------------------------------------------------------
+    boot_splash::set_progress(0, "CPU + memory");
 
     // CPU structures.
     arch::gdt::init();
@@ -266,6 +277,11 @@ extern "C" fn kmain() -> ! {
     // Save boot CR3 before any address space changes.
     mm::paging::init_boot_cr3();
 
+    // ---------------------------------------------------------------
+    // Stage 1: Scheduler + IPC
+    // ---------------------------------------------------------------
+    boot_splash::set_progress(1, "Scheduler + IPC");
+
     // Capability system.
     cap::init();
     // Tier 5 KARL: seed the channel/notification/endpoint pools so
@@ -273,7 +289,6 @@ extern "C" fn kmain() -> ! {
     ipc::channel::init();
     ipc::notify::init();
     ipc::endpoint::init();
-    kprintln!("[sot] === Project STYX exokernel layer active ===");
     kinfo!(sotos_common::trace::cat::IPC, "[ok] Capabilities");
 
     // Scheduler.
@@ -283,6 +298,11 @@ extern "C" fn kmain() -> ! {
     // SYSCALL/SYSRET MSRs.
     arch::syscall::init();
     kinfo!(sotos_common::trace::cat::SYSCALL, "[ok] SYSCALL/SYSRET");
+
+    // ---------------------------------------------------------------
+    // Stage 2: Capabilities
+    // ---------------------------------------------------------------
+    boot_splash::set_progress(2, "Capabilities");
 
     // Hardware interrupts.
     arch::pic::init();
@@ -299,13 +319,12 @@ extern "C" fn kmain() -> ! {
         lapic_ticks
     );
 
+    // ---------------------------------------------------------------
+    // Stage 3: Drivers
+    // ---------------------------------------------------------------
+    boot_splash::set_progress(3, "Drivers");
+
     // Phase E — ACPI parser + IOAPIC discovery + MSI vector allocator.
-    // Limine v8 returns the RSDP at an HHDM virtual address; the
-    // parser walks the RSDT/XSDT chain looking for the MADT and
-    // records IOAPIC + Interrupt Source Override entries. We do
-    // this AFTER lapic::init() so the parser's diagnostic kprintln
-    // lines are already after the LAPIC banner — the order has no
-    // hardware-level dependency.
     if let Some(rsdp) = RSDP_REQUEST.get_response() {
         acpi::init(rsdp.address());
     } else {
@@ -316,10 +335,6 @@ extern "C" fn kmain() -> ! {
     kinfo!(sotos_common::trace::cat::PROCESS, "[ok] ACPI + IOAPIC + MSI");
 
     // Phase E — MSI delivery acceptance test.
-    // Send a self-IPI via the LAPIC ICR with `MSI_TEST_VECTOR`. The
-    // pre-registered IDT handler increments `MSI_TEST_COUNTER`. We
-    // briefly enable interrupts so the LAPIC can deliver the
-    // queued vector through the host IDT, then verify the counter.
     {
         use core::sync::atomic::Ordering;
         let lapic_id = arch::percpu::current_percpu().lapic_id;
@@ -329,38 +344,34 @@ extern "C" fn kmain() -> ! {
         unsafe { core::arch::asm!("sti", "nop", "cli", options(nomem, nostack)); }
         let after = arch::idt::MSI_TEST_COUNTER.load(Ordering::Acquire);
         if after == before + 1 {
-            kprintln!(
+            kdebug!(
                 "  msi-test: self-IPI (vector {}) delivered, counter {} -> {} — PASS",
                 irq::MSI_TEST_VECTOR,
                 before,
                 after
             );
         } else {
-            kprintln!(
-                "  msi-test: self-IPI delivery failed; counter {} -> {} (expected +1)",
+            kerr!(
+                "msi-test: self-IPI delivery failed; counter {} -> {} (expected +1)",
                 before,
                 after
             );
         }
     }
 
-    // VMX capability detection (Phase B.0 — read-only). Reports whether
-    // the bhyve VT-x backend can come up on this CPU + accelerator.
+    // VMX capability detection (Phase B.0 — read-only).
     arch::vmx::print_capabilities();
 
-    // VMX bringup on the BSP (Phase B.1 + B.2). Allocates the per-CPU
-    // VMXON region, sets CR4.VMXE, programs IA32_FEATURE_CONTROL if
-    // unlocked, and executes the `vmxon` instruction. Gated behind
-    // `cpu_has_vmx()` so TCG and WHPX boots are unaffected — they
-    // return `Err(NotSupported)` and continue with VMX disabled.
-    // Only `just run-kvm` (with `-cpu host,+vmx`) will reach VMX root.
+    // VMX bringup on the BSP (Phase B.1 + B.2).
     arch::vmx::init_bsp();
 
-    // Phase C: VM subsystem is now driven entirely by userspace via the
-    // SYS_VM_* syscall family. The kernel no longer auto-runs the Phase B
-    // smoke test at boot — `services/init/src/tier4_demo.rs::run_bhyve`
-    // owns the test VM lifecycle now.
+    // Phase C: VM subsystem driven by userspace via SYS_VM_* syscalls.
     vm::init();
+
+    // ---------------------------------------------------------------
+    // Stage 4: Userspace
+    // ---------------------------------------------------------------
+    boot_splash::set_progress(4, "Userspace");
 
     // Spawn init process (first userspace code).
     let user_cr3 = spawn_init_process();
@@ -379,9 +390,17 @@ extern "C" fn kmain() -> ! {
     // Start BSP LAPIC timer (~100 Hz periodic).
     arch::lapic::start_timer(lapic_ticks);
 
+    // ---------------------------------------------------------------
+    // Boot complete — finalize splash and enter idle loop
+    // ---------------------------------------------------------------
+    boot_splash::set_progress(5, "ready");
+    boot_splash::finish();
+
+    // Re-enable verbose output now that splash is done.
+    boot_splash::VERBOSE.store(true, Ordering::Release);
+
     // Enable interrupts.
     x86_64::instructions::interrupts::enable();
-    kprintln!("Kernel ready — entering idle loop");
 
     // Idle loop (thread 0). Timer interrupts cause preemptive switching.
     loop {
