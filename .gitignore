@@ -106,6 +106,7 @@ run.log
 
 # Temporary test/diagnostic scripts (dev-only)
 scripts/test_*.py
+!scripts/test_boot.py
 scripts/diag_*.py
 
 # Library Cargo.lock files (only workspace root's is tracked)

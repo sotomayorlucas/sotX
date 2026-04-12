@@ -665,6 +665,10 @@ run-lkl: image-lkl create-ext4-disk
         -m 2048M \
         -smp 2
 
+# Run TDD boot verification suite (builds image, boots QEMU, checks all stages)
+test-boot *ARGS: image
+    python scripts/test_boot.py --no-build {{ARGS}}
+
 # ── Unit 3: persistent rootdisk on second virtio-blk device ──
 
 # Create a 64 MiB raw image for the rootdisk (init formats it on first boot)
