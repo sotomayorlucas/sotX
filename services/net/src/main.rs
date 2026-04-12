@@ -638,7 +638,7 @@ pub extern "C" fn _start() -> ! {
     let net_dev = match pci.find_device(0x1AF4, 0x1000) {
         Some(d) => d,
         None => {
-            print(b"NET: virtio-net device not found\n");
+            // No virtio-net device — network service idle (use just run-net).
             loop {
                 sys::yield_now();
             }

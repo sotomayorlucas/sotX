@@ -25,7 +25,7 @@ pub(crate) fn init() {
     }
     #[cfg(not(lkl))]
     {
-        crate::framebuffer::print(b"LKL: disabled (build with SOTOS_LKL=1)\n");
+        // LKL disabled — build with SOTOS_LKL=1 to enable.
     }
 }
 

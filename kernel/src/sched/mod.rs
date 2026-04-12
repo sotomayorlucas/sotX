@@ -936,8 +936,9 @@ pub fn exit_current() -> ! {
             None
         }
     };
-    // Diagnostic: log thread death (lock-free serial write)
-    {
+    // Diagnostic: log thread death (lock-free serial write, verbose only)
+    #[cfg(feature = "verbose")]
+    if crate::boot_splash::VERBOSE.load(core::sync::atomic::Ordering::Relaxed) {
         use crate::arch::serial;
         for b in b"EXIT-T " {
             serial::write_byte(*b);

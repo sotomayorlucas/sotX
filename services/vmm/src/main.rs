@@ -99,6 +99,12 @@ pub extern "C" fn _start() -> ! {
     let mut fault_track: [(u64, u32); 16] = [(0, 0); 16];
     let mut fault_count: u32 = 0;
 
+    // Rate-limit noisy error messages (print first N, then go silent).
+    let mut segv_logged: u32 = 0;
+    let mut cow_fail_logged: u32 = 0;
+    let mut map_fail_logged: u32 = 0;
+    const MAX_ERR_LOG: u32 = 5;
+
     // Fault handling loop.
     loop {
         pool_refill(); // ρ_fiss: pre-allocate frames before blocking
@@ -164,11 +170,17 @@ pub extern "C" fn _start() -> ! {
                     if fault_track[slot].0 == vaddr_raw {
                         fault_track[slot].1 += 1;
                         if fault_track[slot].1 > 8 {
-                            print(b"VMM: SEGV t=");
-                            print_hex16(fault.tid as u64);
-                            print(b" a=");
-                            print_hex64(fault.addr);
-                            print(b"\n");
+                            if segv_logged < MAX_ERR_LOG {
+                                segv_logged += 1;
+                                print(b"VMM: SEGV t=");
+                                print_hex16(fault.tid as u64);
+                                print(b" a=");
+                                print_hex64(fault.addr);
+                                print(b"\n");
+                                if segv_logged == MAX_ERR_LOG {
+                                    print(b"VMM: suppressing further SEGV messages\n");
+                                }
+                            }
                             let _ = sys::signal_inject(fault.tid as u64, 11); // SIGSEGV
                             let _ = sys::thread_resume(fault.tid as u64);
                             fault_track[slot].1 = 0;
@@ -192,15 +204,21 @@ pub extern "C" fn _start() -> ! {
                         // 2. Copy 4KiB from the old frame to the new frame
                         //    (kernel copies via HHDM using SYS_FRAME_COPY)
                         if let Err(_) = sys::frame_copy(new_frame, target_as_cap, vaddr_raw) {
-                            print(b"VMM: FC-FAIL t=");
-                            print_hex16(fault.tid as u64);
-                            print(b"\n");
+                            if cow_fail_logged < MAX_ERR_LOG {
+                                cow_fail_logged += 1;
+                                print(b"VMM: FC-FAIL t=");
+                                print_hex16(fault.tid as u64);
+                                print(b"\n");
+                            }
                         }
                         // 3. Unmap old PTE
                         if sys::unmap_from(target_as_cap, vaddr_raw).is_err() {
-                            print(b"VMM: UM-FAIL t=");
-                            print_hex16(fault.tid as u64);
-                            print(b"\n");
+                            if cow_fail_logged < MAX_ERR_LOG {
+                                cow_fail_logged += 1;
+                                print(b"VMM: UM-FAIL t=");
+                                print_hex16(fault.tid as u64);
+                                print(b"\n");
+                            }
                         }
                         // 4. Map new frame as WRITABLE
                         if sys::map_into(target_as_cap, vaddr_raw, new_frame, MAP_WRITABLE).is_err() {
@@ -275,11 +293,17 @@ pub extern "C" fn _start() -> ! {
                         }
                     };
                     if sys::map_into(target_as_cap, vaddr_raw, frame, MAP_WRITABLE).is_err() {
-                        print(b"VMM: SEGV t=");
-                        print_hex16(fault.tid as u64);
-                        print(b" a=");
-                        print_hex64(fault.addr);
-                        print(b"\n");
+                        if map_fail_logged < MAX_ERR_LOG {
+                            map_fail_logged += 1;
+                            print(b"VMM: SEGV t=");
+                            print_hex16(fault.tid as u64);
+                            print(b" a=");
+                            print_hex64(fault.addr);
+                            print(b"\n");
+                            if map_fail_logged == MAX_ERR_LOG {
+                                print(b"VMM: suppressing further map-fail messages\n");
+                            }
+                        }
                         let _ = sys::signal_inject(fault.tid as u64, 11);
                         let _ = sys::thread_resume(fault.tid as u64);
                         continue;

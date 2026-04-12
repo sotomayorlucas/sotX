@@ -307,7 +307,7 @@ pub extern "C" fn _start() -> ! {
             print(b"\n");
         }
         Err(_) => {
-            print(b"INIT: net service not found (networking disabled)\n");
+            // Net service not available — networking disabled for this boot config.
         }
     }
 
@@ -857,31 +857,32 @@ fn init_virtio_blk(boot_info: &BootInfo) -> Option<VirtioBlk> {
     let pci = PciBus::new(pci_cap);
 
     let (devices, count) = pci.enumerate::<32>();
-    print(b"PCI: ");
-    print_u64(count as u64);
-    print(b" devices\n");
+    if count > 0 {
+        print(b"PCI: ");
+        print_u64(count as u64);
+        print(b" devices\n");
 
-    for i in 0..count {
-        let d = &devices[i];
-        print(b"  ");
-        print_u64(i as u64);
-        print(b": vendor=");
-        print_hex(d.vendor_id as u32);
-        print(b" device=");
-        print_hex(d.device_id as u32);
-        print(b" class=");
-        print_hex(d.class as u32);
-        print(b":");
-        print_hex(d.subclass as u32);
-        print(b" irq=");
-        print_u64(d.irq_line as u64);
-        print(b"\n");
+        for i in 0..count {
+            let d = &devices[i];
+            print(b"  ");
+            print_u64(i as u64);
+            print(b": vendor=");
+            print_hex(d.vendor_id as u32);
+            print(b" device=");
+            print_hex(d.device_id as u32);
+            print(b" class=");
+            print_hex(d.class as u32);
+            print(b":");
+            print_hex(d.subclass as u32);
+            print(b" irq=");
+            print_u64(d.irq_line as u64);
+            print(b"\n");
+        }
     }
 
     let blk_dev = match pci.find_device(0x1AF4, 0x1001) {
         Some(d) => d,
         None => {
-            print(b"BLK: virtio-blk not found\n");
             return None;
         }
     };
@@ -1080,7 +1081,6 @@ fn init_virtio_root_blk(boot_info: &BootInfo) -> Option<VirtioBlk> {
     let dev = match VirtioBlk::nth_device(&pci, 1) {
         Some(d) => d,
         None => {
-            print(b"ROOTBLK: second virtio-blk not present, skipping\n");
             return None;
         }
     };
