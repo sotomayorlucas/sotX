@@ -878,24 +878,26 @@ pub fn dispatch_command(line: &[u8]) {
         // Default: command succeeds. Builtins that fail override this.
         set_exit_status(0);
 
+        // Intercept `<cmd> --help` before running the real handler.
+        if let Some(sp) = find_space(line) {
+            let args_tail = trim(&line[sp + 1..]);
+            if crate::help::is_help_flag(args_tail) {
+                crate::help::print_command_doc(&line[..sp]);
+                return;
+            }
+        }
+
         // --- Command dispatch ---
         if eq(line, b"help") {
-            print(b"commands: help, echo, uname, uptime, caps, ls, cat, write, rm,\n");
-            print(b"  stat, hexdump, head, tail, grep, mkdir, rmdir, cd, pwd, snap,\n");
-            print(b"  fork, getpid, exec, ps, top, kill, export, env, unset, exit,\n");
-            print(b"  jobs, fg, bg, history, wc, sort, uniq, diff, read, source,\n");
-            print(b"  true, false, sleep, type, services, threads, meminfo, bench\n");
-            print(b"operators: cmd1 && cmd2, cmd1 || cmd2, cmd1 | cmd2\n");
-            print(b"  cmd > file, cmd >> file, cmd < file, cmd &\n");
-            print(b"scripting: if COND; then CMD; fi\n");
-            print(b"  for VAR in A B C; do CMD; done\n");
-            print(b"  while COND; do CMD; done, until COND; do CMD; done\n");
-            print(b"  function NAME() { body; }, <<EOF heredocs\n");
-            print(b"  break, continue, source <file>, . <file>\n");
-            print(b"variables: $VAR, $?, $$, $#, $@, $0, $1-$8\n");
-            print(b"expansion: $(cmd), `cmd`, $((expr))\n");
-            print(b"test: -f, -d, -e, -n, -z, =, !=, -eq, -ne, -gt, -lt, -ge, -le\n");
-            print(b"network: resolve, ping, traceroute, wget [-O file] [-q] <url>\n");
+            crate::help::print_all_categorized();
+        } else if starts_with(line, b"help ") {
+            let topic = trim(&line[5..]);
+            crate::help::print_command_doc(topic);
+        } else if eq(line, b"man") {
+            print(b"usage: man <command>\n");
+        } else if starts_with(line, b"man ") {
+            let topic = trim(&line[4..]);
+            crate::help::print_command_doc(topic);
         } else if eq(line, b"uname") {
             print(b"sotOS 0.1.0 x86_64 LUCAS\n");
         } else if eq(line, b"uptime") {

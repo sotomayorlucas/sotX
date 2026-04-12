@@ -14,6 +14,7 @@ pub mod exec;
 pub mod net;
 pub mod lua;
 pub mod trace;
+pub mod help;
 
 use syscall::*;
 use util::*;
