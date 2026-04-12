@@ -11,6 +11,8 @@ sotos-lua = { path = "../../libs/sotos-lua" }
 default = ["trace"]
 trace = []
 
+[workspace]
+
 [profile.dev]
 panic = "abort"
 
