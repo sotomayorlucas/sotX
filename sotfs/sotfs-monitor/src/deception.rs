@@ -66,7 +66,7 @@ fn project_passthrough(graph: &TypeGraph) -> ProjectedView {
     for (&dir_id, edge_ids) in &graph.dir_contains {
         let mut dir_entries = Vec::new();
         for &eid in edge_ids {
-            if let Some(Edge::Contains { tgt, name, .. }) = graph.edges.get(&eid) {
+            if let Some(Edge::Contains { tgt, name, .. }) = graph.get_edge(eid) {
                 dir_entries.push((name.clone(), *tgt));
             }
         }
@@ -74,7 +74,7 @@ fn project_passthrough(graph: &TypeGraph) -> ProjectedView {
     }
 
     ProjectedView {
-        visible_inodes: graph.inodes.clone(),
+        visible_inodes: graph.inodes.iter().map(|(aid, v)| (aid.0 as u64, v.clone())).collect(),
         visible_entries: entries,
         fabricated_data: BTreeMap::new(),
         redirects: BTreeMap::new(),
@@ -95,8 +95,8 @@ fn project_restrict(graph: &TypeGraph, root_dir: DirId) -> ProjectedView {
         }
 
         // Add this dir's inode
-        if let Some(dir) = graph.dirs.get(&dir_id) {
-            if let Some(inode) = graph.inodes.get(&dir.inode_id) {
+        if let Some(dir) = graph.get_dir(dir_id) {
+            if let Some(inode) = graph.get_inode(dir.inode_id) {
                 visible_inodes.insert(dir.inode_id, inode.clone());
             }
         }
@@ -105,8 +105,8 @@ fn project_restrict(graph: &TypeGraph, root_dir: DirId) -> ProjectedView {
         if let Some(edge_ids) = graph.dir_contains.get(&dir_id) {
             let mut dir_list = Vec::new();
             for &eid in edge_ids {
-                if let Some(Edge::Contains { tgt, name, .. }) = graph.edges.get(&eid) {
-                    if let Some(inode) = graph.inodes.get(tgt) {
+                if let Some(Edge::Contains { tgt, name, .. }) = graph.get_edge(eid) {
+                    if let Some(inode) = graph.get_inode(*tgt) {
                         visible_inodes.insert(*tgt, inode.clone());
                         dir_list.push((name.clone(), *tgt));
 

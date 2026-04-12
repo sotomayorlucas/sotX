@@ -94,10 +94,10 @@ pub fn mkdir(
             name: name.into(),
         });
     }
-    let parent = g
+    let parent_inode_id = g
         .get_dir(parent_dir)
-        .ok_or(GraphError::DirNotFound(parent_dir))?;
-    let parent_inode_id = parent.inode_id;
+        .ok_or(GraphError::DirNotFound(parent_dir))?
+        .inode_id;
 
     let inode_id = g.alloc_inode_id();
     let dir_id = g.alloc_dir_id();
@@ -188,8 +188,7 @@ pub fn rmdir(g: &mut TypeGraph, parent_dir: DirId, name: &str) -> Result<(), Gra
         .ok_or_else(|| GraphError::NameNotFound(name.into()))?;
 
     let inode = g
-        .inodes
-        .get(&target_inode_id)
+        .get_inode(target_inode_id)
         .ok_or(GraphError::InodeNotFound(target_inode_id))?;
     if inode.vtype != VnodeType::Directory {
         return Err(GraphError::NotADirectory(target_inode_id));
@@ -202,7 +201,7 @@ pub fn rmdir(g: &mut TypeGraph, parent_dir: DirId, name: &str) -> Result<(), Gra
     // GC-RMDIR-1: must be empty (only "." and "..")
     if let Some(edge_ids) = g.dir_contains.get(&target_dir) {
         for &eid in edge_ids {
-            if let Some(Edge::Contains { name: n, .. }) = g.edges.get(&eid) {
+            if let Some(Edge::Contains { name: n, .. }) = g.get_edge(eid) {
                 if n != "." && n != ".." {
                     return Err(GraphError::DirNotEmpty(target_dir));
                 }
@@ -216,7 +215,7 @@ pub fn rmdir(g: &mut TypeGraph, parent_dir: DirId, name: &str) -> Result<(), Gra
     // Entry edge from parent
     if let Some(parent_edges) = g.dir_contains.get(&parent_dir) {
         for &eid in parent_edges {
-            if let Some(Edge::Contains { tgt, name: n, .. }) = g.edges.get(&eid) {
+            if let Some(Edge::Contains { tgt, name: n, .. }) = g.get_edge(eid) {
                 if *tgt == target_inode_id && n == name {
                     edges_to_remove.push(eid);
                 }
@@ -231,7 +230,7 @@ pub fn rmdir(g: &mut TypeGraph, parent_dir: DirId, name: &str) -> Result<(), Gra
 
     // Remove edges
     for eid in &edges_to_remove {
-        if let Some(edge) = g.edges.remove(eid) {
+        if let Some(edge) = g.remove_edge(*eid) {
             match &edge {
                 Edge::Contains { src, tgt, .. } => {
                     if let Some(set) = g.dir_contains.get_mut(src) {
@@ -247,8 +246,8 @@ pub fn rmdir(g: &mut TypeGraph, parent_dir: DirId, name: &str) -> Result<(), Gra
     }
 
     // Remove nodes
-    g.inodes.remove(&target_inode_id);
-    g.dirs.remove(&target_dir);
+    g.remove_inode(target_inode_id);
+    g.remove_dir(target_dir);
     g.dir_contains.remove(&target_dir);
     g.inode_incoming_contains.remove(&target_inode_id);
 
@@ -274,8 +273,7 @@ pub fn link(
         });
     }
     let inode = g
-        .inodes
-        .get(&target_inode)
+        .get_inode(target_inode)
         .ok_or(GraphError::InodeNotFound(target_inode))?;
     // GC-LINK-2: cannot link directories
     if inode.vtype == VnodeType::Directory {
@@ -293,14 +291,14 @@ pub fn link(
         tgt: target_inode,
         name: name.into(),
     };
-    g.edges.insert(edge_id, edge);
+    g.insert_edge(edge_id, edge);
     g.dir_contains.entry(dir).or_default().insert(edge_id);
     g.inode_incoming_contains
         .entry(target_inode)
         .or_default()
         .insert(edge_id);
 
-    g.inodes.get_mut(&target_inode).unwrap().link_count += 1;
+    g.get_inode_mut(target_inode).unwrap().link_count += 1;
 
     Ok(())
 }
@@ -319,7 +317,7 @@ pub fn unlink(g: &mut TypeGraph, dir: DirId, name: &str) -> Result<(), GraphErro
             .ok_or(GraphError::DirNotFound(dir))?;
         let mut found = None;
         for &eid in edge_ids {
-            if let Some(Edge::Contains { tgt, name: n, .. }) = g.edges.get(&eid) {
+            if let Some(Edge::Contains { tgt, name: n, .. }) = g.get_edge(eid) {
                 if n == name {
                     found = Some((eid, *tgt));
                     break;
@@ -330,15 +328,14 @@ pub fn unlink(g: &mut TypeGraph, dir: DirId, name: &str) -> Result<(), GraphErro
     };
 
     let inode = g
-        .inodes
-        .get(&target_inode_id)
+        .get_inode(target_inode_id)
         .ok_or(GraphError::InodeNotFound(target_inode_id))?;
     if inode.vtype == VnodeType::Directory {
         return Err(GraphError::NotAFile(target_inode_id));
     }
 
     // Remove the contains edge
-    g.edges.remove(&edge_id);
+    g.remove_edge(edge_id);
     if let Some(set) = g.dir_contains.get_mut(&dir) {
         set.remove(&edge_id);
     }
@@ -346,7 +343,7 @@ pub fn unlink(g: &mut TypeGraph, dir: DirId, name: &str) -> Result<(), GraphErro
         set.remove(&edge_id);
     }
 
-    let inode = g.inodes.get_mut(&target_inode_id).unwrap();
+    let inode = g.get_inode_mut(target_inode_id).unwrap();
     inode.link_count -= 1;
 
     // If last link, garbage-collect inode and its blocks
@@ -360,17 +357,17 @@ pub fn unlink(g: &mut TypeGraph, dir: DirId, name: &str) -> Result<(), GraphErro
             .collect();
 
         for eid in pts_edges {
-            if let Some(Edge::PointsTo { tgt: block_id, .. }) = g.edges.remove(&eid) {
-                if let Some(block) = g.blocks.get_mut(&block_id) {
+            if let Some(Edge::PointsTo { tgt: block_id, .. }) = g.remove_edge(eid) {
+                if let Some(block) = g.get_block_mut(block_id) {
                     block.refcount -= 1;
                     if block.refcount == 0 {
-                        g.blocks.remove(&block_id);
+                        g.remove_block(block_id);
                     }
                 }
             }
         }
 
-        g.inodes.remove(&target_inode_id);
+        g.remove_inode(target_inode_id);
         g.inode_incoming_contains.remove(&target_inode_id);
     }
 
@@ -425,8 +422,7 @@ fn rename_same_dir(
     // If destination already exists, unlink/rmdir it first (POSIX replace semantics)
     if let Some(dst_inode_id) = g.resolve_name(dir, dst_name) {
         let dst_inode = g
-            .inodes
-            .get(&dst_inode_id)
+            .get_inode(dst_inode_id)
             .ok_or(GraphError::InodeNotFound(dst_inode_id))?;
         if dst_inode.vtype == VnodeType::Directory {
             rmdir(g, dir, dst_name)?;
@@ -442,7 +438,7 @@ fn rename_same_dir(
         .ok_or(GraphError::DirNotFound(dir))?;
     let mut src_edge_id = None;
     for &eid in edge_ids {
-        if let Some(Edge::Contains { tgt, name, .. }) = g.edges.get(&eid) {
+        if let Some(Edge::Contains { tgt, name, .. }) = g.get_edge(eid) {
             if *tgt == src_inode && name == src_name {
                 src_edge_id = Some(eid);
                 break;
@@ -452,7 +448,7 @@ fn rename_same_dir(
     let eid = src_edge_id.ok_or_else(|| GraphError::NameNotFound(src_name.into()))?;
 
     // In-place name update — no edge removal/creation, no index churn
-    if let Some(Edge::Contains { name, .. }) = g.edges.get_mut(&eid) {
+    if let Some(Edge::Contains { name, .. }) = g.get_edge_mut(eid) {
         *name = dst_name.into();
     }
 
@@ -480,7 +476,7 @@ fn rename_cross_dir(
     let dst_exists = g.resolve_name(dst_dir, dst_name);
 
     // GC-RENAME-2: cycle prevention for cross-dir directory moves
-    if let Some(inode) = g.inodes.get(&src_inode) {
+    if let Some(inode) = g.get_inode(src_inode) {
         if inode.vtype == VnodeType::Directory {
             if let Some(src_child_dir) = g.dir_for_inode(src_inode) {
                 if g.is_ancestor(src_child_dir, dst_dir) {
@@ -493,8 +489,7 @@ fn rename_cross_dir(
     // If target exists, unlink it first (Cases B/D)
     if let Some(dst_inode_id) = dst_exists {
         let dst_inode = g
-            .inodes
-            .get(&dst_inode_id)
+            .get_inode(dst_inode_id)
             .ok_or(GraphError::InodeNotFound(dst_inode_id))?;
         if dst_inode.vtype == VnodeType::Directory {
             rmdir(g, dst_dir, dst_name)?;
@@ -511,7 +506,7 @@ fn rename_cross_dir(
             .ok_or(GraphError::DirNotFound(src_dir))?;
         let mut found = None;
         for &eid in edges {
-            if let Some(Edge::Contains { tgt, name, .. }) = g.edges.get(&eid) {
+            if let Some(Edge::Contains { tgt, name, .. }) = g.get_edge(eid) {
                 if *tgt == src_inode && name == src_name {
                     found = Some(eid);
                     break;
@@ -521,7 +516,7 @@ fn rename_cross_dir(
         found.ok_or_else(|| GraphError::NameNotFound(src_name.into()))?
     };
 
-    g.edges.remove(&src_edge_id);
+    g.remove_edge(src_edge_id);
     if let Some(set) = g.dir_contains.get_mut(&src_dir) {
         set.remove(&src_edge_id);
     }
@@ -537,7 +532,7 @@ fn rename_cross_dir(
         tgt: src_inode,
         name: dst_name.into(),
     };
-    g.edges.insert(new_edge_id, new_edge);
+    g.insert_edge(new_edge_id, new_edge);
     g.dir_contains
         .entry(dst_dir)
         .or_default()
@@ -548,32 +543,35 @@ fn rename_cross_dir(
         .insert(new_edge_id);
 
     // Moving a directory cross-dir: update its ".." edge
-    if let Some(inode) = g.inodes.get(&src_inode) {
+    if let Some(inode) = g.get_inode(src_inode) {
         if inode.vtype == VnodeType::Directory {
             if let Some(child_dir) = g.dir_for_inode(src_inode) {
-                let dst_parent_inode = g.dirs.get(&dst_dir).map(|d| d.inode_id);
+                let dst_parent_inode = g.get_dir(dst_dir).map(|d| d.inode_id);
                 if let Some(dst_pi) = dst_parent_inode {
                     // Find and update ".." edge
                     if let Some(edges) = g.dir_contains.get(&child_dir) {
                         let dotdot_edge = edges.iter().find(|&&eid| {
                             matches!(
-                                g.edges.get(&eid),
+                                g.get_edge(eid),
                                 Some(Edge::Contains { name, .. }) if name == ".."
                             )
                         });
                         if let Some(&dotdot_eid) = dotdot_edge {
+                            // Extract old target before mutable borrow
+                            let old_tgt = match g.get_edge(dotdot_eid) {
+                                Some(Edge::Contains { tgt, .. }) => Some(*tgt),
+                                _ => None,
+                            };
                             // Remove old ".." incoming count
-                            if let Some(Edge::Contains { tgt: old_tgt, .. }) =
-                                g.edges.get(&dotdot_eid)
-                            {
+                            if let Some(old) = old_tgt {
                                 if let Some(set) =
-                                    g.inode_incoming_contains.get_mut(old_tgt)
+                                    g.inode_incoming_contains.get_mut(&old)
                                 {
                                     set.remove(&dotdot_eid);
                                 }
                             }
                             // Update edge target
-                            if let Some(edge) = g.edges.get_mut(&dotdot_eid) {
+                            if let Some(edge) = g.get_edge_mut(dotdot_eid) {
                                 if let Edge::Contains { tgt, .. } = edge {
                                     *tgt = dst_pi;
                                 }
@@ -601,14 +599,14 @@ pub fn write_block(
     sector_start: u64,
     sector_count: u64,
 ) -> Result<BlockId, GraphError> {
-    if !g.inodes.contains_key(&inode_id) {
+    if !g.contains_inode(inode_id) {
         return Err(GraphError::InodeNotFound(inode_id));
     }
 
     let block_id = g.alloc_block_id();
     let edge_id = g.alloc_edge_id();
 
-    g.blocks.insert(
+    g.insert_block(
         block_id,
         Block {
             id: block_id,
@@ -624,7 +622,7 @@ pub fn write_block(
         tgt: block_id,
         offset,
     };
-    g.edges.insert(edge_id, edge);
+    g.insert_edge(edge_id, edge);
     g.inode_points_to
         .entry(inode_id)
         .or_default()
@@ -645,8 +643,7 @@ pub fn write_data(
     data: &[u8],
 ) -> Result<usize, GraphError> {
     let inode = g
-        .inodes
-        .get(&inode_id)
+        .get_inode(inode_id)
         .ok_or(GraphError::InodeNotFound(inode_id))?;
     if inode.vtype != VnodeType::Regular {
         return Err(GraphError::NotAFile(inode_id));
@@ -660,10 +657,11 @@ pub fn write_data(
         buf.resize(end, 0);
     }
     buf[offset as usize..end].copy_from_slice(data);
+    let new_size = buf.len() as u64;
 
     // Update inode size
-    if let Some(inode) = g.inodes.get_mut(&inode_id) {
-        inode.size = buf.len() as u64;
+    if let Some(inode) = g.get_inode_mut(inode_id) {
+        inode.size = new_size;
         inode.mtime = now();
     }
 
@@ -678,8 +676,7 @@ pub fn read_data(
     size: usize,
 ) -> Result<Vec<u8>, GraphError> {
     let inode = g
-        .inodes
-        .get(&inode_id)
+        .get_inode(inode_id)
         .ok_or(GraphError::InodeNotFound(inode_id))?;
     if inode.vtype != VnodeType::Regular {
         return Err(GraphError::NotAFile(inode_id));
@@ -702,8 +699,7 @@ pub fn truncate(
     new_size: u64,
 ) -> Result<(), GraphError> {
     let inode = g
-        .inodes
-        .get(&inode_id)
+        .get_inode(inode_id)
         .ok_or(GraphError::InodeNotFound(inode_id))?;
     if inode.vtype != VnodeType::Regular {
         return Err(GraphError::NotAFile(inode_id));
@@ -712,7 +708,7 @@ pub fn truncate(
     let buf = g.file_data.entry(inode_id).or_default();
     buf.resize(new_size as usize, 0);
 
-    if let Some(inode) = g.inodes.get_mut(&inode_id) {
+    if let Some(inode) = g.get_inode_mut(inode_id) {
         inode.size = new_size;
         inode.mtime = now();
     }
@@ -727,8 +723,7 @@ pub fn chmod(
     mode: u16,
 ) -> Result<(), GraphError> {
     let inode = g
-        .inodes
-        .get_mut(&inode_id)
+        .get_inode_mut(inode_id)
         .ok_or(GraphError::InodeNotFound(inode_id))?;
     inode.permissions = Permissions(mode);
     Ok(())
@@ -742,8 +737,7 @@ pub fn chown(
     gid: Option<u32>,
 ) -> Result<(), GraphError> {
     let inode = g
-        .inodes
-        .get_mut(&inode_id)
+        .get_inode_mut(inode_id)
         .ok_or(GraphError::InodeNotFound(inode_id))?;
     if let Some(u) = uid {
         inode.uid = u;
@@ -863,8 +857,8 @@ mod tests {
         let rd = g.root_dir;
         let id = create_file(&mut g, rd, "hello.txt", 0, 0, Permissions::FILE_DEFAULT).unwrap();
         g.check_invariants().unwrap();
-        assert_eq!(g.inodes[&id].link_count, 1);
-        assert_eq!(g.inodes[&id].vtype, VnodeType::Regular);
+        assert_eq!(g.get_inode(id).unwrap().link_count, 1);
+        assert_eq!(g.get_inode(id).unwrap().vtype, VnodeType::Regular);
     }
 
     #[test]
@@ -874,8 +868,8 @@ mod tests {
         let result = mkdir(&mut g, rd, "subdir", 0, 0, Permissions::DIR_DEFAULT).unwrap();
         g.check_invariants().unwrap();
         assert!(result.dir_id.is_some());
-        assert_eq!(g.inodes[&result.inode_id].vtype, VnodeType::Directory);
-        assert_eq!(g.inodes[&result.inode_id].link_count, 2);
+        assert_eq!(g.get_inode(result.inode_id).unwrap().vtype, VnodeType::Directory);
+        assert_eq!(g.get_inode(result.inode_id).unwrap().link_count, 2);
     }
 
     #[test]
@@ -905,7 +899,7 @@ mod tests {
         let sub = mkdir(&mut g, rd, "sub", 0, 0, Permissions::DIR_DEFAULT).unwrap();
         link(&mut g, sub.dir_id.unwrap(), "alias", id).unwrap();
         g.check_invariants().unwrap();
-        assert_eq!(g.inodes[&id].link_count, 2);
+        assert_eq!(g.get_inode(id).unwrap().link_count, 2);
     }
 
     #[test]
@@ -1064,7 +1058,7 @@ mod tests {
         let id = create_file(&mut g, rd, "data", 0, 0, Permissions::FILE_DEFAULT).unwrap();
         let bid = write_block(&mut g, id, 0, 100, 8).unwrap();
         g.check_invariants().unwrap();
-        assert_eq!(g.blocks[&bid].refcount, 1);
+        assert_eq!(g.get_block(bid).unwrap().refcount, 1);
     }
 
     #[test]
@@ -1091,7 +1085,7 @@ mod tests {
         let rd = g.root_dir;
         let id = create_file(&mut g, rd, "hello.txt", 0, 0, Permissions::FILE_DEFAULT).unwrap();
         write_data(&mut g, id, 0, b"Hello, sotFS!").unwrap();
-        assert_eq!(g.inodes[&id].size, 13);
+        assert_eq!(g.get_inode(id).unwrap().size, 13);
         let data = read_data(&g, id, 0, 100).unwrap();
         assert_eq!(data, b"Hello, sotFS!");
     }
@@ -1124,7 +1118,7 @@ mod tests {
         let id = create_file(&mut g, rd, "f", 0, 0, Permissions::FILE_DEFAULT).unwrap();
         write_data(&mut g, id, 0, b"Hello World").unwrap();
         truncate(&mut g, id, 5).unwrap();
-        assert_eq!(g.inodes[&id].size, 5);
+        assert_eq!(g.get_inode(id).unwrap().size, 5);
         let data = read_data(&g, id, 0, 100).unwrap();
         assert_eq!(data, b"Hello");
     }

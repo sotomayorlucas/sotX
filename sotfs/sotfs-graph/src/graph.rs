@@ -10,7 +10,8 @@
 use alloc::{
     boxed::Box,
     collections::{BTreeMap, BTreeSet},
-    string::String,
+    format,
+    string::{String, ToString},
     vec::Vec,
 };
 #[cfg(feature = "std")]
@@ -68,21 +69,21 @@ pub struct TypeGraph {
     pub edges: Arena<Edge, EDGE_CAPACITY>,
 
     // --- Indexes for fast lookup ---
-    /// Directory → set of contains edge IDs (outgoing)
+    /// Directory -> set of contains edge IDs (outgoing)
     pub dir_contains: BTreeMap<DirId, BTreeSet<EdgeId>>,
-    /// Inode → set of contains edge IDs (incoming)
+    /// Inode -> set of contains edge IDs (incoming)
     pub inode_incoming_contains: BTreeMap<InodeId, BTreeSet<EdgeId>>,
-    /// Inode → set of pointsTo edge IDs (outgoing)
+    /// Inode -> set of pointsTo edge IDs (outgoing)
     pub inode_points_to: BTreeMap<InodeId, BTreeSet<EdgeId>>,
-    /// Capability → grants edge ID
+    /// Capability -> grants edge ID
     pub cap_grants: BTreeMap<CapId, EdgeId>,
-    /// Capability → parent cap (via delegates edge)
+    /// Capability -> parent cap (via delegates edge)
     pub cap_parent: BTreeMap<CapId, CapId>,
-    /// Capability → children caps (via delegates edges)
+    /// Capability -> children caps (via delegates edges)
     pub cap_children: BTreeMap<CapId, BTreeSet<CapId>>,
 
     // --- File data (in-memory for FUSE prototype) ---
-    /// InodeId → file content bytes
+    /// InodeId -> file content bytes
     pub file_data: BTreeMap<InodeId, Vec<u8>>,
 
     // --- ID allocators ---
@@ -169,6 +170,30 @@ impl TypeGraph {
             (*ptr).root_dir = dir_id;
             (*ptr).root_inode = inode_id;
             Box::from_raw(ptr)
+        let mut g = Self {
+            inodes: Arena::new(),
+            dirs: Arena::new(),
+            caps: Arena::new(),
+            transactions: Arena::new(),
+            versions: Arena::new(),
+            blocks: Arena::new(),
+            edges: Arena::new(),
+            dir_contains: BTreeMap::new(),
+            inode_incoming_contains: BTreeMap::new(),
+            inode_points_to: BTreeMap::new(),
+            cap_grants: BTreeMap::new(),
+            cap_parent: BTreeMap::new(),
+            cap_children: BTreeMap::new(),
+            file_data: BTreeMap::new(),
+            next_inode: 2,
+            next_dir: 2,
+            next_cap: 1,
+            next_txn: 1,
+            next_version: 1,
+            next_block: 1,
+            next_edge: 2,
+            root_dir: dir_id,
+            root_inode: inode_id,
         };
 
         // Insert root inode with link_count=2 (entry from parent "." + self ".")
@@ -176,6 +201,7 @@ impl TypeGraph {
         // Actually POSIX: root has nlink=2 for "." even without parent.
         let mut ri = root_inode;
         ri.link_count = 1; // just "." — G3 excludes ".."
+        ri.link_count = 1; // just "." -- G3 excludes ".."
         g.inodes.insert_at(id_to_arena(inode_id), ri);
         g.dirs.insert_at(id_to_arena(dir_id), root_dir);
 
@@ -545,7 +571,7 @@ impl TypeGraph {
 
         for component in &components {
             if component == &".." {
-                // Resolve ".." — find parent
+                // Resolve ".." -- find parent
                 if let Some(parent_inode) = self.resolve_name(current_dir, "..") {
                     current_inode = parent_inode;
                     current_dir = self
@@ -593,7 +619,7 @@ impl TypeGraph {
     }
 
     // -----------------------------------------------------------------------
-    // Cycle detection (for rename — GC-RENAME-2)
+    // Cycle detection (for rename -- GC-RENAME-2)
     // -----------------------------------------------------------------------
 
     /// Check if `ancestor_dir` is an ancestor of (or equal to) `descendant_dir`
@@ -642,7 +668,7 @@ impl TypeGraph {
     }
 
     // -----------------------------------------------------------------------
-    // Invariant checking (§5.4-5.5)
+    // Invariant checking (5.4-5.5)
     // -----------------------------------------------------------------------
 
     /// Check all graph invariants. Returns Ok(()) or the first violation.
@@ -932,6 +958,7 @@ mod tests {
     #[test]
     fn root_link_count_is_one() {
         let g = TypeGraph::new_boxed();
+        let g = TypeGraph::new();
         assert_eq!(g.get_inode(g.root_inode).unwrap().link_count, 1);
     }
 }

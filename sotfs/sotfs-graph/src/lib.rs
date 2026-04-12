@@ -19,6 +19,7 @@ pub mod error;
 pub mod rcu;
 pub mod typestate;
 
+pub use arena::{Arena, ArenaId};
 pub use error::GraphError;
 pub use graph::TypeGraph;
 pub use rcu::RcuGraph;

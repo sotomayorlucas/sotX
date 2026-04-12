@@ -50,35 +50,40 @@ pub fn compute_treewidth(graph: &TypeGraph) -> usize {
     // Map each node type to a unique u64 for the undirected skeleton
     let mut id_map: BTreeMap<NodeId, u64> = BTreeMap::new();
 
-    for &iid in graph.inodes.keys() {
+    for aid in graph.inodes.keys() {
+        let iid = aid.0 as u64;
         let uid = next_uid;
         next_uid += 1;
         id_map.insert(NodeId::Inode(iid), uid);
         node_ids.push(uid);
         adj.entry(uid).or_default();
     }
-    for &did in graph.dirs.keys() {
+    for aid in graph.dirs.keys() {
+        let did = aid.0 as u64;
         let uid = next_uid;
         next_uid += 1;
         id_map.insert(NodeId::Directory(did), uid);
         node_ids.push(uid);
         adj.entry(uid).or_default();
     }
-    for &cid in graph.caps.keys() {
+    for aid in graph.caps.keys() {
+        let cid = aid.0 as u64;
         let uid = next_uid;
         next_uid += 1;
         id_map.insert(NodeId::Capability(cid), uid);
         node_ids.push(uid);
         adj.entry(uid).or_default();
     }
-    for &bid in graph.blocks.keys() {
+    for aid in graph.blocks.keys() {
+        let bid = aid.0 as u64;
         let uid = next_uid;
         next_uid += 1;
         id_map.insert(NodeId::Block(bid), uid);
         node_ids.push(uid);
         adj.entry(uid).or_default();
     }
-    for &vid in graph.versions.keys() {
+    for aid in graph.versions.keys() {
+        let vid = aid.0 as u64;
         let uid = next_uid;
         next_uid += 1;
         id_map.insert(NodeId::Version(vid), uid);

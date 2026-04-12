@@ -51,14 +51,14 @@ fn seed_to_name(seed: u8) -> &'static str {
 }
 
 fn apply(g: &mut TypeGraph, op: &FuzzOp) {
-    let dirs: Vec<DirId> = g.dirs.keys().copied().collect();
+    let dirs: Vec<DirId> = g.dirs.keys().map(|aid| aid.0 as u64).collect();
     let files: Vec<InodeId> = g
         .inodes
         .iter()
         .filter(|(_, i)| i.vtype == VnodeType::Regular)
-        .map(|(&id, _)| id)
+        .map(|(aid, _)| aid.0 as u64)
         .collect();
-    let all_inodes: Vec<InodeId> = g.inodes.keys().copied().collect();
+    let all_inodes: Vec<InodeId> = g.inodes.keys().map(|aid| aid.0 as u64).collect();
 
     match op {
         FuzzOp::Create(di, ns) => {

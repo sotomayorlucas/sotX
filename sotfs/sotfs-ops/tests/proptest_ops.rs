@@ -113,18 +113,18 @@ fn arb_op_sequence(max_len: usize) -> impl Strategy<Value = Vec<FsOp>> {
 // ---------------------------------------------------------------------------
 
 fn get_dirs(g: &TypeGraph) -> Vec<DirId> {
-    g.dirs.keys().copied().collect()
+    g.dirs.keys().map(|aid| aid.0 as u64).collect()
 }
 
 fn get_inodes(g: &TypeGraph) -> Vec<InodeId> {
-    g.inodes.keys().copied().collect()
+    g.inodes.keys().map(|aid| aid.0 as u64).collect()
 }
 
 fn get_regular_files(g: &TypeGraph) -> Vec<InodeId> {
     g.inodes
         .iter()
         .filter(|(_, i)| i.vtype == VnodeType::Regular)
-        .map(|(&id, _)| id)
+        .map(|(aid, _)| aid.0 as u64)
         .collect()
 }
 
@@ -241,13 +241,14 @@ proptest! {
         for op in &ops {
             apply_op(&mut g, op);
         }
-        for (&id, inode) in &g.inodes {
+        for (aid, inode) in g.inodes.iter() {
+            let id = aid.0 as u64;
             let actual = g.inode_incoming_contains
                 .get(&id)
                 .map(|edges| {
                     edges.iter()
                         .filter(|&&eid| {
-                            matches!(g.edges.get(&eid),
+                            matches!(g.get_edge(eid),
                                 Some(sotfs_graph::types::Edge::Contains { name, .. }) if name != "..")
                         })
                         .count() as u32
@@ -292,9 +293,9 @@ proptest! {
         let mut g = TypeGraph::new();
         let rd = g.root_dir;
         let fid = create_file(&mut g, rd, "f", 42, 7, Permissions::FILE_DEFAULT).unwrap();
-        let before = g.inodes[&fid].clone();
+        let before = g.get_inode(fid).unwrap().clone();
         chmod(&mut g, fid, mode).unwrap();
-        let after = &g.inodes[&fid];
+        let after = &g.get_inode(fid).unwrap();
         prop_assert_eq!(after.uid, before.uid);
         prop_assert_eq!(after.gid, before.gid);
         prop_assert_eq!(after.size, before.size);
@@ -311,9 +312,9 @@ proptest! {
         let mut g = TypeGraph::new();
         let rd = g.root_dir;
         let fid = create_file(&mut g, rd, "f", 0, 0, Permissions(0o600)).unwrap();
-        let before = g.inodes[&fid].clone();
+        let before = g.get_inode(fid).unwrap().clone();
         chown(&mut g, fid, Some(uid), Some(gid)).unwrap();
-        let after = &g.inodes[&fid];
+        let after = &g.get_inode(fid).unwrap();
         prop_assert_eq!(after.permissions.mode(), before.permissions.mode());
         prop_assert_eq!(after.size, before.size);
         prop_assert_eq!(after.uid, uid);
@@ -346,7 +347,7 @@ proptest! {
         let fid = create_file(&mut g, rd, "f", 0, 0, Permissions::FILE_DEFAULT).unwrap();
         write_data(&mut g, fid, 0, &initial).unwrap();
         truncate(&mut g, fid, new_size).unwrap();
-        prop_assert_eq!(g.inodes[&fid].size, new_size);
+        prop_assert_eq!(g.get_inode(fid).unwrap().size, new_size);
 
         let data = read_data(&g, fid, 0, new_size as usize).unwrap();
         prop_assert_eq!(data.len(), new_size as usize);

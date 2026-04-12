@@ -96,7 +96,7 @@ impl Filesystem for SotFsFilesystem {
 
         match g.resolve_name(parent_dir, name_str) {
             Some(inode_id) => {
-                if let Some(inode) = g.inodes.get(&inode_id) {
+                if let Some(inode) = g.get_inode(inode_id) {
                     reply.entry(&TTL, &inode_to_attr(inode), 0);
                 } else {
                     reply.error(libc::ENOENT);
@@ -111,7 +111,7 @@ impl Filesystem for SotFsFilesystem {
     // -------------------------------------------------------------------
     fn getattr(&mut self, _req: &Request, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
         let g = self.graph.lock().unwrap();
-        match g.inodes.get(&ino) {
+        match g.get_inode(ino) {
             Some(inode) => reply.attr(&TTL, &inode_to_attr(inode)),
             None => reply.error(libc::ENOENT),
         }
@@ -161,7 +161,7 @@ impl Filesystem for SotFsFilesystem {
             }
         }
 
-        match g.inodes.get(&ino) {
+        match g.get_inode(ino) {
             Some(inode) => reply.attr(&TTL, &inode_to_attr(inode)),
             None => reply.error(libc::ENOENT),
         }
@@ -190,7 +190,7 @@ impl Filesystem for SotFsFilesystem {
 
         let entries = g.list_dir(dir_id);
         for (i, (name, inode_id)) in entries.iter().enumerate().skip(offset as usize) {
-            let kind = match g.inodes.get(inode_id) {
+            let kind = match g.get_inode(*inode_id) {
                 Some(inode) => match inode.vtype {
                     VnodeType::Directory => FileType::Directory,
                     VnodeType::Symlink => FileType::Symlink,
@@ -399,7 +399,7 @@ impl Filesystem for SotFsFilesystem {
     // -------------------------------------------------------------------
     fn open(&mut self, _req: &Request, ino: u64, _flags: i32, reply: ReplyOpen) {
         let g = self.graph.lock().unwrap();
-        if g.inodes.contains_key(&ino) {
+        if g.contains_inode(ino) {
             let fh = self.alloc_fh();
             self.open_files.lock().unwrap().insert(fh, ino);
             reply.opened(fh, 0);

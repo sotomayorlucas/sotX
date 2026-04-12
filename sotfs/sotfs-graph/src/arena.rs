@@ -1,4 +1,5 @@
 //! # Arena Allocator — fixed-capacity, no_std, no_alloc
+//! # Arena Allocator — fixed-capacity, heap-backed, no_std compatible
 //!
 //! Provides `Arena<T, CAPACITY>`: a dense storage pool with O(1) alloc,
 //! dealloc, and lookup. Uses a free-list for slot reuse after deletions
@@ -6,9 +7,20 @@
 //!
 //! Designed for the sotFS kernel service where heap allocation is
 //! unavailable. Tests use smaller CAPACITY (1024), kernel uses 65536+.
+//! The backing arrays are heap-allocated (`Box<[T]>`) to avoid stack
+//! overflow at large capacities (65K+). Requires `alloc` but not `std`.
+//!
+//! Default CAPACITY: 65536 for kernel node pools, 131072 for edges.
+//! Tests use smaller capacities (1024).
 
 use core::fmt;
 use core::mem::MaybeUninit;
+
+#[cfg(not(feature = "std"))]
+use alloc::boxed::Box;
+
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 
 /// Slot index into an Arena.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -35,6 +47,8 @@ enum SlotState {
 ///
 /// Uses a backing array of `CAPACITY` elements stored as `MaybeUninit<T>`.
 /// A free-list enables O(1) deallocation and slot reuse.
+/// Uses a heap-allocated backing array of `CAPACITY` elements stored as
+/// `MaybeUninit<T>`. A free-list enables O(1) deallocation and slot reuse.
 /// When full, `alloc()` returns `None`.
 ///
 /// For the kernel service, `CAPACITY` is set high (65536).
@@ -48,10 +62,27 @@ pub struct Arena<T, const CAPACITY: usize> {
     len: usize,
     /// Free list: stack of recently-freed slot indices for O(1) reuse.
     free_list: [u32; CAPACITY],
+    /// Backing storage (heap-allocated). Only slots in `Occupied` state
+    /// contain initialized values.
+    data: Box<[MaybeUninit<T>]>,
+    /// Per-slot state tracking (heap-allocated).
+    state: Box<[SlotState]>,
+    /// Number of currently occupied slots.
+    len: usize,
+    /// Free list: stack of recently-freed slot indices for O(1) reuse.
+    free_list: Box<[u32]>,
     /// Number of entries in the free list.
     free_count: usize,
     /// Next slot to bump-allocate from (when free list is empty).
     next_bump: usize,
+}
+
+/// Create a boxed slice of MaybeUninit<T> with the given length.
+fn boxed_uninit_slice<T>(len: usize) -> Box<[MaybeUninit<T>]> {
+    let mut v = Vec::with_capacity(len);
+    // SAFETY: MaybeUninit<T> does not require initialization.
+    unsafe { v.set_len(len) };
+    v.into_boxed_slice()
 }
 
 impl<T, const CAPACITY: usize> Arena<T, CAPACITY> {
@@ -70,6 +101,10 @@ impl<T, const CAPACITY: usize> Arena<T, CAPACITY> {
             // SAFETY: MaybeUninit<u32> is fine uninitialized; free_count=0 means
             // no entries are read from free_list until a dealloc writes one.
             free_list: [0u32; CAPACITY],
+            data: boxed_uninit_slice(CAPACITY),
+            state: vec![SlotState::Vacant; CAPACITY].into_boxed_slice(),
+            len: 0,
+            free_list: vec![0u32; CAPACITY].into_boxed_slice(),
             free_count: 0,
             next_bump: 0,
         }
@@ -125,6 +160,13 @@ impl<T, const CAPACITY: usize> Arena<T, CAPACITY> {
         true
     }
 
+    /// Convenience: insert at slot index derived from a `u64` key.
+    /// Equivalent to `insert_at(ArenaId(key as u32), value)`.
+    #[inline]
+    pub fn insert(&mut self, key: u64, value: T) -> bool {
+        self.insert_at(ArenaId(key as u32), value)
+    }
+
     /// Deallocate the slot at `id`, dropping the value and pushing the
     /// slot onto the free list for reuse.
     ///
@@ -165,6 +207,12 @@ impl<T, const CAPACITY: usize> Arena<T, CAPACITY> {
         Some(value)
     }
 
+    /// Convenience: remove by `u64` key. Equivalent to `remove(ArenaId(key as u32))`.
+    #[inline]
+    pub fn remove_by_key(&mut self, key: &u64) -> Option<T> {
+        self.remove(ArenaId(*key as u32))
+    }
+
     /// Get a shared reference to the value at `id`.
     /// Returns `None` if the slot is vacant or out of range.
     #[inline]
@@ -175,6 +223,12 @@ impl<T, const CAPACITY: usize> Arena<T, CAPACITY> {
         }
         // SAFETY: slot is Occupied.
         Some(unsafe { self.data[slot].assume_init_ref() })
+    }
+
+    /// Convenience: get by `u64` key. Equivalent to `get(ArenaId(key as u32))`.
+    #[inline]
+    pub fn get_by_key(&self, key: &u64) -> Option<&T> {
+        self.get(ArenaId(*key as u32))
     }
 
     /// Get a mutable reference to the value at `id`.
@@ -189,11 +243,23 @@ impl<T, const CAPACITY: usize> Arena<T, CAPACITY> {
         Some(unsafe { self.data[slot].assume_init_mut() })
     }
 
+    /// Convenience: get_mut by `u64` key. Equivalent to `get_mut(ArenaId(key as u32))`.
+    #[inline]
+    pub fn get_mut_by_key(&mut self, key: &u64) -> Option<&mut T> {
+        self.get_mut(ArenaId(*key as u32))
+    }
+
     /// Check whether the slot at `id` is occupied.
     #[inline]
     pub fn contains(&self, id: ArenaId) -> bool {
         let slot = id.index();
         slot < CAPACITY && matches!(self.state[slot], SlotState::Occupied)
+    }
+
+    /// Convenience: check by `u64` key. Equivalent to `contains(ArenaId(key as u32))`.
+    #[inline]
+    pub fn contains_key(&self, key: &u64) -> bool {
+        self.contains(ArenaId(*key as u32))
     }
 
     /// Number of currently occupied slots.
@@ -270,6 +336,7 @@ impl<T: Clone, const CAPACITY: usize> Clone for Arena<T, CAPACITY> {
             free_count: self.free_count,
             next_bump: self.next_bump,
         };
+        let mut new_data = boxed_uninit_slice(CAPACITY);
         // Clone all occupied values.
         for i in 0..self.next_bump {
             if matches!(self.state[i], SlotState::Occupied) {
@@ -278,6 +345,17 @@ impl<T: Clone, const CAPACITY: usize> Clone for Arena<T, CAPACITY> {
             }
         }
         new_arena
+                new_data[i] = MaybeUninit::new(val.clone());
+            }
+        }
+        Self {
+            data: new_data,
+            state: self.state.clone(),
+            len: self.len,
+            free_list: self.free_list.clone(),
+            free_count: self.free_count,
+            next_bump: self.next_bump,
+        }
     }
 }
 
@@ -322,6 +400,8 @@ impl<'a, T, const CAPACITY: usize> Iterator for ArenaIter<'a, T, CAPACITY> {
 pub struct ArenaIterMut<'a, T, const CAPACITY: usize> {
     data: &'a mut [MaybeUninit<T>; CAPACITY],
     state: &'a [SlotState; CAPACITY],
+    data: &'a mut [MaybeUninit<T>],
+    state: &'a [SlotState],
     pos: usize,
     bound: usize,
 }
@@ -408,6 +488,7 @@ mod tests {
         let mut arena: Arena<u64, 1024> = Arena::new();
         let id1 = arena.alloc(10).unwrap();
         let id2 = arena.alloc(20).unwrap();
+        let _id2 = arena.alloc(20).unwrap();
         assert_eq!(arena.len(), 2);
 
         // Dealloc id1, then alloc again should reuse the same slot.
@@ -580,5 +661,26 @@ mod tests {
         let id = arena.alloc([3u8; 32]).unwrap();
         arena.dealloc(id);
         // arena drops here — should not panic
+        // arena drops here -- should not panic
+    }
+
+    #[test]
+    fn convenience_insert_and_get_by_key() {
+        let mut arena: Arena<u64, 1024> = Arena::new();
+        assert!(arena.insert(5, 50));
+        assert!(arena.insert(10, 100));
+        assert_eq!(*arena.get_by_key(&5).unwrap(), 50);
+        assert_eq!(*arena.get_by_key(&10).unwrap(), 100);
+        assert!(arena.contains_key(&5));
+        assert!(!arena.contains_key(&999));
+
+        // get_mut_by_key
+        *arena.get_mut_by_key(&5).unwrap() = 55;
+        assert_eq!(*arena.get_by_key(&5).unwrap(), 55);
+
+        // remove_by_key
+        let val = arena.remove_by_key(&10);
+        assert_eq!(val, Some(100));
+        assert!(!arena.contains_key(&10));
     }
 }

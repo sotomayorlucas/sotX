@@ -48,17 +48,17 @@ fn build_adjacency(graph: &TypeGraph) -> BTreeMap<NodeId, BTreeSet<NodeId>> {
     let mut adj: BTreeMap<NodeId, BTreeSet<NodeId>> = BTreeMap::new();
 
     // Ensure all nodes are present
-    for &id in graph.inodes.keys() {
-        adj.entry(NodeId::Inode(id)).or_default();
+    for aid in graph.inodes.keys() {
+        adj.entry(NodeId::Inode(aid.0 as u64)).or_default();
     }
-    for &id in graph.dirs.keys() {
-        adj.entry(NodeId::Directory(id)).or_default();
+    for aid in graph.dirs.keys() {
+        adj.entry(NodeId::Directory(aid.0 as u64)).or_default();
     }
-    for &id in graph.caps.keys() {
-        adj.entry(NodeId::Capability(id)).or_default();
+    for aid in graph.caps.keys() {
+        adj.entry(NodeId::Capability(aid.0 as u64)).or_default();
     }
-    for &id in graph.blocks.keys() {
-        adj.entry(NodeId::Block(id)).or_default();
+    for aid in graph.blocks.keys() {
+        adj.entry(NodeId::Block(aid.0 as u64)).or_default();
     }
 
     // Add undirected edges
@@ -148,12 +148,12 @@ pub fn compute_all_curvatures(graph: &TypeGraph, alpha: f64) -> CurvatureReport 
     let adj = build_adjacency(graph);
     let mut edges = Vec::new();
 
-    for (eid, edge) in &graph.edges {
+    for (aid, edge) in graph.edges.iter() {
         let src = edge.src_node();
         let tgt = edge.tgt_node();
         let kappa = compute_edge_curvature(&adj, src, tgt, alpha);
         edges.push(EdgeCurvature {
-            edge_id: *eid,
+            edge_id: aid.0 as u64,
             src,
             tgt,
             kappa,
@@ -245,7 +245,8 @@ fn edges_in_2hop_neighborhood(
     // Step 2: Collect all edges where BOTH endpoints are known to the graph
     // and at least one endpoint is in the 2-hop neighborhood.
     let mut affected_edges = BTreeSet::new();
-    for (&eid, edge) in &graph.edges {
+    for (aid, edge) in graph.edges.iter() {
+        let eid = aid.0 as u64;
         let src = edge.src_node();
         let tgt = edge.tgt_node();
         if neighborhood.contains(&src) || neighborhood.contains(&tgt) {
@@ -296,7 +297,8 @@ pub fn recompute_incremental_with_alpha(
     let mut min_kappa = f64::INFINITY;
     let mut max_kappa = f64::NEG_INFINITY;
 
-    for (&eid, edge) in &graph.edges {
+    for (aid, edge) in graph.edges.iter() {
+        let eid = aid.0 as u64;
         let src = edge.src_node();
         let tgt = edge.tgt_node();
 
