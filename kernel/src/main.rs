@@ -933,7 +933,7 @@ fn spawn_init_process() -> u64 {
     );
     // Tell the kernel fb_console module the physical address so kprintln! can
     // push bytes into the ring from this point onwards.
-    arch::x86_64::fb_console::init(console_ring_phys);
+    arch::x86_64::fb_console::init(console_ring_phys + hhdm);
 
     // Create root capabilities.
     create_init_caps();
