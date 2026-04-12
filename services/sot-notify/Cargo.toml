@@ -1,0 +1,19 @@
+[package]
+name = "sot-notify"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[[bin]]
+name = "sot-notify"
+path = "src/main.rs"
+
+[dependencies]
+sotos-common = { path = "../../libs/sotos-common" }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

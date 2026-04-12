@@ -554,6 +554,10 @@ pub const SIG_REDIRECT_TAG: u64 = 0x5349_4700; // "SIG\0"
 /// write data into the pipe.
 pub const PIPE_RETRY_TAG: u64 = 0x5049_5045; // "PIPE"
 
+/// IPC tag used by the `sot-notify` notification daemon.
+/// Clients send `(severity, timeout_ms, title, body)` with this tag.
+pub const NOTIFY_TAG: u64 = 0x4E4F_5446; // "NOTF"
+
 /// Signal frame pushed onto the user stack during signal delivery.
 /// Both the kernel (rt_sigreturn) and LUCAS (frame construction) use
 /// this layout. 22 × 8 = 176 bytes.
