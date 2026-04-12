@@ -10,6 +10,7 @@ use sotfs_graph::graph::TypeGraph;
 use sotfs_graph::types::*;
 use sotfs_ops::*;
 use sotfs_monitor::{treewidth, curvature};
+use sotfs_ops::affected_nodes_create;
 
 /// Build a graph with N files in root (star topology).
 fn build_star(n: usize) -> TypeGraph {
@@ -126,10 +127,118 @@ fn bench_treewidth_check(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark: incremental vs full curvature recomputation.
+///
+/// For each graph size, we:
+/// 1. Build the graph, compute full curvature (baseline).
+/// 2. Add one more file.
+/// 3. Benchmark: full recomputation on the new graph.
+/// 4. Benchmark: incremental recomputation (2-hop neighborhood only).
+fn bench_incremental_curvature(c: &mut Criterion) {
+    let mut group = c.benchmark_group("incremental_curvature");
+
+    for n in [100, 1000, 10000] {
+        // Build a star graph with n files, then add one more
+        let mut g = TypeGraph::new();
+        let rd = g.root_dir;
+        for i in 0..n {
+            let name = format!("f{}", i);
+            let _ = create_file(&mut g, rd, &name, 0, 0, Permissions::FILE_DEFAULT);
+        }
+
+        // Baseline report BEFORE the extra file
+        let prev_report = curvature::compute_curvatures(&g);
+
+        // Add the extra file
+        let new_inode = create_file(&mut g, rd, "f_extra", 0, 0, Permissions::FILE_DEFAULT)
+            .unwrap();
+        let affected = affected_nodes_create(rd, new_inode);
+
+        // Clone graph for fair benchmarking (both closures need it)
+        let g_full = g.clone();
+        let g_incr = g.clone();
+        let prev_clone = prev_report.clone();
+        let affected_slice: Vec<_> = affected.as_slice().to_vec();
+
+        // Benchmark: full recomputation
+        group.bench_with_input(
+            BenchmarkId::new("full", n),
+            &g_full,
+            |b, g| {
+                b.iter(|| black_box(curvature::compute_curvatures(g)));
+            },
+        );
+
+        // Benchmark: incremental recomputation
+        group.bench_with_input(
+            BenchmarkId::new("incremental", n),
+            &(g_incr, prev_clone, affected_slice),
+            |b, (g, prev, affected)| {
+                b.iter(|| {
+                    black_box(curvature::recompute_incremental(g, affected, prev))
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+/// Benchmark: incremental on chain topology (deep nested dirs).
+fn bench_incremental_chain(c: &mut Criterion) {
+    let mut group = c.benchmark_group("incremental_chain");
+
+    for n in [100, 500] {
+        let mut g = TypeGraph::new();
+        let mut current = g.root_dir;
+        for i in 0..n {
+            let name = format!("d{}", i);
+            match mkdir(&mut g, current, &name, 0, 0, Permissions::DIR_DEFAULT) {
+                Ok(r) => current = r.dir_id.unwrap(),
+                Err(_) => break,
+            }
+        }
+
+        let prev_report = curvature::compute_curvatures(&g);
+
+        // Add a file to the deepest directory
+        let new_inode = create_file(&mut g, current, "leaf", 0, 0, Permissions::FILE_DEFAULT)
+            .unwrap();
+        let affected = affected_nodes_create(current, new_inode);
+
+        let g_full = g.clone();
+        let g_incr = g.clone();
+        let prev_clone = prev_report.clone();
+        let affected_slice: Vec<_> = affected.as_slice().to_vec();
+
+        group.bench_with_input(
+            BenchmarkId::new("full", n),
+            &g_full,
+            |b, g| {
+                b.iter(|| black_box(curvature::compute_curvatures(g)));
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("incremental", n),
+            &(g_incr, prev_clone, affected_slice),
+            |b, (g, prev, affected)| {
+                b.iter(|| {
+                    black_box(curvature::recompute_incremental(g, affected, prev))
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_treewidth,
     bench_curvature,
     bench_treewidth_check,
+    bench_incremental_curvature,
+    bench_incremental_chain,
 );
 criterion_main!(benches);

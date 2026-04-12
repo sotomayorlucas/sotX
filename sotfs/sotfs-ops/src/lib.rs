@@ -42,7 +42,7 @@ pub fn create_file(
             name: name.into(),
         });
     }
-    if !g.dirs.contains_key(&parent_dir) {
+    if !g.contains_dir(parent_dir) {
         return Err(GraphError::DirNotFound(parent_dir));
     }
 
@@ -52,7 +52,7 @@ pub fn create_file(
     // Create inode with link_count=1
     let mut inode = Inode::new_file(inode_id, permissions, uid, gid);
     inode.link_count = 1;
-    g.inodes.insert(inode_id, inode);
+    g.insert_inode(inode_id, inode);
 
     // Create contains edge
     let edge = Edge::Contains {
@@ -61,7 +61,7 @@ pub fn create_file(
         tgt: inode_id,
         name: name.into(),
     };
-    g.edges.insert(edge_id, edge);
+    g.insert_edge(edge_id, edge);
     g.dir_contains
         .entry(parent_dir)
         .or_default()
@@ -95,8 +95,7 @@ pub fn mkdir(
         });
     }
     let parent = g
-        .dirs
-        .get(&parent_dir)
+        .get_dir(parent_dir)
         .ok_or(GraphError::DirNotFound(parent_dir))?;
     let parent_inode_id = parent.inode_id;
 
@@ -110,10 +109,10 @@ pub fn mkdir(
     // G3 counts "." but not ".." → link_count = 2
     let mut inode = Inode::new_dir(inode_id, permissions, uid, gid);
     inode.link_count = 2;
-    g.inodes.insert(inode_id, inode);
+    g.insert_inode(inode_id, inode);
 
     // Create directory node
-    g.dirs.insert(
+    g.insert_dir(
         dir_id,
         Directory {
             id: dir_id,
@@ -128,7 +127,7 @@ pub fn mkdir(
         tgt: inode_id,
         name: name.into(),
     };
-    g.edges.insert(entry_edge, e1);
+    g.insert_edge(entry_edge, e1);
     g.dir_contains
         .entry(parent_dir)
         .or_default()
@@ -145,7 +144,7 @@ pub fn mkdir(
         tgt: inode_id,
         name: ".".into(),
     };
-    g.edges.insert(dot_edge, e2);
+    g.insert_edge(dot_edge, e2);
     g.dir_contains
         .entry(dir_id)
         .or_default()
@@ -162,7 +161,7 @@ pub fn mkdir(
         tgt: parent_inode_id,
         name: "..".into(),
     };
-    g.edges.insert(dotdot_edge, e3);
+    g.insert_edge(dotdot_edge, e3);
     g.dir_contains
         .entry(dir_id)
         .or_default()
@@ -378,7 +377,10 @@ pub fn unlink(g: &mut TypeGraph, dir: DirId, name: &str) -> Result<(), GraphErro
     Ok(())
 }
 
-/// DPO Rule: RENAME (same directory, no replacement) — §6.2.7 Case A
+/// DPO Rule: RENAME — §6.2.7
+///
+/// Dispatches to a fast path (same directory) or slow path (cross-directory).
+/// Same-directory renames cannot create cycles and skip the ancestor walk.
 pub fn rename(
     g: &mut TypeGraph,
     src_dir: DirId,
@@ -391,6 +393,84 @@ pub fn rename(
         return Err(GraphError::NameNotFound(src_name.into()));
     }
 
+    // FAST PATH: same-directory rename — no cycle possible, no ".." update needed.
+    if src_dir == dst_dir {
+        return rename_same_dir(g, src_dir, src_name, dst_name);
+    }
+    // SLOW PATH: cross-directory rename with cycle prevention.
+    rename_cross_dir(g, src_dir, src_name, dst_dir, dst_name)
+}
+
+/// Fast path: rename within the same directory.
+///
+/// No cycle check needed (moving within the same parent cannot create a cycle).
+/// No ".." edge update needed (parent directory is unchanged).
+/// No 2PC needed (single directory, atomic name swap).
+fn rename_same_dir(
+    g: &mut TypeGraph,
+    dir: DirId,
+    src_name: &str,
+    dst_name: &str,
+) -> Result<(), GraphError> {
+    // GC-RENAME-1: source must exist
+    let src_inode = g
+        .resolve_name(dir, src_name)
+        .ok_or_else(|| GraphError::NameNotFound(src_name.into()))?;
+
+    // If source and destination names are identical, it's a no-op
+    if src_name == dst_name {
+        return Ok(());
+    }
+
+    // If destination already exists, unlink/rmdir it first (POSIX replace semantics)
+    if let Some(dst_inode_id) = g.resolve_name(dir, dst_name) {
+        let dst_inode = g
+            .inodes
+            .get(&dst_inode_id)
+            .ok_or(GraphError::InodeNotFound(dst_inode_id))?;
+        if dst_inode.vtype == VnodeType::Directory {
+            rmdir(g, dir, dst_name)?;
+        } else {
+            unlink(g, dir, dst_name)?;
+        }
+    }
+
+    // Find the source edge and update its name in-place
+    let edge_ids = g
+        .dir_contains
+        .get(&dir)
+        .ok_or(GraphError::DirNotFound(dir))?;
+    let mut src_edge_id = None;
+    for &eid in edge_ids {
+        if let Some(Edge::Contains { tgt, name, .. }) = g.edges.get(&eid) {
+            if *tgt == src_inode && name == src_name {
+                src_edge_id = Some(eid);
+                break;
+            }
+        }
+    }
+    let eid = src_edge_id.ok_or_else(|| GraphError::NameNotFound(src_name.into()))?;
+
+    // In-place name update — no edge removal/creation, no index churn
+    if let Some(Edge::Contains { name, .. }) = g.edges.get_mut(&eid) {
+        *name = dst_name.into();
+    }
+
+    Ok(())
+}
+
+/// Slow path: cross-directory rename with full cycle prevention.
+///
+/// GC-RENAME-2: checks whether dst_dir is a descendant of the moved inode
+/// (which would create a cycle in the directory tree).
+/// Updates ".." edge when moving directories across parents.
+fn rename_cross_dir(
+    g: &mut TypeGraph,
+    src_dir: DirId,
+    src_name: &str,
+    dst_dir: DirId,
+    dst_name: &str,
+) -> Result<(), GraphError> {
     // GC-RENAME-1: source must exist
     let src_inode = g
         .resolve_name(src_dir, src_name)
@@ -400,13 +480,11 @@ pub fn rename(
     let dst_exists = g.resolve_name(dst_dir, dst_name);
 
     // GC-RENAME-2: cycle prevention for cross-dir directory moves
-    if src_dir != dst_dir {
-        if let Some(inode) = g.inodes.get(&src_inode) {
-            if inode.vtype == VnodeType::Directory {
-                if let Some(src_child_dir) = g.dir_for_inode(src_inode) {
-                    if g.is_ancestor(src_child_dir, dst_dir) {
-                        return Err(GraphError::WouldCreateCycle);
-                    }
+    if let Some(inode) = g.inodes.get(&src_inode) {
+        if inode.vtype == VnodeType::Directory {
+            if let Some(src_child_dir) = g.dir_for_inode(src_inode) {
+                if g.is_ancestor(src_child_dir, dst_dir) {
+                    return Err(GraphError::WouldCreateCycle);
                 }
             }
         }
@@ -469,43 +547,41 @@ pub fn rename(
         .or_default()
         .insert(new_edge_id);
 
-    // If moving a directory cross-dir, update its ".." edge
-    if src_dir != dst_dir {
-        if let Some(inode) = g.inodes.get(&src_inode) {
-            if inode.vtype == VnodeType::Directory {
-                if let Some(child_dir) = g.dir_for_inode(src_inode) {
-                    let dst_parent_inode = g.dirs.get(&dst_dir).map(|d| d.inode_id);
-                    if let Some(dst_pi) = dst_parent_inode {
-                        // Find and update ".." edge
-                        if let Some(edges) = g.dir_contains.get(&child_dir) {
-                            let dotdot_edge = edges.iter().find(|&&eid| {
-                                matches!(
-                                    g.edges.get(&eid),
-                                    Some(Edge::Contains { name, .. }) if name == ".."
-                                )
-                            });
-                            if let Some(&dotdot_eid) = dotdot_edge {
-                                // Remove old ".." incoming count
-                                if let Some(Edge::Contains { tgt: old_tgt, .. }) =
-                                    g.edges.get(&dotdot_eid)
+    // Moving a directory cross-dir: update its ".." edge
+    if let Some(inode) = g.inodes.get(&src_inode) {
+        if inode.vtype == VnodeType::Directory {
+            if let Some(child_dir) = g.dir_for_inode(src_inode) {
+                let dst_parent_inode = g.dirs.get(&dst_dir).map(|d| d.inode_id);
+                if let Some(dst_pi) = dst_parent_inode {
+                    // Find and update ".." edge
+                    if let Some(edges) = g.dir_contains.get(&child_dir) {
+                        let dotdot_edge = edges.iter().find(|&&eid| {
+                            matches!(
+                                g.edges.get(&eid),
+                                Some(Edge::Contains { name, .. }) if name == ".."
+                            )
+                        });
+                        if let Some(&dotdot_eid) = dotdot_edge {
+                            // Remove old ".." incoming count
+                            if let Some(Edge::Contains { tgt: old_tgt, .. }) =
+                                g.edges.get(&dotdot_eid)
+                            {
+                                if let Some(set) =
+                                    g.inode_incoming_contains.get_mut(old_tgt)
                                 {
-                                    if let Some(set) =
-                                        g.inode_incoming_contains.get_mut(old_tgt)
-                                    {
-                                        set.remove(&dotdot_eid);
-                                    }
+                                    set.remove(&dotdot_eid);
                                 }
-                                // Update edge target
-                                if let Some(edge) = g.edges.get_mut(&dotdot_eid) {
-                                    if let Edge::Contains { tgt, .. } = edge {
-                                        *tgt = dst_pi;
-                                    }
-                                }
-                                g.inode_incoming_contains
-                                    .entry(dst_pi)
-                                    .or_default()
-                                    .insert(dotdot_eid);
                             }
+                            // Update edge target
+                            if let Some(edge) = g.edges.get_mut(&dotdot_eid) {
+                                if let Edge::Contains { tgt, .. } = edge {
+                                    *tgt = dst_pi;
+                                }
+                            }
+                            g.inode_incoming_contains
+                                .entry(dst_pi)
+                                .or_default()
+                                .insert(dotdot_eid);
                         }
                     }
                 }
@@ -678,6 +754,105 @@ pub fn chown(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Affected-node sets for incremental curvature recomputation
+// ---------------------------------------------------------------------------
+
+/// Fixed-capacity set of affected NodeIds (no_std compatible).
+/// Maximum 8 entries — sufficient for any single DPO rule.
+pub struct AffectedNodes {
+    pub nodes: [NodeId; 8],
+    pub len: usize,
+}
+
+impl AffectedNodes {
+    /// Create an empty set.
+    pub const fn empty() -> Self {
+        Self {
+            nodes: [NodeId::Inode(0); 8],
+            len: 0,
+        }
+    }
+
+    fn push(&mut self, node: NodeId) {
+        if self.len < 8 {
+            // Deduplicate
+            for i in 0..self.len {
+                if self.nodes[i] == node {
+                    return;
+                }
+            }
+            self.nodes[self.len] = node;
+            self.len += 1;
+        }
+    }
+
+    /// Return a slice of the affected nodes.
+    pub fn as_slice(&self) -> &[NodeId] {
+        &self.nodes[..self.len]
+    }
+}
+
+/// Affected nodes after create_file: the parent directory node + new inode.
+pub fn affected_nodes_create(dir: DirId, inode: InodeId) -> AffectedNodes {
+    let mut a = AffectedNodes::empty();
+    a.push(NodeId::Directory(dir));
+    a.push(NodeId::Inode(inode));
+    a
+}
+
+/// Affected nodes after unlink: the directory node + the (possibly removed) inode.
+pub fn affected_nodes_unlink(dir: DirId, inode: InodeId) -> AffectedNodes {
+    let mut a = AffectedNodes::empty();
+    a.push(NodeId::Directory(dir));
+    a.push(NodeId::Inode(inode));
+    a
+}
+
+/// Affected nodes after mkdir: parent dir + new inode + new dir node.
+pub fn affected_nodes_mkdir(parent_dir: DirId, inode: InodeId, new_dir: DirId) -> AffectedNodes {
+    let mut a = AffectedNodes::empty();
+    a.push(NodeId::Directory(parent_dir));
+    a.push(NodeId::Inode(inode));
+    a.push(NodeId::Directory(new_dir));
+    a
+}
+
+/// Affected nodes after rmdir: parent dir + removed inode + removed dir node.
+pub fn affected_nodes_rmdir(parent_dir: DirId, inode: InodeId, removed_dir: DirId) -> AffectedNodes {
+    let mut a = AffectedNodes::empty();
+    a.push(NodeId::Directory(parent_dir));
+    a.push(NodeId::Inode(inode));
+    a.push(NodeId::Directory(removed_dir));
+    a
+}
+
+/// Affected nodes after rename: src_dir + dst_dir + moved inode.
+/// If dst_dir == src_dir, the dedup in push() handles it.
+pub fn affected_nodes_rename(src_dir: DirId, dst_dir: DirId, inode: InodeId) -> AffectedNodes {
+    let mut a = AffectedNodes::empty();
+    a.push(NodeId::Directory(src_dir));
+    a.push(NodeId::Directory(dst_dir));
+    a.push(NodeId::Inode(inode));
+    a
+}
+
+/// Affected nodes after link: directory + target inode.
+pub fn affected_nodes_link(dir: DirId, inode: InodeId) -> AffectedNodes {
+    let mut a = AffectedNodes::empty();
+    a.push(NodeId::Directory(dir));
+    a.push(NodeId::Inode(inode));
+    a
+}
+
+/// Affected nodes after write_block: inode + new block.
+pub fn affected_nodes_write_block(inode: InodeId, block: BlockId) -> AffectedNodes {
+    let mut a = AffectedNodes::empty();
+    a.push(NodeId::Inode(inode));
+    a.push(NodeId::Block(block));
+    a
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -774,6 +949,76 @@ mod tests {
     }
 
     #[test]
+    fn rename_same_dir_preserves_inode() {
+        let mut g = TypeGraph::new();
+        let rd = g.root_dir;
+        let id = create_file(&mut g, rd, "a.txt", 0, 0, Permissions::FILE_DEFAULT).unwrap();
+        write_data(&mut g, id, 0, b"data").unwrap();
+        rename(&mut g, rd, "a.txt", rd, "b.txt").unwrap();
+        g.check_invariants().unwrap();
+        // Inode is the same, data preserved
+        let resolved = g.resolve_name(rd, "b.txt").unwrap();
+        assert_eq!(resolved, id);
+        let data = read_data(&g, id, 0, 100).unwrap();
+        assert_eq!(data, b"data");
+    }
+
+    #[test]
+    fn rename_same_dir_overwrites_existing() {
+        let mut g = TypeGraph::new();
+        let rd = g.root_dir;
+        let src_id = create_file(&mut g, rd, "src", 0, 0, Permissions::FILE_DEFAULT).unwrap();
+        write_data(&mut g, src_id, 0, b"keep").unwrap();
+        let _dst_id = create_file(&mut g, rd, "dst", 0, 0, Permissions::FILE_DEFAULT).unwrap();
+        write_data(&mut g, _dst_id, 0, b"discard").unwrap();
+        rename(&mut g, rd, "src", rd, "dst").unwrap();
+        g.check_invariants().unwrap();
+        // Source name gone, dst now points to src's inode
+        assert!(g.resolve_name(rd, "src").is_none());
+        let resolved = g.resolve_name(rd, "dst").unwrap();
+        assert_eq!(resolved, src_id);
+        let data = read_data(&g, src_id, 0, 100).unwrap();
+        assert_eq!(data, b"keep");
+    }
+
+    #[test]
+    fn rename_same_dir_directory_entry() {
+        let mut g = TypeGraph::new();
+        let rd = g.root_dir;
+        let sub = mkdir(&mut g, rd, "olddir", 0, 0, Permissions::DIR_DEFAULT).unwrap();
+        let sub_dir = sub.dir_id.unwrap();
+        // Add a file inside the subdirectory
+        create_file(&mut g, sub_dir, "inner.txt", 0, 0, Permissions::FILE_DEFAULT).unwrap();
+        rename(&mut g, rd, "olddir", rd, "newdir").unwrap();
+        g.check_invariants().unwrap();
+        assert!(g.resolve_name(rd, "olddir").is_none());
+        assert!(g.resolve_name(rd, "newdir").is_some());
+        // Inner file still accessible
+        assert!(g.resolve_name(sub_dir, "inner.txt").is_some());
+    }
+
+    #[test]
+    fn rename_same_dir_noop_same_name() {
+        let mut g = TypeGraph::new();
+        let rd = g.root_dir;
+        let id = create_file(&mut g, rd, "same", 0, 0, Permissions::FILE_DEFAULT).unwrap();
+        rename(&mut g, rd, "same", rd, "same").unwrap();
+        g.check_invariants().unwrap();
+        assert_eq!(g.resolve_name(rd, "same").unwrap(), id);
+    }
+
+    #[test]
+    fn rename_dot_rejected() {
+        let mut g = TypeGraph::new();
+        let rd = g.root_dir;
+        create_file(&mut g, rd, "f", 0, 0, Permissions::FILE_DEFAULT).unwrap();
+        assert!(rename(&mut g, rd, ".", rd, "x").is_err());
+        assert!(rename(&mut g, rd, "f", rd, ".").is_err());
+        assert!(rename(&mut g, rd, "..", rd, "x").is_err());
+        assert!(rename(&mut g, rd, "f", rd, "..").is_err());
+    }
+
+    #[test]
     fn rename_cross_dir() {
         let mut g = TypeGraph::new();
         let rd = g.root_dir;
@@ -784,6 +1029,19 @@ mod tests {
         g.check_invariants().unwrap();
         assert!(g.resolve_name(rd, "f").is_none());
         assert!(g.resolve_name(sub_dir, "f2").is_some());
+    }
+
+    #[test]
+    fn rename_cross_dir_cycle_rejected() {
+        let mut g = TypeGraph::new();
+        let rd = g.root_dir;
+        let a = mkdir(&mut g, rd, "a", 0, 0, Permissions::DIR_DEFAULT).unwrap();
+        let a_dir = a.dir_id.unwrap();
+        let b = mkdir(&mut g, a_dir, "b", 0, 0, Permissions::DIR_DEFAULT).unwrap();
+        let b_dir = b.dir_id.unwrap();
+        // Try to move "a" into "a/b" — would create cycle
+        let err = rename(&mut g, rd, "a", b_dir, "a");
+        assert!(matches!(err, Err(GraphError::WouldCreateCycle)));
     }
 
     #[test]
