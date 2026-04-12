@@ -1340,6 +1340,11 @@ fn compose() {
             let eff_w_max = (avail_right_limit - eff_x).max(0) as u32;
             let eff_w = tl.width.min(eff_w_max);
 
+            // Soft drop-shadow beneath the window (title bar + body).
+            // Drawn BEFORE the window content so the window paints on top.
+            let shadow_h = TITLE_BAR_HEIGHT as u32 + eff_h;
+            fb.draw_shadow(eff_x, title_top, eff_w, shadow_h, 12);
+
             // Tokyo Night-styled title bar (decorations module: traffic lights,
             // rounded corners, modern palette).
             let focused = i == focused_tl;

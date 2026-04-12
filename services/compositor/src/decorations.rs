@@ -22,8 +22,7 @@ use crate::render::Framebuffer;
 /// Height of the decorated title bar in pixels.
 pub const TITLE_BAR_HEIGHT: i32 = 28;
 
-/// Rounded-corner radius for future window rounding (title bar is squared for now).
-#[allow(dead_code)]
+/// Rounded-corner radius for window top corners.
 pub const BORDER_RADIUS: i32 = 8;
 
 /// Advance (in pixels) of every glyph drawn by `Framebuffer::draw_text`.
@@ -101,6 +100,21 @@ pub fn draw_title_bar(fb: &mut Framebuffer, x: i32, y: i32, w: i32, focused: boo
     };
     let bottom = darken(base, 5);
 
+    // Save background pixels in the corner regions before the gradient
+    // overwrites them, so we can restore the rounded-off corners afterward.
+    let r = BORDER_RADIUS;
+    let r_sq = r * r;
+    const MAX_R: usize = BORDER_RADIUS as usize;
+    let mut tl_saved: [u32; MAX_R * MAX_R] = [0; MAX_R * MAX_R];
+    let mut tr_saved: [u32; MAX_R * MAX_R] = [0; MAX_R * MAX_R];
+    let ru = r.min(MAX_R as i32) as usize;
+    for row in 0..ru {
+        for col in 0..ru {
+            tl_saved[row * MAX_R + col] = fb.read_pixel(x + col as i32, y + row as i32);
+            tr_saved[row * MAX_R + col] = fb.read_pixel(x + w - 1 - col as i32, y + row as i32);
+        }
+    }
+
     // Vertical gradient across the bar, row by row.
     let bar_rows = TITLE_BAR_HEIGHT.max(1);
     for row in 0..bar_rows {
@@ -112,9 +126,17 @@ pub fn draw_title_bar(fb: &mut Framebuffer, x: i32, y: i32, w: i32, focused: boo
     // 1px bottom border line inside the title bar.
     fb.fill_rect(x, y + TITLE_BAR_HEIGHT - 1, width, 1, TOKYO_NIGHT.border);
 
-    // No drop-shadow strip: rows below the bar coincide with the start of
-    // the client content area, so the compose loop would overwrite any
-    // shadow painted here on the same frame.
+    // Rounded top corners: restore background pixels outside the radius arc.
+    for row in 0..ru {
+        for col in 0..ru {
+            let dx = r - 1 - col as i32;
+            let dy = r - 1 - row as i32;
+            if dx * dx + dy * dy > r_sq {
+                fb.write_pixel(x + col as i32, y + row as i32, tl_saved[row * MAX_R + col]);
+                fb.write_pixel(x + w - 1 - col as i32, y + row as i32, tr_saved[row * MAX_R + col]);
+            }
+        }
+    }
 
     // Traffic-light buttons on the LEFT.
     let cy = y + TITLE_BAR_HEIGHT / 2;
