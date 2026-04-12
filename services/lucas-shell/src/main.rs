@@ -16,6 +16,7 @@ pub mod net;
 pub mod lua;
 pub mod trace;
 pub mod help;
+pub mod color;
 
 use syscall::*;
 use util::*;
