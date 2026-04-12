@@ -1,6 +1,94 @@
 use crate::syscall::*;
 
 // ---------------------------------------------------------------------------
+// Standardized error / usage output
+// ---------------------------------------------------------------------------
+//
+// All shell error and usage messages flow through `err!()` and `usage!()`.
+// Output format is consistent:
+//     \x1b[31;1merror:\x1b[0m cmd: msg\n         (red, bold "error:")
+//     \x1b[33musage:\x1b[0m cmd: pattern\n       (yellow "usage:")
+//
+// Exit codes follow POSIX conventions and are set via `crate::parse::set_exit_status`
+// by the helper functions:
+//     0   success                      (default)
+//     1   generic runtime failure      (EXIT_GENERIC, used by `err!()`)
+//     2   usage error                  (EXIT_USAGE,   used by `usage!()`)
+//     127 command not found            (EXIT_NOTFOUND, used by `emit_notfound`)
+//
+// Raw ANSI codes are used inline to avoid new dependencies.
+
+pub const EXIT_GENERIC: i64 = 1;
+pub const EXIT_USAGE: i64 = 2;
+pub const EXIT_NOTFOUND: i64 = 127;
+
+/// Shared body for the red-bold "error:" banner, used by `emit_error` and
+/// `emit_notfound`. Leaves exit-status setting to the caller.
+#[inline]
+fn print_error_prefix(cmd: &[u8]) {
+    print(b"\x1b[31;1merror:\x1b[0m ");
+    print(cmd);
+    print(b": ");
+}
+
+/// Emit a standardized error line and set `$?` to `EXIT_GENERIC`:
+///     "\x1b[31;1merror:\x1b[0m cmd: msg\n"
+///
+/// The extra `detail` slice (usually a filename or empty) is appended
+/// between `msg` and the newline with a single space separator.
+#[inline]
+pub fn emit_error(cmd: &[u8], msg: &[u8], detail: &[u8]) {
+    print_error_prefix(cmd);
+    print(msg);
+    if !detail.is_empty() {
+        print(b" ");
+        print(detail);
+    }
+    print(b"\n");
+    crate::parse::set_exit_status(EXIT_GENERIC);
+}
+
+/// Emit a standardized usage line and set `$?` to `EXIT_USAGE`:
+///     "\x1b[33musage:\x1b[0m cmd: pattern\n"
+#[inline]
+pub fn emit_usage(cmd: &[u8], pattern: &[u8]) {
+    print(b"\x1b[33musage:\x1b[0m ");
+    print(cmd);
+    print(b": ");
+    print(pattern);
+    print(b"\n");
+    crate::parse::set_exit_status(EXIT_USAGE);
+}
+
+/// POSIX "command not found" — red-bold banner, exit status 127.
+#[inline]
+pub fn emit_notfound(cmd: &[u8]) {
+    print_error_prefix(cmd);
+    print(b"command not found\n");
+    crate::parse::set_exit_status(EXIT_NOTFOUND);
+}
+
+/// `err!(cmd, msg)`                 -> "error: cmd: msg\n", `$?` = 1
+/// `err!(cmd, msg, detail)`         -> "error: cmd: msg detail\n", `$?` = 1
+#[macro_export]
+macro_rules! err {
+    ($cmd:expr, $msg:expr) => {
+        $crate::util::emit_error($cmd, $msg, b"")
+    };
+    ($cmd:expr, $msg:expr, $detail:expr) => {
+        $crate::util::emit_error($cmd, $msg, $detail)
+    };
+}
+
+/// `usage!(cmd, pattern)`           -> "usage: cmd: pattern\n", `$?` = 2
+#[macro_export]
+macro_rules! usage {
+    ($cmd:expr, $pattern:expr) => {
+        $crate::util::emit_usage($cmd, $pattern)
+    };
+}
+
+// ---------------------------------------------------------------------------
 // String helpers
 // ---------------------------------------------------------------------------
 
@@ -289,7 +377,9 @@ pub fn read_simple_line(buf: &mut [u8]) -> usize {
 }
 
 /// Open a virtual file (prefix + name), read and print response.
-pub fn open_virtual_and_print(prefix: &[u8], name: &[u8], on_error: &[u8]) {
+/// Returns `true` on success, `false` if the file could not be opened —
+/// callers should use `err!(...)` to emit a standardized error in that case.
+pub fn open_virtual_and_print(prefix: &[u8], name: &[u8]) -> bool {
     let mut path_buf = [0u8; 64];
     let mut pos = prefix.len();
     path_buf[..pos].copy_from_slice(prefix);
@@ -305,7 +395,8 @@ pub fn open_virtual_and_print(prefix: &[u8], name: &[u8], on_error: &[u8]) {
         let n = linux_read(fd as u64, buf.as_mut_ptr(), buf.len());
         if n > 0 { linux_write(1, buf.as_ptr(), n as usize); }
         linux_close(fd as u64);
+        true
     } else {
-        print(on_error);
+        false
     }
 }

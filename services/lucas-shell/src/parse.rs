@@ -8,7 +8,7 @@ use crate::net::cmd_wget;
 use crate::lua::cmd_lua;
 use crate::jobs::*;
 use crate::history::cmd_history;
-use crate::shell_trace;
+use crate::{err, usage, shell_trace};
 
 // ---------------------------------------------------------------------------
 // Last exit status ($?)
@@ -133,9 +133,7 @@ pub fn dispatch_with_redirects(line: &[u8]) {
         let path = null_terminate(&redir.stdin_file[..redir.stdin_file_len], &mut path_buf);
         in_fd = linux_open(path, 0); // O_RDONLY
         if in_fd < 0 {
-            print(b"redirect: cannot open input file: ");
-            print(&redir.stdin_file[..redir.stdin_file_len]);
-            print(b"\n");
+            err!(b"redirect", b"cannot open input file:", &redir.stdin_file[..redir.stdin_file_len]);
             return;
         }
     }
@@ -152,9 +150,7 @@ pub fn dispatch_with_redirects(line: &[u8]) {
         };
         out_fd = linux_open(path, flags);
         if out_fd < 0 {
-            print(b"redirect: cannot open output file: ");
-            print(&redir.stdout_file[..redir.stdout_file_len]);
-            print(b"\n");
+            err!(b"redirect", b"cannot open output file:", &redir.stdout_file[..redir.stdout_file_len]);
             if in_fd >= 0 { linux_close(in_fd as u64); }
             return;
         }
@@ -587,12 +583,12 @@ pub fn accumulate_block(first_line: &[u8], line_buf: &mut [u8; 512], buf: &mut [
 pub fn execute_if_block(line: &[u8], _line_buf: &mut [u8; 512]) {
     let after_if = trim(&line[3..]);
     let then_pos = find_substr(after_if, b"; then ");
-    if then_pos.is_none() { print(b"syntax error: expected '; then'\n"); return; }
+    if then_pos.is_none() { err!(b"if", b"syntax error: expected '; then'"); return; }
     let then_pos = then_pos.unwrap();
     let condition = trim(&after_if[..then_pos]);
     let after_then = &after_if[then_pos + 7..];
     let fi_pos = find_substr(after_then, b"; fi");
-    if fi_pos.is_none() { print(b"syntax error: expected '; fi'\n"); return; }
+    if fi_pos.is_none() { err!(b"if", b"syntax error: expected '; fi'"); return; }
     let fi_pos = fi_pos.unwrap();
     let command = trim(&after_then[..fi_pos]);
 
@@ -636,7 +632,7 @@ pub fn execute_for_block(line: &[u8], _line_buf: &mut [u8; 512]) {
             }
         }
     }
-    print(b"syntax error: for VAR in ITEMS; do CMD; done\n");
+    usage!(b"for", b"for VAR in ITEMS; do CMD; done");
 }
 
 // ---------------------------------------------------------------------------
@@ -672,7 +668,11 @@ fn execute_while_inner(line: &[u8], invert: bool) {
             // Also try "; do\n" or just "; do;" pattern
             match find_substr(after_kw, b";do ") {
                 Some(p) => p,
-                None => { print(b"syntax error: expected '; do'\n"); return; }
+                None => {
+                    let cmd: &[u8] = if invert { b"until" } else { b"while" };
+                    err!(cmd, b"syntax error: expected '; do'");
+                    return;
+                }
             }
         }
     };
@@ -684,7 +684,11 @@ fn execute_while_inner(line: &[u8], invert: bool) {
         None => {
             match find_substr(after_do, b";done") {
                 Some(p) => p,
-                None => { print(b"syntax error: expected '; done'\n"); return; }
+                None => {
+                    let cmd: &[u8] = if invert { b"until" } else { b"while" };
+                    err!(cmd, b"syntax error: expected '; done'");
+                    return;
+                }
             }
         }
     };
@@ -704,7 +708,8 @@ fn execute_while_inner(line: &[u8], invert: bool) {
 
     loop {
         if iterations >= MAX_ITERATIONS {
-            print(b"while: max iterations reached\n");
+            let cmd: &[u8] = if invert { b"until" } else { b"while" };
+            err!(cmd, b"max iterations reached");
             break;
         }
         iterations += 1;
@@ -922,7 +927,7 @@ pub fn dispatch_command(line: &[u8]) {
         } else if starts_with(line, b"kill ") {
             let args = trim(&line[5..]);
             if args.is_empty() {
-                print(b"usage: kill <pid> [signal]\n");
+                usage!(b"kill", b"kill <pid> [signal]");
             } else {
                 cmd_kill(args);
             }
@@ -954,7 +959,7 @@ pub fn dispatch_command(line: &[u8]) {
         } else if starts_with(line, b"cat ") {
             let name = trim(&line[4..]);
             if name.is_empty() {
-                print(b"usage: cat <file>\n");
+                usage!(b"cat", b"cat <file>");
             } else {
                 cmd_cat(name);
             }
@@ -967,20 +972,20 @@ pub fn dispatch_command(line: &[u8]) {
                     cmd_write(name, text);
                 }
                 None => {
-                    print(b"usage: write <file> <text>\n");
+                    usage!(b"write", b"write <file> <text>");
                 }
             }
         } else if starts_with(line, b"rm ") {
             let name = trim(&line[3..]);
             if name.is_empty() {
-                print(b"usage: rm <file>\n");
+                usage!(b"rm", b"rm <file>");
             } else {
                 cmd_rm(name);
             }
         } else if starts_with(line, b"stat ") {
             let name = trim(&line[5..]);
             if name.is_empty() {
-                print(b"usage: stat <file>\n");
+                usage!(b"stat", b"stat <file>");
             } else {
                 cmd_stat(name);
             }
@@ -989,28 +994,28 @@ pub fn dispatch_command(line: &[u8]) {
         } else if starts_with(line, b"hexdump ") {
             let name = trim(&line[8..]);
             if name.is_empty() {
-                print(b"usage: hexdump <file>\n");
+                usage!(b"hexdump", b"hexdump <file>");
             } else {
                 cmd_hexdump(name);
             }
         } else if starts_with(line, b"mkdir ") {
             let name = trim(&line[6..]);
             if name.is_empty() {
-                print(b"usage: mkdir <dir>\n");
+                usage!(b"mkdir", b"mkdir <dir>");
             } else {
                 cmd_mkdir(name);
             }
         } else if starts_with(line, b"rmdir ") {
             let name = trim(&line[6..]);
             if name.is_empty() {
-                print(b"usage: rmdir <dir>\n");
+                usage!(b"rmdir", b"rmdir <dir>");
             } else {
                 cmd_rmdir(name);
             }
         } else if starts_with(line, b"cd ") {
             let name = trim(&line[3..]);
             if name.is_empty() {
-                print(b"usage: cd <dir>\n");
+                usage!(b"cd", b"cd <dir>");
             } else {
                 cmd_cd(name);
             }
@@ -1028,48 +1033,48 @@ pub fn dispatch_command(line: &[u8]) {
         } else if starts_with(line, b"exec ") {
             let name = trim(&line[5..]);
             if name.is_empty() {
-                print(b"usage: exec <program>\n");
+                usage!(b"exec", b"exec <program>");
             } else {
                 cmd_exec(name);
             }
         } else if starts_with(line, b"resolve ") {
             let name = trim(&line[8..]);
             if name.is_empty() {
-                print(b"usage: resolve <hostname>\n");
+                usage!(b"resolve", b"resolve <hostname>");
             } else {
                 crate::net::cmd_resolve(name);
             }
         } else if eq(line, b"ping") {
-            print(b"usage: ping <host|ip>\n");
+            usage!(b"ping", b"ping <host|ip>");
         } else if starts_with(line, b"ping ") {
             let host = trim(&line[5..]);
             if host.is_empty() {
-                print(b"usage: ping <host|ip>\n");
+                usage!(b"ping", b"ping <host|ip>");
             } else {
                 crate::net::cmd_ping(host);
             }
         } else if eq(line, b"traceroute") {
-            print(b"usage: traceroute <host|ip>\n");
+            usage!(b"traceroute", b"traceroute <host|ip>");
         } else if starts_with(line, b"traceroute ") {
             let host = trim(&line[11..]);
             if host.is_empty() {
-                print(b"usage: traceroute <host|ip>\n");
+                usage!(b"traceroute", b"traceroute <host|ip>");
             } else {
                 crate::net::cmd_traceroute(host);
             }
         } else if eq(line, b"wget") || eq(line, b"curl") {
-            print(b"usage: wget [-O file] [-q] <url>\n");
+            usage!(b"wget", b"wget [-O file] [-q] <url>");
         } else if starts_with(line, b"curl ") {
             let args = trim(&line[5..]);
             if args.is_empty() {
-                print(b"usage: wget [-O file] [-q] <url>\n");
+                usage!(b"curl", b"wget [-O file] [-q] <url>");
             } else {
                 cmd_wget(args);
             }
         } else if starts_with(line, b"wget ") {
             let args = trim(&line[5..]);
             if args.is_empty() {
-                print(b"usage: wget [-O file] [-q] <url>\n");
+                usage!(b"wget", b"wget [-O file] [-q] <url>");
             } else {
                 cmd_wget(args);
             }
@@ -1083,7 +1088,7 @@ pub fn dispatch_command(line: &[u8]) {
                 let val = trim(&args[eq_pos + 1..]);
                 env_set(key, val);
             } else {
-                print(b"usage: export KEY=VALUE\n");
+                usage!(b"export", b"export KEY=VALUE");
             }
         } else if eq(line, b"env") {
             cmd_env();
@@ -1127,12 +1132,12 @@ pub fn dispatch_command(line: &[u8]) {
             let name = trim(&line[5..]);
             cmd_sort(name);
         } else if eq(line, b"sort") {
-            print(b"usage: sort <file>\n");
+            usage!(b"sort", b"sort <file>");
         } else if starts_with(line, b"uniq ") {
             let name = trim(&line[5..]);
             cmd_uniq(name);
         } else if eq(line, b"uniq") {
-            print(b"usage: uniq <file>\n");
+            usage!(b"uniq", b"uniq <file>");
         } else if starts_with(line, b"diff ") {
             let args = trim(&line[5..]);
             cmd_diff(args);
@@ -1143,7 +1148,7 @@ pub fn dispatch_command(line: &[u8]) {
             let arg = trim(&line[10..]);
             cmd_netmirror(arg);
         } else if eq(line, b"netmirror") {
-            print(b"usage: netmirror on|off\n");
+            usage!(b"netmirror", b"netmirror on|off");
         } else if starts_with(line, b"snapshot ") {
             let arg = trim(&line[9..]);
             cmd_snap(arg);
@@ -1153,7 +1158,7 @@ pub fn dispatch_command(line: &[u8]) {
             let code = trim(&line[4..]);
             cmd_lua(code);
         } else if eq(line, b"lua") {
-            print(b"usage: lua <code>\nexample: lua print(1+2)\n");
+            usage!(b"lua", b"lua <code>  (example: lua print(1+2))");
         } else if starts_with(line, b"apt ") {
             let args = trim(&line[4..]);
             cmd_apt(args);
@@ -1166,11 +1171,11 @@ pub fn dispatch_command(line: &[u8]) {
             cmd_pkg(b"help");
         } else if starts_with(line, b"source ") {
             let name = trim(&line[7..]);
-            if name.is_empty() { print(b"usage: source <file>\n"); }
+            if name.is_empty() { usage!(b"source", b"source <file>"); }
             else { cmd_source(name); }
         } else if starts_with(line, b". ") {
             let name = trim(&line[2..]);
-            if name.is_empty() { print(b"usage: . <file>\n"); }
+            if name.is_empty() { usage!(b".", b". <file>"); }
             else { cmd_source(name); }
         } else if starts_with(line, b"read ") {
             let args = trim(&line[5..]);
@@ -1185,7 +1190,7 @@ pub fn dispatch_command(line: &[u8]) {
             let arg = trim(&line[6..]);
             cmd_sleep(arg);
         } else if eq(line, b"sleep") {
-            print(b"usage: sleep <seconds>\n");
+            usage!(b"sleep", b"sleep <seconds>");
         } else if starts_with(line, b"type ") {
             let name = trim(&line[5..]);
             cmd_type(name);

@@ -5,12 +5,6 @@ name = "sotos-lucas-shell"
 version = "0.1.0"
 edition = "2021"
 
-# Declare this package as a standalone cargo workspace so cargo does not
-# attach to an ancestor workspace manifest. Required when building inside
-# a git worktree whose own workspace excludes this path (cargo otherwise
-# walks further up and attaches to the main tree's workspace).
-[workspace]
-
 [dependencies]
 sotos-common = { path = "../../libs/sotos-common" }
 sotos-lua = { path = "../../libs/sotos-lua" }
@@ -18,8 +12,6 @@ sotos-lua = { path = "../../libs/sotos-lua" }
 [features]
 default = ["trace"]
 trace = []
-
-[workspace]
 
 [profile.dev]
 panic = "abort"
