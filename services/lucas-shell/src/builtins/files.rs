@@ -2,6 +2,7 @@
 
 use crate::syscall::*;
 use crate::util::*;
+use crate::color;
 
 // --- cat ---
 
@@ -84,22 +85,36 @@ pub fn cmd_stat(name: &[u8]) {
         stat_buf[12], stat_buf[13], stat_buf[14], stat_buf[15],
     ]);
 
+    color::color(color::FG_CYAN);
     print(b"  file: ");
+    color::reset();
     print(name);
+
+    color::color(color::FG_CYAN);
     print(b"\n  size: ");
+    color::reset();
     print_u64(size);
-    print(b"\n  inode: ");
+
+    color::color(color::FG_CYAN);
+    print(b"\n inode: ");
+    color::reset();
     print_u64(ino);
+
+    color::color(color::FG_CYAN);
     print(b"\n  type: ");
+    color::reset();
     if mode & 0o170000 == 0o40000 {
+        color::color(color::FG_BLUE);
         print(b"directory");
     } else if mode & 0o170000 == 0o100000 {
         print(b"regular file");
     } else if mode & 0o170000 == 0o20000 {
+        color::color(color::FG_YELLOW);
         print(b"character device");
     } else {
         print(b"unknown");
     }
+    color::reset();
     print(b"\n");
 }
 

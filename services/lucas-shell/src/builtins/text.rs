@@ -2,6 +2,7 @@
 
 use crate::syscall::*;
 use crate::util::*;
+use crate::color;
 
 // --- wc ---
 
@@ -369,14 +370,14 @@ pub fn cmd_grep(args: &[u8]) {
         if total < 0 { print(b"grep: file not found\n"); return; }
         let total = total as usize;
 
-        // Scan for lines containing the pattern.
+        // Scan for lines containing the pattern, colorize matches.
         let mut line_start: usize = 0;
         let mut i: usize = 0;
         while i <= total {
             if i == total || buf[i] == b'\n' {
                 let line = &buf[line_start..i];
                 if contains(line, pattern) {
-                    linux_write(1, line.as_ptr(), line.len());
+                    grep_print_colored(line, pattern);
                     print(b"\n");
                 }
                 line_start = i + 1;
@@ -385,5 +386,35 @@ pub fn cmd_grep(args: &[u8]) {
         }
     } else {
         print(b"usage: grep <pattern> <file>\n");
+    }
+}
+
+/// Print a line with all occurrences of `pattern` highlighted in red.
+fn grep_print_colored(line: &[u8], pattern: &[u8]) {
+    if pattern.is_empty() || color::no_color() {
+        print(line);
+        return;
+    }
+    let plen = pattern.len();
+    let mut pos = 0usize;
+    while pos < line.len() {
+        if pos + plen <= line.len() && &line[pos..pos + plen] == pattern {
+            // Flush any preceding plain text as a batch
+            color::color(color::BOLD_RED);
+            print(&line[pos..pos + plen]);
+            color::reset();
+            pos += plen;
+        } else {
+            // Find the next match (or end) and print the plain span in one write
+            let span_start = pos;
+            pos += 1;
+            while pos < line.len() {
+                if pos + plen <= line.len() && &line[pos..pos + plen] == pattern {
+                    break;
+                }
+                pos += 1;
+            }
+            print(&line[span_start..pos]);
+        }
     }
 }
