@@ -536,7 +536,10 @@ unsafe extern "C" fn ap_entry(cpu: &limine::mp::Cpu) -> ! {
 }
 
 use sotos_common::{ASLR_JITTER_PAGES, BAR0_VIRT_BASE, FB_USER_BASE, PROCESS_STACK_BASE};
-use sotos_common::{KB_RING_ADDR as KB_RING_PAGE, MOUSE_RING_ADDR as MOUSE_RING_PAGE};
+use sotos_common::{
+    CONSOLE_RING_ADDR as CONSOLE_RING_PAGE, KB_RING_ADDR as KB_RING_PAGE,
+    MOUSE_RING_ADDR as MOUSE_RING_PAGE,
+};
 
 // ---------------------------------------------------------------------------
 // Process loading helpers — shared by all load_*_process() functions
@@ -897,6 +900,21 @@ fn spawn_init_process() -> u64 {
         mouse_ring_phys,
         PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER,
     );
+
+    // Map console ring buffer page at CONSOLE_RING_ADDR (kernel writes, init reads).
+    let console_ring_frame = mm::alloc_frame().expect("no frame for console ring");
+    let console_ring_phys = console_ring_frame.addr();
+    unsafe {
+        core::ptr::write_bytes((console_ring_phys + hhdm) as *mut u8, 0, 4096);
+    }
+    addr_space.map_page(
+        CONSOLE_RING_PAGE,
+        console_ring_phys,
+        PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER,
+    );
+    // Tell the kernel fb_console module the physical address so kprintln! can
+    // push bytes into the ring from this point onwards.
+    arch::x86_64::fb_console::init(console_ring_phys);
 
     // Create root capabilities.
     create_init_caps();

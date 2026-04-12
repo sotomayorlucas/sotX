@@ -60,6 +60,9 @@ impl fmt::Write for SerialWriter {
         for byte in s.bytes() {
             if byte == b'\n' {
                 write_byte(b'\r');
+                super::fb_console::push_byte(b'\n');
+            } else {
+                super::fb_console::push_byte(byte);
             }
             write_byte(byte);
         }
