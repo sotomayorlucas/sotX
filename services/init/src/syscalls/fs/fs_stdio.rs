@@ -109,7 +109,13 @@ pub(crate) fn sys_ioctl(ctx: &mut SyscallContext, msg: &IpcMsg) {
             }
             TCSETS | TCSETSW | TCSETSF => reply_val(ctx.ep_cap, 0),
             TIOCGWINSZ => {
-                let ws = Winsize::default_serial();
+                let (cols, rows, xpix, ypix) = crate::framebuffer::con_dimensions();
+                let ws = Winsize {
+                    ws_row: rows,
+                    ws_col: cols,
+                    ws_xpixel: xpix,
+                    ws_ypixel: ypix,
+                };
                 let buf_addr = msg.regs[2];
                 if buf_addr != 0 {
                     let bytes: [u8; 8] = unsafe { core::mem::transmute(ws) };

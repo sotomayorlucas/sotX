@@ -301,6 +301,55 @@ const COL_TEXT: u32 = 0xFFA9B1D6;
 /// Terminal background color.
 const COL_BG: u32 = 0xFF1A1B26;
 
+// ---------------------------------------------------------------------------
+// Scrollback ring buffer (256 rows x 200 cols)
+// ---------------------------------------------------------------------------
+const SB_ROWS: usize = 256;
+const SB_COLS: usize = 200;
+
+/// A single cell in the scrollback buffer.
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct ScrollbackCell {
+    ch: u8,
+    _pad: u8,
+}
+
+impl ScrollbackCell {
+    const fn empty() -> Self { Self { ch: b' ', _pad: 0 } }
+}
+
+/// Scrollback ring: SB_ROWS rows of SB_COLS cells each.
+static mut SB_RING: [[ScrollbackCell; SB_COLS]; SB_ROWS] =
+    [[ScrollbackCell::empty(); SB_COLS]; SB_ROWS];
+/// Write head in the ring (next row to write into).
+static mut SB_HEAD: usize = 0;
+/// Number of valid rows stored (up to SB_ROWS).
+static mut SB_COUNT: usize = 0;
+/// Current scroll-back view offset (0 = live, >0 = scrolled back N rows).
+static mut SB_VIEW_OFFSET: usize = 0;
+/// Screen shadow buffer — mirrors the visible character cells so we can
+/// evict rows into the scrollback ring and redraw on scroll-back.
+/// Max 80 rows (generous for any realistic resolution).
+const SB_SCREEN_MAX_ROWS: usize = 80;
+static mut SB_SCREEN_BUF: [[ScrollbackCell; SB_COLS]; SB_SCREEN_MAX_ROWS] =
+    [[ScrollbackCell::empty(); SB_COLS]; SB_SCREEN_MAX_ROWS];
+
+// ---------------------------------------------------------------------------
+// DEC private mode state
+// ---------------------------------------------------------------------------
+
+/// DECTCEM: cursor visible (DEC ?25h / ?25l).
+static mut CURSOR_VISIBLE: bool = true;
+/// DECSCUSR cursor style: 0=default/block, 1=blinking block, 2=steady block,
+/// 3=blinking underline, 4=steady underline, 5=blinking bar, 6=steady bar.
+static mut CURSOR_STYLE: u8 = 0;
+/// Alt screen active (?1049 / ?1047).
+static mut ALT_SCREEN_ACTIVE: bool = false;
+/// Saved cursor for alt screen switch.
+static mut ALT_SAVED_COL: u32 = 0;
+static mut ALT_SAVED_ROW: u32 = 0;
+
 /// Keyboard state.
 static KB_SHIFT: SyncUnsafeCell<bool> = SyncUnsafeCell::new(false);
 static KB_CTRL: SyncUnsafeCell<bool> = SyncUnsafeCell::new(false);
@@ -372,15 +421,125 @@ unsafe fn fb_draw_glyph_at(px: u32, py: u32, ch: u8, fg: u32, bg: u32) {
     }
 }
 
-/// Draw a character at (col, row) in the text console.
+/// Draw a character at (col, row) in the text console and update the
+/// screen shadow buffer.
 unsafe fn fb_draw_char(col: u32, row: u32, ch: u8) {
     let x = *TEXT_X.get() + col * 8;
     let y = *TEXT_Y.get() + row * 16;
     fb_draw_glyph_at(x, y, ch, COL_TEXT, COL_BG);
+    // Mirror into screen shadow buffer.
+    let r = row as usize;
+    let c = col as usize;
+    if r < SB_SCREEN_MAX_ROWS && c < SB_COLS {
+        SB_SCREEN_BUF[r][c] = ScrollbackCell { ch, _pad: 0 };
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Scrollback helpers
+// ---------------------------------------------------------------------------
+
+/// Evict the top visible row (row 0) into the scrollback ring.
+/// Called just before the framebuffer pixel data is shifted up.
+unsafe fn sb_evict_top_row() {
+    let cols = (*CON_COLS.get() as usize).min(SB_COLS);
+    // We cannot directly read characters back from the framebuffer pixels.
+    // Instead we keep a simple character-cell shadow buffer for row 0.
+    // Because fb_scroll shifts rows 1..N into 0..N-1, the data that was
+    // in screen row 0 is the one being lost.  We sample it from
+    // SB_SCREEN_BUF[0] which fb_draw_char and print path maintain.
+    let dst = &mut SB_RING[SB_HEAD];
+    for c in 0..cols {
+        dst[c] = SB_SCREEN_BUF[0][c];
+    }
+    for c in cols..SB_COLS {
+        dst[c] = ScrollbackCell::empty();
+    }
+    SB_HEAD = (SB_HEAD + 1) % SB_ROWS;
+    if SB_COUNT < SB_ROWS { SB_COUNT += 1; }
+
+    // Shift the screen shadow buffer up by one row.
+    let rows = *CON_ROWS.get() as usize;
+    for r in 0..(rows.saturating_sub(1)) {
+        SB_SCREEN_BUF[r] = SB_SCREEN_BUF[r + 1];
+    }
+    if rows > 0 {
+        SB_SCREEN_BUF[rows - 1] = [ScrollbackCell::empty(); SB_COLS];
+    }
+}
+
+/// Redraw the entire visible area from the scrollback ring at the current
+/// `SB_VIEW_OFFSET`.  Offset 0 = live screen, offset N = N rows back.
+unsafe fn sb_redraw_view() {
+    let cols = (*CON_COLS.get() as usize).min(SB_COLS);
+    let rows = *CON_ROWS.get() as usize;
+    let offset = SB_VIEW_OFFSET;
+
+    if offset == 0 {
+        // Redraw from the live screen buffer.
+        for r in 0..rows {
+            for c in 0..cols {
+                let ch = SB_SCREEN_BUF[r][c].ch;
+                fb_draw_char(c as u32, r as u32, ch);
+            }
+        }
+        return;
+    }
+
+    // Drawing from the scrollback ring.
+    // The ring stores the most recent SB_COUNT evicted rows.
+    // SB_HEAD points one past the newest entry.
+    // offset=1 means the most recent evicted row is the last visible row,
+    // with older rows above it.
+    for vr in 0..rows {
+        // Which scrollback row does screen row `vr` correspond to?
+        // The bottommost visible row when fully scrolled back by `offset`
+        // is the (offset-1)th evicted row (counting from newest=0).
+        let sb_age = offset as isize - vr as isize; // age from newest
+        if sb_age < 1 || sb_age as usize > SB_COUNT {
+            // This row is either beyond stored history or on the live screen
+            // For rows that would be on the live screen, show the screen buf.
+            let live_row = vr as isize - offset as isize;
+            if live_row >= 0 && (live_row as usize) < rows {
+                for c in 0..cols {
+                    let ch = SB_SCREEN_BUF[live_row as usize][c].ch;
+                    fb_draw_char(c as u32, vr as u32, ch);
+                }
+            } else {
+                // Beyond history — blank
+                for c in 0..cols {
+                    fb_draw_char(c as u32, vr as u32, b' ');
+                }
+            }
+        } else {
+            // Read from scrollback ring. age=1 is newest (at SB_HEAD-1).
+            let idx = (SB_HEAD + SB_ROWS - sb_age as usize) % SB_ROWS;
+            for c in 0..cols {
+                let ch = SB_RING[idx][c].ch;
+                fb_draw_char(c as u32, vr as u32, ch);
+            }
+        }
+    }
+}
+
+/// Scroll the view backward (into history) by N rows.
+pub(crate) unsafe fn sb_scroll_up(n: usize) {
+    let max = SB_COUNT;
+    SB_VIEW_OFFSET = (SB_VIEW_OFFSET + n).min(max);
+    sb_redraw_view();
+}
+
+/// Scroll the view forward (toward live) by N rows.
+pub(crate) unsafe fn sb_scroll_down(n: usize) {
+    SB_VIEW_OFFSET = SB_VIEW_OFFSET.saturating_sub(n);
+    sb_redraw_view();
 }
 
 /// Scroll the text console up by one row.
 unsafe fn fb_scroll() {
+    // Evict the top row into the scrollback ring before it is overwritten.
+    sb_evict_top_row();
+
     let fb_u8 = *FB_PTR.get() as *mut u8;
     let pitch = *FB_PITCH.get() as usize;
     let fb32 = *FB_PTR.get() as *mut u32;
@@ -426,6 +585,13 @@ unsafe fn fb_clear_region(col_start: u32, col_end: u32, row_start: u32, row_end:
                     let x = *TEXT_X.get() + col * 8 + px;
                     *fb32.add(y as usize * stride as usize + x as usize) = COL_BG;
                 }
+            }
+        }
+        // Clear screen shadow buffer for this row.
+        let r = row as usize;
+        if r < SB_SCREEN_MAX_ROWS {
+            for c in (col_start as usize)..(col_end as usize).min(SB_COLS) {
+                SB_SCREEN_BUF[r][c] = ScrollbackCell::empty();
             }
         }
     }
@@ -476,12 +642,13 @@ impl vte::Perform for FbPerformer {
         }
     }
 
-    fn csi_dispatch(&mut self, params: &vte::Params, _intermediates: &[u8], _ignore: bool, action: char) {
+    fn csi_dispatch(&mut self, params: &vte::Params, intermediates: &[u8], _ignore: bool, action: char) {
         unsafe {
             let mut iter = params.iter();
             let p0 = iter.next().map(|s| s[0] as u32).unwrap_or(0);
             let p1 = iter.next().map(|s| s[0] as u32).unwrap_or(0);
             let nparams = params.len();
+            let is_dec_private = intermediates.first() == Some(&b'?');
 
             match action as u8 {
                 b'A' => { let n = if p0 == 0 { 1 } else { p0 }; *CON_CUR_ROW.get() = (*CON_CUR_ROW.get()).saturating_sub(n); }
@@ -517,7 +684,52 @@ impl vte::Perform for FbPerformer {
                     2 => fb_clear_region(0, *CON_COLS.get(), *CON_CUR_ROW.get(), *CON_CUR_ROW.get() + 1),
                     _ => {}
                 }
-                b'm' | b'h' | b'l' | b'T' | b'n' | b'P' | b'L' | b'M' | b'r' => {}
+                // -------------------------------------------------------
+                // DEC private modes: CSI ? Pn h (set) / CSI ? Pn l (reset)
+                // -------------------------------------------------------
+                b'h' | b'l' => {
+                    let set = action as u8 == b'h';
+                    if is_dec_private {
+                        // Iterate all params — some apps send multiple modes
+                        // in one sequence (e.g. CSI ?1049;25h).
+                        for sub in params.iter() {
+                            let mode = sub[0] as u32;
+                            match mode {
+                                25 => { // DECTCEM — cursor visibility
+                                    CURSOR_VISIBLE = set;
+                                }
+                                1049 | 1047 => { // Alt screen
+                                    if set && !ALT_SCREEN_ACTIVE {
+                                        ALT_SAVED_COL = *CON_CUR_COL.get();
+                                        ALT_SAVED_ROW = *CON_CUR_ROW.get();
+                                        fb_clear_region(0, *CON_COLS.get(), 0, *CON_ROWS.get());
+                                        *CON_CUR_COL.get() = 0;
+                                        *CON_CUR_ROW.get() = 0;
+                                        ALT_SCREEN_ACTIVE = true;
+                                    } else if !set && ALT_SCREEN_ACTIVE {
+                                        fb_clear_region(0, *CON_COLS.get(), 0, *CON_ROWS.get());
+                                        *CON_CUR_COL.get() = ALT_SAVED_COL;
+                                        *CON_CUR_ROW.get() = ALT_SAVED_ROW;
+                                        ALT_SCREEN_ACTIVE = false;
+                                    }
+                                }
+                                // Accept silently: DECCKM(?1), DECAWM(?7),
+                                // att610 blink(?12), bracketed paste(?2004)
+                                1 | 7 | 12 | 2004 => {}
+                                _ => {} // unknown — ignore
+                            }
+                        }
+                    }
+                    // Non-private h/l (SM/RM) — accept silently
+                }
+                // DECSCUSR: CSI Ps SP q — cursor style
+                b'q' if intermediates.first() == Some(&b' ') => {
+                    let style = p0 as u8;
+                    if style <= 6 {
+                        CURSOR_STYLE = style;
+                    }
+                }
+                b'm' | b'T' | b'n' | b'P' | b'L' | b'M' | b'r' => {}
                 b'S' => { let n = if p0 == 0 { 1 } else { p0 }; for _ in 0..n { fb_scroll(); } }
                 b's' => { *ANSI_SAVED_COL.get() = *CON_CUR_COL.get(); *ANSI_SAVED_ROW.get() = *CON_CUR_ROW.get(); }
                 b'u' => { *CON_CUR_COL.get() = *ANSI_SAVED_COL.get(); *CON_CUR_ROW.get() = *ANSI_SAVED_ROW.get(); }
@@ -596,6 +808,25 @@ static SCANCODE_TO_ASCII_SHIFT: [u8; 128] = [
     0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0,
 ];
 
+// ---------------------------------------------------------------------------
+// Window size query — used by TIOCGWINSZ in child_handler
+// ---------------------------------------------------------------------------
+
+/// Return the current console dimensions: (cols, rows, xpixel, ypixel).
+/// If the framebuffer is not active, returns the serial default (80x24).
+pub(crate) fn con_dimensions() -> (u16, u16, u16, u16) {
+    unsafe {
+        if !*FB_ACTIVE.get() {
+            return (80, 24, 0, 0);
+        }
+        let cols = *CON_COLS.get() as u16;
+        let rows = *CON_ROWS.get() as u16;
+        let xpixel = (cols as u32 * 8) as u16;
+        let ypixel = (rows as u32 * 16) as u16;
+        (cols, rows, xpixel, ypixel)
+    }
+}
+
 /// Buffered byte from serial peek.
 static KB_PEEK_BUF: AtomicU64 = AtomicU64::new(0);
 
@@ -639,6 +870,17 @@ pub(crate) unsafe fn kb_read_char() -> Option<u8> {
             0x1D => { *KB_CTRL.get() = true; continue; }
             0x9D => { *KB_CTRL.get() = false; continue; }
             _ => {}
+        }
+
+        // Shift+PgUp / Shift+PgDn — scroll back/forward through history.
+        // PS/2 Set 1: PgUp = 0x49, PgDn = 0x51.
+        if *KB_SHIFT.get() && scancode == 0x49 {
+            sb_scroll_up(5);
+            continue;
+        }
+        if *KB_SHIFT.get() && scancode == 0x51 {
+            sb_scroll_down(5);
+            continue;
         }
 
         if scancode & 0x80 != 0 {
