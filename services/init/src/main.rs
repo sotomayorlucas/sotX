@@ -315,6 +315,12 @@ pub extern "C" fn _start() -> ! {
     // child's AS cap (or once kernel-side spawn lands like compositor).
     // spawn_process(b"sot-statusbar");
 
+    // --- Phase 6a2: Keyboard-driven app launcher ---
+    // Wayland client (layer-shell Overlay or xdg_toplevel fallback) that
+    // presents a 500x400 fuzzy-search modal for launching services and
+    // binaries. Same self_as_cap caveat as sot-statusbar applies.
+    // spawn_process(b"sot-launcher");
+
     // --- Phase 6b: STYX exokernel syscall validation (Tier 1.2) ---
     // Validates SOT syscalls 300-310 from userspace. Output goes to serial.
     spawn_process(b"styx-test");
