@@ -24,9 +24,6 @@ use sotos_theme::{TOKYO_NIGHT, geometry};
 pub const TITLE_BAR_HEIGHT: i32 = geometry::TITLE_BAR_HEIGHT;
 
 /// Rounded-corner radius for window top corners.
-pub const BORDER_RADIUS: i32 = 8;
-/// Rounded-corner radius for future window rounding (title bar is squared for now).
-#[allow(dead_code)]
 pub const BORDER_RADIUS: i32 = geometry::BORDER_RADIUS;
 
 const GLYPH_ADVANCE: i32 = geometry::GLYPH_ADVANCE_6X10;
@@ -115,13 +112,10 @@ pub fn draw_title_bar(fb: &mut Framebuffer, x: i32, y: i32, w: i32, focused: boo
         let visible = if needs_ellipsis { max_chars - 3 } else { max_chars };
         let total_width = (if needs_ellipsis { visible + 3 } else { visible } as i32) * GLYPH_ADVANCE;
         let tx = (x + (w - total_width) / 2).max(reserved_left);
-        fb.draw_text(tx, y + 8, &bytes[..visible], TOKYO_NIGHT.title_text);
+        fb.draw_text(tx, y + 8, &bytes[..visible], TOKYO_NIGHT.fg);
         if needs_ellipsis {
-            fb.draw_text(tx + (visible as i32) * GLYPH_ADVANCE, y + 8, b"...", TOKYO_NIGHT.title_text);
+            fb.draw_text(tx + (visible as i32) * GLYPH_ADVANCE, y + 8, b"...", TOKYO_NIGHT.fg);
         }
-        let draw_width = (max_chars as i32) * GLYPH_ADVANCE;
-        let tx = (x + (w - draw_width) / 2).max(reserved_left);
-        fb.draw_text(tx, y + 8, &bytes[..max_chars], TOKYO_NIGHT.fg);
     }
 }
 

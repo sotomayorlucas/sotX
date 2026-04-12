@@ -48,17 +48,12 @@ const CLIENT_POOL_BASE: u64 = 0x9000000;
 // Tokyo Night palette (sourced from sotos-theme)
 // ---------------------------------------------------------------------------
 
-const TN_BG: u32      = 0xFF1A1B26; // storm background
-const TN_FG: u32      = 0xFFC0CAF5; // foreground text
-const TN_DIM: u32     = 0xFF565F89; // comment / divider
-const TN_ACCENT: u32  = 0xFF7AA2F7; // blue accent
-const TN_GREEN: u32   = 0xFF9ECE6A; // healthy metric
-const TN_YELLOW: u32  = 0xFFE0AF68; // warning metric
-const TN_RED: u32     = 0xFFF7768E; // critical metric
 const TN_BG: u32     = sotos_theme::TOKYO_NIGHT.bg;        // storm background
 const TN_FG: u32     = sotos_theme::TOKYO_NIGHT.fg;        // foreground text
+const TN_DIM: u32    = 0xFF565F89;                          // comment / divider
 const TN_ACCENT: u32 = sotos_theme::TOKYO_NIGHT.accent;    // blue accent
 const TN_GREEN: u32  = sotos_theme::TOKYO_NIGHT.green_alt; // memory OK
+const TN_YELLOW: u32 = 0xFFE0AF68;                          // warning metric
 const TN_RED: u32    = sotos_theme::TOKYO_NIGHT.red;        // memory low
 
 // ---------------------------------------------------------------------------
@@ -244,6 +239,41 @@ fn reply_bytes(msg: &IpcMsg) -> ([u8; IPC_DATA_MAX], usize) {
         core::ptr::copy_nonoverlapping(src, buf.as_mut_ptr(), byte_count);
     }
     (buf, byte_count)
+}
+
+/// The Wayland interface name for the layer-shell protocol.
+const LAYER_SHELL_INTERFACE: &[u8] = b"zwlr_layer_shell_v1";
+
+/// Scan a packed wl_registry::global event stream for the global whose
+/// interface string matches `needle`.  Returns `Some(name)` on success.
+fn find_global(buf: &[u8], len: usize, needle: &[u8]) -> Option<u32> {
+    let mut off = 0usize;
+    while off + 8 <= len {
+        let size_op =
+            u32::from_ne_bytes([buf[off + 4], buf[off + 5], buf[off + 6], buf[off + 7]]);
+        let opcode = (size_op & 0xFFFF) as u16;
+        let size = (size_op >> 16) as usize;
+        if size < 8 || off + size > len {
+            return None;
+        }
+        if opcode == 0 && size >= 20 {
+            let payload = &buf[off + 8..off + size];
+            let str_len =
+                u32::from_ne_bytes([payload[4], payload[5], payload[6], payload[7]]) as usize;
+            if str_len > 0 && 8 + str_len <= payload.len() {
+                let str_bytes = &payload[8..8 + str_len - 1];
+                if str_bytes == needle {
+                    let name =
+                        u32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    return Some(name);
+                }
+            }
+        }
+        off += size;
+        // Wayland messages are 4-byte aligned
+        off = (off + 3) & !3;
+    }
+    None
 }
 
 /// Walk packed events for `zwlr_layer_surface_v1::configure(serial, w, h)`

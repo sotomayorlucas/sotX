@@ -5,8 +5,10 @@ extern crate alloc;
 
 use sotos_common::sys;
 
-// ======================================================================// Bump allocator for goblin ELF parsing (128 KiB, resettable)
-// ======================================================================mod bump_alloc {
+// ======================================================================
+// Bump allocator for goblin ELF parsing (128 KiB, resettable)
+// ======================================================================
+mod bump_alloc {
     use core::sync::atomic::{AtomicUsize, Ordering};
 
     const HEAP_SIZE: usize = 512 * 1024;

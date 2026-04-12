@@ -103,7 +103,7 @@ impl Framebuffer {
     /// shape; kept on `Framebuffer` for compatibility with existing
     /// call sites. Multi-shape rendering lives in `crate::cursor`.
     pub fn draw_cursor(&self, x: i32, y: i32) {
-        crate::cursor::draw(self, x, y, crate::cursor::CursorShape::Default);
+        crate::cursor::draw(self, x, y, crate::cursor::CursorShape::Default, 0);
     }
 
     /// Read back the pixel at `(px, py)` from the framebuffer.
@@ -156,7 +156,7 @@ impl Framebuffer {
         const SHADOW_OFS_X: i32 = 4;
         const SHADOW_OFS_Y: i32 = 6;
 
-        let shadow_color = crate::decorations::TOKYO_NIGHT.shadow;
+        let shadow_color = sotos_theme::TOKYO_NIGHT.shadow;
         // Extract the shadow base alpha and RGB.
         let s_alpha_max = ((shadow_color >> 24) & 0xFF) as i32; // 0x55 = 85
         let s_r = ((shadow_color >> 16) & 0xFF) as i32;

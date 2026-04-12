@@ -391,13 +391,6 @@ static CON_CUR_ROW: SyncUnsafeCell<u32> = SyncUnsafeCell::new(0);
 static TEXT_X: SyncUnsafeCell<u32> = SyncUnsafeCell::new(0);
 static TEXT_Y: SyncUnsafeCell<u32> = SyncUnsafeCell::new(0);
 
-/// Terminal default text color (kept for non-SGR call sites that want
-/// the palette default). Mirrors `framebuffer_palette::DEFAULT_FG`.
-const COL_TEXT: u32 = DEFAULT_FG;
-/// Terminal default background color. Mirrors
-/// `framebuffer_palette::DEFAULT_BG`.
-const COL_BG: u32 = DEFAULT_BG;
-
 // ---------------------------------------------------------------------------
 // Current SGR style (updated by `\x1b[...m` sequences, read by the glyph
 // drawer). Kept as plain cells — the console is single-threaded, owned by
@@ -553,18 +546,12 @@ unsafe fn fb_draw_glyph_at(px: u32, py: u32, ch: u8, fg: u32, bg: u32) {
 }
 
 /// Draw a character at (col, row) in the text console using the
-/// currently active SGR style.
+/// currently active SGR style, and update the screen shadow buffer.
 unsafe fn fb_draw_char(col: u32, row: u32, ch: u8) {
     let x = *TEXT_X.get() + col * 8;
     let y = *TEXT_Y.get() + row * 16;
     let (fg, bg) = current_colors();
     fb_draw_glyph_at(x, y, ch, fg, bg);
-/// Draw a character at (col, row) in the text console and update the
-/// screen shadow buffer.
-unsafe fn fb_draw_char(col: u32, row: u32, ch: u8) {
-    let x = *TEXT_X.get() + col * 8;
-    let y = *TEXT_Y.get() + row * 16;
-    fb_draw_glyph_at(x, y, ch, COL_TEXT, COL_BG);
     // Mirror into screen shadow buffer.
     let r = row as usize;
     let c = col as usize;

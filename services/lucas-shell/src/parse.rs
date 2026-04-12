@@ -7,10 +7,8 @@ use crate::exec::cmd_exec;
 use crate::net::cmd_wget;
 use crate::lua::cmd_lua;
 use crate::jobs::*;
-use crate::history::cmd_history;
-use crate::{err, usage, shell_trace};
 use crate::history::{cmd_history, save_to_vfs};
-use crate::shell_trace;
+use crate::{err, usage, shell_trace};
 
 // ---------------------------------------------------------------------------
 // Last exit status ($?)

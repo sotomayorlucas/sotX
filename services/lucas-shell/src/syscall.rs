@@ -86,8 +86,6 @@ pub fn syscall6(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -
 #[inline(always)] pub fn linux_mkdir(path: *const u8, mode: u64) -> i64 { syscall2(83, path as u64, mode) }
 #[inline(always)] pub fn linux_rmdir(path: *const u8) -> i64 { syscall1(84, path as u64) }
 #[inline(always)] pub fn linux_unlink(path: *const u8) -> i64 { syscall1(87, path as u64) }
-/// getdents64(fd, buf, count) — read directory entries in linux_dirent64 format.
-#[inline(always)] pub fn linux_getdents64(fd: u64, buf: *mut u8, count: usize) -> i64 { syscall3(217, fd, buf as u64, count as u64) }
 #[allow(dead_code)] #[inline(always)] pub fn linux_getppid() -> i64 { syscall0(110) }
 #[inline(always)] pub fn linux_socket(dom: u64, typ: u64, proto: u64) -> i64 { syscall3(41, dom, typ, proto) }
 #[inline(always)] pub fn linux_connect(fd: u64, addr: *const u8, len: u64) -> i64 { syscall3(42, fd, addr as u64, len) }
