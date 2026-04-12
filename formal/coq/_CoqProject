@@ -1,0 +1,6 @@
+-R . SotFS
+
+SotfsGraph.v
+DpoCreate.v
+DpoUnlink.v
+DpoRename.v
