@@ -173,6 +173,136 @@ impl TypeGraph {
     }
 
     // -----------------------------------------------------------------------
+    // Typed accessors (thin wrappers for forward-compatibility with Arena)
+    // -----------------------------------------------------------------------
+
+    /// Insert an inode.
+    #[inline]
+    pub fn insert_inode(&mut self, id: InodeId, inode: Inode) {
+        self.inodes.insert(id, inode);
+    }
+
+    /// Insert a directory.
+    #[inline]
+    pub fn insert_dir(&mut self, id: DirId, dir: Directory) {
+        self.dirs.insert(id, dir);
+    }
+
+    /// Insert a capability.
+    #[inline]
+    pub fn insert_cap(&mut self, id: CapId, cap: Capability) {
+        self.caps.insert(id, cap);
+    }
+
+    /// Insert a block.
+    #[inline]
+    pub fn insert_block(&mut self, id: BlockId, block: Block) {
+        self.blocks.insert(id, block);
+    }
+
+    /// Insert an edge.
+    #[inline]
+    pub fn insert_edge(&mut self, id: EdgeId, edge: Edge) {
+        self.edges.insert(id, edge);
+    }
+
+    /// Get a reference to an inode by ID.
+    #[inline]
+    pub fn get_inode(&self, id: InodeId) -> Option<&Inode> {
+        self.inodes.get(&id)
+    }
+
+    /// Get a mutable reference to an inode by ID.
+    #[inline]
+    pub fn get_inode_mut(&mut self, id: InodeId) -> Option<&mut Inode> {
+        self.inodes.get_mut(&id)
+    }
+
+    /// Get a reference to a directory by ID.
+    #[inline]
+    pub fn get_dir(&self, id: DirId) -> Option<&Directory> {
+        self.dirs.get(&id)
+    }
+
+    /// Get a reference to a capability by ID.
+    #[inline]
+    pub fn get_cap(&self, id: CapId) -> Option<&Capability> {
+        self.caps.get(&id)
+    }
+
+    /// Get a reference to a block by ID.
+    #[inline]
+    pub fn get_block(&self, id: BlockId) -> Option<&Block> {
+        self.blocks.get(&id)
+    }
+
+    /// Get a mutable reference to a block by ID.
+    #[inline]
+    pub fn get_block_mut(&mut self, id: BlockId) -> Option<&mut Block> {
+        self.blocks.get_mut(&id)
+    }
+
+    /// Get a reference to an edge by ID.
+    #[inline]
+    pub fn get_edge(&self, id: EdgeId) -> Option<&Edge> {
+        self.edges.get(&id)
+    }
+
+    /// Get a mutable reference to an edge by ID.
+    #[inline]
+    pub fn get_edge_mut(&mut self, id: EdgeId) -> Option<&mut Edge> {
+        self.edges.get_mut(&id)
+    }
+
+    /// Check if an inode exists.
+    #[inline]
+    pub fn contains_inode(&self, id: InodeId) -> bool {
+        self.inodes.contains_key(&id)
+    }
+
+    /// Check if a directory exists.
+    #[inline]
+    pub fn contains_dir(&self, id: DirId) -> bool {
+        self.dirs.contains_key(&id)
+    }
+
+    /// Check if a capability exists.
+    #[inline]
+    pub fn contains_cap(&self, id: CapId) -> bool {
+        self.caps.contains_key(&id)
+    }
+
+    /// Check if a block exists.
+    #[inline]
+    pub fn contains_block(&self, id: BlockId) -> bool {
+        self.blocks.contains_key(&id)
+    }
+
+    /// Remove an inode.
+    #[inline]
+    pub fn remove_inode(&mut self, id: InodeId) -> Option<Inode> {
+        self.inodes.remove(&id)
+    }
+
+    /// Remove a directory.
+    #[inline]
+    pub fn remove_dir(&mut self, id: DirId) -> Option<Directory> {
+        self.dirs.remove(&id)
+    }
+
+    /// Remove a block.
+    #[inline]
+    pub fn remove_block(&mut self, id: BlockId) -> Option<Block> {
+        self.blocks.remove(&id)
+    }
+
+    /// Remove an edge.
+    #[inline]
+    pub fn remove_edge(&mut self, id: EdgeId) -> Option<Edge> {
+        self.edges.remove(&id)
+    }
+
+    // -----------------------------------------------------------------------
     // Directory name lookup
     // -----------------------------------------------------------------------
 
