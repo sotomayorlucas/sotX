@@ -3,6 +3,7 @@
 
 use crate::syscall::*;
 use crate::util::*;
+use crate::err;
 use super::util::{kernel_syscall0};
 
 // --- top ---
@@ -73,7 +74,7 @@ pub fn cmd_ls() {
     let path = null_terminate(b".", &mut path_buf);
     let fd = linux_open(path, 0); // O_RDONLY
     if fd < 0 {
-        print(b"ls: cannot open directory\n");
+        err!(b"ls", b"cannot open directory");
         return;
     }
     let mut buf = [0u8; 1024];
@@ -95,9 +96,7 @@ pub fn cmd_ls_path(path: &[u8]) {
     let mut path_buf = [0u8; 64];
     let p = null_terminate(path, &mut path_buf);
     if linux_chdir(p) < 0 {
-        print(b"ls: cannot access ");
-        print(path);
-        print(b"\n");
+        err!(b"ls", b"cannot access", path);
         return;
     }
     cmd_ls();
@@ -114,7 +113,7 @@ pub fn cmd_ps() {
     let path = null_terminate(b"/proc", &mut path_buf);
     let fd = linux_open(path, 0);
     if fd < 0 {
-        print(b"ps: cannot open /proc\n");
+        err!(b"ps", b"cannot open /proc");
         return;
     }
     let mut buf = [0u8; 1024];
@@ -133,7 +132,7 @@ pub fn cmd_uptime() {
     let path = null_terminate(b"/proc/uptime", &mut path_buf);
     let fd = linux_open(path, 0);
     if fd < 0 {
-        print(b"uptime: cannot read\n");
+        err!(b"uptime", b"cannot read /proc/uptime");
         return;
     }
     let mut buf = [0u8; 64];
@@ -155,7 +154,7 @@ pub fn cmd_kill(args: &[u8]) {
             let sig = parse_u64_simple(trim(&args[sp + 1..]));
             let ret = linux_kill(pid, sig);
             if ret < 0 {
-                print(b"kill: no such process\n");
+                err!(b"kill", b"no such process");
             }
         }
         None => {
@@ -163,7 +162,7 @@ pub fn cmd_kill(args: &[u8]) {
             let pid = parse_u64_simple(args);
             let ret = linux_kill(pid, 9);
             if ret < 0 {
-                print(b"kill: no such process\n");
+                err!(b"kill", b"no such process");
             }
         }
     }
@@ -175,7 +174,7 @@ pub fn cmd_fork() {
     let child_fn = crate::exec::child_shell_main as *const () as u64;
     let child_pid = linux_clone(child_fn);
     if child_pid < 0 {
-        print(b"fork: failed\n");
+        err!(b"fork", b"failed");
         return;
     }
     print(b"forked child pid=");
@@ -192,13 +191,17 @@ pub fn cmd_fork() {
 pub fn cmd_syslog(max_entries: u64) {
     let mut num_buf = [0u8; 10];
     let num_len = u64_to_dec(max_entries, &mut num_buf);
-    open_virtual_and_print(b"/proc/syslog/", &num_buf[..num_len], b"syslog: cannot read\n");
+    if !open_virtual_and_print(b"/proc/syslog/", &num_buf[..num_len]) {
+        err!(b"syslog", b"cannot read /proc/syslog");
+    }
 }
 
 // --- netmirror ---
 
 pub fn cmd_netmirror(arg: &[u8]) {
-    open_virtual_and_print(b"/proc/netmirror/", arg, b"netmirror: failed\n");
+    if !open_virtual_and_print(b"/proc/netmirror/", arg) {
+        err!(b"netmirror", b"failed");
+    }
 }
 
 // --- threads ---

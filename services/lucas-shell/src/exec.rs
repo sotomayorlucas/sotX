@@ -1,6 +1,7 @@
 use crate::syscall::*;
 use crate::env::env_slice;
-use crate::shell_trace;
+use crate::util::emit_notfound;
+use crate::{err, shell_trace};
 
 // ---------------------------------------------------------------------------
 // Exec: fork + execve
@@ -29,7 +30,7 @@ pub extern "C" fn child_exec_main() -> ! {
         crate::trace::trace_write(b"execve failed errno=");
         crate::trace::trace_write_u64((-ret) as u64);
     });
-    print(b"exec: not found\n");
+    err!(b"exec", b"not found");
     linux_exit(127);
 }
 
@@ -232,9 +233,7 @@ pub fn cmd_exec(line: &[u8]) {
         // Resolve command via PATH
         let resolved_len = resolve_command(prog_name, &mut EXEC_NAME_BUF);
         if resolved_len == 0 {
-            print(prog_name);
-            print(b": command not found\n");
-            crate::parse::set_exit_status(127);
+            emit_notfound(prog_name);
             return;
         }
         EXEC_NAME_LEN = resolved_len;
@@ -301,8 +300,7 @@ pub fn cmd_exec(line: &[u8]) {
         shell_trace!(Error, PROCESS, {
             crate::trace::trace_write(b"fork failed");
         });
-        print(b"exec: fork failed\n");
-        crate::parse::set_exit_status(1);
+        err!(b"exec", b"fork failed");
         return;
     }
 

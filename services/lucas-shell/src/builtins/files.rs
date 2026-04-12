@@ -2,6 +2,7 @@
 
 use crate::syscall::*;
 use crate::util::*;
+use crate::err;
 
 // --- cat ---
 
@@ -10,7 +11,7 @@ pub fn cmd_cat(name: &[u8]) {
     let path = null_terminate(name, &mut path_buf);
     let fd = linux_open(path, 0); // O_RDONLY
     if fd < 0 {
-        print(b"cat: file not found\n");
+        err!(b"cat", b"file not found", name);
         return;
     }
     let mut buf = [0u8; 512];
@@ -33,7 +34,7 @@ pub fn cmd_write(name: &[u8], text: &[u8]) {
     // O_WRONLY(1) | O_CREAT(0x40) = 0x41
     let fd = linux_open(path, 0x41);
     if fd < 0 {
-        print(b"write: cannot open file\n");
+        err!(b"write", b"cannot open file", name);
         return;
     }
     let n = linux_write(fd as u64, text.as_ptr(), text.len());
@@ -42,7 +43,7 @@ pub fn cmd_write(name: &[u8], text: &[u8]) {
         print_u64(n as u64);
         print(b" bytes\n");
     } else {
-        print(b"write: error\n");
+        err!(b"write", b"write failed");
     }
     linux_close(fd as u64);
 }
@@ -56,7 +57,7 @@ pub fn cmd_rm(name: &[u8]) {
     if ret == 0 {
         print(b"removed\n");
     } else {
-        print(b"rm: file not found\n");
+        err!(b"rm", b"file not found", name);
     }
 }
 
@@ -68,7 +69,7 @@ pub fn cmd_stat(name: &[u8]) {
     let mut stat_buf = [0u8; 144];
     let ret = linux_stat(path, stat_buf.as_mut_ptr());
     if ret < 0 {
-        print(b"stat: not found\n");
+        err!(b"stat", b"not found", name);
         return;
     }
     // st_mode at offset 24 (u32)
@@ -110,7 +111,7 @@ pub fn cmd_hexdump(name: &[u8]) {
     let path = null_terminate(name, &mut path_buf);
     let fd = linux_open(path, 0);
     if fd < 0 {
-        print(b"hexdump: file not found\n");
+        err!(b"hexdump", b"file not found", name);
         return;
     }
     let hex = b"0123456789abcdef";
@@ -165,7 +166,7 @@ pub fn cmd_mkdir(name: &[u8]) {
     if ret == 0 {
         print(b"directory created\n");
     } else {
-        print(b"mkdir: failed\n");
+        err!(b"mkdir", b"failed", name);
     }
 }
 
@@ -178,7 +179,7 @@ pub fn cmd_rmdir(name: &[u8]) {
     if ret == 0 {
         print(b"directory removed\n");
     } else {
-        print(b"rmdir: failed (not empty or not found)\n");
+        err!(b"rmdir", b"not empty or not found", name);
     }
 }
 

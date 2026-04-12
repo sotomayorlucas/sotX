@@ -6,6 +6,7 @@
 use crate::syscall::*;
 use crate::util::*;
 use crate::env::*;
+use crate::{err, usage};
 
 // ---------------------------------------------------------------------------
 // Kernel syscall helpers (bypass Linux translation layer)
@@ -164,7 +165,7 @@ pub fn cmd_cd(name: &[u8]) {
     let path = null_terminate(name, &mut path_buf);
     let ret = linux_chdir(path);
     if ret < 0 {
-        print(b"cd: not a directory or not found\n");
+        err!(b"cd", b"not a directory or not found", name);
     }
 }
 
@@ -191,20 +192,28 @@ pub fn cmd_pwd() {
 pub fn cmd_snap(args: &[u8]) {
     if starts_with(args, b"create ") {
         let name = trim(&args[7..]);
-        if name.is_empty() { print(b"usage: snap create <name>\n"); return; }
-        open_virtual_and_print(b"/snap/create/", name, b"snap create: failed\n");
+        if name.is_empty() { usage!(b"snap", b"snap create <name>"); return; }
+        if !open_virtual_and_print(b"/snap/create/", name) {
+            err!(b"snap create", b"failed", name);
+        }
     } else if eq(args, b"list") {
-        open_virtual_and_print(b"/snap/list", b"", b"snap list: failed\n");
+        if !open_virtual_and_print(b"/snap/list", b"") {
+            err!(b"snap list", b"failed");
+        }
     } else if starts_with(args, b"restore ") {
         let name = trim(&args[8..]);
-        if name.is_empty() { print(b"usage: snap restore <name>\n"); return; }
-        open_virtual_and_print(b"/snap/restore/", name, b"snap restore: failed\n");
+        if name.is_empty() { usage!(b"snap", b"snap restore <name>"); return; }
+        if !open_virtual_and_print(b"/snap/restore/", name) {
+            err!(b"snap restore", b"failed", name);
+        }
     } else if starts_with(args, b"delete ") {
         let name = trim(&args[7..]);
-        if name.is_empty() { print(b"usage: snap delete <name>\n"); return; }
-        open_virtual_and_print(b"/snap/delete/", name, b"snap delete: failed\n");
+        if name.is_empty() { usage!(b"snap", b"snap delete <name>"); return; }
+        if !open_virtual_and_print(b"/snap/delete/", name) {
+            err!(b"snap delete", b"failed", name);
+        }
     } else {
-        print(b"usage: snap create|list|restore|delete [<name>]\n");
+        usage!(b"snap", b"snap create|list|restore|delete [<name>]");
     }
 }
 
@@ -212,7 +221,7 @@ pub fn cmd_snap(args: &[u8]) {
 
 pub fn cmd_trace(args: &[u8]) {
     if args.is_empty() || eq(args, b"help") {
-        print(b"usage: trace level <error|warn|info|debug|trace>\n");
+        usage!(b"trace", b"trace level <error|warn|info|debug|trace>");
         print(b"       trace cat <+syscall|-net|all|none>\n");
         print(b"       trace status\n");
         return;
@@ -255,7 +264,7 @@ pub fn cmd_trace(args: &[u8]) {
             else if eq(val, b"debug") { 3 }
             else if eq(val, b"trace") { 4 }
             else {
-                print(b"trace: unknown level\n");
+                err!(b"trace", b"unknown level", val);
                 return;
             };
         crate::trace::set_level(lvl);
@@ -278,7 +287,7 @@ pub fn cmd_trace(args: &[u8]) {
             let name = &val[1..];
             let mask = parse_cat_name(name);
             if mask == 0 {
-                print(b"trace: unknown category\n");
+                err!(b"trace", b"unknown category", name);
                 return;
             }
             let cur = crate::trace::get_categories();
@@ -288,12 +297,12 @@ pub fn cmd_trace(args: &[u8]) {
             print(name);
             print(b"\n");
         } else {
-            print(b"trace: expected +name, -name, all, or none\n");
+            err!(b"trace", b"expected +name, -name, all, or none");
         }
         return;
     }
 
-    print(b"trace: unknown subcommand\n");
+    err!(b"trace", b"unknown subcommand", args);
 }
 
 fn parse_cat_name(name: &[u8]) -> u16 {
@@ -575,10 +584,7 @@ pub fn cmd_type(name: &[u8]) {
         print(b"\n");
         return;
     }
-    print(b"type: ");
-    print(name);
-    print(b" not found\n");
-    crate::parse::set_exit_status(1);
+    err!(b"type", b"not found", name);
 }
 
 // ---------------------------------------------------------------------------
@@ -594,10 +600,7 @@ pub fn cmd_source(filename: &[u8]) {
     let mut data = [0u8; 4096];
     let total = slurp_file(filename, &mut data);
     if total < 0 {
-        print(b"source: cannot read file: ");
-        print(filename);
-        print(b"\n");
-        crate::parse::set_exit_status(1);
+        err!(b"source", b"cannot read file:", filename);
         return;
     }
     let total = total as usize;

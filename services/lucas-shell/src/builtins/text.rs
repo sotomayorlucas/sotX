@@ -2,17 +2,18 @@
 
 use crate::syscall::*;
 use crate::util::*;
+use crate::{err, usage};
 
 // --- wc ---
 
 pub fn cmd_wc(name: &[u8]) {
     if name.is_empty() {
-        print(b"usage: wc <file>\n");
+        usage!(b"wc", b"wc <file>");
         return;
     }
     let mut data = [0u8; 4096];
     let total = slurp_file(name, &mut data);
-    if total < 0 { print(b"wc: file not found\n"); return; }
+    if total < 0 { err!(b"wc", b"file not found", name); return; }
     let total = total as usize;
 
     let mut out_buf = [0u8; 128];
@@ -56,12 +57,12 @@ pub fn wc_data(data: &[u8], buf: &mut [u8]) -> usize {
 
 pub fn cmd_sort(name: &[u8]) {
     if name.is_empty() {
-        print(b"usage: sort <file>\n");
+        usage!(b"sort", b"sort <file>");
         return;
     }
     let mut data = [0u8; 4096];
     let total = slurp_file(name, &mut data);
-    if total < 0 { print(b"sort: file not found\n"); return; }
+    if total < 0 { err!(b"sort", b"file not found", name); return; }
     let total = total as usize;
 
     let mut out_buf = [0u8; 4096];
@@ -127,12 +128,12 @@ pub fn sort_data(data: &[u8], buf: &mut [u8]) -> usize {
 
 pub fn cmd_uniq(name: &[u8]) {
     if name.is_empty() {
-        print(b"usage: uniq <file>\n");
+        usage!(b"uniq", b"uniq <file>");
         return;
     }
     let mut data = [0u8; 4096];
     let total = slurp_file(name, &mut data);
-    if total < 0 { print(b"uniq: file not found\n"); return; }
+    if total < 0 { err!(b"uniq", b"file not found", name); return; }
     let total = total as usize;
 
     let mut out_buf = [0u8; 4096];
@@ -185,26 +186,26 @@ pub fn cmd_diff(args: &[u8]) {
         let file1 = trim(&args[..sp]);
         let file2 = trim(&args[sp + 1..]);
         if file1.is_empty() || file2.is_empty() {
-            print(b"usage: diff <file1> <file2>\n");
+            usage!(b"diff", b"diff <file1> <file2>");
             return;
         }
 
         // Read file1
         let mut data1 = [0u8; 4096];
         let len1 = slurp_file(file1, &mut data1);
-        if len1 < 0 { print(b"diff: cannot open "); print(file1); print(b"\n"); return; }
+        if len1 < 0 { err!(b"diff", b"cannot open", file1); return; }
         let len1 = len1 as usize;
 
         // Read file2
         let mut data2 = [0u8; 4096];
         let len2 = slurp_file(file2, &mut data2);
-        if len2 < 0 { print(b"diff: cannot open "); print(file2); print(b"\n"); return; }
+        if len2 < 0 { err!(b"diff", b"cannot open", file2); return; }
         let len2 = len2 as usize;
 
         // Line-by-line comparison
         diff_data(&data1[..len1], &data2[..len2]);
     } else {
-        print(b"usage: diff <file1> <file2>\n");
+        usage!(b"diff", b"diff <file1> <file2>");
     }
 }
 
@@ -298,14 +299,14 @@ pub fn cmd_head(args: &[u8]) {
         if let Some(sp) = find_space(rest) {
             num_lines = parse_u64_simple(&rest[..sp]) as usize;
             name = trim(&rest[sp + 1..]);
-        } else { print(b"usage: head [-n N] <file>\n"); return; }
+        } else { usage!(b"head", b"head [-n N] <file>"); return; }
     } else { name = args; }
-    if name.is_empty() { print(b"usage: head [-n N] <file>\n"); return; }
+    if name.is_empty() { usage!(b"head", b"head [-n N] <file>"); return; }
 
     let mut path_buf = [0u8; 64];
     let path = null_terminate(name, &mut path_buf);
     let fd = linux_open(path, 0);
-    if fd < 0 { print(b"head: file not found\n"); return; }
+    if fd < 0 { err!(b"head", b"file not found", name); return; }
 
     let mut buf = [0u8; 1];
     let mut lines_printed: usize = 0;
@@ -329,13 +330,13 @@ pub fn cmd_tail(args: &[u8]) {
         if let Some(sp) = find_space(rest) {
             num_lines = parse_u64_simple(&rest[..sp]) as usize;
             name = trim(&rest[sp + 1..]);
-        } else { print(b"usage: tail [-n N] <file>\n"); return; }
+        } else { usage!(b"tail", b"tail [-n N] <file>"); return; }
     } else { name = args; }
-    if name.is_empty() { print(b"usage: tail [-n N] <file>\n"); return; }
+    if name.is_empty() { usage!(b"tail", b"tail [-n N] <file>"); return; }
 
     let mut data = [0u8; 4096];
     let total = slurp_file(name, &mut data);
-    if total < 0 { print(b"tail: file not found\n"); return; }
+    if total < 0 { err!(b"tail", b"file not found", name); return; }
     let total = total as usize;
 
     // Count total lines, find start of last N.
@@ -362,11 +363,11 @@ pub fn cmd_grep(args: &[u8]) {
     if let Some(sp) = find_space(args) {
         let pattern = &args[..sp];
         let name = trim(&args[sp + 1..]);
-        if name.is_empty() { print(b"usage: grep <pattern> <file>\n"); return; }
+        if name.is_empty() { usage!(b"grep", b"grep <pattern> <file>"); return; }
 
         let mut buf = [0u8; 4096];
         let total = slurp_file(name, &mut buf);
-        if total < 0 { print(b"grep: file not found\n"); return; }
+        if total < 0 { err!(b"grep", b"file not found", name); return; }
         let total = total as usize;
 
         // Scan for lines containing the pattern.
@@ -384,6 +385,6 @@ pub fn cmd_grep(args: &[u8]) {
             i += 1;
         }
     } else {
-        print(b"usage: grep <pattern> <file>\n");
+        usage!(b"grep", b"grep <pattern> <file>");
     }
 }
