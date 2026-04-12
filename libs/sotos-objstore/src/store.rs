@@ -24,6 +24,7 @@ pub struct ObjectStore {
     pub bitmap: [u8; BITMAP_BYTES],
     pub wal: WalHeader,
     pub wal_buf: [[u8; SECTOR_SIZE]; WAL_MAX_ENTRIES],
+    pub wal_index: wal::WalIndex,
     pub sector_buf: [u8; SECTOR_SIZE],
     pub refcount: [u8; REFCOUNT_ENTRIES],
     pub snap_meta: [SnapMeta; MAX_SNAPSHOTS],
@@ -124,8 +125,9 @@ impl ObjectStore {
         store.wal = WalHeader::zeroed();
         store.wal.magic = WAL_MAGIC;
 
-        // Clear WAL buffers.
+        // Clear WAL buffers and index.
         store.wal_buf = [[0u8; SECTOR_SIZE]; WAL_MAX_ENTRIES];
+        store.wal_index = wal::WalIndex::new();
         store.sector_buf = [0u8; SECTOR_SIZE];
 
         // Clear refcount table and snapshot metadata.
@@ -175,8 +177,8 @@ impl ObjectStore {
             return Err("old version");
         }
 
-        // WAL replay.
-        let replayed = wal::replay(&mut store.blk, &mut store.wal, &mut store.wal_buf)?;
+        // WAL replay (also rebuilds the hash index).
+        let replayed = wal::replay(&mut store.blk, &mut store.wal, &mut store.wal_buf, &mut store.wal_index)?;
         if replayed {
             store.blk.read_sector(SECTOR_SUPERBLOCK as u64)?;
             unsafe {
@@ -1060,19 +1062,19 @@ impl ObjectStore {
         let flags_pre = self.dir[dir_slot].flags;
         let oid_pre = self.dir[dir_slot].oid;
 
-        wal::begin(&mut self.wal);
+        wal::begin(&mut self.wal, &mut self.wal_index);
 
         // Stage superblock.
         let sb_buf = unsafe {
             &*((&self.sb as *const Superblock) as *const [u8; SECTOR_SIZE])
         };
-        wal::stage(&mut self.wal, &mut self.wal_buf, SECTOR_SUPERBLOCK, sb_buf)?;
+        wal::stage(&mut self.wal, &mut self.wal_buf, &mut self.wal_index, SECTOR_SUPERBLOCK, sb_buf)?;
 
         // Stage directory sector containing the modified slot.
         let dir_sector_idx = dir_slot / DIR_ENTRIES_PER_SECTOR;
         let dir_abs_sector = SECTOR_DIR + dir_sector_idx as u32;
         let dir_buf = self.serialize_dir_sector(dir_sector_idx);
-        wal::stage(&mut self.wal, &mut self.wal_buf, dir_abs_sector, &dir_buf)?;
+        wal::stage(&mut self.wal, &mut self.wal_buf, &mut self.wal_index, dir_abs_sector, &dir_buf)?;
 
         wal::commit(&mut self.blk, &mut self.wal, &self.wal_buf)?;
 

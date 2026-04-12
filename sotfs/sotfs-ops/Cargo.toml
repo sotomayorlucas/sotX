@@ -19,3 +19,7 @@ criterion = { version = "0.5", features = ["html_reports"] }
 [[bench]]
 name = "dpo_bench"
 harness = false
+
+[[bench]]
+name = "wal_bench"
+harness = false
