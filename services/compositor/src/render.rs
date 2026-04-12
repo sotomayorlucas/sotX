@@ -79,9 +79,12 @@ impl Framebuffer {
     /// Thin forwarder to `crate::decorations::draw_title_bar`, which owns all
     /// the Tokyo Night-styled chrome (traffic lights, rounded corners).
     /// Kept on `Framebuffer` for backwards compatibility with older callers.
-    pub fn draw_title_bar(&mut self, x: i32, y: i32, w: u32, title: &[u8]) {
-        let title_str = core::str::from_utf8(title).unwrap_or("");
-        crate::decorations::draw_title_bar(self, x, y, w as i32, true, title_str);
+    pub fn draw_title_bar(&mut self, x: i32, y: i32, w: u32, title: &[u8], focused: bool) {
+        // Strip trailing NUL bytes before UTF-8 conversion.
+        let mut end = title.len();
+        while end > 0 && title[end - 1] == 0 { end -= 1; }
+        let title_str = core::str::from_utf8(&title[..end]).unwrap_or("");
+        crate::decorations::draw_title_bar(self, x, y, w as i32, focused, title_str);
     }
 
     /// Draw text at `(x, y)` using the compact `FONT_6X10` font.

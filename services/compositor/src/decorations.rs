@@ -124,15 +124,20 @@ pub fn draw_title_bar(fb: &mut Framebuffer, x: i32, y: i32, w: i32, focused: boo
     draw_traffic_light(fb, cx2, cy, TOKYO_NIGHT.max_green);
 
     // Title text: centered horizontally, 8px from top. Clipped so it never
-    // overlaps the traffic lights.
+    // overlaps the traffic lights. Long titles get an ellipsis ("...").
     let bytes = title.as_bytes();
     let reserved_left = cx2 + BUTTON_DIAMETER / 2 + 8;
     let available = (x + w - 8 - reserved_left).max(0);
     let max_chars = ((available / GLYPH_ADVANCE).max(0) as usize).min(bytes.len());
     if max_chars > 0 {
-        let draw_width = (max_chars as i32) * GLYPH_ADVANCE;
-        let tx = (x + (w - draw_width) / 2).max(reserved_left);
-        fb.draw_text(tx, y + 8, &bytes[..max_chars], TOKYO_NIGHT.title_text);
+        let needs_ellipsis = max_chars < bytes.len() && max_chars > 3;
+        let visible = if needs_ellipsis { max_chars - 3 } else { max_chars };
+        let total_width = (if needs_ellipsis { visible + 3 } else { visible } as i32) * GLYPH_ADVANCE;
+        let tx = (x + (w - total_width) / 2).max(reserved_left);
+        fb.draw_text(tx, y + 8, &bytes[..visible], TOKYO_NIGHT.title_text);
+        if needs_ellipsis {
+            fb.draw_text(tx + (visible as i32) * GLYPH_ADVANCE, y + 8, b"...", TOKYO_NIGHT.title_text);
+        }
     }
 }
 
