@@ -19,6 +19,21 @@ pub static mut LAST_EXIT_STATUS: i64 = 0;
 pub fn set_exit_status(s: i64) { unsafe { LAST_EXIT_STATUS = s; } }
 pub fn get_exit_status() -> i64 { unsafe { LAST_EXIT_STATUS } }
 
+/// Canonical list of shell builtins, mirroring the dispatch table in
+/// `dispatch_command`. Used by tab completion for command-name matching.
+/// Keep sorted alphabetically so the completion list prints nicely.
+pub const BUILTIN_NAMES: &[&[u8]] = &[
+    b".", b"apt", b"bench", b"bg", b"break", b"caps", b"cat", b"cd",
+    b"continue", b"curl", b"diff", b"echo", b"env", b"exec", b"exit",
+    b"export", b"false", b"fg", b"fork", b"getpid", b"grep", b"head",
+    b"help", b"hexdump", b"history", b"jobs", b"kill", b"ls", b"lua",
+    b"meminfo", b"mkdir", b"netmirror", b"ping", b"pkg", b"ps", b"pwd",
+    b"read", b"resolve", b"rm", b"rmdir", b"services", b"sleep", b"snap",
+    b"snapshot", b"sort", b"source", b"stat", b"syslog", b"tail",
+    b"threads", b"top", b"trace", b"traceroute", b"true", b"type",
+    b"uname", b"uniq", b"unset", b"uptime", b"wc", b"wget", b"write",
+];
+
 // ---------------------------------------------------------------------------
 // Redirect parsing and execution
 // ---------------------------------------------------------------------------

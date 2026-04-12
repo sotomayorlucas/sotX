@@ -2,6 +2,8 @@ use crate::syscall::*;
 use crate::util::*;
 use crate::history::*;
 use crate::jobs::*;
+use crate::parse::BUILTIN_NAMES;
+use crate::env::env_for_each_name;
 
 // ---------------------------------------------------------------------------
 // Shell line editor
@@ -162,178 +164,268 @@ pub fn read_line(line_buf: &mut [u8; 512]) -> usize {
 // ---------------------------------------------------------------------------
 // Tab completion
 // ---------------------------------------------------------------------------
+//
+// Context-aware completion with three modes:
+//   1. Command: first token on the line → builtins + `/bin` + `/usr/bin`.
+//   2. Env var: token starts with `$` → matching `ENV` keys.
+//   3. Path:    everything else → directory entries filtered by the trailing
+//               prefix; completion adds `/` for directories.
+//
+// All buffers are fixed-size — no heap. At most 128 candidates per attempt.
+
+const MAX_CANDIDATES: usize = 128;
+const CAND_NAME_LEN: usize = 64;
+const TN_BLUE: &[u8] = b"\x1b[38;2;122;162;247m";
+const TN_RESET: &[u8] = b"\x1b[0m";
+
+/// Candidate list used by all completion modes. Kept in BSS (not on the
+/// stack) because the shell's guest thread only has a 16KB stack and the
+/// candidate buffer alone is ~8KB. Tab completion is non-reentrant — the
+/// user can't press Tab while the shell is already handling a Tab — so a
+/// single global instance is safe.
+struct Candidates {
+    names: [[u8; CAND_NAME_LEN]; MAX_CANDIDATES],
+    lens:  [u8; MAX_CANDIDATES],
+    is_dir: [bool; MAX_CANDIDATES],
+    count: usize,
+}
+
+static mut CANDS: Candidates = Candidates {
+    names: [[0; CAND_NAME_LEN]; MAX_CANDIDATES],
+    lens:  [0; MAX_CANDIDATES],
+    is_dir: [false; MAX_CANDIDATES],
+    count: 0,
+};
+
+impl Candidates {
+    fn reset(&mut self) { self.count = 0; }
+
+    fn push(&mut self, name: &[u8], is_dir: bool) {
+        if self.count >= MAX_CANDIDATES || name.is_empty() { return; }
+        let n = name.len().min(CAND_NAME_LEN);
+        // Deduplicate — a builtin `ls` and a `/bin/ls` binary shouldn't both
+        // clutter the candidate grid.
+        for i in 0..self.count {
+            if self.lens[i] as usize == n && self.names[i][..n] == name[..n] {
+                return;
+            }
+        }
+        self.names[self.count][..n].copy_from_slice(&name[..n]);
+        self.lens[self.count] = n as u8;
+        self.is_dir[self.count] = is_dir;
+        self.count += 1;
+    }
+
+    fn name(&self, i: usize) -> &[u8] {
+        &self.names[i][..self.lens[i] as usize]
+    }
+}
 
 fn do_tab_completion(line_buf: &mut [u8; 512], pos: &mut usize) {
-    if *pos == 0 { return; }
-    // Extract the current word (last token) — copy to avoid borrow conflict
+    // Find current word start: search backward for space.
     let mut word_start = *pos;
     while word_start > 0 && line_buf[word_start - 1] != b' ' {
         word_start -= 1;
     }
-    if word_start >= *pos { return; }
+    // Copy word into a local buffer to avoid aliasing line_buf.
     let mut word_buf = [0u8; 128];
     let word_len = (*pos - word_start).min(127);
     word_buf[..word_len].copy_from_slice(&line_buf[word_start..*pos]);
     let word = &word_buf[..word_len];
 
-    // Check if word contains '/' — do file completion
-    let has_slash = find_byte(word, b'/').is_some();
-
-    if has_slash {
-        tab_complete_file(word, line_buf, pos, word_start);
-    } else {
-        tab_complete_builtin(word, line_buf, pos, word_start);
-    }
-}
-
-fn tab_complete_builtin(prefix: &[u8], line_buf: &mut [u8; 512], pos: &mut usize, word_start: usize) {
-    static BUILTINS: &[&[u8]] = &[
-        b"help", b"echo", b"uname", b"uptime", b"caps", b"ls", b"cat", b"write",
-        b"rm", b"stat", b"hexdump", b"head", b"tail", b"grep", b"mkdir", b"rmdir",
-        b"cd", b"pwd", b"snap", b"fork", b"getpid", b"exec", b"ps", b"top", b"kill",
-        b"resolve", b"ping", b"traceroute", b"wget", b"export", b"env", b"unset",
-        b"exit", b"jobs", b"fg", b"bg", b"history", b"wc", b"sort", b"uniq", b"diff",
-        b"function", b"syslog", b"netmirror", b"snapshot",
-        b"services", b"threads", b"meminfo", b"bench",
-        b"read", b"source", b"true", b"false", b"sleep", b"type", b"trace", b"pkg", b"apt",
-        b"while", b"until", b"break", b"continue",
-    ];
-
-    let mut matches: [usize; 40] = [0; 40];
-    let mut match_count: usize = 0;
-
-    for (i, &builtin) in BUILTINS.iter().enumerate() {
-        if starts_with(builtin, prefix) && match_count < 40 {
-            matches[match_count] = i;
-            match_count += 1;
-        }
-    }
-
-    if match_count == 0 {
-        return;
-    }
-    if match_count == 1 {
-        // Single match — complete it
-        let builtin = BUILTINS[matches[0]];
-        let suffix = &builtin[prefix.len()..];
-        if *pos + suffix.len() + 1 < line_buf.len() {
-            line_buf[*pos..*pos + suffix.len()].copy_from_slice(suffix);
-            *pos += suffix.len();
-            line_buf[*pos] = b' ';
-            *pos += 1;
-            linux_write(1, suffix.as_ptr(), suffix.len());
-            print(b" ");
-        }
-    } else {
-        // Multiple matches — show all
-        print(b"\n");
-        for i in 0..match_count {
-            print(BUILTINS[matches[i]]);
-            print(b"  ");
-        }
-        print(b"\n$ ");
-        linux_write(1, line_buf[..word_start].as_ptr(), word_start);
-        // Find common prefix among matches
-        let first = BUILTINS[matches[0]];
-        let mut common_len = first.len();
-        for i in 1..match_count {
-            let other = BUILTINS[matches[i]];
-            let mut cl = 0;
-            while cl < common_len && cl < other.len() && first[cl] == other[cl] {
-                cl += 1;
+    // Determine context: first token vs argument.
+    let is_first = {
+        let mut only_ws = true;
+        for i in 0..word_start {
+            if line_buf[i] != b' ' && line_buf[i] != b'\t' {
+                only_ws = false;
+                break;
             }
-            common_len = cl;
         }
-        if common_len > prefix.len() {
-            let extra = &first[prefix.len()..common_len];
-            line_buf[*pos..*pos + extra.len()].copy_from_slice(extra);
-            *pos += extra.len();
+        only_ws
+    };
+
+    // Safety: tab completion is strictly sequential — there's no way for the
+    // user to press Tab while the shell is already mid-completion.
+    let cands = unsafe { &mut *core::ptr::addr_of_mut!(CANDS) };
+    cands.reset();
+
+    if !word.is_empty() && word[0] == b'$' {
+        // Env var completion: word is "$PRE" — match against env names.
+        let var_prefix = &word[1..];
+        env_for_each_name(|name| {
+            if starts_with(name, var_prefix) {
+                cands.push(name, false);
+            }
+        });
+        finish_completion(cands, word, line_buf, pos, CompletionMode::NoTrailingSpace);
+    } else if is_first && find_byte(word, b'/').is_none() {
+        // Command completion: builtins + /bin + /usr/bin.
+        for &b in BUILTIN_NAMES {
+            if starts_with(b, word) {
+                cands.push(b, false);
+            }
         }
-        linux_write(1, line_buf[word_start..*pos].as_ptr(), *pos - word_start);
+        collect_dir_matches(b"/bin", word, false, cands);
+        collect_dir_matches(b"/usr/bin", word, false, cands);
+        finish_completion(cands, word, line_buf, pos, CompletionMode::AppendSpace);
+    } else {
+        // Path completion.
+        let (dir, name_prefix) = split_path(word);
+        collect_dir_matches(dir, name_prefix, true, cands);
+        finish_completion(cands, name_prefix, line_buf, pos, CompletionMode::AppendSpace);
     }
 }
 
-fn tab_complete_file(prefix: &[u8], line_buf: &mut [u8; 512], pos: &mut usize, _word_start: usize) {
-    // Split prefix into directory part and name part
-    let mut last_slash = 0;
-    for i in 0..prefix.len() {
-        if prefix[i] == b'/' { last_slash = i + 1; }
-    }
-    let dir_part = if last_slash > 0 { &prefix[..last_slash] } else { b"." as &[u8] };
-    let name_prefix = &prefix[last_slash..];
+/// Controls what `finish_completion` appends after a unique match.
+/// - `AppendSpace` is the bash default; cursor ready for the next argument.
+/// - `NoTrailingSpace` is used for `$VAR` completion so the user can keep
+///   typing (e.g. `$HOME/bin`) without having to delete a stray space.
+#[derive(Clone, Copy, PartialEq)]
+enum CompletionMode {
+    AppendSpace,
+    NoTrailingSpace,
+}
 
-    // Open directory and list entries
+/// Split a path into (dir, basename_prefix). `foo/bar` → (`foo`, `bar`).
+/// `/abs/path/` → (`/abs/path`, ``). No slash → (`.`, word).
+fn split_path(word: &[u8]) -> (&[u8], &[u8]) {
+    let mut last = None;
+    for (i, &b) in word.iter().enumerate() {
+        if b == b'/' { last = Some(i); }
+    }
+    match last {
+        None => (b".".as_slice(), word),
+        Some(0) => (b"/".as_slice(), &word[1..]),
+        Some(i) => (&word[..i], &word[i + 1..]),
+    }
+}
+
+/// Read `dir` via getdents64 and push entries starting with `prefix` into `cands`.
+/// Skips `.` and `..`. `track_type=true` marks directories so single-match
+/// completion can append `/`.
+fn collect_dir_matches(dir: &[u8], prefix: &[u8], track_type: bool, cands: &mut Candidates) {
     let mut dir_buf = [0u8; 128];
-    let dir_path = null_terminate(dir_part, &mut dir_buf);
+    let dir_path = null_terminate(dir, &mut dir_buf);
+    let flags = (sotos_common::linux_abi::O_RDONLY | sotos_common::linux_abi::O_DIRECTORY) as u64;
+    let fd = linux_open(dir_path, flags);
+    if fd < 0 { return; }
 
-    // Save/restore cwd for listing the target dir
-    let mut old_cwd = [0u8; 128];
-    let cwd_ret = linux_getcwd(old_cwd.as_mut_ptr(), old_cwd.len() as u64);
-
-    if last_slash > 0 {
-        if linux_chdir(dir_path) < 0 { return; }
-    }
-
-    let mut dot_buf = [0u8; 4];
-    let dot_path = null_terminate(b".", &mut dot_buf);
-    let fd = linux_open(dot_path, 0);
-    if fd < 0 {
-        if cwd_ret > 0 && last_slash > 0 { linux_chdir(old_cwd.as_ptr()); }
-        return;
-    }
-
-    let mut listing = [0u8; 2048];
-    let total = read_all(fd as u64, &mut listing);
-    linux_close(fd as u64);
-
-    if cwd_ret > 0 && last_slash > 0 { linux_chdir(old_cwd.as_ptr()); }
-
-    // Parse directory listing lines and find matches
-    let mut match_names: [[u8; 64]; 16] = [[0; 64]; 16];
-    let mut match_lens: [usize; 16] = [0; 16];
-    let mut match_count: usize = 0;
-
-    let mut line_start: usize = 0;
-    let mut i: usize = 0;
-    while i <= total && match_count < 16 {
-        if i == total || listing[i] == b'\n' {
-            let entry_line = &listing[line_start..i];
-            // Entry line format might be "name" or "name  SIZE  TYPE" etc
-            // Extract just the first word/name
-            let entry_name = if let Some(sp) = find_space(entry_line) {
-                &entry_line[..sp]
-            } else {
-                entry_line
-            };
-            if !entry_name.is_empty() && starts_with(entry_name, name_prefix) {
-                let l = entry_name.len().min(64);
-                match_names[match_count][..l].copy_from_slice(&entry_name[..l]);
-                match_lens[match_count] = l;
-                match_count += 1;
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = linux_getdents64(fd as u64, buf.as_mut_ptr(), buf.len());
+        if n <= 0 { break; }
+        let n = n as usize;
+        let mut off = 0usize;
+        while off + 19 <= n {
+            let reclen = u16::from_le_bytes([buf[off + 16], buf[off + 17]]) as usize;
+            if reclen == 0 || off + reclen > n { break; }
+            let d_type = buf[off + 18];
+            // Name begins at off+19 and is NUL-terminated within the record.
+            let name_start = off + 19;
+            let mut name_end = name_start;
+            while name_end < off + reclen && buf[name_end] != 0 {
+                name_end += 1;
             }
-            line_start = i + 1;
+            let name = &buf[name_start..name_end];
+            if name != b"." && name != b".." && starts_with(name, prefix) {
+                let is_dir = track_type && d_type == sotos_common::linux_abi::DT_DIR;
+                cands.push(name, is_dir);
+                if cands.count >= MAX_CANDIDATES { break; }
+            }
+            off += reclen;
         }
-        i += 1;
+        if cands.count >= MAX_CANDIDATES { break; }
     }
+    linux_close(fd as u64);
+}
 
-    if match_count == 0 { return; }
-    if match_count == 1 {
-        let suffix = &match_names[0][name_prefix.len()..match_lens[0]];
-        if *pos + suffix.len() + 1 < line_buf.len() {
-            line_buf[*pos..*pos + suffix.len()].copy_from_slice(suffix);
-            *pos += suffix.len();
-            line_buf[*pos] = b' ';
-            *pos += 1;
-            linux_write(1, suffix.as_ptr(), suffix.len());
-            print(b" ");
+/// Insert a slice into `line_buf` at `*pos`, advancing `*pos` and echoing to
+/// the terminal. Bounds-checked; silently drops bytes that would overflow.
+fn line_insert(line_buf: &mut [u8; 512], pos: &mut usize, data: &[u8]) {
+    let room = line_buf.len().saturating_sub(*pos + 1);
+    let n = data.len().min(room);
+    if n == 0 { return; }
+    line_buf[*pos..*pos + n].copy_from_slice(&data[..n]);
+    *pos += n;
+    linux_write(1, data.as_ptr(), n);
+}
+
+/// Act on collected candidates — zero/one/many.
+/// `filter_prefix` is the substring the user already typed (the portion to
+/// skip when writing the completion back into the line buffer).
+fn finish_completion(
+    cands: &Candidates,
+    filter_prefix: &[u8],
+    line_buf: &mut [u8; 512],
+    pos: &mut usize,
+    mode: CompletionMode,
+) {
+    match cands.count {
+        0 => {
+            print(b"\x07");
         }
-    } else {
-        print(b"\n");
-        for j in 0..match_count {
-            linux_write(1, match_names[j][..match_lens[j]].as_ptr(), match_lens[j]);
-            print(b"  ");
+        1 => {
+            let full = cands.name(0);
+            let suffix = &full[filter_prefix.len().min(full.len())..];
+            line_insert(line_buf, pos, suffix);
+            if cands.is_dir[0] {
+                line_insert(line_buf, pos, b"/");
+            } else if mode == CompletionMode::AppendSpace {
+                line_insert(line_buf, pos, b" ");
+            }
         }
-        print(b"\n$ ");
-        linux_write(1, line_buf[..*pos].as_ptr(), *pos);
+        _ => {
+            // Extend by common prefix first (saves a round trip), then draw a
+            // 4-column grid and redraw the prompt so the user keeps editing.
+            let common = common_prefix_len(cands);
+            if common > filter_prefix.len() {
+                let extra = &cands.names[0][filter_prefix.len()..common];
+                line_insert(line_buf, pos, extra);
+            }
+            print_candidate_grid(cands);
+            print(b"$ ");
+            linux_write(1, line_buf.as_ptr(), *pos);
+        }
     }
+}
+
+/// Longest byte-wise common prefix of all candidate names.
+fn common_prefix_len(cands: &Candidates) -> usize {
+    if cands.count == 0 { return 0; }
+    let first = cands.name(0);
+    let mut common = first.len();
+    for i in 1..cands.count {
+        let other = cands.name(i);
+        let mut cl = 0usize;
+        while cl < common && cl < other.len() && first[cl] == other[cl] {
+            cl += 1;
+        }
+        common = cl;
+        if common == 0 { break; }
+    }
+    common
+}
+
+/// Print candidates in a 4-column grid colored Tokyo-Night blue.
+fn print_candidate_grid(cands: &Candidates) {
+    const COLS: usize = 4;
+    const COL_WIDTH: usize = 20;
+    print(b"\n");
+    print(TN_BLUE);
+    for i in 0..cands.count {
+        let name = cands.name(i);
+        let nlen = name.len().min(COL_WIDTH - 1);
+        linux_write(1, name.as_ptr(), nlen);
+        // Pad with spaces to column width; last column ends with newline.
+        let is_last_col = (i % COLS) == COLS - 1;
+        let is_last_entry = i + 1 == cands.count;
+        if is_last_col || is_last_entry {
+            print(b"\n");
+        } else {
+            let pad = COL_WIDTH - nlen;
+            for _ in 0..pad { print(b" "); }
+        }
+    }
+    print(TN_RESET);
 }

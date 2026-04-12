@@ -81,6 +81,8 @@ pub fn syscall6(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -
 #[inline(always)] pub fn linux_kill(pid: u64, sig: u64) -> i64 { syscall2(62, pid, sig) }
 #[inline(always)] pub fn linux_getcwd(buf: *mut u8, size: u64) -> i64 { syscall2(79, buf as u64, size) }
 #[inline(always)] pub fn linux_chdir(path: *const u8) -> i64 { syscall1(80, path as u64) }
+/// SYS_getdents64(217): read directory entries as packed LinuxDirent64 records.
+#[inline(always)] pub fn linux_getdents64(fd: u64, dirp: *mut u8, count: usize) -> i64 { syscall3(217, fd, dirp as u64, count as u64) }
 #[inline(always)] pub fn linux_mkdir(path: *const u8, mode: u64) -> i64 { syscall2(83, path as u64, mode) }
 #[inline(always)] pub fn linux_rmdir(path: *const u8) -> i64 { syscall1(84, path as u64) }
 #[inline(always)] pub fn linux_unlink(path: *const u8) -> i64 { syscall1(87, path as u64) }
