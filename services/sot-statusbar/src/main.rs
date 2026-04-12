@@ -457,13 +457,21 @@ pub extern "C" fn _start() -> ! {
     msg.put_u32(REGISTRY_ID);
     let reply = wl_call(comp_ep, &msg.finish());
 
-    // -- Step 4: scan the advertised globals for zwlr_layer_shell_v1 --
+    // -- Step 4: resolve the layer-shell global name --
+    //
+    // The compositor advertises globals in wl_registry::global events,
+    // but the IPC transport is limited to 64 bytes per reply. With 7
+    // globals the events exceed that budget and later entries (including
+    // zwlr_layer_shell_v1 at name 5) are truncated. We attempt to parse
+    // the reply first; on failure we fall back to the compositor's
+    // well-known global name assignment (name 5 = zwlr_layer_shell_v1,
+    // matching services/compositor/src/wayland/registry.rs).
     let (reply_buf, reply_len) = reply_bytes(&reply);
     let layer_shell_name = match find_global(&reply_buf, reply_len, LAYER_SHELL_INTERFACE) {
         Some(n) => n,
         None => {
-            print(b"statusbar: no layer-shell\n");
-            idle_forever();
+            print(b"sot-statusbar: globals truncated, using known name 5\n");
+            5
         }
     };
 

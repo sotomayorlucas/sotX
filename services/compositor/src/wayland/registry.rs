@@ -70,16 +70,25 @@ pub struct BoundObject {
 
 /// Handle wl_registry::bind request.
 /// Returns the bound global name so the caller can track it.
+///
+/// Wire format of `wl_registry::bind` (typed new_id variant):
+///   name(u32), interface(string: len + chars + pad), version(u32), id(u32)
+///
+/// We must skip the interface string to reach `version` and `id`.
 pub fn handle_bind(msg: &WlMessage) -> Option<BoundObject> {
     if msg.opcode != 0 {
         return None;
     }
     let name = msg.arg_u32(0);
-    // The new_id argument is at offset 4, but for wl_registry::bind
-    // it's encoded as (interface_string, version, id) -- simplified:
-    // In practice, the bind message for our compositor just needs the
-    // name and the client-assigned ID (at known offset after interface+version).
-    // For a minimal compositor, we accept any bind and track it.
-    let client_id = msg.arg_u32(4); // simplified: direct ID
+
+    // Skip the interface string to find the client-allocated object ID.
+    // Payload layout: name(4) + string(4 + padded_chars) + version(4) + id(4).
+    // String wire encoding: length(u32) + bytes(length, NUL-terminated) + padding to 4.
+    let str_len = msg.arg_u32(4) as usize; // byte count including NUL
+    let padded = (str_len + 3) & !3;
+    // version sits right after the string, then id after version.
+    let id_offset = 4 + 4 + padded + 4; // name + strlen_word + padded_chars + version
+    let client_id = msg.arg_u32(id_offset);
+
     Some(BoundObject { global_name: name, client_id })
 }
