@@ -2,6 +2,10 @@ use sotos_common::sys;
 use sotos_common::{KB_RING_ADDR, SyncUnsafeCell};
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use crate::framebuffer_palette::{
+    ANSI_PALETTE, DEFAULT_BG, DEFAULT_FG, truecolor, xterm256,
+};
+
 // ---------------------------------------------------------------------------
 // Print helpers — serial only when no framebuffer, serial+fb when available
 // ---------------------------------------------------------------------------
@@ -296,10 +300,42 @@ static CON_CUR_ROW: SyncUnsafeCell<u32> = SyncUnsafeCell::new(0);
 static TEXT_X: SyncUnsafeCell<u32> = SyncUnsafeCell::new(0);
 static TEXT_Y: SyncUnsafeCell<u32> = SyncUnsafeCell::new(0);
 
-/// Terminal text color.
-const COL_TEXT: u32 = 0xFFA9B1D6;
-/// Terminal background color.
-const COL_BG: u32 = 0xFF1A1B26;
+/// Terminal default text color (kept for non-SGR call sites that want
+/// the palette default). Mirrors `framebuffer_palette::DEFAULT_FG`.
+const COL_TEXT: u32 = DEFAULT_FG;
+/// Terminal default background color. Mirrors
+/// `framebuffer_palette::DEFAULT_BG`.
+const COL_BG: u32 = DEFAULT_BG;
+
+// ---------------------------------------------------------------------------
+// Current SGR style (updated by `\x1b[...m` sequences, read by the glyph
+// drawer). Kept as plain cells — the console is single-threaded, owned by
+// init, and all writers already go through `fb_putchar`.
+// ---------------------------------------------------------------------------
+static CUR_FG: SyncUnsafeCell<u32> = SyncUnsafeCell::new(DEFAULT_FG);
+static CUR_BG: SyncUnsafeCell<u32> = SyncUnsafeCell::new(DEFAULT_BG);
+static CUR_BOLD: SyncUnsafeCell<bool> = SyncUnsafeCell::new(false);
+static CUR_REVERSE: SyncUnsafeCell<bool> = SyncUnsafeCell::new(false);
+
+/// Resolve the current effective (fg, bg) taking bold and reverse into
+/// account. Bold upgrades the standard ANSI base colors to their bright
+/// variant (xterm-compatible); truecolor/256-color values are left
+/// alone. Reverse simply swaps fg and bg.
+#[inline]
+unsafe fn current_colors() -> (u32, u32) {
+    let mut fg = *CUR_FG.get();
+    let bg = *CUR_BG.get();
+    if *CUR_BOLD.get() {
+        // Upgrade base ANSI colors 0..=7 to their bright counterparts.
+        for i in 0..8 {
+            if fg == ANSI_PALETTE[i] {
+                fg = ANSI_PALETTE[i + 8];
+                break;
+            }
+        }
+    }
+    if *CUR_REVERSE.get() { (bg, fg) } else { (fg, bg) }
+}
 
 /// Keyboard state.
 static KB_SHIFT: SyncUnsafeCell<bool> = SyncUnsafeCell::new(false);
@@ -372,11 +408,13 @@ unsafe fn fb_draw_glyph_at(px: u32, py: u32, ch: u8, fg: u32, bg: u32) {
     }
 }
 
-/// Draw a character at (col, row) in the text console.
+/// Draw a character at (col, row) in the text console using the
+/// currently active SGR style.
 unsafe fn fb_draw_char(col: u32, row: u32, ch: u8) {
     let x = *TEXT_X.get() + col * 8;
     let y = *TEXT_Y.get() + row * 16;
-    fb_draw_glyph_at(x, y, ch, COL_TEXT, COL_BG);
+    let (fg, bg) = current_colors();
+    fb_draw_glyph_at(x, y, ch, fg, bg);
 }
 
 /// Scroll the text console up by one row.
