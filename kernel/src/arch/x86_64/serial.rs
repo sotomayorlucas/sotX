@@ -87,11 +87,26 @@ macro_rules! kprintln {
     ($($arg:tt)*) => ($crate::kprint!("{}\n", format_args!($($arg)*)));
 }
 
-/// Debug-only print macro — compiles to nothing without the `verbose` feature.
+/// Debug-only print macro — gated on both the `verbose` compile-time feature
+/// AND the runtime `boot_splash::VERBOSE` flag (off during splash).
 #[macro_export]
 macro_rules! kdebug {
     ($($arg:tt)*) => {
         #[cfg(feature = "verbose")]
-        { $crate::kprintln!($($arg)*) }
+        {
+            if $crate::boot_splash::VERBOSE.load(core::sync::atomic::Ordering::Relaxed) {
+                $crate::kprintln!($($arg)*)
+            }
+        }
+    };
+}
+
+/// Error macro — always prints in red regardless of verbose mode.
+/// Format: `\x1b[31;1m[err]\x1b[0m message`
+#[macro_export]
+macro_rules! kerr {
+    ($($arg:tt)*) => {
+        $crate::kprint!("\x1b[31;1m[err]\x1b[0m ");
+        $crate::kprintln!($($arg)*);
     };
 }

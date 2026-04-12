@@ -22,8 +22,9 @@ pub fn set_categories(mask: u16) {
     TRACE_CATS.store(mask, Ordering::Relaxed);
 }
 
-/// Core trace macro. Gated on the `verbose` feature. Checks both the level
-/// threshold and the category mask before emitting output.
+/// Core trace macro. Gated on the `verbose` feature AND the runtime
+/// `boot_splash::VERBOSE` flag. Checks both the level threshold and
+/// the category mask before emitting output.
 ///
 /// Usage: `ktrace!(TraceLevel::Info, cat::MM, "frame count: {}", n);`
 #[macro_export]
@@ -31,28 +32,31 @@ macro_rules! ktrace {
     ($level:expr, $cat:expr, $($arg:tt)*) => {
         #[cfg(feature = "verbose")]
         {
-            let lvl: sotos_common::trace::TraceLevel = $level;
-            let cat_mask: u16 = $cat;
-            if (lvl as u8) <= $crate::trace::TRACE_LEVEL.load(core::sync::atomic::Ordering::Relaxed)
-                && (cat_mask & $crate::trace::TRACE_CATS.load(core::sync::atomic::Ordering::Relaxed)) != 0
-            {
-                let name_bytes = sotos_common::trace::cat_name_bytes(cat_mask);
-                let name_str = match core::str::from_utf8(name_bytes) {
-                    Ok(s) => s,
-                    Err(_) => "???",
-                };
-                $crate::kprint!("[");
-                $crate::kprint!("{}", lvl.as_byte() as char);
-                $crate::kprint!(" ");
-                $crate::kprint!("{}", name_str);
-                $crate::kprint!("] ");
-                $crate::kprintln!($($arg)*);
+            if $crate::boot_splash::VERBOSE.load(core::sync::atomic::Ordering::Relaxed) {
+                let lvl: sotos_common::trace::TraceLevel = $level;
+                let cat_mask: u16 = $cat;
+                if (lvl as u8) <= $crate::trace::TRACE_LEVEL.load(core::sync::atomic::Ordering::Relaxed)
+                    && (cat_mask & $crate::trace::TRACE_CATS.load(core::sync::atomic::Ordering::Relaxed)) != 0
+                {
+                    let name_bytes = sotos_common::trace::cat_name_bytes(cat_mask);
+                    let name_str = match core::str::from_utf8(name_bytes) {
+                        Ok(s) => s,
+                        Err(_) => "???",
+                    };
+                    $crate::kprint!("[");
+                    $crate::kprint!("{}", lvl.as_byte() as char);
+                    $crate::kprint!(" ");
+                    $crate::kprint!("{}", name_str);
+                    $crate::kprint!("] ");
+                    $crate::kprintln!($($arg)*);
+                }
             }
         }
     };
 }
 
 /// Error-level trace (always compiled — not gated on `verbose`).
+/// Prints in red `\x1b[31;1m[err]\x1b[0m` regardless of verbose mode.
 /// Only the category mask is checked; errors are never filtered by level.
 #[macro_export]
 macro_rules! kerror {
@@ -66,11 +70,11 @@ macro_rules! kerror {
                     Ok(s) => s,
                     Err(_) => "???",
                 };
-                $crate::kprint!("[");
+                $crate::kprint!("\x1b[31;1m[");
                 $crate::kprint!("{}", sotos_common::trace::TraceLevel::Error.as_byte() as char);
                 $crate::kprint!(" ");
                 $crate::kprint!("{}", name_str);
-                $crate::kprint!("] ");
+                $crate::kprint!("]\x1b[0m ");
                 $crate::kprintln!($($arg)*);
             }
         }
