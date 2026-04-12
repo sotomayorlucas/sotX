@@ -4,6 +4,7 @@ pub mod files;
 pub mod system;
 pub mod apt;
 pub mod util;
+pub mod help_data;
 pub use text::*;
 pub use files::*;
 pub use system::*;
