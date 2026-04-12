@@ -12,11 +12,13 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
+pub mod arena;
 pub mod types;
 pub mod graph;
 pub mod error;
 pub mod typestate;
 
+pub use arena::{Arena, ArenaId};
 pub use error::GraphError;
 pub use graph::TypeGraph;
 pub use types::*;

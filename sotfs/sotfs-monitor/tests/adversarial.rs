@@ -309,7 +309,7 @@ fn invariant_corruption_link_count_mismatch() {
     let fid = create_file(&mut g, rd, "f", 0, 0, Permissions::FILE_DEFAULT).unwrap();
 
     // Deliberately corrupt link_count
-    g.inodes.get_mut(&fid).unwrap().link_count = 42;
+    g.get_inode_mut(fid).unwrap().link_count = 42;
 
     let result = g.check_invariants();
     assert!(result.is_err(), "Should detect link_count corruption");
@@ -326,9 +326,9 @@ fn invariant_corruption_duplicate_name() {
     // Manually insert a second contains edge with the same name
     let eid = g.alloc_edge_id();
     let iid = g.alloc_inode_id();
-    g.inodes.insert(iid, Inode::new_file(iid, Permissions::FILE_DEFAULT, 0, 0));
+    g.insert_inode(iid, Inode::new_file(iid, Permissions::FILE_DEFAULT, 0, 0));
     let edge = Edge::Contains { id: eid, src: rd, tgt: iid, name: "dup".into() };
-    g.edges.insert(eid, edge);
+    g.insert_edge(eid, edge);
     g.dir_contains.entry(rd).or_default().insert(eid);
 
     let result = g.check_invariants();
@@ -401,7 +401,7 @@ fn large_file_write_survives() {
     let data = vec![0xABu8; 1024 * 1024];
     write_data(&mut g, fid, 0, &data).unwrap();
 
-    assert_eq!(g.inodes[&fid].size, 1024 * 1024);
+    assert_eq!(g.get_inode(fid).unwrap().size, 1024 * 1024);
 
     let read_back = read_data(&g, fid, 0, 1024 * 1024).unwrap();
     assert_eq!(read_back.len(), 1024 * 1024);

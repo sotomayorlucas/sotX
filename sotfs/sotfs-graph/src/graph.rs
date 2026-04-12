@@ -2,11 +2,15 @@
 //!
 //! Implements TG = (V, E, src, tgt, τ_V, τ_E, attr) from Definition 5.1.
 //! Provides O(1) node/edge lookup and O(n) invariant checking.
+//!
+//! Node and edge pools use arena-based storage (`Arena<T, CAPACITY>`) with
+//! free-list slot reuse. No heap allocation needed for primary storage.
 
 #[cfg(not(feature = "std"))]
 use alloc::{
     collections::{BTreeMap, BTreeSet},
-    string::String,
+    format,
+    string::{String, ToString},
     vec::Vec,
 };
 #[cfg(feature = "std")]
@@ -14,42 +18,71 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::arena::{Arena, ArenaId};
 use crate::error::GraphError;
 use crate::types::*;
 
 /// Maximum hard links per inode (bounds treewidth via GC-LINK-3).
 pub const LINK_MAX: u32 = 65535;
 
+/// Default node arena capacity (inodes, dirs, caps, transactions, versions, blocks).
+pub const NODE_CAPACITY: usize = 65536;
+/// Default edge arena capacity (double node capacity for typical fan-out).
+pub const EDGE_CAPACITY: usize = 131072;
+
+// ---------------------------------------------------------------------------
+// Helper: map typed u64 IDs to ArenaId and back
+// ---------------------------------------------------------------------------
+
+/// Convert a typed u64 ID to an arena slot index.
+/// IDs start at 1; slot 0 is valid but unused by the ID allocators.
+#[inline(always)]
+fn id_to_arena(id: u64) -> ArenaId {
+    ArenaId(id as u32)
+}
+
 /// The sotFS typed metadata graph.
+///
+/// Node pools (inodes, dirs, caps, transactions, versions, blocks) and the
+/// edge pool use `Arena`-based storage with 65K/131K slot capacities.
+/// Index maps (`dir_contains`, `inode_incoming_contains`, etc.) remain
+/// `BTreeMap` for efficient set operations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TypeGraph {
-    // --- Node pools ---
-    pub inodes: BTreeMap<InodeId, Inode>,
-    pub dirs: BTreeMap<DirId, Directory>,
-    pub caps: BTreeMap<CapId, Capability>,
-    pub transactions: BTreeMap<TxnId, Transaction>,
-    pub versions: BTreeMap<VersionId, Version>,
-    pub blocks: BTreeMap<BlockId, Block>,
+    // --- Node pools (arena-backed) ---
+    #[serde(with = "arena_serde")]
+    pub inodes: Arena<Inode, NODE_CAPACITY>,
+    #[serde(with = "arena_serde")]
+    pub dirs: Arena<Directory, NODE_CAPACITY>,
+    #[serde(with = "arena_serde")]
+    pub caps: Arena<Capability, NODE_CAPACITY>,
+    #[serde(with = "arena_serde")]
+    pub transactions: Arena<Transaction, NODE_CAPACITY>,
+    #[serde(with = "arena_serde")]
+    pub versions: Arena<Version, NODE_CAPACITY>,
+    #[serde(with = "arena_serde")]
+    pub blocks: Arena<Block, NODE_CAPACITY>,
 
-    // --- Edge pool ---
-    pub edges: BTreeMap<EdgeId, Edge>,
+    // --- Edge pool (arena-backed) ---
+    #[serde(with = "arena_serde")]
+    pub edges: Arena<Edge, EDGE_CAPACITY>,
 
     // --- Indexes for fast lookup ---
-    /// Directory → set of contains edge IDs (outgoing)
+    /// Directory -> set of contains edge IDs (outgoing)
     pub dir_contains: BTreeMap<DirId, BTreeSet<EdgeId>>,
-    /// Inode → set of contains edge IDs (incoming)
+    /// Inode -> set of contains edge IDs (incoming)
     pub inode_incoming_contains: BTreeMap<InodeId, BTreeSet<EdgeId>>,
-    /// Inode → set of pointsTo edge IDs (outgoing)
+    /// Inode -> set of pointsTo edge IDs (outgoing)
     pub inode_points_to: BTreeMap<InodeId, BTreeSet<EdgeId>>,
-    /// Capability → grants edge ID
+    /// Capability -> grants edge ID
     pub cap_grants: BTreeMap<CapId, EdgeId>,
-    /// Capability → parent cap (via delegates edge)
+    /// Capability -> parent cap (via delegates edge)
     pub cap_parent: BTreeMap<CapId, CapId>,
-    /// Capability → children caps (via delegates edges)
+    /// Capability -> children caps (via delegates edges)
     pub cap_children: BTreeMap<CapId, BTreeSet<CapId>>,
 
     // --- File data (in-memory for FUSE prototype) ---
-    /// InodeId → file content bytes
+    /// InodeId -> file content bytes
     pub file_data: BTreeMap<InodeId, Vec<u8>>,
 
     // --- ID allocators ---
@@ -92,13 +125,13 @@ impl TypeGraph {
         };
 
         let mut g = Self {
-            inodes: BTreeMap::new(),
-            dirs: BTreeMap::new(),
-            caps: BTreeMap::new(),
-            transactions: BTreeMap::new(),
-            versions: BTreeMap::new(),
-            blocks: BTreeMap::new(),
-            edges: BTreeMap::new(),
+            inodes: Arena::new(),
+            dirs: Arena::new(),
+            caps: Arena::new(),
+            transactions: Arena::new(),
+            versions: Arena::new(),
+            blocks: Arena::new(),
+            edges: Arena::new(),
             dir_contains: BTreeMap::new(),
             inode_incoming_contains: BTreeMap::new(),
             inode_points_to: BTreeMap::new(),
@@ -121,11 +154,11 @@ impl TypeGraph {
         // For root, there's no parent, so link_count = 1 (just ".")
         // Actually POSIX: root has nlink=2 for "." even without parent.
         let mut ri = root_inode;
-        ri.link_count = 1; // just "." — G3 excludes ".."
-        g.inodes.insert(inode_id, ri);
-        g.dirs.insert(dir_id, root_dir);
+        ri.link_count = 1; // just "." -- G3 excludes ".."
+        g.inodes.insert_at(id_to_arena(inode_id), ri);
+        g.dirs.insert_at(id_to_arena(dir_id), root_dir);
 
-        g.edges.insert(dot_edge_id, dot_edge);
+        g.edges.insert_at(id_to_arena(dot_edge_id), dot_edge);
         g.dir_contains
             .entry(dir_id)
             .or_default()
@@ -173,6 +206,148 @@ impl TypeGraph {
     }
 
     // -----------------------------------------------------------------------
+    // Arena-backed insert/get/remove helpers
+    // -----------------------------------------------------------------------
+
+    /// Insert an inode into the arena at the slot corresponding to its ID.
+    #[inline]
+    pub fn insert_inode(&mut self, id: InodeId, inode: Inode) {
+        self.inodes.insert_at(id_to_arena(id), inode);
+    }
+
+    /// Insert a directory into the arena.
+    #[inline]
+    pub fn insert_dir(&mut self, id: DirId, dir: Directory) {
+        self.dirs.insert_at(id_to_arena(id), dir);
+    }
+
+    /// Insert a capability into the arena.
+    #[inline]
+    pub fn insert_cap(&mut self, id: CapId, cap: Capability) {
+        self.caps.insert_at(id_to_arena(id), cap);
+    }
+
+    /// Insert a block into the arena.
+    #[inline]
+    pub fn insert_block(&mut self, id: BlockId, block: Block) {
+        self.blocks.insert_at(id_to_arena(id), block);
+    }
+
+    /// Insert an edge into the arena.
+    #[inline]
+    pub fn insert_edge(&mut self, id: EdgeId, edge: Edge) {
+        self.edges.insert_at(id_to_arena(id), edge);
+    }
+
+    /// Get a reference to an inode by ID.
+    #[inline]
+    pub fn get_inode(&self, id: InodeId) -> Option<&Inode> {
+        self.inodes.get(id_to_arena(id))
+    }
+
+    /// Get a mutable reference to an inode by ID.
+    #[inline]
+    pub fn get_inode_mut(&mut self, id: InodeId) -> Option<&mut Inode> {
+        self.inodes.get_mut(id_to_arena(id))
+    }
+
+    /// Get a reference to a directory by ID.
+    #[inline]
+    pub fn get_dir(&self, id: DirId) -> Option<&Directory> {
+        self.dirs.get(id_to_arena(id))
+    }
+
+    /// Get a reference to a capability by ID.
+    #[inline]
+    pub fn get_cap(&self, id: CapId) -> Option<&Capability> {
+        self.caps.get(id_to_arena(id))
+    }
+
+    /// Get a reference to a block by ID.
+    #[inline]
+    pub fn get_block(&self, id: BlockId) -> Option<&Block> {
+        self.blocks.get(id_to_arena(id))
+    }
+
+    /// Get a mutable reference to a block by ID.
+    #[inline]
+    pub fn get_block_mut(&mut self, id: BlockId) -> Option<&mut Block> {
+        self.blocks.get_mut(id_to_arena(id))
+    }
+
+    /// Get a reference to an edge by ID.
+    #[inline]
+    pub fn get_edge(&self, id: EdgeId) -> Option<&Edge> {
+        self.edges.get(id_to_arena(id))
+    }
+
+    /// Get a mutable reference to an edge by ID.
+    #[inline]
+    pub fn get_edge_mut(&mut self, id: EdgeId) -> Option<&mut Edge> {
+        self.edges.get_mut(id_to_arena(id))
+    }
+
+    /// Check if an inode exists.
+    #[inline]
+    pub fn contains_inode(&self, id: InodeId) -> bool {
+        self.inodes.contains(id_to_arena(id))
+    }
+
+    /// Check if a directory exists.
+    #[inline]
+    pub fn contains_dir(&self, id: DirId) -> bool {
+        self.dirs.contains(id_to_arena(id))
+    }
+
+    /// Check if a capability exists.
+    #[inline]
+    pub fn contains_cap(&self, id: CapId) -> bool {
+        self.caps.contains(id_to_arena(id))
+    }
+
+    /// Check if a transaction exists.
+    #[inline]
+    pub fn contains_txn(&self, id: TxnId) -> bool {
+        self.transactions.contains(id_to_arena(id))
+    }
+
+    /// Check if a version exists.
+    #[inline]
+    pub fn contains_version(&self, id: VersionId) -> bool {
+        self.versions.contains(id_to_arena(id))
+    }
+
+    /// Check if a block exists.
+    #[inline]
+    pub fn contains_block(&self, id: BlockId) -> bool {
+        self.blocks.contains(id_to_arena(id))
+    }
+
+    /// Remove an inode from the arena.
+    #[inline]
+    pub fn remove_inode(&mut self, id: InodeId) -> Option<Inode> {
+        self.inodes.remove(id_to_arena(id))
+    }
+
+    /// Remove a directory from the arena.
+    #[inline]
+    pub fn remove_dir(&mut self, id: DirId) -> Option<Directory> {
+        self.dirs.remove(id_to_arena(id))
+    }
+
+    /// Remove a block from the arena.
+    #[inline]
+    pub fn remove_block(&mut self, id: BlockId) -> Option<Block> {
+        self.blocks.remove(id_to_arena(id))
+    }
+
+    /// Remove an edge from the arena.
+    #[inline]
+    pub fn remove_edge(&mut self, id: EdgeId) -> Option<Edge> {
+        self.edges.remove(id_to_arena(id))
+    }
+
+    // -----------------------------------------------------------------------
     // Directory name lookup
     // -----------------------------------------------------------------------
 
@@ -182,10 +357,10 @@ impl TypeGraph {
         for &eid in edge_ids {
             if let Some(Edge::Contains {
                 name: ref n, ..
-            }) = self.edges.get(&eid)
+            }) = self.get_edge(eid)
             {
                 if n == name {
-                    return self.edges.get(&eid);
+                    return self.get_edge(eid);
                 }
             }
         }
@@ -205,7 +380,7 @@ impl TypeGraph {
         let mut entries = Vec::new();
         if let Some(edge_ids) = self.dir_contains.get(&dir) {
             for &eid in edge_ids {
-                if let Some(Edge::Contains { tgt, name, .. }) = self.edges.get(&eid) {
+                if let Some(Edge::Contains { tgt, name, .. }) = self.get_edge(eid) {
                     entries.push((name.clone(), *tgt));
                 }
             }
@@ -237,7 +412,7 @@ impl TypeGraph {
 
         for component in &components {
             if component == &".." {
-                // Resolve ".." — find parent
+                // Resolve ".." -- find parent
                 if let Some(parent_inode) = self.resolve_name(current_dir, "..") {
                     current_inode = parent_inode;
                     current_dir = self
@@ -254,7 +429,7 @@ impl TypeGraph {
             current_inode = target_inode;
 
             // If not the last component, it must be a directory
-            if let Some(inode) = self.inodes.get(&target_inode) {
+            if let Some(inode) = self.get_inode(target_inode) {
                 if inode.vtype == VnodeType::Directory {
                     current_dir = self
                         .dir_for_inode(target_inode)
@@ -285,7 +460,7 @@ impl TypeGraph {
     }
 
     // -----------------------------------------------------------------------
-    // Cycle detection (for rename — GC-RENAME-2)
+    // Cycle detection (for rename -- GC-RENAME-2)
     // -----------------------------------------------------------------------
 
     /// Check if `ancestor_dir` is an ancestor of (or equal to) `descendant_dir`
@@ -311,11 +486,11 @@ impl TypeGraph {
         }
         if let Some(edge_ids) = self.dir_contains.get(&current) {
             for &eid in edge_ids {
-                if let Some(Edge::Contains { tgt, name, .. }) = self.edges.get(&eid) {
+                if let Some(Edge::Contains { tgt, name, .. }) = self.get_edge(eid) {
                     if name == "." || name == ".." {
                         continue;
                     }
-                    if let Some(inode) = self.inodes.get(tgt) {
+                    if let Some(inode) = self.get_inode(*tgt) {
                         if inode.vtype == VnodeType::Directory {
                             if let Some(child_dir) = self.dir_for_inode(*tgt) {
                                 if child_dir == target {
@@ -334,7 +509,7 @@ impl TypeGraph {
     }
 
     // -----------------------------------------------------------------------
-    // Invariant checking (§5.4-5.5)
+    // Invariant checking (5.4-5.5)
     // -----------------------------------------------------------------------
 
     /// Check all graph invariants. Returns Ok(()) or the first violation.
@@ -351,16 +526,17 @@ impl TypeGraph {
 
     /// I2 + G3: link_count = |incoming contains edges excluding ".."|
     fn check_link_count_consistency(&self) -> Result<(), GraphError> {
-        for (id, inode) in &self.inodes {
+        for (aid, inode) in self.inodes.iter() {
+            let id = aid.0 as u64;
             let count = self
                 .inode_incoming_contains
-                .get(id)
+                .get(&id)
                 .map(|edges| {
                     edges
                         .iter()
                         .filter(|&&eid| {
                             matches!(
-                                self.edges.get(&eid),
+                                self.get_edge(eid),
                                 Some(Edge::Contains { name, .. }) if name != ".."
                             )
                         })
@@ -383,7 +559,7 @@ impl TypeGraph {
         for (dir_id, edge_ids) in &self.dir_contains {
             let mut names = BTreeSet::new();
             for &eid in edge_ids {
-                if let Some(Edge::Contains { name, .. }) = self.edges.get(&eid) {
+                if let Some(Edge::Contains { name, .. }) = self.get_edge(eid) {
                     if !names.insert(name.clone()) {
                         return Err(GraphError::InvariantViolation(format!(
                             "Directory {} has duplicate name '{}'",
@@ -398,14 +574,15 @@ impl TypeGraph {
 
     /// I3: every directory has a "." self-reference
     fn check_dir_self_ref(&self) -> Result<(), GraphError> {
-        for (dir_id, dir) in &self.dirs {
+        for (aid, dir) in self.dirs.iter() {
+            let dir_id = aid.0 as u64;
             let has_dot = self
                 .dir_contains
-                .get(dir_id)
+                .get(&dir_id)
                 .map(|edges| {
                     edges.iter().any(|&eid| {
                         matches!(
-                            self.edges.get(&eid),
+                            self.get_edge(eid),
                             Some(Edge::Contains { tgt, name, .. })
                                 if name == "." && *tgt == dir.inode_id
                         )
@@ -425,22 +602,23 @@ impl TypeGraph {
 
     /// G2: no dangling edges
     fn check_no_dangling_edges(&self) -> Result<(), GraphError> {
-        for (eid, edge) in &self.edges {
+        for (aid, edge) in self.edges.iter() {
+            let eid = aid.0 as u64;
             let src_exists = match edge.src_node() {
-                NodeId::Inode(id) => self.inodes.contains_key(&id),
-                NodeId::Directory(id) => self.dirs.contains_key(&id),
-                NodeId::Capability(id) => self.caps.contains_key(&id),
-                NodeId::Transaction(id) => self.transactions.contains_key(&id),
-                NodeId::Version(id) => self.versions.contains_key(&id),
-                NodeId::Block(id) => self.blocks.contains_key(&id),
+                NodeId::Inode(id) => self.contains_inode(id),
+                NodeId::Directory(id) => self.contains_dir(id),
+                NodeId::Capability(id) => self.contains_cap(id),
+                NodeId::Transaction(id) => self.contains_txn(id),
+                NodeId::Version(id) => self.contains_version(id),
+                NodeId::Block(id) => self.contains_block(id),
             };
             let tgt_exists = match edge.tgt_node() {
-                NodeId::Inode(id) => self.inodes.contains_key(&id),
-                NodeId::Directory(id) => self.dirs.contains_key(&id),
-                NodeId::Capability(id) => self.caps.contains_key(&id),
-                NodeId::Transaction(id) => self.transactions.contains_key(&id),
-                NodeId::Version(id) => self.versions.contains_key(&id),
-                NodeId::Block(id) => self.blocks.contains_key(&id),
+                NodeId::Inode(id) => self.contains_inode(id),
+                NodeId::Directory(id) => self.contains_dir(id),
+                NodeId::Capability(id) => self.contains_cap(id),
+                NodeId::Transaction(id) => self.contains_txn(id),
+                NodeId::Version(id) => self.contains_version(id),
+                NodeId::Block(id) => self.contains_block(id),
             };
             if !src_exists || !tgt_exists {
                 return Err(GraphError::InvariantViolation(format!(
@@ -454,11 +632,12 @@ impl TypeGraph {
 
     /// I8: block refcount = |incoming pointsTo edges|
     fn check_block_refcount(&self) -> Result<(), GraphError> {
-        for (id, block) in &self.blocks {
+        for (aid, block) in self.blocks.iter() {
+            let id = aid.0 as u64;
             let actual = self
                 .edges
                 .values()
-                .filter(|e| matches!(e, Edge::PointsTo { tgt, .. } if *tgt == *id))
+                .filter(|e| matches!(e, Edge::PointsTo { tgt, .. } if *tgt == id))
                 .count() as u32;
             if block.refcount != actual {
                 return Err(GraphError::InvariantViolation(format!(
@@ -472,7 +651,8 @@ impl TypeGraph {
 
     /// G5: no directory cycles (excluding "." and "..")
     fn check_no_dir_cycles(&self) -> Result<(), GraphError> {
-        for &dir_id in self.dirs.keys() {
+        for (aid, _) in self.dirs.iter() {
+            let dir_id = aid.0 as u64;
             let mut visited = BTreeSet::new();
             if self.has_cycle_from(dir_id, &mut visited) {
                 return Err(GraphError::InvariantViolation(format!(
@@ -490,11 +670,11 @@ impl TypeGraph {
         }
         if let Some(edge_ids) = self.dir_contains.get(&start) {
             for &eid in edge_ids {
-                if let Some(Edge::Contains { tgt, name, .. }) = self.edges.get(&eid) {
+                if let Some(Edge::Contains { tgt, name, .. }) = self.get_edge(eid) {
                     if name == "." || name == ".." {
                         continue;
                     }
-                    if let Some(inode) = self.inodes.get(tgt) {
+                    if let Some(inode) = self.get_inode(*tgt) {
                         if inode.vtype == VnodeType::Directory {
                             if let Some(child_dir) = self.dir_for_inode(*tgt) {
                                 if self.has_cycle_from(child_dir, visited) {
@@ -513,7 +693,7 @@ impl TypeGraph {
     /// G4: capability monotonicity along delegation chains
     fn check_cap_monotonicity(&self) -> Result<(), GraphError> {
         for (&child_id, &parent_id) in &self.cap_parent {
-            if let (Some(child), Some(parent)) = (self.caps.get(&child_id), self.caps.get(&parent_id))
+            if let (Some(child), Some(parent)) = (self.get_cap(child_id), self.get_cap(parent_id))
             {
                 if !child.rights.is_subset_of(&parent.rights) {
                     return Err(GraphError::InvariantViolation(format!(
@@ -530,6 +710,69 @@ impl TypeGraph {
 impl Default for TypeGraph {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Serde support for Arena<T, N>
+//
+// Arenas are serialized as a Vec of (slot_index, value) pairs, and
+// deserialized back by insert_at. This preserves ID stability.
+// ---------------------------------------------------------------------------
+
+mod arena_serde {
+    use super::*;
+    use serde::de::{Deserializer, SeqAccess, Visitor};
+    use serde::ser::{SerializeSeq, Serializer};
+    use core::marker::PhantomData;
+
+    pub fn serialize<T, const N: usize, S>(
+        arena: &Arena<T, N>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        T: Serialize,
+        S: Serializer,
+    {
+        let mut seq = serializer.serialize_seq(Some(arena.len()))?;
+        for (id, val) in arena.iter() {
+            seq.serialize_element(&(id.0, val))?;
+        }
+        seq.end()
+    }
+
+    pub fn deserialize<'de, T, const N: usize, D>(
+        deserializer: D,
+    ) -> Result<Arena<T, N>, D::Error>
+    where
+        T: Deserialize<'de>,
+        D: Deserializer<'de>,
+    {
+        struct ArenaVisitor<T, const N: usize>(PhantomData<T>);
+
+        impl<'de, T, const N: usize> Visitor<'de> for ArenaVisitor<T, N>
+        where
+            T: Deserialize<'de>,
+        {
+            type Value = Arena<T, N>;
+
+            fn expecting(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+                write!(f, "a sequence of (slot_index, value) pairs")
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut arena = Arena::new();
+                while let Some((slot, val)) = seq.next_element::<(u32, T)>()? {
+                    arena.insert_at(ArenaId(slot), val);
+                }
+                Ok(arena)
+            }
+        }
+
+        deserializer.deserialize_seq(ArenaVisitor(PhantomData))
     }
 }
 
@@ -556,6 +799,6 @@ mod tests {
     #[test]
     fn root_link_count_is_one() {
         let g = TypeGraph::new();
-        assert_eq!(g.inodes[&g.root_inode].link_count, 1);
+        assert_eq!(g.get_inode(g.root_inode).unwrap().link_count, 1);
     }
 }
