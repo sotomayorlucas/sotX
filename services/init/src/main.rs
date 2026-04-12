@@ -60,6 +60,8 @@ mod vdso;
 #[allow(dead_code)]
 mod framebuffer;
 #[allow(dead_code)]
+mod framebuffer_palette;
+#[allow(dead_code)]
 mod process;
 #[allow(dead_code)]
 mod fd;
