@@ -92,15 +92,29 @@ pub extern "C" fn _start() -> ! {
     print_hex(comp_ep);
     print(b"\n");
 
-    // Connect.
-    let mut connect_msg = IpcMsg::empty();
-    connect_msg.tag = WL_CONNECT_TAG;
-    let reply = wl_call(comp_ep, &connect_msg);
-    if reply.tag != WL_CONNECT_TAG || reply.regs[0] != 1 {
-        print(b"sotos-term: compositor rejected connect\n");
-        loop {
-            sys::yield_now();
+    // Connect with retry + timeout to handle the compositor's transition
+    // from blocking-recv to active polling loop.
+    print(b"sotos-term: connecting...\n");
+    let mut connected = false;
+    for attempt in 0..10u32 {
+        let mut connect_msg = IpcMsg::empty();
+        connect_msg.tag = WL_CONNECT_TAG;
+        match sys::call_timeout(comp_ep, &connect_msg, 200) {
+            Ok(reply) if reply.tag == WL_CONNECT_TAG && reply.regs[0] == 1 => {
+                connected = true;
+                break;
+            }
+            _ => {
+                // Timeout or rejection — yield and retry.
+                for _ in 0..50 {
+                    sys::yield_now();
+                }
+            }
         }
+    }
+    if !connected {
+        print(b"sotos-term: connect failed after retries\n");
+        loop { sys::yield_now(); }
     }
 
     // wl_display.get_registry (opcode 1).
@@ -117,8 +131,11 @@ pub extern "C" fn _start() -> ! {
     bind_global(comp_ep, 3, b"xdg_wm_base", 2, XDG_WM_BASE_ID);
     bind_global(comp_ep, 4, b"wl_seat", 5, SEAT_ID);
 
+    print(b"sotos-term: registry+bind done\n");
+
     // Create the SHM object (kernel-level) -- one big shared memory region.
     let pages = ((POOL_SIZE as usize) + 0xFFF) / 0x1000;
+    print(b"sotos-term: shm_create...\n");
     let shm_handle = match sys::shm_create(pages as u64) {
         Ok(h) => h,
         Err(_) => {
@@ -143,7 +160,10 @@ pub extern "C" fn _start() -> ! {
         }
     };
 
+    print(b"sotos-term: shm_pool registered\n");
+
     // Map SHM into our own address space so we can write pixels directly.
+    print(b"sotos-term: shm_map...\n");
     if sys::shm_map(confirmed_handle, self_as_cap, CLIENT_POOL_BASE, 1).is_err() {
         print(b"sotos-term: shm_map failed\n");
         loop {
@@ -195,6 +215,8 @@ pub extern "C" fn _start() -> ! {
         msg.put_u32(POINTER_ID);
         wl_call_noreply(comp_ep, &msg.finish());
     }
+
+    print(b"sotos-term: surface+toplevel created\n");
 
     // Splash: put a visible banner into the grid so the window has
     // something to render on the first commit even before any bytes

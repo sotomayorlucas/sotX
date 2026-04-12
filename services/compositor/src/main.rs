@@ -364,11 +364,8 @@ pub extern "C" fn _start() -> ! {
 
     print(b"compositor: waiting for clients on IPC\n");
 
-    // Passive: block on IPC endpoint waiting for Wayland client connections.
-    // Do NOT touch framebuffer or consume KB/MOUSE bytes until a client
-    // connects -- the serial console and LUCAS shell own those resources
-    // until then. Boot-smoke: events are silently swallowed when no
-    // client is connected (this is NOT an error).
+    // Passive: block on IPC endpoint waiting for the first Wayland client,
+    // then drain any additional clients that connected during the transition.
     loop {
         match sys::recv(ep_cap) {
             Ok(msg) => {
@@ -379,6 +376,15 @@ pub extern "C" fn _start() -> ! {
             Err(_) => {
                 sys::yield_now();
             }
+        }
+    }
+    // Drain any clients that connected while we were transitioning.
+    for _ in 0..MAX_CLIENTS {
+        match sys::recv_timeout(ep_cap, 5) {
+            Ok(msg) => {
+                process_ipc_message(ep_cap, &msg);
+            }
+            Err(_) => break,
         }
     }
 

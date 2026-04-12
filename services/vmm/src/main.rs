@@ -126,8 +126,8 @@ pub extern "C" fn _start() -> ! {
                     };
 
                     fault_count += 1;
-                    // Log only every 10000th fault (quiet mode)
-                    if fault_count % 10000 == 0 {
+                    // Log only the first 5 faults
+                    if fault_count <= 5 {
                         print(b"VF t=");
                         print_hex16(fault.tid as u64);
                         print(b" a=");
@@ -197,8 +197,16 @@ pub extern "C" fn _start() -> ! {
                         let new_frame = match pool_take() {
                             Ok(f) => f,
                             Err(_) => {
-                                print(b"VMM: OOM(CoW)\n");
-                                continue; // leave thread suspended
+                                if cow_fail_logged < MAX_ERR_LOG {
+                                    cow_fail_logged += 1;
+                                    print(b"VMM: OOM(CoW)\n");
+                                    if cow_fail_logged == MAX_ERR_LOG {
+                                        print(b"VMM: suppressing further OOM messages\n");
+                                    }
+                                }
+                                let _ = sys::signal_inject(fault.tid as u64, 9);
+                                let _ = sys::thread_resume(fault.tid as u64);
+                                continue;
                             }
                         };
                         // 2. Copy 4KiB from the old frame to the new frame

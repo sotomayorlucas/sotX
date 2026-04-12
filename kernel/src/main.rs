@@ -1029,6 +1029,7 @@ fn load_initrd(cr3: u64) {
     kdebug!("  initrd: entry = {:#x}", entry);
 
     // Find and load "shell" binary (LUCAS guest) if present.
+    kprintln!("  initrd: shell lookup = {}", if found[1].is_some() { "FOUND" } else { "MISSING" });
     if let Some(shell_data) = found[1] {
         kdebug!("  initrd: found 'shell' ({} bytes)", shell_data.len());
         match elf::load(shell_data, &addr_space) {

@@ -497,14 +497,16 @@ pub extern "C" fn _start() -> ! {
     // tracked service. Now backed by the new SMF dependency graph.
     supervisor::check_all();
 
-    // --- Phase 7: Dynamic linking test ---
-    test_dynamic_linking();
+    // Phase 7/8 tests (dynamic linking + WASM) disabled for production boot.
+    // Enable via `just build-user-demos` for development.
+    #[cfg(feature = "demos")]
+    {
+        test_dynamic_linking();
+        test_wasm();
+    }
 
-    // --- Phase 8: WASM SFI interpreter test ---
-    test_wasm();
-
-    // --- Wait for spawned processes to finish ---
-    for _ in 0..200 { sys::yield_now(); }
+    // Brief yield to let spawned services settle.
+    for _ in 0..50 { sys::yield_now(); }
 
     // SKIP boot tests for git debugging — go straight to LUCAS shell
     // run_linux_test();
@@ -515,6 +517,10 @@ pub extern "C" fn _start() -> ! {
     // run_phase_validation();
 
     // --- Phase 9: LUCAS shell ---
+    let boot_info = unsafe { &*(BOOT_INFO_ADDR as *const BootInfo) };
+    print(b"LUCAS-DBG: guest_entry=");
+    print_u64(boot_info.guest_entry);
+    print(b"\n");
     start_lucas(blk);
 
     sys::thread_exit();
