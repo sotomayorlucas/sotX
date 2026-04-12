@@ -253,6 +253,166 @@ pub fn active_count() -> usize {
 }
 
 // ---------------------------------------------------------------------------
+// Window map/unmap tweens
+// ---------------------------------------------------------------------------
+
+/// Maximum simultaneous window tweens (one per toplevel slot).
+pub const MAX_TWEENS: usize = 16;
+
+/// Duration of map/unmap animations in TSC ticks (~150ms at 2 GHz).
+pub const TWEEN_DURATION_TSC: u64 = 300_000_000;
+
+/// The kind of window tween: appearing or disappearing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TweenKind {
+    /// Window mapping in: alpha 0->1, scale 0.92->1.0
+    MapIn,
+    /// Window unmapping out: alpha 1->0, scale 1.0->0.92
+    UnmapOut,
+}
+
+/// Per-toplevel animation state for map/unmap transitions.
+#[derive(Clone, Copy, Debug)]
+pub struct TweenState {
+    /// Whether this slot is in use.
+    pub active: bool,
+    /// Index into the TOPLEVELS array.
+    pub toplevel_idx: usize,
+    /// Whether this is a map-in or unmap-out tween.
+    pub kind: TweenKind,
+    /// TSC timestamp when the tween started.
+    pub start_tsc: u64,
+    /// Total duration in TSC ticks.
+    pub duration_tsc: u64,
+}
+
+impl TweenState {
+    pub const fn empty() -> Self {
+        Self {
+            active: false,
+            toplevel_idx: 0,
+            kind: TweenKind::MapIn,
+            start_tsc: 0,
+            duration_tsc: 0,
+        }
+    }
+
+    /// Compute the normalized progress `t` in [0.0, 1.0] with ease-out cubic.
+    /// Returns the eased value: for MapIn this goes 0->1, for UnmapOut 1->0.
+    pub fn progress(&self, now_tsc: u64) -> f32 {
+        if !self.active || self.duration_tsc == 0 {
+            return match self.kind {
+                TweenKind::MapIn => 1.0,
+                TweenKind::UnmapOut => 0.0,
+            };
+        }
+        let elapsed = now_tsc.saturating_sub(self.start_tsc);
+        let t = if elapsed >= self.duration_tsc {
+            1.0
+        } else {
+            (elapsed as f32) / (self.duration_tsc as f32)
+        };
+        let eased = ease_out(t);
+        match self.kind {
+            TweenKind::MapIn => eased,         // 0 -> 1
+            TweenKind::UnmapOut => 1.0 - eased, // 1 -> 0
+        }
+    }
+
+    /// Whether this tween has completed.
+    pub fn is_done(&self, now_tsc: u64) -> bool {
+        if !self.active {
+            return true;
+        }
+        if self.duration_tsc == 0 {
+            return true;
+        }
+        now_tsc >= self.start_tsc + self.duration_tsc
+    }
+}
+
+/// Fixed pool of window tweens.
+static TWEENS: SyncUnsafeCell<[TweenState; MAX_TWEENS]> =
+    SyncUnsafeCell::new([const { TweenState::empty() }; MAX_TWEENS]);
+
+/// Cancel any active tween for the given toplevel.
+fn cancel_for(tweens: &mut [TweenState; MAX_TWEENS], toplevel_idx: usize) {
+    for tw in tweens.iter_mut() {
+        if tw.active && tw.toplevel_idx == toplevel_idx {
+            tw.active = false;
+        }
+    }
+}
+
+/// Allocate a tween slot for `toplevel_idx` with the given kind.
+/// Cancels any prior tween for the same toplevel first.
+/// Returns false only if the pool is full.
+fn start_tween(toplevel_idx: usize, kind: TweenKind, now_tsc: u64) -> bool {
+    let tweens = unsafe { &mut *TWEENS.get() };
+    cancel_for(tweens, toplevel_idx);
+    for tw in tweens.iter_mut() {
+        if !tw.active {
+            tw.active = true;
+            tw.toplevel_idx = toplevel_idx;
+            tw.kind = kind;
+            tw.start_tsc = now_tsc;
+            tw.duration_tsc = TWEEN_DURATION_TSC;
+            return true;
+        }
+    }
+    false
+}
+
+/// Start a map-in tween for the given toplevel index.
+pub fn start_map_in(toplevel_idx: usize, now_tsc: u64) {
+    let _ = start_tween(toplevel_idx, TweenKind::MapIn, now_tsc);
+}
+
+/// Start an unmap-out tween for the given toplevel index.
+/// Returns true if the tween was successfully started.
+pub fn start_unmap_out(toplevel_idx: usize, now_tsc: u64) -> bool {
+    start_tween(toplevel_idx, TweenKind::UnmapOut, now_tsc)
+}
+
+/// Query the current alpha (0-255) and scale factor for a toplevel.
+/// If no tween is active for that toplevel, returns (255, 1.0) (fully visible).
+pub fn get_tween_values(toplevel_idx: usize, now_tsc: u64) -> (u8, f32) {
+    let tweens = unsafe { &*TWEENS.get() };
+    for tw in tweens.iter() {
+        if tw.active && tw.toplevel_idx == toplevel_idx {
+            let p = tw.progress(now_tsc);
+            let alpha = (p * 255.0) as u8;
+            let scale = 0.92 + p * 0.08;
+            return (alpha, scale);
+        }
+    }
+    (255, 1.0)
+}
+
+/// Tick all tweens: retire finished ones. Returns completed UnmapOut
+/// toplevel indices (caller deactivates them) and whether any tweens
+/// remain active (caller should keep repainting).
+pub fn tick_tweens(now_tsc: u64) -> ([usize; MAX_TWEENS], usize, bool) {
+    let tweens = unsafe { &mut *TWEENS.get() };
+    let mut completed = [0usize; MAX_TWEENS];
+    let mut count = 0;
+    let mut still_active = false;
+    for tw in tweens.iter_mut() {
+        if !tw.active { continue; }
+        if tw.is_done(now_tsc) {
+            if tw.kind == TweenKind::UnmapOut && count < MAX_TWEENS {
+                completed[count] = tw.toplevel_idx;
+                count += 1;
+            }
+            tw.active = false;
+        } else {
+            still_active = true;
+        }
+    }
+    (completed, count, still_active)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

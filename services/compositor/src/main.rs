@@ -725,6 +725,8 @@ fn apply_dispatch_result(client_idx: usize, result: &DispatchResult) {
                 print(b"compositor: new toplevel ");
                 print_u32_dec(tl_id);
                 print(b"\n");
+                // Start a fade+scale map-in animation.
+                animation::start_map_in(i, rdtsc());
                 mark_damage();
                 break;
             }
@@ -1061,27 +1063,29 @@ fn handle_mouse(packet: input::MousePacket) {
         if cursor_x >= cb_x && cursor_x < cb_x + cb_w
             && cursor_y >= cb_y && cursor_y < cb_y + cb_h
         {
-            // Close the toplevel.
+            // Close the toplevel: start an unmap-out animation instead of
+            // immediately deactivating. The toplevel stays `active = true`
+            // during the fade-out; `tick_tweens()` in the compose loop will
+            // deactivate it once the animation completes.
             //
-            // The close-button is currently the ONLY surface-destruction path
-            // in the compositor. When client-disconnect / xdg_toplevel.destroy
-            // / wl_surface.destroy land, every one of those code paths MUST
-            // also clear `hovered_surface` (and `focused_*`) for any surface
-            // it tears down — otherwise input handlers will dispatch events
-            // to a dead wl_surface ID.
+            // If for any reason the tween pool is full, fall back to
+            // immediate deactivation so we never leak a zombie toplevel.
             unsafe {
-                let toplevels_mut = &mut *TOPLEVELS.get();
-                let destroyed_surface_id = toplevels_mut[hit_tl_idx].wl_surface_id;
-                toplevels_mut[hit_tl_idx].active = false;
-                // Clear focus if this was focused.
+                let has_tween = animation::start_unmap_out(hit_tl_idx, rdtsc());
+                if !has_tween {
+                    // Pool full — immediate deactivation fallback.
+                    let toplevels_mut = &mut *TOPLEVELS.get();
+                    toplevels_mut[hit_tl_idx].active = false;
+                }
+                // Clear focus either way so input stops going to this window.
                 let focus = &mut *FOCUS.get();
                 if focus.focused_toplevel_idx == hit_tl_idx {
                     focus.focused_toplevel_idx = MAX_TOPLEVELS;
                     focus.focused_client_idx = MAX_CLIENTS;
                     focus.keyboard_focus = None;
                 }
-                // Clear hover if it pointed at the destroyed surface, so the
-                // next mouse event doesn't dispatch to a dead wl_surface ID.
+                let toplevels_ref = &*TOPLEVELS.get();
+                let destroyed_surface_id = toplevels_ref[hit_tl_idx].wl_surface_id;
                 if focus.hovered_surface == Some(destroyed_surface_id) {
                     focus.hovered_surface = None;
                 }
@@ -1324,10 +1328,33 @@ fn compose() {
         let avail_left = insets.left as i32;
         let avail_right_limit = fb.width as i32 - insets.right as i32;
 
+        // Tick window tweens: retire finished animations, deactivate
+        // toplevels whose unmap-out completed, and keep repainting
+        // while any tween is still running.
+        let now_tsc = crate::rdtsc();
+        let (completed, count, tweens_active) = animation::tick_tweens(now_tsc);
+        if count > 0 {
+            let toplevels_mut = &mut *TOPLEVELS.get();
+            for ci in 0..count {
+                let idx = completed[ci];
+                if idx < MAX_TOPLEVELS {
+                    toplevels_mut[idx].active = false;
+                }
+            }
+        }
+        if tweens_active {
+            *DAMAGE.get() = true;
+        }
+
         // Draw all active toplevels.
         for i in 0..MAX_TOPLEVELS {
             let tl = &toplevels[i];
             if !tl.active { continue; }
+
+            // Query tween state for this toplevel (alpha + scale).
+            let (tw_alpha, tw_scale) = animation::get_tween_values(i, now_tsc);
+            // Skip fully transparent windows.
+            if tw_alpha == 0 { continue; }
 
             // Effective top-left after inset clamping (from layer-shell).
             let title_top = (tl.y - TITLE_BAR_HEIGHT as i32).max(avail_top);
@@ -1342,17 +1369,26 @@ fn compose() {
 
             // Tokyo Night-styled title bar (decorations module: traffic lights,
             // rounded corners, modern palette).
+            // During tweens, draw the title bar with alpha blending.
             let focused = i == focused_tl;
             let title_bytes = &tl.title[..tl.title_len.min(tl.title.len())];
             let title_str = core::str::from_utf8(title_bytes).unwrap_or("");
-            decorations::draw_title_bar(
-                fb,
-                eff_x,
-                title_top,
-                eff_w as i32,
-                focused,
-                title_str,
-            );
+            if tw_alpha == 255 {
+                decorations::draw_title_bar(
+                    fb,
+                    eff_x,
+                    title_top,
+                    eff_w as i32,
+                    focused,
+                    title_str,
+                );
+            } else {
+                // For partially-transparent windows, draw title bar as
+                // an alpha-blended solid rect (simplified — full chrome
+                // would need a temp buffer). Use the title bar BG color.
+                let bar_color = if focused { 0xFF24283B } else { 0xFF1A1B26 };
+                fb.fill_rect_alpha(eff_x, title_top, eff_w, TITLE_BAR_HEIGHT as u32, bar_color, tw_alpha);
+            }
 
             // Find the surface and its buffer.
             let mut found_buffer = false;
@@ -1369,7 +1405,9 @@ fn compose() {
                     if pool_idx < MAX_POOLS && pools[pool_idx].active {
                         let pool = &pools[pool_idx];
                         let src = (pool.mapped_vaddr + buf.offset as u64) as *const u32;
-                        fb.blit(eff_x, eff_y, buf.width.min(eff_w), buf.height.min(eff_h), src, buf.stride);
+                        let bw = buf.width.min(eff_w);
+                        let bh = buf.height.min(eff_h);
+                        fb.blit_scaled_alpha(eff_x, eff_y, bw, bh, src, buf.stride, tw_alpha, tw_scale);
                         found_buffer = true;
                     }
                 }
@@ -1377,7 +1415,11 @@ fn compose() {
             }
 
             if !found_buffer && eff_w > 0 && eff_h > 0 {
-                fb.fill_rect(eff_x, eff_y, eff_w, eff_h, 0xFF333355);
+                if tw_alpha == 255 {
+                    fb.fill_rect(eff_x, eff_y, eff_w, eff_h, 0xFF333355);
+                } else {
+                    fb.fill_rect_alpha(eff_x, eff_y, eff_w, eff_h, 0xFF333355, tw_alpha);
+                }
             }
         }
 
