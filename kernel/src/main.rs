@@ -965,10 +965,12 @@ fn load_initrd(cr3: u64) {
         "hello-gui",
         "bzImage",
         "guest-initramfs",
+        "sotos-term",
     ];
     let found = initrd::find_all(module_data, &names);
     // Indices: 0=init, 1=shell, 2=vmm, 3=kbd, 4=net, 5=nvme, 6=xhci,
-    //          7=compositor, 8=hello-gui, 9=bzImage, 10=guest-initramfs
+    //          7=compositor, 8=hello-gui, 9=bzImage, 10=guest-initramfs,
+    //          11=sotos-term
 
     // Phase F.4 — stash the bzImage slice's physical pointer + length
     // in a kernel global so the VM subsystem (`vm::run_payload_on_vm`)
@@ -1068,6 +1070,10 @@ fn load_initrd(cr3: u64) {
     if let Some(gui_data) = found[8] {
         kdebug!("  initrd: found 'hello-gui' ({} bytes)", gui_data.len());
         load_hello_gui_process(gui_data);
+    }
+    if let Some(term_data) = found[11] {
+        kdebug!("  initrd: found 'sotos-term' ({} bytes)", term_data.len());
+        load_sotos_term_process(term_data);
     }
 }
 
@@ -1518,4 +1524,52 @@ fn write_hello_gui_boot_info(gui_as: &mm::paging::AddressSpace) {
 
     write_bootinfo(phys, &info);
     kdebug!("  hello-gui bootinfo: 1 cap at {:#x}", BOOT_INFO_ADDR);
+}
+
+/// Load the sotos-term Wayland terminal emulator as a separate process.
+///
+/// sotos-term needs its own AS cap for `shm_map`, so like hello-gui it is
+/// loaded by the kernel rather than spawned by init.
+fn load_sotos_term_process(term_data: &[u8]) {
+    let proc = match load_service(&ProcessSpec {
+        name: "sotos-term",
+        data: term_data,
+        stack_pages: 4,
+    }) {
+        Some(p) => p,
+        None => return,
+    };
+    write_sotos_term_boot_info(&proc.addr_space);
+    proc.spawn();
+    kdebug!("  sotos-term: separate process, cr3={:#x}", proc.cr3);
+}
+
+/// Write BootInfo for sotos-term process.
+///
+/// Cap 0: AddrSpace (sotos-term's own CR3) -- for shm_map into self.
+fn write_sotos_term_boot_info(term_as: &mm::paging::AddressSpace) {
+    use sotos_common::{BootInfo, BOOT_INFO_ADDR, BOOT_INFO_MAGIC};
+
+    let phys = alloc_bootinfo_page(term_as, "sotos-term");
+
+    let term_as_cap = cap::insert(
+        cap::CapObject::AddrSpace { cr3: term_as.cr3() },
+        cap::Rights::ALL,
+        None,
+    )
+    .expect("failed to create sotos-term AS cap");
+    kdebug!(
+        "  sotos-term cap {}: addr_space (self, cr3={:#x})",
+        term_as_cap.raw(),
+        term_as.cr3()
+    );
+
+    let mut info = BootInfo::empty();
+    info.magic = BOOT_INFO_MAGIC;
+    info.cap_count = 1;
+    info.caps[0] = term_as_cap.raw() as u64;
+    info.self_as_cap = term_as_cap.raw() as u64;
+
+    write_bootinfo(phys, &info);
+    kdebug!("  sotos-term bootinfo: 1 cap at {:#x}", BOOT_INFO_ADDR);
 }

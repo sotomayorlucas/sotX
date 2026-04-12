@@ -5,10 +5,8 @@ extern crate alloc;
 
 use sotos_common::sys;
 
-// =============================================================================
-// Bump allocator for goblin ELF parsing (128 KiB, resettable)
-// =============================================================================
-mod bump_alloc {
+// ======================================================================// Bump allocator for goblin ELF parsing (128 KiB, resettable)
+// ======================================================================mod bump_alloc {
     use core::sync::atomic::{AtomicUsize, Ordering};
 
     const HEAP_SIZE: usize = 512 * 1024;
@@ -215,6 +213,17 @@ pub extern "C" fn _start() -> ! {
     };
 
     // --- Initialize framebuffer text console ---
+    //
+    // The old `fb_init_gui` painted a simulated "LUCAS Terminal" window
+    // chrome directly onto the Limine framebuffer and routed a text
+    // console inside that chrome. That was a stand-in for a real window
+    // manager. Now the native Wayland compositor + sotos-term client
+    // (see `services/sotos-term/`) provide the same UX as real clients,
+    // so we suppress the fake chrome -- the compositor takes ownership of
+    // the framebuffer and draws real windows instead. The plain serial-
+    // synced text console (`fb_init`) still runs so kernel panics and
+    // early-boot logs remain visible on the framebuffer before the
+    // compositor finishes coming up.
     if boot_info.fb_addr != 0 {
         unsafe { fb_init(boot_info); }
         // Draw Tokyo Night desktop GUI (positions terminal in window)
