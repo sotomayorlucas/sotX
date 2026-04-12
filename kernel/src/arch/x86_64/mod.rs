@@ -1,4 +1,5 @@
 pub mod ept;
+pub mod fb_console;
 pub mod gdt;
 pub mod idt;
 pub mod io;

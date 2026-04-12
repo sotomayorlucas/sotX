@@ -217,6 +217,9 @@ pub extern "C" fn _start() -> ! {
         unsafe { fb_init(boot_info); }
         // Draw Tokyo Night desktop GUI (positions terminal in window)
         unsafe { framebuffer::fb_init_gui(); }
+        // Replay any kernel boot messages that were buffered in the console ring
+        // before init had its framebuffer ready.
+        unsafe { framebuffer::drain_console_ring(); }
     }
 
     print(b"INIT: boot complete, ");

@@ -408,6 +408,11 @@ pub const MAX_THREAD_NOTIFY: usize = 64;
 pub const KB_RING_ADDR: u64 = 0x510000;
 /// Mouse event ring buffer virtual address (shared: kernel, kbd, init).
 pub const MOUSE_RING_ADDR: u64 = 0x520000;
+/// Kernel console ring buffer virtual address (kernel writes, init drains).
+/// Layout: [write_idx: u32, read_idx: u32, data: [u8; CONSOLE_RING_CAP]]
+pub const CONSOLE_RING_ADDR: u64 = 0xB40000;
+/// Data capacity of the console ring (page size minus 8-byte header).
+pub const CONSOLE_RING_CAP: u32 = 4088;
 
 // ---------------------------------------------------------------
 // Address layout constants (kernel + userspace)

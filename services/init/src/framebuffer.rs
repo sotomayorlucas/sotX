@@ -1,5 +1,5 @@
 use sotos_common::sys;
-use sotos_common::{KB_RING_ADDR, SyncUnsafeCell};
+use sotos_common::{CONSOLE_RING_ADDR, CONSOLE_RING_CAP, KB_RING_ADDR, SyncUnsafeCell};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
@@ -14,6 +14,8 @@ pub(crate) fn print(s: &[u8]) {
         sys::debug_print(b);
     }
     if unsafe { *FB_ACTIVE.get() } {
+        // Drain any pending kernel messages first so they appear in order.
+        unsafe { drain_console_ring(); }
         for &b in s {
             unsafe { fb_putchar(b); }
         }
@@ -76,6 +78,32 @@ pub(crate) fn print_hex(val: u32) {
     let hex = b"0123456789ABCDEF";
     for i in (0..8).rev() {
         sys::debug_print(hex[((val >> (i * 4)) & 0xF) as usize]);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Kernel console ring drain — replay kernel kprintln! output on framebuffer
+// ---------------------------------------------------------------------------
+
+/// Drain all pending bytes from the kernel console ring buffer and feed them
+/// through `fb_putchar` so kernel boot messages appear on the framebuffer.
+pub(crate) unsafe fn drain_console_ring() {
+    if !*FB_ACTIVE.get() {
+        return;
+    }
+    let base = CONSOLE_RING_ADDR as *mut u32;
+    let data = (CONSOLE_RING_ADDR + 8) as *const u8;
+
+    loop {
+        let write_idx = core::ptr::read_volatile(base);
+        let read_idx = core::ptr::read_volatile(base.add(1));
+        if read_idx == write_idx {
+            break;
+        }
+        let byte = core::ptr::read_volatile(data.add(read_idx as usize));
+        let next = (read_idx + 1) % CONSOLE_RING_CAP;
+        core::ptr::write_volatile(base.add(1), next);
+        fb_putchar(byte);
     }
 }
 
