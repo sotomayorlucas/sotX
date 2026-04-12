@@ -55,9 +55,9 @@ const XDG_TOPLEVEL_ID: u32 = 10;
 const IPC_DATA_MAX: usize = 64;
 
 // Colors (XRGB8888 format).
-const COLOR_WINDOW_BG: u32 = 0xFF2D5BA4; // blue window body
-const COLOR_BANNER: u32 = 0xFF1A3A6B; // darker blue banner
-const COLOR_WHITE: u32 = 0xFFFFFFFF;
+const COLOR_WINDOW_BG: u32 = 0xFF2D5BA4; // blue window body (app-specific)
+const COLOR_BANNER: u32 = 0xFF1A3A6B;    // darker blue banner (app-specific)
+const COLOR_WHITE: u32 = sotos_theme::TOKYO_NIGHT.fg_bright;
 
 // ---------------------------------------------------------------------------
 // Helpers

@@ -16,21 +16,38 @@ use embedded_graphics::text::{Text, Baseline};
 use crate::display::FramebufferDisplay;
 
 // ---------------------------------------------------------------------------
-// Tokyo Night color palette
+// Tokyo Night color palette (sourced from sotos-theme)
 // ---------------------------------------------------------------------------
-const BG_TOP: (u8, u8, u8) = (26, 27, 38);    // #1a1b26
-const BG_BOT: (u8, u8, u8) = (16, 16, 28);    // #10101c
-const TASKBAR_BG: Rgb888 = Rgb888::new(30, 30, 46);       // #1e1e2e
-const BORDER: Rgb888 = Rgb888::new(65, 72, 104);           // #414868
-const TITLE_ACTIVE: Rgb888 = Rgb888::new(52, 97, 167);     // #3461a7
-const WIN_BG: Rgb888 = Rgb888::new(26, 27, 38);            // #1a1b26
-const SHADOW_COLOR: Rgb888 = Rgb888::new(10, 10, 18);      // #0a0a12
-const CLOSE_RED: Rgb888 = Rgb888::new(247, 118, 142);      // #f7768e
-const MIN_YELLOW: Rgb888 = Rgb888::new(224, 175, 104);     // #e0af68
-const MAX_GREEN: Rgb888 = Rgb888::new(115, 218, 202);      // #73daca
-const TEXT_WHITE: Rgb888 = Rgb888::new(255, 255, 255);
-const TEXT_BRIGHT: Rgb888 = Rgb888::new(205, 214, 244);     // #cdd6f4
-const ACCENT: Rgb888 = Rgb888::new(122, 162, 247);          // #7aa2f7
+
+/// Convert a BGRA `0xAARRGGBB` u32 to an `Rgb888` triplet.
+const fn rgb(c: u32) -> Rgb888 {
+    let (r, g, b) = sotos_theme::palette::rgb_components(c);
+    Rgb888::new(r, g, b)
+}
+
+/// Extract (R, G, B) tuple from BGRA u32.
+const fn rgb_tuple(c: u32) -> (u8, u8, u8) {
+    sotos_theme::palette::rgb_components(c)
+}
+
+const TN: sotos_theme::Palette = sotos_theme::TOKYO_NIGHT;
+
+const BG_TOP: (u8, u8, u8) = rgb_tuple(TN.bg);       // #1a1b26
+const BG_BOT: (u8, u8, u8) = rgb_tuple(TN.bg_dark);   // #10101c
+const TASKBAR_BG: Rgb888 = rgb(TN.bg_surface);         // #1e1e2e
+const BORDER: Rgb888 = rgb(TN.border);                  // #414868
+// Note: the desktop title bar uses a slightly different blue (0xFF3461A7)
+// than the compositor (0xFF7AA2F7). We keep the original value here to
+// preserve identical visual output.
+const TITLE_ACTIVE: Rgb888 = Rgb888::new(52, 97, 167);  // #3461a7 (desktop-specific)
+const WIN_BG: Rgb888 = rgb(TN.bg);                      // #1a1b26
+const SHADOW_COLOR: Rgb888 = Rgb888::new(10, 10, 18);   // #0a0a12 (desktop shadow, darker than TN.shadow)
+const CLOSE_RED: Rgb888 = rgb(TN.red);                   // #f7768e
+const MIN_YELLOW: Rgb888 = rgb(TN.yellow);               // #e0af68
+const MAX_GREEN: Rgb888 = rgb(TN.green);                 // #73daca
+const TEXT_WHITE: Rgb888 = rgb(TN.fg_bright);             // #ffffff
+const TEXT_BRIGHT: Rgb888 = rgb(TN.fg_secondary);         // #cdd6f4
+const ACCENT: Rgb888 = rgb(TN.accent);                    // #7aa2f7
 
 // Layout constants
 const CORNER_RADIUS: u32 = 10;

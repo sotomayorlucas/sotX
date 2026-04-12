@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 sotos-common = { path = "../../libs/sotos-common" }
+sotos-theme = { path = "../../libs/sotos-theme" }
 
 [profile.dev]
 panic = "abort"

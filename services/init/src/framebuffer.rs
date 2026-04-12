@@ -476,6 +476,10 @@ static mut ALT_SCREEN_ACTIVE: bool = false;
 /// Saved cursor for alt screen switch.
 static mut ALT_SAVED_COL: u32 = 0;
 static mut ALT_SAVED_ROW: u32 = 0;
+/// Terminal text color (Tokyo Night fg_muted).
+const COL_TEXT: u32 = sotos_theme::TOKYO_NIGHT.fg_muted;
+/// Terminal background color (Tokyo Night bg).
+const COL_BG: u32 = sotos_theme::TOKYO_NIGHT.bg;
 
 /// Keyboard state.
 static KB_SHIFT: SyncUnsafeCell<bool> = SyncUnsafeCell::new(false);

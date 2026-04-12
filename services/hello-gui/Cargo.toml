@@ -3,8 +3,11 @@ name = "sotos-hello-gui"
 version = "0.1.0"
 edition = "2021"
 
+[workspace]
+
 [dependencies]
 sotos-common = { path = "../../libs/sotos-common" }
+sotos-theme = { path = "../../libs/sotos-theme" }
 
 [profile.dev]
 panic = "abort"

@@ -260,6 +260,7 @@ name = "sotos-gui"
 version = "0.1.0"
 dependencies = [
  "embedded-graphics",
+ "sotos-theme",
  "tinybmp",
 ]
 
@@ -284,6 +285,7 @@ dependencies = [
  "sotos-objstore",
  "sotos-pci",
  "sotos-provenance",
+ "sotos-theme",
  "sotos-virtio",
  "sotos-wasm",
  "ufmt",
@@ -316,6 +318,10 @@ dependencies = [
 
 [[package]]
 name = "sotos-provenance"
+version = "0.1.0"
+
+[[package]]
+name = "sotos-theme"
 version = "0.1.0"
 
 [[package]]
