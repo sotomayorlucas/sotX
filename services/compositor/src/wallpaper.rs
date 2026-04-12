@@ -1,9 +1,13 @@
 //! Compositor wallpaper / desktop background.
 //!
-//! Replaces the old single-color clear with a vertical Tokyo Night
-//! gradient. The gradient is computed once into a static cache; the
-//! compose loop just blits cached rows. Optional BMP image support is
-//! exposed via `set_image()`.
+//! Supports loading a BMP wallpaper from the initrd at boot. If the BMP
+//! load fails (missing file, bad format, etc.), falls back to a vertical
+//! Tokyo Night gradient computed at init time.
+//!
+//! Wallpaper selection: reads `SOTOS_WALLPAPER` env var if available,
+//! defaults to `tokyo-night`. The initrd path is
+//! `/usr/share/sotos/wallpapers/<name>.bmp` (packed as
+//! `usr/share/sotos/wallpapers/<name>.bmp` in the CPIO archive).
 
 use crate::render::Framebuffer;
 use sotos_common::SyncUnsafeCell;
@@ -17,16 +21,32 @@ pub const BG_BOT: u32 = 0xFF10101C;
 /// Maximum supported framebuffer height (4K headroom).
 pub const MAX_GRADIENT_HEIGHT: usize = 2160;
 
-/// Wallpaper state: gradient cache + optional override image.
+/// 1024 * 768 = 786432 pixels. Static buffer for a decoded BMP wallpaper.
+const IMG_W: usize = 1024;
+const IMG_H: usize = 768;
+const IMG_PIXELS: usize = IMG_W * IMG_H;
+
+/// Static pixel cache for the decoded BMP image (BGRA u32).
+static IMAGE_CACHE: SyncUnsafeCell<[u32; IMG_PIXELS]> =
+    SyncUnsafeCell::new([0u32; IMG_PIXELS]);
+
+/// Whether `IMAGE_CACHE` holds a valid decoded image.
+static IMAGE_VALID: SyncUnsafeCell<bool> = SyncUnsafeCell::new(false);
+
+/// Raw BMP file buffer. Max ~2.4 MiB for 1024x768x24bpp + header.
+/// This is only used during init; after decoding we only read IMAGE_CACHE.
+const BMP_BUF_SIZE: usize = 1024 * 768 * 3 + 256; // pixel data + header room
+static BMP_BUF: SyncUnsafeCell<[u8; BMP_BUF_SIZE]> =
+    SyncUnsafeCell::new([0u8; BMP_BUF_SIZE]);
+
+/// Wallpaper state: gradient cache + image flag.
 pub struct Wallpaper {
-    /// One BGRA color per row.
+    /// One BGRA color per row (gradient fallback).
     gradient_cache: [u32; MAX_GRADIENT_HEIGHT],
     /// Number of valid rows in `gradient_cache`.
     gradient_height: usize,
-    /// Optional override image (BGRA u32 pixels).
-    image: Option<&'static [u32]>,
-    image_width: usize,
-    image_height: usize,
+    /// If true, use IMAGE_CACHE instead of gradient.
+    has_image: bool,
 }
 
 impl Wallpaper {
@@ -34,9 +54,7 @@ impl Wallpaper {
         Self {
             gradient_cache: [0u32; MAX_GRADIENT_HEIGHT],
             gradient_height: 0,
-            image: None,
-            image_width: 0,
-            image_height: 0,
+            has_image: false,
         }
     }
 }
@@ -75,38 +93,215 @@ fn blend(top: u32, bot: u32, num: u32, den: u32) -> u32 {
     pack(0xFF, r, g, b)
 }
 
-/// Compute the gradient cache for `height` rows. Linear interpolation
-/// from BG_TOP (row 0) to BG_BOT (row height-1).
+/// Read a little-endian u16 from a byte slice at `off`.
+#[inline]
+fn read_u16(buf: &[u8], off: usize) -> u16 {
+    if off + 2 > buf.len() {
+        return 0;
+    }
+    (buf[off] as u16) | ((buf[off + 1] as u16) << 8)
+}
+
+/// Read a little-endian u32 from a byte slice at `off`.
+#[inline]
+fn read_u32(buf: &[u8], off: usize) -> u32 {
+    if off + 4 > buf.len() {
+        return 0;
+    }
+    (buf[off] as u32)
+        | ((buf[off + 1] as u32) << 8)
+        | ((buf[off + 2] as u32) << 16)
+        | ((buf[off + 3] as u32) << 24)
+}
+
+/// Read a little-endian i32 from a byte slice at `off`.
+#[inline]
+fn read_i32(buf: &[u8], off: usize) -> i32 {
+    read_u32(buf, off) as i32
+}
+
+/// Try to parse an uncompressed 24-bit BMP from `raw` into `IMAGE_CACHE`.
+/// Returns true on success.
+fn parse_bmp(raw: &[u8], file_size: usize) -> bool {
+    if file_size < 54 {
+        return false;
+    }
+    // Check BMP magic
+    if raw[0] != b'B' || raw[1] != b'M' {
+        return false;
+    }
+
+    let data_offset = read_u32(raw, 10) as usize;
+    let _dib_size = read_u32(raw, 14);
+    let width = read_i32(raw, 18);
+    let height = read_i32(raw, 22);
+    let bpp = read_u16(raw, 28);
+    let compression = read_u32(raw, 30);
+
+    // Only support uncompressed 24-bit BMPs
+    if compression != 0 || bpp != 24 {
+        return false;
+    }
+    if width <= 0 || width > IMG_W as i32 {
+        return false;
+    }
+
+    // height > 0 means bottom-up; height < 0 means top-down
+    let bottom_up = height > 0;
+    let abs_h = if bottom_up { height } else { -height };
+    if abs_h <= 0 || abs_h > IMG_H as i32 {
+        return false;
+    }
+
+    let w = width as usize;
+    let h = abs_h as usize;
+
+    // Row stride in the BMP file: each row is padded to 4-byte boundary
+    let row_bytes = (w * 3 + 3) & !3;
+
+    let needed = data_offset + row_bytes * h;
+    if needed > file_size {
+        return false;
+    }
+
+    let cache = unsafe { &mut *IMAGE_CACHE.get() };
+
+    // Decode pixels. BMP stores BGR, we want ARGB (0xFFRRGGBB in our BGRA layout).
+    for src_y in 0..h {
+        // Map source row to destination row
+        let dst_y = if bottom_up { h - 1 - src_y } else { src_y };
+        let row_off = data_offset + src_y * row_bytes;
+
+        for x in 0..w {
+            let pix_off = row_off + x * 3;
+            if pix_off + 3 > file_size {
+                return false;
+            }
+            let b_val = raw[pix_off] as u32;
+            let g_val = raw[pix_off + 1] as u32;
+            let r_val = raw[pix_off + 2] as u32;
+            let dst_idx = dst_y * IMG_W + x;
+            cache[dst_idx] = 0xFF000000 | (r_val << 16) | (g_val << 8) | b_val;
+        }
+
+        // Fill remaining columns with black if image is narrower than IMG_W
+        for x in w..IMG_W {
+            let dst_idx = dst_y * IMG_W + x;
+            cache[dst_idx] = 0xFF000000;
+        }
+    }
+
+    // Fill remaining rows with black if image is shorter than IMG_H
+    for y in h..IMG_H {
+        for x in 0..IMG_W {
+            cache[y * IMG_W + x] = 0xFF000000;
+        }
+    }
+
+    true
+}
+
+/// Try to load a BMP wallpaper from the initrd.
+/// `name` is the wallpaper name (e.g. "tokyo-night").
+/// Returns true if the wallpaper was successfully loaded.
+fn try_load_bmp(name: &[u8]) -> bool {
+    // Build the initrd path: "usr/share/sotos/wallpapers/<name>.bmp"
+    // (CPIO entries don't have a leading slash)
+    const PREFIX: &[u8] = b"usr/share/sotos/wallpapers/";
+    const SUFFIX: &[u8] = b".bmp";
+    const MAX_PATH: usize = 128;
+
+    let total_len = PREFIX.len() + name.len() + SUFFIX.len();
+    if total_len >= MAX_PATH {
+        return false;
+    }
+
+    let mut path_buf = [0u8; MAX_PATH];
+    let mut pos = 0;
+    let mut i = 0;
+    while i < PREFIX.len() {
+        path_buf[pos] = PREFIX[i];
+        pos += 1;
+        i += 1;
+    }
+    i = 0;
+    while i < name.len() {
+        path_buf[pos] = name[i];
+        pos += 1;
+        i += 1;
+    }
+    i = 0;
+    while i < SUFFIX.len() {
+        path_buf[pos] = SUFFIX[i];
+        pos += 1;
+        i += 1;
+    }
+    let path = &path_buf[..pos];
+
+    // Read the BMP file from the initrd into our static buffer
+    let buf = unsafe { &mut *BMP_BUF.get() };
+    let file_size = match sotos_common::sys::initrd_read(
+        path.as_ptr() as u64,
+        path.len() as u64,
+        buf.as_ptr() as u64,
+        BMP_BUF_SIZE as u64,
+    ) {
+        Ok(sz) => sz as usize,
+        Err(_) => return false,
+    };
+
+    if file_size == 0 {
+        return false;
+    }
+
+    parse_bmp(buf, file_size)
+}
+
+/// Get the wallpaper name from the environment or use the default.
+/// Returns a static byte slice with the name.
+fn wallpaper_name() -> &'static [u8] {
+    // For now, default to "tokyo-night". A future integration with
+    // env var reading can override this.
+    b"tokyo-night"
+}
+
+/// Initialize the wallpaper: try to load a BMP from the initrd, fall
+/// back to the gradient if that fails.
 pub fn init(height: usize) {
     let h = height.min(MAX_GRADIENT_HEIGHT);
     let wp = unsafe { &mut *WALLPAPER.get() };
     wp.gradient_height = h;
-    wp.image = None;
-    wp.image_width = 0;
-    wp.image_height = 0;
+    wp.has_image = false;
 
+    // Always compute the gradient as a fallback
     if h == 0 {
         return;
     }
     if h == 1 {
         wp.gradient_cache[0] = BG_TOP;
-        return;
+    } else {
+        let den = (h - 1) as u32;
+        for i in 0..h {
+            wp.gradient_cache[i] = blend(BG_TOP, BG_BOT, i as u32, den);
+        }
     }
 
-    let den = (h - 1) as u32;
-    for i in 0..h {
-        wp.gradient_cache[i] = blend(BG_TOP, BG_BOT, i as u32, den);
+    // Try to load a BMP wallpaper
+    let name = wallpaper_name();
+    if try_load_bmp(name) {
+        unsafe { *IMAGE_VALID.get() = true };
+        wp.has_image = true;
+        debug_print(b"wallpaper: loaded BMP from initrd\n");
+    } else {
+        debug_print(b"wallpaper: BMP not found, using gradient fallback\n");
     }
 }
 
-/// Override the wallpaper with a static image. The image must already
-/// be in BGRA u32 format and live for the lifetime of the compositor.
-#[allow(dead_code)]
-pub fn set_image(pixels: &'static [u32], width: usize, height: usize) {
-    let wp = unsafe { &mut *WALLPAPER.get() };
-    wp.image = Some(pixels);
-    wp.image_width = width;
-    wp.image_height = height;
+/// Print a debug message to serial via the kernel debug_print syscall.
+fn debug_print(msg: &[u8]) {
+    for &b in msg {
+        sotos_common::sys::debug_print(b);
+    }
 }
 
 /// Draw the wallpaper to the framebuffer over the rect (x, y, w, h).
@@ -118,45 +313,30 @@ pub fn draw(fb: &mut Framebuffer, x: i32, y: i32, w: i32, h: i32) {
     }
     let wp = unsafe { &*WALLPAPER.get() };
 
-    if let Some(img) = wp.image {
-        let iw = wp.image_width as i32;
-        let ih = wp.image_height as i32;
-        if iw <= 0 || ih <= 0 {
-            return;
-        }
+    // If we have a decoded BMP image, blit it
+    if wp.has_image && unsafe { *IMAGE_VALID.get() } {
+        let cache = unsafe { &*IMAGE_CACHE.get() };
+        let iw = IMG_W as i32;
+        let ih = IMG_H as i32;
 
-        // Clip once against the framebuffer, then write pixels via
-        // volatile stores like `Framebuffer::blit`. Per-pixel
-        // `fill_rect` would re-clip ~2M times at 1920x1080.
         let fb_w = fb.width as i32;
         let fb_h = fb.height as i32;
         let x0 = x.max(0);
         let y0 = y.max(0);
-        let x1 = (x + w).min(fb_w);
-        let y1 = (y + h).min(fb_h);
+        let x1 = (x + w).min(fb_w).min(iw);
+        let y1 = (y + h).min(fb_h).min(ih);
         if x0 >= x1 || y0 >= y1 {
             return;
         }
 
         let pixels_per_row = (fb.pitch / 4) as usize;
         let fb_base = fb.addr as *mut u32;
-        let iw_us = iw as usize;
-        let img_len = img.len();
 
         for py in y0..y1 {
-            let sy = py.rem_euclid(ih) as usize;
-            let src_row_off = sy * iw_us;
+            let src_row = (py as usize) * IMG_W;
             let dst_row = unsafe { fb_base.add((py as usize) * pixels_per_row) };
             for px in x0..x1 {
-                let sx = px.rem_euclid(iw) as usize;
-                let src_idx = src_row_off + sx;
-                if src_idx >= img_len {
-                    continue;
-                }
-                let pixel = img[src_idx];
-                if (pixel >> 24) & 0xFF == 0 {
-                    continue;
-                }
+                let pixel = cache[src_row + px as usize];
                 unsafe {
                     dst_row.add(px as usize).write_volatile(pixel);
                 }
@@ -165,8 +345,7 @@ pub fn draw(fb: &mut Framebuffer, x: i32, y: i32, w: i32, h: i32) {
         return;
     }
 
-    // Gradient path: one cached color per row, drawn as a horizontal
-    // span. `fill_rect` does the framebuffer-edge clipping for us.
+    // Gradient fallback: one cached color per row, drawn as a horizontal span.
     let cache_h = wp.gradient_height;
     if cache_h == 0 {
         return;
