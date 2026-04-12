@@ -88,3 +88,13 @@ pub fn cmd_env() {
         }
     }
 }
+
+/// Call `f(name)` for each active environment variable name.
+/// Used by tab completion to enumerate `$VAR` candidates.
+pub fn env_for_each_name<F: FnMut(&[u8])>(mut f: F) {
+    for e in env_slice() {
+        if e.active {
+            f(&e.key[..e.key_len]);
+        }
+    }
+}
