@@ -19,7 +19,7 @@ use syscall::*;
 use util::*;
 use env::env_set;
 use jobs::*;
-use history::history_add;
+use history::{history_add, load_from_vfs};
 use functions::*;
 use line::read_line;
 use parse::*;
@@ -184,6 +184,8 @@ pub fn shell_loop() {
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     print(b"sotOS LUCAS shell v0.3\n");
+    // Load persistent history (silently no-ops on first run).
+    load_from_vfs();
     shell_loop();
     linux_exit(0);
 }

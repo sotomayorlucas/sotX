@@ -7,7 +7,7 @@ use crate::exec::cmd_exec;
 use crate::net::cmd_wget;
 use crate::lua::cmd_lua;
 use crate::jobs::*;
-use crate::history::cmd_history;
+use crate::history::{cmd_history, save_to_vfs};
 use crate::shell_trace;
 
 // ---------------------------------------------------------------------------
@@ -1178,6 +1178,7 @@ pub fn dispatch_command(line: &[u8]) {
             set_loop_continue(true);
         } else if eq(line, b"exit") {
             print(b"bye!\n");
+            save_to_vfs();
             linux_exit(0);
         } else if starts_with(line, b"trace ") {
             let args = trim(&line[6..]);
