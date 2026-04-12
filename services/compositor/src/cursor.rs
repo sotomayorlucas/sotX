@@ -1,36 +1,49 @@
-//! Multi-shape cursor glyphs for the compositor.
+//! Multi-shape cursor theme for the compositor.
 //!
 //! Each glyph is a hand-crafted static BGRA bitmap. `0` is treated as a
 //! fully transparent pixel; opaque pixels are written straight to the
-//! framebuffer by [`draw`]. Glyphs are small (16x24 max) so they fit
-//! comfortably in `.rodata` with no heap allocation.
+//! framebuffer by [`draw`]. Glyphs stay under 24x24 so the whole theme
+//! fits comfortably in `.rodata` with no heap allocation.
 //!
-//! Only `CursorShape::Default` is wired into the compose loop today; the
-//! other variants and glyphs are staged for future hover/drag logic, so
-//! dead-code is suppressed at the module level.
-#![allow(dead_code)]
+//! The compose loop picks a shape from hover state and passes it (with
+//! the current animation frame for `Wait`) to [`draw`]. Glyphs are looked
+//! up through [`glyph_for`], which returns a `&'static CursorGlyph`.
 
 use crate::render::Framebuffer;
 
 /// Logical cursor shape requested by the compositor.
+///
+/// Hover detection in `main.rs` maps pointer position + window geometry
+/// to one of these variants and stores it in `CURRENT_SHAPE`. Every
+/// frame the compose loop reads the static and calls [`draw`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CursorShape {
-    /// Classic top-left arrow.
+    /// Classic top-left arrow — default everywhere no other shape wins.
     Default,
-    /// Hand with extended index finger (link / button hover).
+    /// Pointing hand — shown over clickable chrome (traffic lights, title).
     Pointer,
-    /// Text I-beam.
-    Text,
-    /// Wait / busy indicator (hourglass).
+    /// Text I-beam — shown over a toplevel's client area.
+    IBeam,
+    /// Busy indicator — 4-frame spinning circle. Reserved for future
+    /// long-running operations; no hover path selects it today.
+    #[allow(dead_code)]
     Wait,
-    /// Four-direction move arrow.
-    Move,
-    /// Vertical resize (up-down).
-    ResizeNS,
-    /// Horizontal resize (left-right).
-    ResizeEW,
-    /// "Not allowed" circle-slash.
-    NotAllowed,
+    /// Resize from the top edge (vertical ↕).
+    ResizeN,
+    /// Resize from the bottom edge (vertical ↕).
+    ResizeS,
+    /// Resize from the right edge (horizontal ↔).
+    ResizeE,
+    /// Resize from the left edge (horizontal ↔).
+    ResizeW,
+    /// Resize from the top-right corner (diagonal ⤡).
+    ResizeNE,
+    /// Resize from the top-left corner (diagonal ⤢).
+    ResizeNW,
+    /// Resize from the bottom-right corner (diagonal ⤢).
+    ResizeSE,
+    /// Resize from the bottom-left corner (diagonal ⤡).
+    ResizeSW,
 }
 
 /// A statically allocated cursor bitmap.
@@ -46,7 +59,7 @@ pub struct CursorGlyph {
 }
 
 // ---------------------------------------------------------------------------
-// Color palette used by the hand-crafted glyphs.
+// Color palette used by every glyph.
 // ---------------------------------------------------------------------------
 
 const T: u32 = 0x00000000; // transparent
@@ -54,11 +67,7 @@ const K: u32 = 0xFF000000; // opaque black (outline)
 const W: u32 = 0xFFFFFFFF; // opaque white (fill)
 
 // ---------------------------------------------------------------------------
-// Glyph bitmaps.
-//
-// Layout note: each row is exactly `width` entries. Glyph dimensions are
-// kept modest (<= 24x24) so the total static footprint stays well under
-// 4 KiB.
+// Glyph bitmaps
 // ---------------------------------------------------------------------------
 
 /// Default arrow — 12 wide, 19 tall. Hot-spot at (0, 0) (top-left).
@@ -126,7 +135,7 @@ pub static POINTER_GLYPH: CursorGlyph = CursorGlyph {
 
 /// Text I-beam — 7 wide, 16 tall. Hot-spot (3, 8) at the center.
 #[rustfmt::skip]
-static TEXT_PIXELS: [u32; 7 * 16] = [
+static IBEAM_PIXELS: [u32; 7 * 16] = [
     K,K,K,T,K,K,K,
     T,K,W,K,W,K,T,
     T,T,K,W,K,T,T,
@@ -145,75 +154,114 @@ static TEXT_PIXELS: [u32; 7 * 16] = [
     K,K,K,T,K,K,K,
 ];
 
-pub static TEXT_GLYPH: CursorGlyph = CursorGlyph {
+pub static IBEAM_GLYPH: CursorGlyph = CursorGlyph {
     width: 7,
     height: 16,
     hot_x: 3,
     hot_y: 8,
-    pixels: &TEXT_PIXELS,
+    pixels: &IBEAM_PIXELS,
 };
 
-/// Wait hourglass — 14 wide, 16 tall. Hot-spot (7, 8) at center.
+// ---------------------------------------------------------------------------
+// Wait spinner: 4 frames of a rotating quadrant marker inside a ring.
+// Frame N lights up the quadrant clockwise from 12 o'clock; the rest of
+// the ring stays outlined. 16×16 with hotspot at center.
+// ---------------------------------------------------------------------------
+
 #[rustfmt::skip]
-static WAIT_PIXELS: [u32; 14 * 16] = [
-    K,K,K,K,K,K,K,K,K,K,K,K,K,K,
-    K,W,W,W,W,W,W,W,W,W,W,W,W,K,
-    T,K,W,W,W,W,W,W,W,W,W,W,K,T,
-    T,T,K,W,W,W,W,W,W,W,W,K,T,T,
-    T,T,T,K,W,W,W,W,W,W,K,T,T,T,
-    T,T,T,T,K,W,W,W,W,K,T,T,T,T,
-    T,T,T,T,T,K,W,W,K,T,T,T,T,T,
-    T,T,T,T,T,T,K,K,T,T,T,T,T,T,
-    T,T,T,T,T,T,K,K,T,T,T,T,T,T,
-    T,T,T,T,T,K,W,W,K,T,T,T,T,T,
-    T,T,T,T,K,W,W,W,W,K,T,T,T,T,
-    T,T,T,K,W,W,W,W,W,W,K,T,T,T,
-    T,T,K,W,W,W,W,W,W,W,W,K,T,T,
-    T,K,W,W,W,W,W,W,W,W,W,W,K,T,
-    K,W,W,W,W,W,W,W,W,W,W,W,W,K,
-    K,K,K,K,K,K,K,K,K,K,K,K,K,K,
+static WAIT_FRAME_0: [u32; 16 * 16] = [
+    T,T,T,T,T,K,K,W,W,K,K,T,T,T,T,T,
+    T,T,T,K,K,W,W,W,W,W,W,K,K,T,T,T,
+    T,T,K,W,W,W,W,W,W,W,W,W,W,K,T,T,
+    T,K,W,W,W,T,T,T,T,T,T,W,W,W,K,T,
+    T,K,W,W,T,T,T,T,T,T,T,T,W,W,K,T,
+    K,W,W,T,T,T,T,T,T,T,T,T,T,W,W,K,
+    K,W,W,T,T,T,T,T,T,T,T,T,T,W,W,K,
+    K,W,T,T,T,T,T,T,T,T,T,T,T,T,W,K,
+    K,W,T,T,T,T,T,T,T,T,T,T,T,T,W,K,
+    K,W,W,T,T,T,T,T,T,T,T,T,T,W,W,K,
+    K,W,W,T,T,T,T,T,T,T,T,T,T,W,W,K,
+    T,K,W,W,T,T,T,T,T,T,T,T,W,W,K,T,
+    T,K,W,W,W,T,T,T,T,T,T,W,W,W,K,T,
+    T,T,K,W,W,W,W,W,W,W,W,W,W,K,T,T,
+    T,T,T,K,K,W,W,W,W,W,W,K,K,T,T,T,
+    T,T,T,T,T,K,K,T,T,K,K,T,T,T,T,T,
 ];
 
-pub static WAIT_GLYPH: CursorGlyph = CursorGlyph {
-    width: 14,
-    height: 16,
-    hot_x: 7,
-    hot_y: 8,
-    pixels: &WAIT_PIXELS,
-};
-
-/// Move four-arrow cross — 16 wide, 16 tall. Hot-spot (8, 8) at center.
 #[rustfmt::skip]
-static MOVE_PIXELS: [u32; 16 * 16] = [
-    T,T,T,T,T,T,T,K,K,T,T,T,T,T,T,T,
-    T,T,T,T,T,T,K,W,W,K,T,T,T,T,T,T,
-    T,T,T,T,T,K,W,W,W,W,K,T,T,T,T,T,
-    T,T,T,T,K,W,W,W,W,W,W,K,T,T,T,T,
-    T,T,T,T,K,K,K,W,W,K,K,K,T,T,T,T,
-    T,T,T,T,T,T,K,W,W,K,T,T,T,T,T,T,
-    T,T,K,K,K,K,K,W,W,K,K,K,K,K,T,T,
-    T,K,W,W,W,W,W,W,W,W,W,W,W,W,K,T,
-    T,K,W,W,W,W,W,W,W,W,W,W,W,W,K,T,
-    T,T,K,K,K,K,K,W,W,K,K,K,K,K,T,T,
-    T,T,T,T,T,T,K,W,W,K,T,T,T,T,T,T,
-    T,T,T,T,K,K,K,W,W,K,K,K,T,T,T,T,
-    T,T,T,T,K,W,W,W,W,W,W,K,T,T,T,T,
-    T,T,T,T,T,K,W,W,W,W,K,T,T,T,T,T,
-    T,T,T,T,T,T,K,W,W,K,T,T,T,T,T,T,
-    T,T,T,T,T,T,T,K,K,T,T,T,T,T,T,T,
+static WAIT_FRAME_1: [u32; 16 * 16] = [
+    T,T,T,T,T,K,K,T,T,K,K,T,T,T,T,T,
+    T,T,T,K,K,W,W,T,T,W,W,K,K,T,T,T,
+    T,T,K,W,W,W,W,T,T,W,W,W,W,K,T,T,
+    T,K,W,W,W,T,T,T,T,T,T,W,W,W,K,T,
+    T,K,W,W,T,T,T,T,T,T,T,T,W,W,K,T,
+    K,W,W,T,T,T,T,T,T,T,T,T,T,W,W,K,
+    K,W,W,T,T,T,T,T,T,T,T,T,T,W,W,K,
+    K,W,T,T,T,T,T,T,T,T,T,T,T,T,W,K,
+    K,W,T,T,T,T,T,T,T,T,T,T,T,T,W,K,
+    K,W,W,T,T,T,T,T,T,T,T,T,T,W,W,K,
+    K,W,W,T,T,T,T,T,T,T,T,T,T,W,W,K,
+    T,K,W,W,T,T,T,T,T,T,T,T,W,W,K,T,
+    T,K,W,W,W,W,W,T,T,W,W,W,W,W,K,T,
+    T,T,K,W,W,W,W,T,T,W,W,W,W,K,T,T,
+    T,T,T,K,K,W,W,T,T,W,W,K,K,T,T,T,
+    T,T,T,T,T,K,K,T,T,K,K,T,T,T,T,T,
 ];
 
-pub static MOVE_GLYPH: CursorGlyph = CursorGlyph {
-    width: 16,
-    height: 16,
-    hot_x: 8,
-    hot_y: 8,
-    pixels: &MOVE_PIXELS,
-};
-
-/// Vertical double-arrow — 8 wide, 16 tall. Hot-spot (4, 8) at center.
 #[rustfmt::skip]
-static RESIZE_NS_PIXELS: [u32; 8 * 16] = [
+static WAIT_FRAME_2: [u32; 16 * 16] = [
+    T,T,T,T,T,K,K,T,T,K,K,T,T,T,T,T,
+    T,T,T,K,K,T,T,T,T,W,W,K,K,T,T,T,
+    T,T,K,W,W,T,T,T,T,W,W,W,W,K,T,T,
+    T,K,W,W,W,T,T,T,T,T,T,W,W,W,K,T,
+    T,K,W,W,T,T,T,T,T,T,T,T,W,W,K,T,
+    K,W,W,T,T,T,T,T,T,T,T,T,T,W,W,K,
+    K,W,W,T,T,T,T,T,T,T,T,T,T,W,W,K,
+    K,W,T,T,T,T,T,T,T,T,T,T,T,T,W,K,
+    K,W,T,T,T,T,T,T,T,T,T,T,T,T,W,K,
+    K,W,W,T,T,T,T,T,T,T,T,T,T,W,W,K,
+    K,W,W,T,T,T,T,T,T,T,T,T,T,W,W,K,
+    T,K,W,W,T,T,T,T,T,T,T,T,W,W,K,T,
+    T,K,W,W,W,W,W,W,W,W,W,W,W,W,K,T,
+    T,T,K,W,W,W,W,W,W,W,W,W,W,K,T,T,
+    T,T,T,K,K,W,W,W,W,W,W,K,K,T,T,T,
+    T,T,T,T,T,K,K,W,W,K,K,T,T,T,T,T,
+];
+
+#[rustfmt::skip]
+static WAIT_FRAME_3: [u32; 16 * 16] = [
+    T,T,T,T,T,K,K,T,T,K,K,T,T,T,T,T,
+    T,T,T,K,K,T,T,T,T,T,T,K,K,T,T,T,
+    T,T,K,W,W,T,T,T,T,T,T,W,W,K,T,T,
+    T,K,W,W,W,T,T,T,T,T,T,W,W,W,K,T,
+    T,K,W,W,T,T,T,T,T,T,T,T,W,W,K,T,
+    K,W,W,T,T,T,T,T,T,T,T,T,T,W,W,K,
+    K,W,W,T,T,T,T,T,T,T,T,T,T,W,W,K,
+    K,W,T,T,T,T,T,T,T,T,T,T,T,T,W,K,
+    K,W,T,T,T,T,T,T,T,T,T,T,T,T,W,K,
+    K,W,W,T,T,T,T,T,T,T,T,T,T,W,W,K,
+    K,W,W,W,W,W,W,W,W,T,T,T,T,W,W,K,
+    T,K,W,W,W,W,W,W,W,T,T,T,W,W,K,T,
+    T,K,W,W,W,W,W,W,W,T,T,W,W,W,K,T,
+    T,T,K,W,W,W,W,W,W,W,W,W,W,K,T,T,
+    T,T,T,K,K,W,W,W,W,W,W,K,K,T,T,T,
+    T,T,T,T,T,K,K,T,T,K,K,T,T,T,T,T,
+];
+
+pub static WAIT_GLYPHS: [CursorGlyph; 4] = [
+    CursorGlyph { width: 16, height: 16, hot_x: 8, hot_y: 8, pixels: &WAIT_FRAME_0 },
+    CursorGlyph { width: 16, height: 16, hot_x: 8, hot_y: 8, pixels: &WAIT_FRAME_1 },
+    CursorGlyph { width: 16, height: 16, hot_x: 8, hot_y: 8, pixels: &WAIT_FRAME_2 },
+    CursorGlyph { width: 16, height: 16, hot_x: 8, hot_y: 8, pixels: &WAIT_FRAME_3 },
+];
+
+// ---------------------------------------------------------------------------
+// Resize cursors — directional double-arrows
+// ---------------------------------------------------------------------------
+
+/// Vertical double-arrow (N/S) — 8 wide, 16 tall. Hot-spot (4, 8).
+#[rustfmt::skip]
+static RESIZE_VERT_PIXELS: [u32; 8 * 16] = [
     T,T,T,K,K,T,T,T,
     T,T,K,W,W,K,T,T,
     T,K,W,W,W,W,K,T,
@@ -232,17 +280,17 @@ static RESIZE_NS_PIXELS: [u32; 8 * 16] = [
     T,T,T,K,K,T,T,T,
 ];
 
-pub static RESIZE_NS_GLYPH: CursorGlyph = CursorGlyph {
+pub static RESIZE_VERT_GLYPH: CursorGlyph = CursorGlyph {
     width: 8,
     height: 16,
     hot_x: 4,
     hot_y: 8,
-    pixels: &RESIZE_NS_PIXELS,
+    pixels: &RESIZE_VERT_PIXELS,
 };
 
-/// Horizontal double-arrow — 16 wide, 8 tall. Hot-spot (8, 4) at center.
+/// Horizontal double-arrow (E/W) — 16 wide, 8 tall. Hot-spot (8, 4).
 #[rustfmt::skip]
-static RESIZE_EW_PIXELS: [u32; 16 * 8] = [
+static RESIZE_HORZ_PIXELS: [u32; 16 * 8] = [
     T,T,T,K,T,T,T,T,T,T,T,T,K,T,T,T,
     T,T,K,K,T,T,T,T,T,T,T,T,K,K,T,T,
     T,K,W,K,K,K,K,K,K,K,K,K,K,W,K,T,
@@ -253,74 +301,108 @@ static RESIZE_EW_PIXELS: [u32; 16 * 8] = [
     T,T,T,K,T,T,T,T,T,T,T,T,K,T,T,T,
 ];
 
-pub static RESIZE_EW_GLYPH: CursorGlyph = CursorGlyph {
+pub static RESIZE_HORZ_GLYPH: CursorGlyph = CursorGlyph {
     width: 16,
     height: 8,
     hot_x: 8,
     hot_y: 4,
-    pixels: &RESIZE_EW_PIXELS,
+    pixels: &RESIZE_HORZ_PIXELS,
 };
 
-/// "Not allowed" circle-slash — 16 wide, 16 tall. Hot-spot (8, 8).
+/// Diagonal ＼ double-arrow (NW-SE) — 16 wide, 16 tall. Hot-spot (8, 8).
 #[rustfmt::skip]
-static NOT_ALLOWED_PIXELS: [u32; 16 * 16] = [
-    T,T,T,T,T,K,K,K,K,K,K,T,T,T,T,T,
-    T,T,T,K,K,W,W,W,W,W,W,K,K,T,T,T,
-    T,T,K,W,W,W,W,W,W,W,K,K,K,K,T,T,
-    T,K,W,W,W,W,W,W,W,K,K,W,W,K,K,T,
-    T,K,W,W,W,W,W,W,K,K,W,W,W,W,K,T,
-    K,W,W,W,W,W,W,K,K,W,W,W,W,W,W,K,
-    K,W,W,W,W,W,K,K,W,W,W,W,W,W,W,K,
-    K,W,W,W,W,K,K,W,W,W,W,W,W,W,W,K,
-    K,W,W,W,W,K,W,W,W,W,W,W,W,W,W,K,
-    K,W,W,W,K,K,W,W,W,W,W,W,W,W,W,K,
-    K,W,W,K,K,W,W,W,W,W,W,W,W,W,W,K,
-    T,K,W,K,W,W,W,W,W,W,W,W,W,W,K,T,
-    T,K,K,W,W,W,W,W,W,W,W,W,W,W,K,T,
-    T,T,K,K,W,W,W,W,W,W,W,W,K,K,T,T,
-    T,T,T,K,K,W,W,W,W,W,W,K,K,T,T,T,
-    T,T,T,T,T,K,K,K,K,K,K,T,T,T,T,T,
+static RESIZE_DIAG_NWSE_PIXELS: [u32; 16 * 16] = [
+    K,K,K,K,K,T,T,T,T,T,T,T,T,T,T,T,
+    K,W,W,W,K,T,T,T,T,T,T,T,T,T,T,T,
+    K,W,W,K,T,T,T,T,T,T,T,T,T,T,T,T,
+    K,W,K,W,K,T,T,T,T,T,T,T,T,T,T,T,
+    K,K,T,K,W,K,T,T,T,T,T,T,T,T,T,T,
+    T,T,T,T,K,W,K,T,T,T,T,T,T,T,T,T,
+    T,T,T,T,T,K,W,K,T,T,T,T,T,T,T,T,
+    T,T,T,T,T,T,K,W,K,T,T,T,T,T,T,T,
+    T,T,T,T,T,T,T,K,W,K,T,T,T,T,T,T,
+    T,T,T,T,T,T,T,T,K,W,K,T,T,T,T,T,
+    T,T,T,T,T,T,T,T,T,K,W,K,T,T,T,T,
+    T,T,T,T,T,T,T,T,T,T,K,W,K,T,T,K,
+    T,T,T,T,T,T,T,T,T,T,T,K,W,K,T,K,
+    T,T,T,T,T,T,T,T,T,T,T,T,K,W,K,K,
+    T,T,T,T,T,T,T,T,T,T,T,K,W,W,W,K,
+    T,T,T,T,T,T,T,T,T,T,T,K,K,K,K,K,
 ];
 
-pub static NOT_ALLOWED_GLYPH: CursorGlyph = CursorGlyph {
+pub static RESIZE_DIAG_NWSE_GLYPH: CursorGlyph = CursorGlyph {
     width: 16,
     height: 16,
     hot_x: 8,
     hot_y: 8,
-    pixels: &NOT_ALLOWED_PIXELS,
+    pixels: &RESIZE_DIAG_NWSE_PIXELS,
+};
+
+/// Diagonal ／ double-arrow (NE-SW) — 16 wide, 16 tall. Hot-spot (8, 8).
+#[rustfmt::skip]
+static RESIZE_DIAG_NESW_PIXELS: [u32; 16 * 16] = [
+    T,T,T,T,T,T,T,T,T,T,T,K,K,K,K,K,
+    T,T,T,T,T,T,T,T,T,T,T,K,W,W,W,K,
+    T,T,T,T,T,T,T,T,T,T,T,T,K,W,W,K,
+    T,T,T,T,T,T,T,T,T,T,T,K,W,K,W,K,
+    T,T,T,T,T,T,T,T,T,T,K,W,K,T,K,K,
+    T,T,T,T,T,T,T,T,T,K,W,K,T,T,T,T,
+    T,T,T,T,T,T,T,T,K,W,K,T,T,T,T,T,
+    T,T,T,T,T,T,T,K,W,K,T,T,T,T,T,T,
+    T,T,T,T,T,T,K,W,K,T,T,T,T,T,T,T,
+    T,T,T,T,T,K,W,K,T,T,T,T,T,T,T,T,
+    T,T,T,T,K,W,K,T,T,T,T,T,T,T,T,T,
+    K,T,T,K,W,K,T,T,T,T,T,T,T,T,T,T,
+    K,T,K,W,K,T,T,T,T,T,T,T,T,T,T,T,
+    K,K,W,K,T,T,T,T,T,T,T,T,T,T,T,T,
+    K,W,W,W,K,T,T,T,T,T,T,T,T,T,T,T,
+    K,K,K,K,K,T,T,T,T,T,T,T,T,T,T,T,
+];
+
+pub static RESIZE_DIAG_NESW_GLYPH: CursorGlyph = CursorGlyph {
+    width: 16,
+    height: 16,
+    hot_x: 8,
+    hot_y: 8,
+    pixels: &RESIZE_DIAG_NESW_PIXELS,
 };
 
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Map a logical cursor shape to its static bitmap.
-pub fn glyph_for(shape: CursorShape) -> &'static CursorGlyph {
+/// Map a logical cursor shape + animation frame to its static bitmap.
+///
+/// `frame` is only consulted for [`CursorShape::Wait`]; it is masked into
+/// the four available wait frames. All other shapes ignore `frame`.
+pub fn glyph_for(shape: CursorShape, frame: u8) -> &'static CursorGlyph {
     match shape {
         CursorShape::Default => &DEFAULT_GLYPH,
         CursorShape::Pointer => &POINTER_GLYPH,
-        CursorShape::Text => &TEXT_GLYPH,
-        CursorShape::Wait => &WAIT_GLYPH,
-        CursorShape::Move => &MOVE_GLYPH,
-        CursorShape::ResizeNS => &RESIZE_NS_GLYPH,
-        CursorShape::ResizeEW => &RESIZE_EW_GLYPH,
-        CursorShape::NotAllowed => &NOT_ALLOWED_GLYPH,
+        CursorShape::IBeam => &IBEAM_GLYPH,
+        CursorShape::Wait => &WAIT_GLYPHS[(frame & 0x03) as usize],
+        // N/S share the vertical double-arrow, E/W the horizontal one.
+        CursorShape::ResizeN | CursorShape::ResizeS => &RESIZE_VERT_GLYPH,
+        CursorShape::ResizeE | CursorShape::ResizeW => &RESIZE_HORZ_GLYPH,
+        // NW-SE corner arrow serves both NW and SE, NE-SW serves both NE and SW.
+        CursorShape::ResizeNW | CursorShape::ResizeSE => &RESIZE_DIAG_NWSE_GLYPH,
+        CursorShape::ResizeNE | CursorShape::ResizeSW => &RESIZE_DIAG_NESW_GLYPH,
     }
 }
 
 /// Draw `shape` at framebuffer position `(x, y)`, where `(x, y)` is the
 /// hot-spot (the logical pointer location).
 ///
-/// Transparent pixels (`0`) are skipped. Opaque pixels are written via
-/// direct volatile stores to the framebuffer, matching the style used
-/// by `Framebuffer::draw_text` — a single bounds check per pixel and
-/// no redundant function-call overhead.
-pub fn draw(fb: &Framebuffer, x: i32, y: i32, shape: CursorShape) {
+/// `frame` animates [`CursorShape::Wait`]; pass `0` for every non-animated
+/// shape. Transparent pixels (`0`) are skipped. Opaque pixels are written
+/// via direct volatile stores — a single bounds check per pixel and no
+/// redundant function-call overhead.
+pub fn draw(fb: &Framebuffer, x: i32, y: i32, shape: CursorShape, frame: u8) {
     if fb.addr == 0 {
         return;
     }
 
-    let glyph = glyph_for(shape);
+    let glyph = glyph_for(shape, frame);
     let origin_x = x - glyph.hot_x as i32;
     let origin_y = y - glyph.hot_y as i32;
     let pixels_per_row = fb.pitch / 4;
