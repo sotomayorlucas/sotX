@@ -1,0 +1,23 @@
+[package]
+name = "sotos-term"
+version = "0.1.0"
+edition = "2021"
+
+# Standalone (not part of any cargo workspace). Required because the parent
+# Cargo.toml excludes service crates and builds them individually.
+[workspace]
+
+[[bin]]
+name = "sotos-term"
+path = "src/main.rs"
+
+[dependencies]
+sotos-common = { path = "../../libs/sotos-common" }
+vte = { version = "0.13", default-features = false, features = ["no_std"] }
+embedded-graphics = { version = "0.8", default-features = false }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
