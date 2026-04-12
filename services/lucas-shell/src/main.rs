@@ -9,6 +9,7 @@ pub mod history;
 pub mod functions;
 pub mod line;
 pub mod parse;
+pub mod prompt;
 pub mod builtins;
 pub mod exec;
 pub mod net;
@@ -55,12 +56,22 @@ pub fn shell_loop() {
     env_set(b"TERM", b"xterm");
     env_set(b"USER", b"root");
 
+    let mut cwd_buf = [0u8; 128];
+
     loop {
         // Reap finished background jobs
         reap_done_jobs();
 
-        // Prompt
-        print(b"$ ");
+        // Prompt -- segmented Tokyo Night colors; honors $PS1 if set.
+        // `linux_getcwd` returns length-including-NUL, so we drop the trailing NUL.
+        let last_exit = parse::get_exit_status() as i32;
+        let cwd_len = linux_getcwd(cwd_buf.as_mut_ptr(), cwd_buf.len() as u64);
+        let cwd: &[u8] = if cwd_len > 1 {
+            &cwd_buf[..(cwd_len as usize) - 1]
+        } else {
+            b"/"
+        };
+        print(prompt::render_prompt(last_exit, cwd));
 
         // Read line with history navigation and tab completion
         let pos = read_line(&mut line_buf);
@@ -183,7 +194,8 @@ pub fn shell_loop() {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
-    print(b"sotOS LUCAS shell v0.3\n");
+    // Tokyo Night startup banner (drawn once, before the first prompt).
+    prompt::print_banner(print);
     shell_loop();
     linux_exit(0);
 }
