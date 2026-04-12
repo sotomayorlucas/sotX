@@ -19,6 +19,7 @@ name = "sot-statusbar"
 version = "0.1.0"
 dependencies = [
  "sotos-common",
+ "sotos-theme",
 ]
 
 [[package]]
@@ -28,3 +29,7 @@ dependencies = [
  "bitflags",
  "linux-raw-sys",
 ]
+
+[[package]]
+name = "sotos-theme"
+version = "0.1.0"

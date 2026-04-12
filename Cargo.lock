@@ -177,6 +177,7 @@ name = "sotos-gui"
 version = "0.1.0"
 dependencies = [
  "embedded-graphics",
+ "sotos-theme",
  "tinybmp",
 ]
 
@@ -232,6 +233,10 @@ dependencies = [
 
 [[package]]
 name = "sotos-pkg"
+version = "0.1.0"
+
+[[package]]
+name = "sotos-theme"
 version = "0.1.0"
 
 [[package]]

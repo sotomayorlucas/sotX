@@ -129,8 +129,13 @@ version = "0.1.0"
 dependencies = [
  "embedded-graphics",
  "sotos-common",
+ "sotos-theme",
  "tiny-skia",
 ]
+
+[[package]]
+name = "sotos-theme"
+version = "0.1.0"
 
 [[package]]
 name = "strict-num"

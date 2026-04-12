@@ -296,10 +296,10 @@ static CON_CUR_ROW: SyncUnsafeCell<u32> = SyncUnsafeCell::new(0);
 static TEXT_X: SyncUnsafeCell<u32> = SyncUnsafeCell::new(0);
 static TEXT_Y: SyncUnsafeCell<u32> = SyncUnsafeCell::new(0);
 
-/// Terminal text color.
-const COL_TEXT: u32 = 0xFFA9B1D6;
-/// Terminal background color.
-const COL_BG: u32 = 0xFF1A1B26;
+/// Terminal text color (Tokyo Night fg_muted).
+const COL_TEXT: u32 = sotos_theme::TOKYO_NIGHT.fg_muted;
+/// Terminal background color (Tokyo Night bg).
+const COL_BG: u32 = sotos_theme::TOKYO_NIGHT.bg;
 
 /// Keyboard state.
 static KB_SHIFT: SyncUnsafeCell<bool> = SyncUnsafeCell::new(false);

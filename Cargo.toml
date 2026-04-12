@@ -15,6 +15,7 @@ members = [
     "libs/sotos-usb-storage",
     "libs/sotos-mouse",
     "libs/sotos-gui",
+    "libs/sotos-theme",
     "libs/sotos-lua",
     "libs/sotos-pkg",
     "libs/sot-fma",

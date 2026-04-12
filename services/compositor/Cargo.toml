@@ -19,6 +19,7 @@ skia = ["dep:tiny-skia"]
 
 [dependencies]
 sotos-common = { path = "../../libs/sotos-common" }
+sotos-theme = { path = "../../libs/sotos-theme" }
 embedded-graphics = { version = "0.8", default-features = false }
 tiny-skia = { version = "0.11", default-features = false, features = ["no-std-float"], optional = true }
 

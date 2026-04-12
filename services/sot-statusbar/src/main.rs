@@ -49,14 +49,14 @@ const POOL_SIZE: u32 = BAR_W * BAR_H * BPP;
 const CLIENT_POOL_BASE: u64 = 0x9000000;
 
 // ---------------------------------------------------------------------------
-// Tokyo Night palette (XRGB8888)
+// Tokyo Night palette (sourced from sotos-theme)
 // ---------------------------------------------------------------------------
 
-const TN_BG: u32     = 0xFF1A1B26; // storm background
-const TN_FG: u32     = 0xFFC0CAF5; // foreground text
-const TN_ACCENT: u32 = 0xFF7AA2F7; // blue accent
-const TN_GREEN: u32  = 0xFF9ECE6A; // memory OK
-const TN_RED: u32    = 0xFFF7768E; // memory low
+const TN_BG: u32     = sotos_theme::TOKYO_NIGHT.bg;        // storm background
+const TN_FG: u32     = sotos_theme::TOKYO_NIGHT.fg;        // foreground text
+const TN_ACCENT: u32 = sotos_theme::TOKYO_NIGHT.accent;    // blue accent
+const TN_GREEN: u32  = sotos_theme::TOKYO_NIGHT.green_alt; // memory OK
+const TN_RED: u32    = sotos_theme::TOKYO_NIGHT.red;        // memory low
 
 // ---------------------------------------------------------------------------
 // IPC tags (must match compositor::wayland::mod constants verbatim)

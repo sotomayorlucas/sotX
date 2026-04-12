@@ -14,67 +14,23 @@ use embedded_graphics::prelude::*;
 use embedded_graphics::primitives::{Circle, PrimitiveStyle, Rectangle};
 
 use crate::render::Framebuffer;
+use sotos_theme::{TOKYO_NIGHT, geometry};
 
 // ---------------------------------------------------------------------------
-// Public geometry constants
+// Public geometry constants (re-exported from sotos-theme)
 // ---------------------------------------------------------------------------
 
 /// Height of the decorated title bar in pixels.
-pub const TITLE_BAR_HEIGHT: i32 = 28;
+pub const TITLE_BAR_HEIGHT: i32 = geometry::TITLE_BAR_HEIGHT;
 
 /// Rounded-corner radius for future window rounding (title bar is squared for now).
 #[allow(dead_code)]
-pub const BORDER_RADIUS: i32 = 8;
+pub const BORDER_RADIUS: i32 = geometry::BORDER_RADIUS;
 
-/// Advance (in pixels) of every glyph drawn by `Framebuffer::draw_text`.
-///
-/// Matches the advance of `font::FONT_6X10` that PR #56 installs as the
-/// `draw_text` backend. The current `draw_text` still uses the built-in
-/// 8x8 bitmap font, but hardcoding 6 here keeps the title centering math
-/// correct after #56 lands without introducing a dependency on a
-/// `crate::font` module that does not exist on this branch yet.
-const GLYPH_ADVANCE: i32 = 6;
-
-/// Diameter of each traffic-light button.
-const BUTTON_DIAMETER: i32 = 14;
-
-/// Gap between traffic-light button centers (center-to-center distance).
-const BUTTON_GAP: i32 = BUTTON_DIAMETER + 8;
-
-/// Left inset before the first traffic-light button.
-const BUTTON_LEFT_INSET: i32 = 10;
-
-// ---------------------------------------------------------------------------
-// Theme
-// ---------------------------------------------------------------------------
-
-/// Color theme for window decorations. All values are BGRA `0xAARRGGBB`.
-#[allow(dead_code)]
-pub struct Theme {
-    pub title_active: u32,
-    pub title_inactive: u32,
-    pub title_text: u32,
-    pub close_red: u32,
-    pub min_yellow: u32,
-    pub max_green: u32,
-    pub border: u32,
-    pub shadow: u32,
-}
-
-/// Tokyo Night flavored palette.
-///
-/// Values taken from the canonical Tokyo Night (storm) spec:
-/// <https://github.com/folke/tokyonight.nvim/blob/main/extras/lua/tokyonight_night.lua>
-pub const TOKYO_NIGHT: Theme = Theme {
-    title_active: 0xFF7AA2F7,   // TN blue
-    title_inactive: 0xFF24283B, // TN bg-storm
-    title_text: 0xFFC0CAF5,     // TN foreground (matches sot-statusbar TN_FG)
-    close_red: 0xFFF7768E,
-    min_yellow: 0xFFE0AF68,
-    max_green: 0xFF73DACA,
-    border: 0xFF24283B,
-    shadow: 0x55000000,
-};
+const GLYPH_ADVANCE: i32 = geometry::GLYPH_ADVANCE_6X10;
+const BUTTON_DIAMETER: i32 = geometry::BUTTON_DIAMETER;
+const BUTTON_GAP: i32 = geometry::BUTTON_GAP;
+const BUTTON_LEFT_INSET: i32 = geometry::BUTTON_LEFT_INSET;
 
 // ---------------------------------------------------------------------------
 // Public entry points
@@ -95,7 +51,7 @@ pub fn draw_title_bar(fb: &mut Framebuffer, x: i32, y: i32, w: i32, focused: boo
 
     // Base color for this state.
     let base = if focused {
-        TOKYO_NIGHT.title_active
+        TOKYO_NIGHT.accent
     } else {
         TOKYO_NIGHT.title_inactive
     };
@@ -110,7 +66,7 @@ pub fn draw_title_bar(fb: &mut Framebuffer, x: i32, y: i32, w: i32, focused: boo
     }
 
     // 1px bottom border line inside the title bar.
-    fb.fill_rect(x, y + TITLE_BAR_HEIGHT - 1, width, 1, TOKYO_NIGHT.border);
+    fb.fill_rect(x, y + TITLE_BAR_HEIGHT - 1, width, 1, TOKYO_NIGHT.bg_highlight);
 
     // No drop-shadow strip: rows below the bar coincide with the start of
     // the client content area, so the compose loop would overwrite any
@@ -119,9 +75,9 @@ pub fn draw_title_bar(fb: &mut Framebuffer, x: i32, y: i32, w: i32, focused: boo
     // Traffic-light buttons on the LEFT.
     let cy = y + TITLE_BAR_HEIGHT / 2;
     let (cx0, cx1, cx2) = button_centers(x);
-    draw_traffic_light(fb, cx0, cy, TOKYO_NIGHT.close_red);
-    draw_traffic_light(fb, cx1, cy, TOKYO_NIGHT.min_yellow);
-    draw_traffic_light(fb, cx2, cy, TOKYO_NIGHT.max_green);
+    draw_traffic_light(fb, cx0, cy, TOKYO_NIGHT.red);
+    draw_traffic_light(fb, cx1, cy, TOKYO_NIGHT.yellow);
+    draw_traffic_light(fb, cx2, cy, TOKYO_NIGHT.green);
 
     // Title text: centered horizontally, 8px from top. Clipped so it never
     // overlaps the traffic lights.
@@ -132,7 +88,7 @@ pub fn draw_title_bar(fb: &mut Framebuffer, x: i32, y: i32, w: i32, focused: boo
     if max_chars > 0 {
         let draw_width = (max_chars as i32) * GLYPH_ADVANCE;
         let tx = (x + (w - draw_width) / 2).max(reserved_left);
-        fb.draw_text(tx, y + 8, &bytes[..max_chars], TOKYO_NIGHT.title_text);
+        fb.draw_text(tx, y + 8, &bytes[..max_chars], TOKYO_NIGHT.fg);
     }
 }
 
