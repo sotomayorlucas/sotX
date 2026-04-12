@@ -764,15 +764,49 @@ fn apply_dispatch_result(client_idx: usize, result: &DispatchResult) {
         mark_damage();
     }
 
-    // Title update?
+    // Title update? Sanitize at ingest so the compose loop can use the
+    // stored bytes directly without per-frame re-validation.
     let (title_tl_id, ref title_buf, title_len) = result.title_update;
     if title_tl_id != 0 && title_len > 0 {
         let toplevels = unsafe { &mut *TOPLEVELS.get() };
         for i in 0..MAX_TOPLEVELS {
             if toplevels[i].active && toplevels[i].toplevel_id == title_tl_id {
-                let copy_len = title_len.min(64);
-                toplevels[i].title[..copy_len].copy_from_slice(&title_buf[..copy_len]);
-                toplevels[i].title_len = copy_len;
+                let raw_len = title_len.min(64);
+                let raw = &title_buf[..raw_len];
+                // Strip trailing NUL bytes from Wayland wire format.
+                let mut end = raw_len;
+                while end > 0 && raw[end - 1] == 0 { end -= 1; }
+                // Sanitize: copy valid UTF-8 / ASCII, replace bad bytes with '?'.
+                let mut out = 0usize;
+                let mut idx = 0usize;
+                while idx < end && out < 64 {
+                    let b = raw[idx];
+                    if b.is_ascii_graphic() || b == b' ' {
+                        toplevels[i].title[out] = b;
+                        out += 1;
+                        idx += 1;
+                    } else if b & 0x80 != 0 {
+                        let seq_len = if b & 0xE0 == 0xC0 { 2 }
+                            else if b & 0xF0 == 0xE0 { 3 }
+                            else if b & 0xF8 == 0xF0 { 4 }
+                            else { 0 };
+                        if seq_len >= 2 && idx + seq_len <= end {
+                            if let Ok(s) = core::str::from_utf8(&raw[idx..idx + seq_len]) {
+                                for &sb in s.as_bytes() {
+                                    if out < 64 { toplevels[i].title[out] = sb; out += 1; }
+                                }
+                                idx += seq_len;
+                                continue;
+                            }
+                        }
+                        toplevels[i].title[out] = b'?';
+                        out += 1;
+                        idx += 1;
+                    } else {
+                        idx += 1; // skip control chars
+                    }
+                }
+                toplevels[i].title_len = out;
                 mark_damage();
                 break;
             }
@@ -1343,8 +1377,10 @@ fn compose() {
             // Tokyo Night-styled title bar (decorations module: traffic lights,
             // rounded corners, modern palette).
             let focused = i == focused_tl;
-            let title_bytes = &tl.title[..tl.title_len.min(tl.title.len())];
-            let title_str = core::str::from_utf8(title_bytes).unwrap_or("");
+            // Title was sanitized at ingest time (title_update handler above).
+            let title_str = core::str::from_utf8(
+                &tl.title[..tl.title_len.min(tl.title.len())]
+            ).unwrap_or("");
             decorations::draw_title_bar(
                 fb,
                 eff_x,
