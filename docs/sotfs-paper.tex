@@ -1033,6 +1033,22 @@ curvature is $O(|E| \cdot |V|)$ full or $O(\delta \cdot d_{\max})$
 incremental, where $\delta$ is the number of affected edges and
 $d_{\max}$ is the maximum degree.
 
+\textbf{Real-world scale distributions.}  The \texttt{scale\_bench} suite
+characterizes latency at $10^3$--$10^4$ nodes over three realistic
+distributions: \texttt{linux\_rootfs} (wide+shallow, 20 top dirs with
+50--200 files each), \texttt{node\_modules} (deep nesting, 5--15 levels with
+2--4 files per level), and \texttt{kernel\_tree} (balanced, depth 5--8, width
+10--30).  Measurements: build time, marginal \texttt{create\_file} latency,
+\texttt{check\_invariants}, \texttt{fsck}, and export (DOT/D3/Graph Hunter).
+
+\textbf{Performance optimizations.}  Same-directory \texttt{rename} skips the
+cycle-prevention check entirely (if \texttt{src\_dir == dst\_dir}, no cycle
+is possible), making it the fast path.  The existing \texttt{sotfs\_curvature.tla}
+TLA+ specification verifies that $\Delta\kappa < \theta$ implies a genuine
+fan-out event occurred (invariant \textsc{CurvatureDropImpliesFanOut}),
+ensuring the curvature monitor has no false negatives within bounded
+model-checking configurations.
+
 \textbf{Methodology.}  All benchmarks use Criterion's default configuration:
 100 samples per measurement, 5-second warm-up, outlier detection via
 modified $Z$-scores.  Results are stored as JSON in \texttt{target/criterion/}

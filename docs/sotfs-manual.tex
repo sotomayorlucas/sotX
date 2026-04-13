@@ -300,6 +300,8 @@ Removes contains edge, decrements link\_count. GC if lc reaches 0.
 \subsection{RENAME(src\_dir, src\_name, dst\_dir, dst\_name)}
 Four cases: same/cross dir $\times$ target exists/absent.  Cross-dir requires SOT Tier~2 (2PC).
 \textbf{Gluing:} GC-RENAME-2 (cycle prevention via \texttt{is\_ancestor} check).
+\textbf{Fast path:} when \texttt{src\_dir == dst\_dir}, the cycle check is trivially
+skipped---same-directory rename cannot create a cycle.
 
 \section{Treewidth Impact per Rule}
 Only LINK can increase treewidth, bounded by GC-LINK-3. All other rules are tw-neutral or tw-decreasing.
@@ -365,7 +367,13 @@ REVOKE: epoch-based, removes capability node and all delegates descendants.
 \chapter{Multi-Layer Verification}
 
 \section{Layer 1: TLA+ Model Checking (Bounded)}
-4 specifications verified: \texttt{sotfs\_graph}, \texttt{sotfs\_transactions}, \texttt{sotfs\_capabilities}, \texttt{sotfs\_crash}. 20+ invariants model-checked across small/medium/large configurations.
+5 specifications verified: \texttt{sotfs\_graph}, \texttt{sotfs\_transactions},
+\texttt{sotfs\_capabilities}, \texttt{sotfs\_crash}, and \texttt{sotfs\_curvature}.
+20+ invariants model-checked across small/medium/large configurations.
+The curvature spec (\texttt{sotfs\_curvature.tla}) verifies that
+$\Delta\kappa < \theta$ implies a genuine fan-out event
+(invariant \textsc{CurvatureDropImpliesFanOut}), plus \textsc{KappaConsistent},
+\textsc{CurvatureBounded}, and \textsc{MonitorEventuallyDetects}.
 
 \section{Layer 2: Crash Refinement (Tested)}
 6 integration tests with redb ACID backend verify round-trip persistence, atomic overwrite, and complex operation survival.
@@ -487,33 +495,40 @@ Checks all 5 structural invariants + block refcount + orphan detection + xattr i
 Returns \texttt{FsckReport} with typed errors and warnings.
 
 % ==============================================================================
-\chapter{Test Summary}
+\chapter{Benchmarks}
+
+\section{DPO Operation Latency}
+Criterion benchmarks (\texttt{dpo\_bench.rs}): \texttt{create\_file} at 100/500/1K,
+\texttt{mkdir\_chain} at 50/200/500, \texttt{unlink} at 100/500,
+\texttt{rename\_same\_dir} at 100/500, \texttt{hard\_link} at 10/100/500,
+\texttt{write\_read} at 64B/1K/4K/64K, \texttt{check\_invariants} at 10/100/500/1K.
+
+\section{WAL Index Speedup}
+\texttt{wal\_bench.rs}: linear scan vs hash-indexed lookup at 10/100/1K entries.
+DPO sequence replay (indexed vs linear) at 10/50/100/500 operations.
+
+\section{Monitor Scaling}
+\texttt{monitor\_bench.rs}: treewidth on star/chain/tree at 50--500 nodes,
+curvature full vs incremental at 100--10K nodes, treewidth check at 100/500.
+
+\section{Real-World Scale Distributions}
+\texttt{scale\_bench.rs} characterizes latency and treewidth on three
+realistic filesystem distributions at $10^3$--$10^4$ nodes:
 
 \begin{center}\small
-\begin{tabular}{lrl}
+\begin{tabular}{lp{4cm}ll}
 \toprule
-\textbf{Category} & \textbf{Count} & \textbf{Method} \\
+\textbf{Distribution} & \textbf{Shape} & \textbf{Depth} & \textbf{Width} \\
 \midrule
-Arena allocator     & 16 & Unit tests \\
-RCU concurrency     &  9 & Multi-thread \\
-Graph invariants    &  3 & Unit tests \\
-Typestate           &  6 & Unit + compile-fail \\
-DPO operations      & 35 & Unit tests \\
-Property-based      & 10 & proptest (10K iter) \\
-Storage/crash       &  7 & Integration (redb) \\
-Transaction         &  3 & Unit tests \\
-Loom concurrency    &  3 & Exhaustive \\
-Treewidth           & 20 & Unit + adversarial \\
-Curvature           & 14 & Unit + incremental \\
-Deception           &  5 & Projections \\
-Adversarial         & 13 & Security scenarios \\
-xattrs/symlinks/ACL & 10 & Unit tests \\
-fsck                &  2 & Unit tests \\
-\midrule
-\textbf{Total}      & \textbf{147} & \textbf{All passing} \\
+\texttt{linux\_rootfs}  & Wide + shallow (20 top dirs, 50--200 files each, 3 subdir levels) & 3--5 & 10--200 \\
+\texttt{node\_modules}  & Deep nesting (packages nested 5--15 levels, 2--4 files/level) & 15--50 & 2--4 \\
+\texttt{kernel\_tree}   & Balanced tree (5--8 depth, 10--30 entries/level) & 5--8 & 10--30 \\
 \bottomrule
 \end{tabular}
 \end{center}
+
+Measurements per distribution: build time, marginal \texttt{create\_file} latency,
+\texttt{check\_invariants} cost, \texttt{fsck} cost, export (DOT/D3/Graph Hunter/stats) latency.
 
 % ==============================================================================
 \part{Architecture Decisions}
