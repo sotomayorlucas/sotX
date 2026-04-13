@@ -212,41 +212,14 @@ Lemma unlink_incoming_target :
 Proof.
   intros g d target_ino name HWF Hin Huser.
   unfold incoming_count, unlink_keep. simpl.
-  induction (g_edges g) as [|h t IH].
-  - contradiction.
-  - simpl.
-    destruct (ce_eqb h (mkContains d target_ino name)) eqn:Heq_edge.
-    + (* h = the removed edge *)
-      apply ce_eqb_eq in Heq_edge. subst h. simpl.
-      rewrite Nat.eqb_refl.
-      assert (Hndot : Nat.eqb name dotdot_name = false).
-      { apply Nat.eqb_neq. apply user_name_not_dotdot. exact Huser. }
-      rewrite Hndot. simpl. reflexivity.
-    + (* h is not the removed edge — it stays *)
-      simpl.
-      destruct (Nat.eqb (ce_ino h) target_ino && negb (Nat.eqb (ce_name h) dotdot_name))
-        eqn:Hpred.
-      * simpl.
-        (* The edge Hin must be in t (since h is not the edge) *)
-        destruct Hin as [Hhead | Htail].
-        { subst h.
-          rewrite ce_eqb_refl in Heq_edge. discriminate. }
-        { f_equal. apply IH.
-          - destruct HWF as [_ [_ [HUN _]]].
-            (* WellFormed on tail — we need to weaken. Use Admitted. *)
-            admit.
-          - exact Htail. }
-      * destruct Hin as [Hhead | Htail].
-        { subst h.
-          rewrite ce_eqb_refl in Heq_edge. discriminate. }
-        { apply IH.
-          - admit.
-          - exact Htail. }
-Admitted.
-(* NOTE: The proof structure is correct. The admits are for passing
-   WellFormed to the inductive hypothesis on the tail of the edge list.
-   A full proof would factor out a lemma about count_occ_pred over
-   remove_edge when the removed element satisfies the predicate. *)
+  apply count_remove_matching_pred.
+  - exact Hin.
+  - (* The removed edge satisfies the incoming_count predicate *)
+    simpl. rewrite Nat.eqb_refl.
+    assert (Hndot : Nat.eqb name dotdot_name = false).
+    { apply Nat.eqb_neq. apply user_name_not_dotdot. exact Huser. }
+    rewrite Hndot. reflexivity.
+Qed.
 
 Theorem unlink_keep_preserves_LinkCountConsistent :
   forall g d name target_ino,
@@ -303,34 +276,22 @@ Proof.
   destruct Hpre as [Hdir Huser Hedge_in Hreg Htgt_exists].
   exists rank.
   intros e Hin Huser_name ir Hfind Hvtype child_dir Hchild.
-  (* e is in the reduced edge list *)
+  (* e is in the reduced edge list — lift to original *)
   unfold unlink_keep in Hin. simpl in Hin.
   apply remove_edge_subset in Hin.
-  (* find_inode in the new graph has same vtype — decrement doesn't change it *)
+  (* find_inode through decrement_link preserves vtype *)
   unfold find_inode in Hfind. unfold unlink_keep in Hfind. simpl in Hfind.
+  unfold decrement_link in Hfind.
+  (* Use the helper lemma to get the original inode record *)
+  apply decrement_link_preserves_vtype in Hfind; [ | exact Hvtype ].
+  destruct Hfind as [ir_old [Hfind_old Hvtype_old]].
   (* dir_for_inode unchanged since dirs unchanged *)
   unfold dir_for_inode in Hchild. unfold unlink_keep in Hchild. simpl in Hchild.
-  (* Need find_inode through decrement_link *)
-  unfold decrement_link in Hfind.
-  (* The target inode is Regular (by Hreg), so if ir has DirectoryType,
-     ir must be a different inode, and decrement_link preserves it *)
-  apply (Hrank e Hin Huser_name).
-  - (* find_inode in old graph = find in decrement_link with same vtype *)
-    destruct (Nat.eq_dec (ce_ino e) target_ino) as [Heq | Hneq].
-    + (* Edge targets target_ino — but target is Regular, Hvtype says Directory *)
-      exfalso.
-      (* find in decrement_link(inodes, target_ino) for target_ino gives
-         the record with vtype unchanged (decrement_link only changes link_count) *)
-      admit. (* Regular vs DirectoryType contradiction *)
-    + (* Edge targets other inode — find unchanged *)
-      admit. (* decrement_link preserves find for non-target *)
-  - exact Hvtype.
+  apply (Hrank e Hin Huser_name ir_old).
+  - unfold find_inode. exact Hfind_old.
+  - exact Hvtype_old.
   - unfold dir_for_inode. exact Hchild.
-Admitted.
-(* NOTE: The core argument is sound: the removed edge's target is Regular
-   (by up_is_regular), so any edge to a DirectoryType inode in the result
-   was already in the old graph and satisfies the old ranking. The admits
-   are for the mechanical step of relating find through decrement_link. *)
+Qed.
 
 (* ===================================================================== *)
 (* 9. MAIN THEOREM: unlink_keep preserves WellFormed                     *)

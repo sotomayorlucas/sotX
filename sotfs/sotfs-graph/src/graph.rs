@@ -86,6 +86,25 @@ pub struct TypeGraph {
     /// InodeId -> file content bytes
     pub file_data: BTreeMap<InodeId, Vec<u8>>,
 
+    // --- Extended attributes (§5.2.7) ---
+    /// XAttrId -> XAttr node
+    pub xattrs: BTreeMap<XAttrId, XAttr>,
+    /// InodeId -> set of XAttrIds (HasXattr edges)
+    pub inode_xattrs: BTreeMap<InodeId, BTreeSet<XAttrId>>,
+    next_xattr: u64,
+
+    // --- Symlink targets ---
+    /// InodeId -> symlink target path (for VnodeType::Symlink inodes)
+    pub symlink_targets: BTreeMap<InodeId, SymlinkTarget>,
+
+    // --- ACLs (§5.2.8) ---
+    /// InodeId -> list of ACL entries (POSIX.1e compatibility)
+    pub acls: BTreeMap<InodeId, Vec<AclEntry>>,
+
+    // --- Quotas (§5.2.9) ---
+    /// DirId -> quota for subtree rooted at this directory
+    pub quotas: BTreeMap<DirId, Quota>,
+
     // --- ID allocators ---
     next_inode: u64,
     next_dir: u64,
@@ -151,6 +170,12 @@ impl TypeGraph {
             cap_parent: BTreeMap::new(),
             cap_children: BTreeMap::new(),
             file_data: BTreeMap::new(),
+            xattrs: BTreeMap::new(),
+            inode_xattrs: BTreeMap::new(),
+            next_xattr: 1,
+            symlink_targets: BTreeMap::new(),
+            acls: BTreeMap::new(),
+            quotas: BTreeMap::new(),
             next_inode: 2,
             next_dir: 2,
             next_cap: 1,
@@ -202,6 +227,12 @@ impl TypeGraph {
     pub fn alloc_dir_id(&mut self) -> DirId {
         let id = self.next_dir;
         self.next_dir += 1;
+        id
+    }
+
+    pub fn alloc_xattr_id(&mut self) -> XAttrId {
+        let id = self.next_xattr;
+        self.next_xattr += 1;
         id
     }
 
@@ -412,6 +443,12 @@ impl TypeGraph {
             .values()
             .find(|d| d.inode_id == inode_id)
             .map(|d| d.id)
+    }
+
+    /// Get the parent directory of a given directory (via ".." edge).
+    pub fn parent_dir(&self, dir: DirId) -> Option<DirId> {
+        let parent_inode = self.resolve_name(dir, "..")?;
+        self.dir_for_inode(parent_inode)
     }
 
     // -----------------------------------------------------------------------

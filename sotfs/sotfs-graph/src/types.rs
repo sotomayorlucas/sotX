@@ -222,9 +222,94 @@ pub struct Block {
     pub refcount: u32,
 }
 
+/// Extended attribute node (§5.2.7).
+///
+/// Each xattr is stored as a separate node with a HasXattr edge from its inode.
+/// This models xattrs as first-class graph citizens, enabling capability-based
+/// access control over individual attributes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct XAttr {
+    pub id: XAttrId,
+    pub namespace: XAttrNamespace,
+    pub name: String,
+    pub value: Vec<u8>,
+}
+
+/// Extended attribute namespaces (following Linux conventions).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum XAttrNamespace {
+    User,
+    System,
+    Security,
+    Trusted,
+}
+
+/// Symlink target stored in the inode's data.
+/// For short symlinks (< 60 bytes), stored inline.
+/// For long symlinks, stored in file_data.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SymlinkTarget(pub String);
+
+/// ACL entry for POSIX.1e compatibility (§5.2.8).
+///
+/// Maps to capability graph edges: each ACL entry becomes a Grants edge
+/// from a synthesized capability with rights derived from the permission bits.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AclEntry {
+    pub tag: AclTag,
+    pub qualifier: u32, // uid or gid, 0 for USER_OBJ/GROUP_OBJ/OTHER/MASK
+    pub permissions: Permissions,
+}
+
+/// ACL entry tag types (POSIX.1e).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AclTag {
+    UserObj,
+    User,
+    GroupObj,
+    Group,
+    Mask,
+    Other,
+}
+
+/// Quota tracking node — attached per-subtree root (§5.2.9).
+///
+/// Uses summary propagation: each directory maintains cumulative counters
+/// for its entire subtree. On DPO operations, only the path from the
+/// modified node to the quota root is updated (O(depth) amortized).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Quota {
+    pub inode_limit: u64,
+    pub inode_usage: u64,
+    pub byte_limit: u64,
+    pub byte_usage: u64,
+}
+
+impl Quota {
+    pub fn new(inode_limit: u64, byte_limit: u64) -> Self {
+        Self {
+            inode_limit,
+            inode_usage: 0,
+            byte_limit,
+            byte_usage: 0,
+        }
+    }
+
+    pub fn check_inode(&self) -> bool {
+        self.inode_limit == 0 || self.inode_usage < self.inode_limit
+    }
+
+    pub fn check_bytes(&self, additional: u64) -> bool {
+        self.byte_limit == 0 || self.byte_usage + additional <= self.byte_limit
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Edge types (§5.3)
 // ---------------------------------------------------------------------------
+
+/// Unique extended attribute identifier.
+pub type XAttrId = u64;
 
 /// A unique edge identifier.
 pub type EdgeId = u64;
@@ -271,6 +356,12 @@ pub enum Edge {
         tgt: BlockId,
         offset: u64,
     },
+    /// Inode → XAttr (§5.3.7).
+    HasXattr {
+        id: EdgeId,
+        src: InodeId,
+        tgt: XAttrId,
+    },
 }
 
 impl Edge {
@@ -281,7 +372,8 @@ impl Edge {
             | Edge::Delegates { id, .. }
             | Edge::DerivedFrom { id, .. }
             | Edge::Supersedes { id, .. }
-            | Edge::PointsTo { id, .. } => *id,
+            | Edge::PointsTo { id, .. }
+            | Edge::HasXattr { id, .. } => *id,
         }
     }
 
@@ -293,6 +385,7 @@ impl Edge {
             Edge::DerivedFrom { src, .. } => NodeId::Version(*src),
             Edge::Supersedes { src, .. } => NodeId::Inode(*src),
             Edge::PointsTo { src, .. } => NodeId::Inode(*src),
+            Edge::HasXattr { src, .. } => NodeId::Inode(*src),
         }
     }
 
@@ -304,6 +397,7 @@ impl Edge {
             Edge::DerivedFrom { tgt, .. } => NodeId::Version(*tgt),
             Edge::Supersedes { tgt, .. } => NodeId::Inode(*tgt),
             Edge::PointsTo { tgt, .. } => NodeId::Inode(*tgt),
+            Edge::HasXattr { tgt, .. } => NodeId::Inode(*tgt as InodeId),
         }
     }
 }

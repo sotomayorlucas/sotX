@@ -195,7 +195,7 @@ Proof.
 Qed.
 
 (* For target_ino: remove one non-dotdot edge, add one non-dotdot edge.
-   Net change = 0. *)
+   Net change = 0. Uses count_remove_matching from SotfsGraph.v. *)
 Lemma rename_incoming_target :
   forall g d target_ino old_name new_name,
     WellFormed g ->
@@ -212,38 +212,21 @@ Proof.
   assert (Hndot_new : Nat.eqb new_name dotdot_name = false).
   { apply Nat.eqb_neq. apply user_name_not_dotdot. exact Huser_new. }
   rewrite Hndot_new. simpl.
-  (* count(remove_edge) + 1 = count(original)
-     because remove_edge removes one element with predicate=true *)
-  induction (g_edges g) as [|h t IH].
-  - contradiction.
-  - simpl.
-    destruct (ce_eqb h (mkContains d target_ino old_name)) eqn:Heq_edge.
-    + (* h = the removed edge *)
-      apply ce_eqb_eq in Heq_edge. subst h. simpl.
-      rewrite Nat.eqb_refl.
+  (* count(remove_edge(old)) + 1 = count(original) *)
+  assert (Hmatch : count_occ_pred
+    (fun e => Nat.eqb (ce_ino e) target_ino && negb (Nat.eqb (ce_name e) dotdot_name))
+    (remove_edge (mkContains d target_ino old_name) (g_edges g)) + 1 =
+    count_occ_pred
+    (fun e => Nat.eqb (ce_ino e) target_ino && negb (Nat.eqb (ce_name e) dotdot_name))
+    (g_edges g)).
+  { apply count_remove_matching.
+    - exact Hin.
+    - simpl. rewrite Nat.eqb_refl.
       assert (Hndot_old : Nat.eqb old_name dotdot_name = false).
       { apply Nat.eqb_neq. apply user_name_not_dotdot. exact Huser_old. }
-      rewrite Hndot_old. simpl. lia.
-    + (* h <> removed edge — h is kept *)
-      simpl.
-      destruct (Nat.eqb (ce_ino h) target_ino && negb (Nat.eqb (ce_name h) dotdot_name))
-        eqn:Hpred.
-      * simpl.
-        destruct Hin as [Hhead | Htail].
-        { subst h. rewrite ce_eqb_refl in Heq_edge. discriminate. }
-        { f_equal. apply IH.
-          - admit. (* WellFormed monotonicity on edge-list tail *)
-          - exact Htail. }
-      * destruct Hin as [Hhead | Htail].
-        { subst h. rewrite ce_eqb_refl in Heq_edge. discriminate. }
-        { apply IH.
-          - admit. (* WellFormed monotonicity on edge-list tail *)
-          - exact Htail. }
-Admitted.
-(* NOTE: The proof is structurally complete. The admits are for the
-   inductive step requiring WellFormed on the tail of the edge list.
-   The key insight (remove one + add one = net zero) is established
-   in the base case where h is the removed edge. *)
+      rewrite Hndot_old. reflexivity. }
+  lia.
+Qed.
 
 Theorem rename_preserves_LinkCountConsistent :
   forall g d old_name new_name target_ino,

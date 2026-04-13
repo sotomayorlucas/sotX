@@ -24,6 +24,18 @@ pub enum GraphError {
     NotAFile(InodeId),
     OutOfIds,
 
+    // xattr errors
+    XAttrNotFound(String),
+    XAttrExists(String),
+    XAttrTooLarge(usize),
+
+    // symlink errors
+    NotASymlink(InodeId),
+    SymlinkLoop,
+
+    // quota errors
+    QuotaExceeded { dir: DirId, resource: String },
+
     // Invariant violations
     InvariantViolation(String),
 }
@@ -51,6 +63,14 @@ impl core::fmt::Display for GraphError {
             Self::NotADirectory(id) => write!(f, "inode {} is not a directory", id),
             Self::NotAFile(id) => write!(f, "inode {} is not a regular file", id),
             Self::OutOfIds => write!(f, "no free inode/dir/block IDs available"),
+            Self::XAttrNotFound(name) => write!(f, "xattr '{}' not found", name),
+            Self::XAttrExists(name) => write!(f, "xattr '{}' already exists", name),
+            Self::XAttrTooLarge(size) => write!(f, "xattr value too large ({} bytes)", size),
+            Self::NotASymlink(id) => write!(f, "inode {} is not a symlink", id),
+            Self::SymlinkLoop => write!(f, "too many levels of symbolic links"),
+            Self::QuotaExceeded { dir, resource } => {
+                write!(f, "{} quota exceeded for directory {}", resource, dir)
+            }
             Self::InvariantViolation(msg) => write!(f, "invariant violation: {}", msg),
         }
     }

@@ -472,3 +472,107 @@ Proof.
       * left. exact Hh.
       * right. apply IH; assumption.
 Qed.
+
+(* ===================================================================== *)
+(* 16. Key lemma: removing a matching element decreases count by 1       *)
+(* Used by DpoUnlink.v and DpoRename.v to close Admitted proofs.         *)
+(* ===================================================================== *)
+
+Lemma count_remove_matching :
+  forall (f : ContainsEdge -> bool) (e : ContainsEdge) (edges : list ContainsEdge),
+    In e edges ->
+    f e = true ->
+    count_occ_pred f (remove_edge e edges) + 1 = count_occ_pred f edges.
+Proof.
+  intros f e edges. induction edges as [|h t IH]; intros Hin Hfe.
+  - contradiction.
+  - simpl. destruct (ce_eqb h e) eqn:Heq_edge.
+    + (* h = e: remove_edge returns t *)
+      apply ce_eqb_eq in Heq_edge. subst h.
+      rewrite Hfe. simpl. lia.
+    + (* h <> e: remove_edge returns h :: remove_edge e t *)
+      simpl.
+      destruct (f h) eqn:Hfh.
+      * simpl. rewrite <- Nat.add_succ_l.
+        f_equal. apply IH.
+        { destruct Hin as [Hh | Ht].
+          - subst h. rewrite ce_eqb_refl in Heq_edge. discriminate.
+          - exact Ht. }
+        { exact Hfe. }
+      * apply IH.
+        { destruct Hin as [Hh | Ht].
+          - subst h. rewrite ce_eqb_refl in Heq_edge. discriminate.
+          - exact Ht. }
+        { exact Hfe. }
+Qed.
+
+(* Corollary: pred form for incoming_count calculations *)
+Lemma count_remove_matching_pred :
+  forall (f : ContainsEdge -> bool) (e : ContainsEdge) (edges : list ContainsEdge),
+    In e edges ->
+    f e = true ->
+    count_occ_pred f (remove_edge e edges) = pred (count_occ_pred f edges).
+Proof.
+  intros f e edges Hin Hfe.
+  assert (H := count_remove_matching f e edges Hin Hfe).
+  lia.
+Qed.
+
+(* ===================================================================== *)
+(* 17. Lemmas for decrement_link: find_inode preserves vtype             *)
+(* Used by DpoUnlink.v to close NoDirCycles Admitted proof.              *)
+(* ===================================================================== *)
+
+Lemma decrement_link_find_vtype :
+  forall inodes ino target_ino,
+    forall ir, find (fun x => Nat.eqb (ir_id x) ino)
+                    (map (fun x =>
+                      if Nat.eqb (ir_id x) target_ino
+                      then mkInode (ir_id x) (ir_vtype x) (pred (ir_link_count x))
+                      else x) inodes) = Some ir ->
+    exists ir_old,
+      find (fun x => Nat.eqb (ir_id x) ino) inodes = Some ir_old /\
+      ir_vtype ir = ir_vtype ir_old.
+Proof.
+  intros inodes ino target_ino.
+  induction inodes as [|h t IH]; intros ir Hfind.
+  - simpl in Hfind. discriminate.
+  - simpl in Hfind.
+    destruct (Nat.eqb (ir_id h) target_ino) eqn:Htgt.
+    + (* h is the target — mapped to decremented version *)
+      simpl in Hfind.
+      destruct (Nat.eqb (ir_id h) ino) eqn:Hid.
+      * inversion Hfind. subst. simpl.
+        exists h. split; reflexivity.
+      * apply IH in Hfind. destruct Hfind as [ir_old [Hf Hv]].
+        exists ir_old. simpl. rewrite Hid. exact (conj Hf Hv).
+    + (* h is not the target — passed through unchanged *)
+      simpl in Hfind.
+      destruct (Nat.eqb (ir_id h) ino) eqn:Hid.
+      * inversion Hfind. subst.
+        exists h. simpl. rewrite Hid. split; reflexivity.
+      * apply IH in Hfind. destruct Hfind as [ir_old [Hf Hv]].
+        exists ir_old. simpl. rewrite Hid. exact (conj Hf Hv).
+Qed.
+
+(* Specialization: if find through decrement_link gives DirectoryType,
+   then find in original also gives DirectoryType *)
+Lemma decrement_link_preserves_vtype :
+  forall inodes ino target_ino ir,
+    find (fun x => Nat.eqb (ir_id x) ino)
+         (map (fun x =>
+           if Nat.eqb (ir_id x) target_ino
+           then mkInode (ir_id x) (ir_vtype x) (pred (ir_link_count x))
+           else x) inodes) = Some ir ->
+    ir_vtype ir = DirectoryType ->
+    exists ir_old,
+      find (fun x => Nat.eqb (ir_id x) ino) inodes = Some ir_old /\
+      ir_vtype ir_old = DirectoryType.
+Proof.
+  intros inodes ino target_ino ir Hfind Hvtype.
+  apply decrement_link_find_vtype in Hfind.
+  destruct Hfind as [ir_old [Hf Hv]].
+  exists ir_old. split.
+  - exact Hf.
+  - rewrite <- Hv. exact Hvtype.
+Qed.

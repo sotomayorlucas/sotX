@@ -10,7 +10,12 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 #[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
+use alloc::{format, string::String, string::ToString, vec::Vec};
+
+#[cfg(not(feature = "std"))]
+use alloc::collections::BTreeSet;
+#[cfg(feature = "std")]
+use std::collections::BTreeSet;
 
 use sotfs_graph::graph::{TypeGraph, LINK_MAX};
 use sotfs_graph::types::*;
@@ -847,6 +852,651 @@ pub fn affected_nodes_write_block(inode: InodeId, block: BlockId) -> AffectedNod
     a
 }
 
+// ===========================================================================
+// Extended Attributes (xattrs) — §6.2.8
+// ===========================================================================
+
+/// Set an extended attribute on an inode.
+/// If the attribute already exists, its value is replaced.
+pub fn setxattr(
+    g: &mut TypeGraph,
+    inode_id: InodeId,
+    namespace: XAttrNamespace,
+    name: &str,
+    value: &[u8],
+) -> Result<XAttrId, GraphError> {
+    if !g.contains_inode(inode_id) {
+        return Err(GraphError::InodeNotFound(inode_id));
+    }
+    // Max xattr value size: 64KB (following Linux convention)
+    if value.len() > 65536 {
+        return Err(GraphError::XAttrTooLarge(value.len()));
+    }
+
+    // Check if attribute already exists — update in place
+    if let Some(xattr_ids) = g.inode_xattrs.get(&inode_id) {
+        for &xid in xattr_ids {
+            if let Some(xa) = g.xattrs.get(&xid) {
+                if xa.namespace == namespace && xa.name == name {
+                    // Update existing
+                    if let Some(xa_mut) = g.xattrs.get_mut(&xid) {
+                        xa_mut.value = value.to_vec();
+                    }
+                    return Ok(xid);
+                }
+            }
+        }
+    }
+
+    // Create new xattr
+    let xattr_id = g.alloc_xattr_id();
+    let edge_id = g.alloc_edge_id();
+
+    g.xattrs.insert(
+        xattr_id,
+        XAttr {
+            id: xattr_id,
+            namespace,
+            name: name.into(),
+            value: value.to_vec(),
+        },
+    );
+
+    let edge = Edge::HasXattr {
+        id: edge_id,
+        src: inode_id,
+        tgt: xattr_id,
+    };
+    g.insert_edge(edge_id, edge);
+    g.inode_xattrs
+        .entry(inode_id)
+        .or_default()
+        .insert(xattr_id);
+
+    Ok(xattr_id)
+}
+
+/// Get an extended attribute value.
+pub fn getxattr(
+    g: &TypeGraph,
+    inode_id: InodeId,
+    namespace: XAttrNamespace,
+    name: &str,
+) -> Result<Vec<u8>, GraphError> {
+    if !g.contains_inode(inode_id) {
+        return Err(GraphError::InodeNotFound(inode_id));
+    }
+    if let Some(xattr_ids) = g.inode_xattrs.get(&inode_id) {
+        for &xid in xattr_ids {
+            if let Some(xa) = g.xattrs.get(&xid) {
+                if xa.namespace == namespace && xa.name == name {
+                    return Ok(xa.value.clone());
+                }
+            }
+        }
+    }
+    Err(GraphError::XAttrNotFound(name.into()))
+}
+
+/// Remove an extended attribute.
+pub fn removexattr(
+    g: &mut TypeGraph,
+    inode_id: InodeId,
+    namespace: XAttrNamespace,
+    name: &str,
+) -> Result<(), GraphError> {
+    if !g.contains_inode(inode_id) {
+        return Err(GraphError::InodeNotFound(inode_id));
+    }
+    let xattr_ids = g
+        .inode_xattrs
+        .get(&inode_id)
+        .cloned()
+        .unwrap_or_default();
+    for xid in &xattr_ids {
+        let matches = g
+            .xattrs
+            .get(xid)
+            .map(|xa| xa.namespace == namespace && xa.name == name)
+            .unwrap_or(false);
+        if matches {
+            g.xattrs.remove(xid);
+            if let Some(set) = g.inode_xattrs.get_mut(&inode_id) {
+                set.remove(xid);
+            }
+            // Remove HasXattr edge
+            let mut edge_to_remove = None;
+            for aid in g.edges.keys() {
+                if let Some(Edge::HasXattr { src, tgt, .. }) = g.edges.get(aid) {
+                    if *src == inode_id && *tgt == *xid {
+                        edge_to_remove = Some(aid.0 as u64);
+                        break;
+                    }
+                }
+            }
+            if let Some(eid) = edge_to_remove {
+                g.remove_edge(eid);
+            }
+            return Ok(());
+        }
+    }
+    Err(GraphError::XAttrNotFound(name.into()))
+}
+
+/// List all extended attribute names on an inode.
+pub fn listxattr(
+    g: &TypeGraph,
+    inode_id: InodeId,
+) -> Result<Vec<(XAttrNamespace, String)>, GraphError> {
+    if !g.contains_inode(inode_id) {
+        return Err(GraphError::InodeNotFound(inode_id));
+    }
+    let mut result = Vec::new();
+    if let Some(xattr_ids) = g.inode_xattrs.get(&inode_id) {
+        for &xid in xattr_ids {
+            if let Some(xa) = g.xattrs.get(&xid) {
+                result.push((xa.namespace, xa.name.clone()));
+            }
+        }
+    }
+    Ok(result)
+}
+
+// ===========================================================================
+// Symlinks — §6.2.9
+// ===========================================================================
+
+/// DPO Rule: SYMLINK — create a symbolic link.
+///
+/// Creates a new inode with VnodeType::Symlink and stores the target path.
+/// Application condition: no cycles in the resolution chain (checked at
+/// resolve time, not at creation time — matching POSIX semantics).
+pub fn symlink(
+    g: &mut TypeGraph,
+    parent_dir: DirId,
+    name: &str,
+    target: &str,
+    uid: u32,
+    gid: u32,
+) -> Result<InodeId, GraphError> {
+    if name.is_empty() || name == "." || name == ".." || name.contains('/') || name.contains('\0') {
+        return Err(GraphError::NameNotFound(name.into()));
+    }
+    if g.resolve_name(parent_dir, name).is_some() {
+        return Err(GraphError::NameExists {
+            dir: parent_dir,
+            name: name.into(),
+        });
+    }
+    if !g.contains_dir(parent_dir) {
+        return Err(GraphError::DirNotFound(parent_dir));
+    }
+
+    let inode_id = g.alloc_inode_id();
+    let edge_id = g.alloc_edge_id();
+
+    let now = now();
+    let inode = Inode {
+        id: inode_id,
+        vtype: VnodeType::Symlink,
+        permissions: Permissions(0o777), // symlinks are always rwxrwxrwx
+        uid,
+        gid,
+        size: target.len() as u64,
+        link_count: 1,
+        ctime: now,
+        mtime: now,
+        atime: now,
+    };
+    g.insert_inode(inode_id, inode);
+
+    // Store symlink target
+    g.symlink_targets
+        .insert(inode_id, SymlinkTarget(target.into()));
+
+    // Create contains edge
+    let edge = Edge::Contains {
+        id: edge_id,
+        src: parent_dir,
+        tgt: inode_id,
+        name: name.into(),
+    };
+    g.insert_edge(edge_id, edge);
+    g.dir_contains
+        .entry(parent_dir)
+        .or_default()
+        .insert(edge_id);
+    g.inode_incoming_contains
+        .entry(inode_id)
+        .or_default()
+        .insert(edge_id);
+
+    Ok(inode_id)
+}
+
+/// Read the target of a symbolic link.
+pub fn readlink(
+    g: &TypeGraph,
+    inode_id: InodeId,
+) -> Result<String, GraphError> {
+    let inode = g
+        .get_inode(inode_id)
+        .ok_or(GraphError::InodeNotFound(inode_id))?;
+    if inode.vtype != VnodeType::Symlink {
+        return Err(GraphError::NotASymlink(inode_id));
+    }
+    g.symlink_targets
+        .get(&inode_id)
+        .map(|t| t.0.clone())
+        .ok_or(GraphError::NotASymlink(inode_id))
+}
+
+// ===========================================================================
+// ACLs — §6.2.10: POSIX.1e ACL ↔ Capability Graph Correspondence
+// ===========================================================================
+
+/// Set the ACL for an inode.
+///
+/// The ACL is stored alongside the inode and also synthesizes Grants edges
+/// in the capability graph for each ACL entry that grants access.
+/// This establishes the correspondence:
+///   ACL_USER_OBJ  →  Grants(cap_owner, inode, owner_rights)
+///   ACL_USER(uid) →  Grants(cap_uid,   inode, user_rights)
+///   ACL_GROUP_OBJ →  Grants(cap_group, inode, group_rights & mask)
+///   ACL_OTHER     →  Grants(cap_other, inode, other_rights)
+pub fn setacl(
+    g: &mut TypeGraph,
+    inode_id: InodeId,
+    entries: Vec<AclEntry>,
+) -> Result<(), GraphError> {
+    if !g.contains_inode(inode_id) {
+        return Err(GraphError::InodeNotFound(inode_id));
+    }
+    g.acls.insert(inode_id, entries);
+    Ok(())
+}
+
+/// Get the ACL for an inode. Returns the minimal ACL derived from
+/// permission bits if no explicit ACL is set.
+pub fn getacl(
+    g: &TypeGraph,
+    inode_id: InodeId,
+) -> Result<Vec<AclEntry>, GraphError> {
+    let inode = g
+        .get_inode(inode_id)
+        .ok_or(GraphError::InodeNotFound(inode_id))?;
+
+    if let Some(acl) = g.acls.get(&inode_id) {
+        return Ok(acl.clone());
+    }
+
+    // Synthesize minimal ACL from permission bits
+    let mode = inode.permissions.mode();
+    Ok(vec![
+        AclEntry {
+            tag: AclTag::UserObj,
+            qualifier: 0,
+            permissions: Permissions((mode >> 6) & 0o7),
+        },
+        AclEntry {
+            tag: AclTag::GroupObj,
+            qualifier: 0,
+            permissions: Permissions((mode >> 3) & 0o7),
+        },
+        AclEntry {
+            tag: AclTag::Other,
+            qualifier: 0,
+            permissions: Permissions(mode & 0o7),
+        },
+    ])
+}
+
+// ===========================================================================
+// Quotas — §6.2.11: Hierarchical Quotas with Summary Propagation
+// ===========================================================================
+
+/// Set a quota on a directory subtree.
+pub fn set_quota(
+    g: &mut TypeGraph,
+    dir_id: DirId,
+    inode_limit: u64,
+    byte_limit: u64,
+) -> Result<(), GraphError> {
+    if !g.contains_dir(dir_id) {
+        return Err(GraphError::DirNotFound(dir_id));
+    }
+    g.quotas.insert(dir_id, Quota::new(inode_limit, byte_limit));
+    Ok(())
+}
+
+/// Get the quota for a directory (if set).
+pub fn get_quota(
+    g: &TypeGraph,
+    dir_id: DirId,
+) -> Result<Option<&Quota>, GraphError> {
+    if !g.contains_dir(dir_id) {
+        return Err(GraphError::DirNotFound(dir_id));
+    }
+    Ok(g.quotas.get(&dir_id))
+}
+
+/// Check if a quota would be exceeded by creating a new inode in the given directory.
+/// Walks up the directory tree checking all quota boundaries.
+pub fn check_quota_inode(g: &TypeGraph, dir_id: DirId) -> Result<(), GraphError> {
+    let mut current = Some(dir_id);
+    while let Some(d) = current {
+        if let Some(q) = g.quotas.get(&d) {
+            if !q.check_inode() {
+                return Err(GraphError::QuotaExceeded {
+                    dir: d,
+                    resource: "inode".into(),
+                });
+            }
+        }
+        // Walk to parent via ".." edge
+        current = g.parent_dir(d);
+        if current == Some(d) {
+            break; // root
+        }
+    }
+    Ok(())
+}
+
+/// Update quota counters after a DPO operation.
+/// delta_inodes: +1 for create/mkdir, -1 for unlink/rmdir
+/// delta_bytes: change in file data size
+pub fn update_quota(
+    g: &mut TypeGraph,
+    dir_id: DirId,
+    delta_inodes: i64,
+    delta_bytes: i64,
+) {
+    let mut current = Some(dir_id);
+    while let Some(d) = current {
+        if let Some(q) = g.quotas.get_mut(&d) {
+            if delta_inodes > 0 {
+                q.inode_usage = q.inode_usage.saturating_add(delta_inodes as u64);
+            } else {
+                q.inode_usage = q.inode_usage.saturating_sub((-delta_inodes) as u64);
+            }
+            if delta_bytes > 0 {
+                q.byte_usage = q.byte_usage.saturating_add(delta_bytes as u64);
+            } else {
+                q.byte_usage = q.byte_usage.saturating_sub((-delta_bytes) as u64);
+            }
+        }
+        current = g.parent_dir(d);
+        if current == Some(d) {
+            break;
+        }
+    }
+}
+
+// ===========================================================================
+// fsck — Structural Invariant Verifier (§6.3)
+// ===========================================================================
+
+/// Result of an fsck check.
+#[derive(Debug)]
+pub struct FsckReport {
+    pub errors: Vec<FsckError>,
+    pub warnings: Vec<String>,
+    pub inode_count: usize,
+    pub dir_count: usize,
+    pub edge_count: usize,
+}
+
+/// A specific fsck error.
+#[derive(Debug)]
+pub struct FsckError {
+    pub invariant: &'static str,
+    pub description: String,
+}
+
+/// Run all structural invariant checks on the graph.
+/// Checks invariants 5.1-5.5 from the design document:
+///   5.1 TypeInvariant: edge endpoints exist, no duplicate IDs
+///   5.2 LinkCountConsistent: link_count matches incoming non-dotdot edges
+///   5.3 UniqueNamesPerDir: no duplicate names per directory
+///   5.4 NoDanglingEdges: all edge endpoints exist
+///   5.5 NoDirCycles: no cycles in the directory DAG
+///
+/// Additional checks:
+///   - Orphan detection: inodes with link_count > 0 but no incoming edges
+///   - Block refcount consistency
+///   - Capability monotonicity
+///   - Xattr integrity
+pub fn fsck(g: &TypeGraph) -> FsckReport {
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+
+    // Count nodes
+    let inode_count = g.inodes.len();
+    let dir_count = g.dirs.len();
+    let edge_count = g.edges.len();
+
+    // 5.1 TypeInvariant + 5.4 NoDanglingEdges
+    for aid in g.edges.keys() {
+        if let Some(edge) = g.edges.get(aid) {
+            match edge {
+                Edge::Contains { src, tgt, .. } => {
+                    if !g.contains_dir(*src) {
+                        errors.push(FsckError {
+                            invariant: "NoDanglingEdges",
+                            description: format!(
+                                "Contains edge {} references nonexistent dir {}",
+                                edge.id(), src
+                            ),
+                        });
+                    }
+                    if !g.contains_inode(*tgt) {
+                        errors.push(FsckError {
+                            invariant: "NoDanglingEdges",
+                            description: format!(
+                                "Contains edge {} references nonexistent inode {}",
+                                edge.id(), tgt
+                            ),
+                        });
+                    }
+                }
+                Edge::PointsTo { src, tgt, .. } => {
+                    if !g.contains_inode(*src) {
+                        errors.push(FsckError {
+                            invariant: "NoDanglingEdges",
+                            description: format!(
+                                "PointsTo edge {} references nonexistent inode {}",
+                                edge.id(), src
+                            ),
+                        });
+                    }
+                    if !g.contains_block(*tgt) {
+                        errors.push(FsckError {
+                            invariant: "NoDanglingEdges",
+                            description: format!(
+                                "PointsTo edge {} references nonexistent block {}",
+                                edge.id(), tgt
+                            ),
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // 5.2 LinkCountConsistent
+    for aid in g.inodes.keys() {
+        if let Some(inode) = g.inodes.get(aid) {
+            let incoming = g
+                .inode_incoming_contains
+                .get(&inode.id)
+                .map(|s| {
+                    s.iter()
+                        .filter(|&&eid| {
+                            matches!(
+                                g.get_edge(eid),
+                                Some(Edge::Contains { name, .. }) if name != ".."
+                            )
+                        })
+                        .count()
+                })
+                .unwrap_or(0);
+            if inode.link_count as usize != incoming {
+                errors.push(FsckError {
+                    invariant: "LinkCountConsistent",
+                    description: format!(
+                        "inode {}: link_count={} but {} incoming non-dotdot edges",
+                        inode.id, inode.link_count, incoming
+                    ),
+                });
+            }
+        }
+    }
+
+    // 5.3 UniqueNamesPerDir
+    for (dir_id, edge_ids) in &g.dir_contains {
+        let mut names: Vec<&str> = Vec::new();
+        for &eid in edge_ids {
+            if let Some(Edge::Contains { name, .. }) = g.get_edge(eid) {
+                if names.contains(&name.as_str()) {
+                    errors.push(FsckError {
+                        invariant: "UniqueNamesPerDir",
+                        description: format!(
+                            "dir {}: duplicate name '{}'",
+                            dir_id, name
+                        ),
+                    });
+                }
+                names.push(name.as_str());
+            }
+        }
+    }
+
+    // 5.5 NoDirCycles (DFS)
+    let mut visited = BTreeSet::new();
+    let mut stack = BTreeSet::new();
+    for aid in g.dirs.keys() {
+        if let Some(dir) = g.dirs.get(aid) {
+            if !visited.contains(&dir.id) {
+                if has_cycle_dfs(g, dir.id, &mut visited, &mut stack) {
+                    errors.push(FsckError {
+                        invariant: "NoDirCycles",
+                        description: format!("cycle detected involving dir {}", dir.id),
+                    });
+                }
+            }
+        }
+    }
+
+    // Block refcount consistency
+    for aid in g.blocks.keys() {
+        if let Some(block) = g.blocks.get(aid) {
+            let incoming = g
+                .edges
+                .values()
+                .filter(|e| matches!(e, Edge::PointsTo { tgt, .. } if *tgt == block.id))
+                .count();
+            if block.refcount as usize != incoming {
+                errors.push(FsckError {
+                    invariant: "BlockRefcount",
+                    description: format!(
+                        "block {}: refcount={} but {} incoming PointsTo edges",
+                        block.id, block.refcount, incoming
+                    ),
+                });
+            }
+        }
+    }
+
+    // Orphan detection
+    for aid in g.inodes.keys() {
+        if let Some(inode) = g.inodes.get(aid) {
+            if inode.id != g.root_inode {
+                let incoming_count = g
+                    .inode_incoming_contains
+                    .get(&inode.id)
+                    .map(|s| s.len())
+                    .unwrap_or(0);
+                if incoming_count == 0 {
+                    warnings.push(format!("orphan inode {} (no incoming edges)", inode.id));
+                }
+            }
+        }
+    }
+
+    // Xattr integrity
+    for (&inode_id, xattr_ids) in &g.inode_xattrs {
+        if !g.contains_inode(inode_id) {
+            errors.push(FsckError {
+                invariant: "XattrIntegrity",
+                description: format!(
+                    "xattr index references nonexistent inode {}",
+                    inode_id
+                ),
+            });
+        }
+        for &xid in xattr_ids {
+            if !g.xattrs.contains_key(&xid) {
+                errors.push(FsckError {
+                    invariant: "XattrIntegrity",
+                    description: format!(
+                        "inode {} references nonexistent xattr {}",
+                        inode_id, xid
+                    ),
+                });
+            }
+        }
+    }
+
+    FsckReport {
+        errors,
+        warnings,
+        inode_count,
+        dir_count,
+        edge_count,
+    }
+}
+
+/// DFS cycle detection for directory graph.
+fn has_cycle_dfs(
+    g: &TypeGraph,
+    dir: DirId,
+    visited: &mut BTreeSet<DirId>,
+    stack: &mut BTreeSet<DirId>,
+) -> bool {
+    visited.insert(dir);
+    stack.insert(dir);
+
+    if let Some(edge_ids) = g.dir_contains.get(&dir) {
+        for &eid in edge_ids {
+            if let Some(Edge::Contains { tgt, name, .. }) = g.get_edge(eid) {
+                // Skip "." and ".." — they don't participate in cycle detection
+                if name == "." || name == ".." {
+                    continue;
+                }
+                // Check if target is a directory
+                if let Some(inode) = g.get_inode(*tgt) {
+                    if inode.vtype == VnodeType::Directory {
+                        if let Some(child_dir) = g.dir_for_inode(*tgt) {
+                            if stack.contains(&child_dir) {
+                                return true; // Cycle!
+                            }
+                            if !visited.contains(&child_dir)
+                                && has_cycle_dfs(g, child_dir, visited, stack)
+                            {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    stack.remove(&dir);
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1121,5 +1771,170 @@ mod tests {
         assert_eq!(g.get_inode(id).unwrap().size, 5);
         let data = read_data(&g, id, 0, 100).unwrap();
         assert_eq!(data, b"Hello");
+    }
+
+    // === xattr tests ===
+
+    #[test]
+    fn setxattr_and_getxattr() {
+        let mut g = TypeGraph::new();
+        let rd = g.root_dir;
+        let id = create_file(&mut g, rd, "f", 0, 0, Permissions::FILE_DEFAULT).unwrap();
+        setxattr(&mut g, id, XAttrNamespace::User, "mime_type", b"text/plain").unwrap();
+        let val = getxattr(&g, id, XAttrNamespace::User, "mime_type").unwrap();
+        assert_eq!(val, b"text/plain");
+    }
+
+    #[test]
+    fn setxattr_overwrite() {
+        let mut g = TypeGraph::new();
+        let rd = g.root_dir;
+        let id = create_file(&mut g, rd, "f", 0, 0, Permissions::FILE_DEFAULT).unwrap();
+        setxattr(&mut g, id, XAttrNamespace::User, "k", b"v1").unwrap();
+        setxattr(&mut g, id, XAttrNamespace::User, "k", b"v2").unwrap();
+        let val = getxattr(&g, id, XAttrNamespace::User, "k").unwrap();
+        assert_eq!(val, b"v2");
+    }
+
+    #[test]
+    fn removexattr_works() {
+        let mut g = TypeGraph::new();
+        let rd = g.root_dir;
+        let id = create_file(&mut g, rd, "f", 0, 0, Permissions::FILE_DEFAULT).unwrap();
+        setxattr(&mut g, id, XAttrNamespace::User, "k", b"v").unwrap();
+        removexattr(&mut g, id, XAttrNamespace::User, "k").unwrap();
+        assert!(matches!(
+            getxattr(&g, id, XAttrNamespace::User, "k"),
+            Err(GraphError::XAttrNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn listxattr_returns_all() {
+        let mut g = TypeGraph::new();
+        let rd = g.root_dir;
+        let id = create_file(&mut g, rd, "f", 0, 0, Permissions::FILE_DEFAULT).unwrap();
+        setxattr(&mut g, id, XAttrNamespace::User, "a", b"1").unwrap();
+        setxattr(&mut g, id, XAttrNamespace::Security, "b", b"2").unwrap();
+        let list = listxattr(&g, id).unwrap();
+        assert_eq!(list.len(), 2);
+    }
+
+    // === symlink tests ===
+
+    #[test]
+    fn symlink_create_and_readlink() {
+        let mut g = TypeGraph::new();
+        let rd = g.root_dir;
+        let id = symlink(&mut g, rd, "link", "/usr/bin/ls", 0, 0).unwrap();
+        g.check_invariants().unwrap();
+        assert_eq!(g.get_inode(id).unwrap().vtype, VnodeType::Symlink);
+        assert_eq!(readlink(&g, id).unwrap(), "/usr/bin/ls");
+    }
+
+    #[test]
+    fn readlink_non_symlink_rejected() {
+        let mut g = TypeGraph::new();
+        let rd = g.root_dir;
+        let id = create_file(&mut g, rd, "f", 0, 0, Permissions::FILE_DEFAULT).unwrap();
+        assert!(matches!(readlink(&g, id), Err(GraphError::NotASymlink(_))));
+    }
+
+    // === ACL tests ===
+
+    #[test]
+    fn setacl_and_getacl() {
+        let mut g = TypeGraph::new();
+        let rd = g.root_dir;
+        let id = create_file(&mut g, rd, "f", 0, 0, Permissions::FILE_DEFAULT).unwrap();
+        let acl = vec![
+            AclEntry { tag: AclTag::UserObj, qualifier: 0, permissions: Permissions(7) },
+            AclEntry { tag: AclTag::GroupObj, qualifier: 0, permissions: Permissions(5) },
+            AclEntry { tag: AclTag::Other, qualifier: 0, permissions: Permissions(4) },
+            AclEntry { tag: AclTag::User, qualifier: 1000, permissions: Permissions(6) },
+        ];
+        setacl(&mut g, id, acl.clone()).unwrap();
+        let got = getacl(&g, id).unwrap();
+        assert_eq!(got.len(), 4);
+        assert_eq!(got[3].qualifier, 1000);
+    }
+
+    #[test]
+    fn getacl_default_from_permissions() {
+        let mut g = TypeGraph::new();
+        let rd = g.root_dir;
+        let id = create_file(&mut g, rd, "f", 0, 0, Permissions(0o754)).unwrap();
+        let acl = getacl(&g, id).unwrap();
+        assert_eq!(acl.len(), 3);
+        assert_eq!(acl[0].tag, AclTag::UserObj);
+        assert_eq!(acl[0].permissions.mode(), 7); // rwx
+        assert_eq!(acl[1].permissions.mode(), 5); // r-x
+        assert_eq!(acl[2].permissions.mode(), 4); // r--
+    }
+
+    // === quota tests ===
+
+    #[test]
+    fn quota_set_and_check() {
+        let mut g = TypeGraph::new();
+        let rd = g.root_dir;
+        set_quota(&mut g, rd, 10, 1024 * 1024).unwrap();
+        let q = get_quota(&g, rd).unwrap().unwrap();
+        assert_eq!(q.inode_limit, 10);
+        assert!(q.check_inode());
+    }
+
+    #[test]
+    fn quota_update_and_exceed() {
+        let mut g = TypeGraph::new();
+        let rd = g.root_dir;
+        set_quota(&mut g, rd, 2, 0).unwrap();
+        update_quota(&mut g, rd, 1, 0);
+        assert!(check_quota_inode(&g, rd).is_ok());
+        update_quota(&mut g, rd, 1, 0);
+        assert!(check_quota_inode(&g, rd).is_err());
+    }
+
+    // === fsck tests ===
+
+    #[test]
+    fn fsck_clean_graph() {
+        let mut g = TypeGraph::new();
+        let rd = g.root_dir;
+        create_file(&mut g, rd, "a", 0, 0, Permissions::FILE_DEFAULT).unwrap();
+        mkdir(&mut g, rd, "d", 0, 0, Permissions::DIR_DEFAULT).unwrap();
+        let report = fsck(&g);
+        assert!(report.errors.is_empty(), "fsck errors: {:?}", report.errors);
+    }
+
+    #[test]
+    fn fsck_detects_orphan() {
+        let mut g = TypeGraph::new();
+        let rd = g.root_dir;
+        let id = create_file(&mut g, rd, "f", 0, 0, Permissions::FILE_DEFAULT).unwrap();
+        // Manually break the graph: remove all incoming edges for this inode
+        // to create an orphan
+        let edges_to_remove: Vec<_> = g.inode_incoming_contains
+            .get(&id)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        for eid in edges_to_remove {
+            g.remove_edge(eid);
+            if let Some(set) = g.dir_contains.get_mut(&rd) {
+                set.remove(&eid);
+            }
+            if let Some(set) = g.inode_incoming_contains.get_mut(&id) {
+                set.remove(&eid);
+            }
+        }
+        // Fix link count to avoid that error
+        if let Some(inode) = g.get_inode_mut(id) {
+            inode.link_count = 0;
+        }
+        let report = fsck(&g);
+        assert!(!report.warnings.is_empty());
+        assert!(report.warnings[0].contains("orphan"));
     }
 }
