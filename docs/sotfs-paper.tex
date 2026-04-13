@@ -1118,8 +1118,110 @@ fsck tools reconstruct implicit graph structure from on-disk metadata, \sotfs{}
 reads the invariants directly from the typed graph---a direct application of
 Courcelle's theorem (\S8.1) to MSO-definable properties.
 
-The updated test suite now comprises \textbf{147 tests} across the workspace
-(was 132), with 12 new tests covering the five features above.  All pass.
+% =============================================================================
+\subsection{Observability and Debugging}
+% =============================================================================
+
+\textbf{Graph Export.}  The \texttt{export} module (\texttt{sotfs-graph/src/export.rs})
+provides three serialization formats for the type graph:
+\begin{itemize}[nosep]
+\item \textbf{GraphViz DOT}: color-coded nodes by type (Inode=lightblue,
+  Directory=gold, Capability=green), styled edges by type.
+\item \textbf{D3.js JSON}: force-directed graph format for interactive
+  browser-based exploration.
+\item \textbf{Graph Hunter temporal multigraph}: timestamped \texttt{add\_node}/\texttt{add\_edge}
+  events sorted by inode \texttt{ctime}, enabling temporal replay of the
+  filesystem's construction history.
+\end{itemize}
+
+\textbf{Provenance Queries.}  An append-only \texttt{ProvenanceLog} records every
+DPO rule application with \texttt{(timestamp, cap\_id, inode\_id, domain\_id, op)}.
+Six MSO-style query functions expose the log:
+\begin{enumerate}[nosep]
+\item \texttt{caps\_for\_inode\_in\_window(ino, t0, t1)}: which capabilities
+  accessed file~F in time window~T?
+\item \texttt{inodes\_touched\_by\_cap(cap, t0, t1)}: what did capability~C access?
+\item \texttt{provenance\_chain(ino)}: complete audit trail for an inode.
+\item \texttt{ops\_by\_domain(dom, t0, t1)}: forensics for a compromised domain.
+\item \texttt{burst\_detect(ino, window)}: sliding-window spike detection
+  (ransomware signature).
+\item \texttt{activity\_summary(t0, t1)}: distinct caps, inodes, and total ops.
+\end{enumerate}
+
+\textbf{Deception Profiles.}  Seven pre-built profiles generate convincing
+filesystem illusions:
+
+\begin{center}\small
+\begin{tabular}{llp{5cm}}
+\toprule
+\textbf{Profile} & \textbf{Target} & \textbf{Key Honeypots} \\
+\midrule
+ubuntu-web  & Apache/MySQL  & \texttt{.bash\_history}, \texttt{.env}, \texttt{authorized\_keys} \\
+centos-db   & PostgreSQL    & \texttt{pg\_hba.conf}, \texttt{.pgpass}, \texttt{redis.conf} \\
+iot-camera  & Hikvision     & \texttt{config.ini}, \texttt{/etc/passwd} \\
+windows-smb & Windows SMB   & \texttt{passwords.xlsx}, \texttt{vpn-credentials.txt} \\
+k8s-node    & Kubernetes    & \texttt{admin.conf}, \texttt{etcd/ca.key}, SA \texttt{token} \\
+cicd-runner & GitHub Actions & AWS \texttt{credentials}, \texttt{hosts.yml}, \texttt{.env} \\
+ad-dc       & Active Directory & \texttt{ntds.dit}, \texttt{SAM}, \texttt{krbtgt\_hash.txt} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Indistinguishability Game.}  We formalize the assumption that an
+attacker cannot distinguish $D_{FS}(G)$ from $G$ without triggering curvature
+alerts as a game-theoretic security game.  The \texttt{check\_indistinguishability()}
+function computes the attacker's advantage as the sum of three distinguishability
+channels: structural (invariant violation, $+0.5$), curvature deviation ($+0.2$),
+and timing side-channel ($+0.1$).  Passthrough projections achieve advantage~$=0$.
+
+\textbf{Timing Calibration.}  \texttt{calibrate\_timing()} measures the ratio of
+projected vs.\ real operation latency.  If the ratio deviates by $>10\%$
+(e.g., restrict projections are faster due to smaller graph), the system
+recommends calibrated delay injection to mask the timing signature.
+
+\textbf{Honeypot-Provenance Integration.}  Every access to a tripwire file
+generates a \texttt{HoneypotAlert} with severity
+(Low/Medium/High/Critical) and full forensic context
+(\texttt{source\_cap}, \texttt{domain\_id}, \texttt{timestamp}).
+
+% =============================================================================
+\subsection{SquirrelFS Comparison}
+% =============================================================================
+
+SquirrelFS~\cite{kadekodi2024} is the closest related work: both systems use
+Rust's type system for crash-consistency guarantees.  We provide a direct
+comparison benchmark (\texttt{comparison\_bench.rs}) with four workloads:
+\begin{itemize}[nosep]
+\item \textbf{Workload~A} (metadata): create/mkdir/unlink/rename at
+  100/1K/10K scale---matches SquirrelFS Figure~5.
+\item \textbf{Workload~B} (data I/O): write/read at 64B/4K/64K/1M---matches Figure~6.
+\item \textbf{Workload~C} (crash consistency): invariant check + fsck +
+  transaction commit/rollback overhead.
+\item \textbf{Workload~D} (verification): curvature (full vs.\ incremental),
+  deception projection, fsck at 1K nodes.
+\end{itemize}
+
+Key differentiator: SquirrelFS provides compile-time crash ordering (typestate
+on NVM operations) but no runtime structural monitoring.  \sotfs{} provides
+multi-layer verification (typestate + TLA+ + Coq) plus runtime anomaly
+detection (curvature) and active deception---at the cost of runtime invariant
+checking overhead.
+
+% =============================================================================
+\subsection{Artifact Evaluation}
+% =============================================================================
+
+A Docker-based artifact evaluation package (\texttt{artifact/}) reproduces all
+paper tables.  \texttt{docker build -t sotfs-artifact artifact/} followed by
+\texttt{docker run --rm sotfs-artifact full} executes: (1)~the full test suite
+(165+ tests), (2)~all five benchmark suites (DPO ops, WAL index, monitor
+scaling, real-world scale, SquirrelFS comparison), and (3)~TLA+ model checking.
+A Nix flake alternative is provided for deterministic builds.
+
+The test suite now comprises \textbf{165+ tests} across the workspace,
+with 42 DPO operation unit tests, 50 monitor tests (including 11 deception
+tests), 13 adversarial scenarios, 10 property-based tests ($10^4$ iterations
+each), and 6 crash-consistency integration tests.  All pass.
 
 % =============================================================================
 \section{Conclusion and Future Work}
@@ -1135,14 +1237,20 @@ The Coq mechanization (6 DPO rules, 7 modules, $\sim$2{,}000 LOC) provides
 unbounded correctness guarantees for the three most-used operations
 (\texttt{create\_file}, \texttt{unlink}, \texttt{rename}) and partial proofs
 for the remaining three (\texttt{mkdir}, \texttt{link}, \texttt{rmdir}).
-Combined with TLA+ bounded model checking (14 specifications, 20+ invariants)
-and 147 Rust tests, \sotfs{} achieves multi-layer verification spanning formal
-proofs, model checking, typestate, concurrency testing, and property-based testing.
+Combined with TLA+ bounded model checking (14 specifications, 20+ invariants),
+165+ Rust tests, 7 deception profiles with game-theoretic indistinguishability
+analysis, and a reproducible artifact evaluation package, \sotfs{} achieves
+end-to-end verification from formal proofs through runtime monitoring to
+active deception.
 
-The immediate next steps are: (1) complete the \textsc{Rmdir} Coq proof by
-adding \textsc{NoHardLinkToDir} to \textsc{WellFormed}; (2) write Coq proofs
-for cross-directory rename; (3) formalize xattr and symlink invariant preservation;
-(4) Verus integration for verified Rust code extraction.
+The DPO framework is extensible: a tutorial example (\texttt{examples/custom\_dpo\_rule.rs})
+demonstrates how to implement a new rule in five steps (preconditions, mutation,
+affected nodes, tests, Coq proof), enabling community contributions.
+
+The immediate next steps are: (1) complete the \textsc{Rmdir} Coq proof;
+(2) Coq proofs for cross-directory rename;
+(3) benchmarks at $10^5$--$10^6$ node scale on real NVM hardware;
+(4) Verus integration for verified Rust extraction.
 
 % =============================================================================
 % References

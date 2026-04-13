@@ -1154,22 +1154,35 @@ by $\pi_\sigma$.
 \subsection{Deception Profiles}
 \label{sec:deception-profiles}
 
-\sotx{} ships with four deception profiles:
+\sotx{} ships with seven deception profiles, each defining honeypot files,
+tripwire directories, and tripwire filenames:
 
-\begin{enumerate}
-\item \textbf{Ubuntu Web Server:} Projects a fake
-  \texttt{/var/www/html} with honeypot PHP files, a decoy
-  \texttt{/etc/shadow}, and a fake \texttt{.ssh/authorized\_keys}.
+\begin{center}\small
+\begin{tabular}{llp{5.5cm}}
+\toprule
+\textbf{Profile} & \textbf{Target} & \textbf{Key Honeypots} \\
+\midrule
+ubuntu-web  & Apache/MySQL/PHP & \texttt{.bash\_history}, \texttt{.ssh/authorized\_keys}, \texttt{.env} \\
+centos-db   & PostgreSQL/Redis & \texttt{pg\_hba.conf}, \texttt{.pgpass}, \texttt{redis.conf} \\
+iot-camera  & Hikvision IP cam & \texttt{config.ini}, \texttt{/etc/passwd} \\
+windows-smb & Windows SMB      & \texttt{passwords.xlsx}, \texttt{vpn-credentials.txt} \\
+k8s-node    & Kubernetes 1.29  & \texttt{admin.conf}, \texttt{etcd/ca.key}, SA \texttt{token} \\
+cicd-runner & GitHub Actions   & AWS \texttt{credentials}, Docker \texttt{config.json}, GH \texttt{hosts.yml} \\
+ad-dc       & Active Directory & \texttt{ntds.dit}, \texttt{SAM}, \texttt{krbtgt\_hash.txt}, \texttt{logon.bat} \\
+\bottomrule
+\end{tabular}
+\end{center}
 
-\item \textbf{CentOS Database:} Projects fake MySQL data directories,
-  decoy \texttt{/etc/my.cnf}, and honeypot backup files.
+Each access to a tripwire file generates a \texttt{HoneypotAlert} with
+severity (Low$\to$Medium$\to$High$\to$Critical) and full forensic context
+(\texttt{source\_cap}, \texttt{domain\_id}, \texttt{timestamp}), integrated
+into the provenance log for incident response.
 
-\item \textbf{IoT Camera:} Minimal filesystem with fake firmware
-  update endpoints and decoy RTSP configuration.
-
-\item \textbf{Windows File Server:} Projects SMB shares with honeypot
-  documents and fake Active Directory configuration files.
-\end{enumerate}
+A game-theoretic \textbf{indistinguishability analysis}
+(\texttt{check\_indistinguishability()}) bounds the attacker's advantage
+from three channels: structural (invariant violation), curvature deviation,
+and timing side-channel.  Passthrough projections achieve advantage~$= 0$;
+fabricated projections with timing calibration achieve advantage~$< 0.3$.
 
 \subsection{Categorical Framework}
 \label{sec:deception-categories}

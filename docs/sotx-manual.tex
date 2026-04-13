@@ -1296,25 +1296,28 @@ The pipeline processes four stages:
 
 \section{Deception Profiles}
 
-The engine includes five built-in profiles:
+The engine includes seven graph-native deception profiles, each defining
+honeypot files, tripwire directories, and tripwire filenames:
 
 \begin{table}[H]
 \centering
-\caption{Built-in deception profiles.}
-\begin{tabularx}{\textwidth}{l X}
+\caption{Built-in deception profiles (filesystem layer).}
+\begin{tabularx}{\textwidth}{l l X}
 \toprule
-\textbf{Profile} & \textbf{Description} \\
+\textbf{Profile} & \textbf{Target} & \textbf{Key Honeypots} \\
 \midrule
-Ubuntu 22.04  & Emulates a standard Ubuntu webserver with Apache \\
-Debian        & Mimics Debian stable with default packages \\
-CentOS        & Presents as a CentOS/RHEL database server \\
-FreeBSD       & Emulates a FreeBSD server \\
-Alpine        & Lightweight Alpine Linux container \\
+ubuntu-web  & Apache/MySQL   & \texttt{.bash\_history}, \texttt{.ssh/authorized\_keys}, \texttt{.env} \\
+centos-db   & PostgreSQL/Redis & \texttt{pg\_hba.conf}, \texttt{.pgpass}, \texttt{redis.conf} \\
+iot-camera  & Hikvision IP cam & \texttt{config.ini}, \texttt{/etc/passwd} \\
+windows-smb & Windows SMB    & \texttt{passwords.xlsx}, \texttt{vpn-credentials.txt} \\
+k8s-node    & Kubernetes 1.29 & \texttt{admin.conf}, \texttt{etcd/ca.key}, SA \texttt{token} \\
+cicd-runner & GitHub Actions & AWS \texttt{credentials}, Docker \texttt{config.json}, GH \texttt{hosts.yml} \\
+ad-dc       & Active Directory & \texttt{ntds.dit}, \texttt{SAM}, \texttt{krbtgt\_hash.txt} \\
 \bottomrule
 \end{tabularx}
 \end{table}
 
-Each profile defines consistent responses for:
+Each profile also defines consistent OS-level responses for:
 \begin{itemize}[leftmargin=1.4em]
   \item \texttt{uname} syscall (kernel version, hostname, architecture).
   \item \texttt{/proc/version} and \texttt{/proc/cpuinfo} contents.
@@ -1322,6 +1325,15 @@ Each profile defines consistent responses for:
   \item File system layout and installed packages.
   \item Network service banners (SSH, HTTP, etc.).
 \end{itemize}
+
+\textbf{Honeypot-Provenance Integration.}  Every access to a tripwire file
+generates a \texttt{HoneypotAlert} with severity (Low/Medium/High/Critical)
+and full forensic context (\texttt{source\_cap}, \texttt{domain\_id},
+\texttt{timestamp}), fed into the provenance log for incident response.
+
+\textbf{Indistinguishability Game.}  A game-theoretic analysis bounds the
+attacker's advantage from structural, curvature, and timing channels.
+Passthrough projections achieve advantage~$= 0$.
 
 \section{Live Migration}
 

@@ -570,4 +570,186 @@ Fsync   & ---           & --- & Force WAL flush \\
 $\eta: \mathrm{Id} \Rightarrow \mathrm{WAL} \circ \mathrm{Id}$ (persistence),
 $\pi_D: \mathrm{Id} \Rightarrow D_{FS}$ (projection).
 
+% ==============================================================================
+\chapter{Observability and Debugging}
+
+\section{Graph Export Formats}
+
+The \texttt{export} module (\texttt{sotfs-graph/src/export.rs}) provides three serialization formats:
+
+\begin{description}
+\item[GraphViz DOT] \texttt{to\_dot(graph, style)} produces a DOT string with
+  color-coded nodes (Inode=lightblue/gold/plum, Directory=lightyellow,
+  Capability=lightgreen, Block=lightcoral) and styled edges (contains=solid,
+  grants=dashed green, delegates=dotted purple, pointsTo=gray, hasXattr=orange).
+  Configurable via \texttt{DotStyle}: show\_sizes, show\_rights, show\_blocks, show\_xattrs.
+
+\item[D3.js JSON] \texttt{to\_d3\_json(graph)} produces
+  \texttt{\{"nodes":[...], "links":[...]\}} with typed metadata per node/link.
+  Import into any D3 force-directed layout for interactive exploration.
+
+\item[Graph Hunter Temporal] \texttt{to\_graph\_hunter(graph)} produces a
+  timestamped event stream: each node/edge creation carries its inode
+  \texttt{ctime}, sorted chronologically. Graph Hunter can replay the
+  filesystem's construction as an animated temporal multigraph.
+\end{description}
+
+\texttt{stats(graph)} returns a \texttt{GraphStats} struct: inode/dir/cap/block/version/edge
+counts, file count, symlink count, xattr count, total bytes, max link count,
+max directory entries, and estimated depth.
+
+\section{Provenance Log and MSO Queries}
+
+\texttt{ProvenanceLog} is an append-only log of DPO rule applications.
+Each entry records: \texttt{timestamp}, \texttt{op} (Create/Write/Unlink/...),
+\texttt{inode\_id}, \texttt{cap\_id}, \texttt{domain\_id}, \texttt{detail}.
+
+Six query functions:
+\begin{enumerate}
+\item \texttt{caps\_for\_inode\_in\_window(ino, t0, t1)} --- capabilities that touched an inode
+\item \texttt{inodes\_touched\_by\_cap(cap, t0, t1)} --- inodes accessed by a capability
+\item \texttt{provenance\_chain(ino)} --- full audit trail (chronological)
+\item \texttt{ops\_by\_domain(dom, t0, t1)} --- forensics for compromised domains
+\item \texttt{burst\_detect(ino, window\_size)} --- sliding-window spike detection
+\item \texttt{activity\_summary(t0, t1)} --- distinct caps/inodes/ops count
+\end{enumerate}
+
+% ==============================================================================
+\chapter{Deception Profiles and Security}
+
+\section{Seven Pre-Built Profiles}
+
+\begin{center}\small
+\begin{tabular}{lp{3.5cm}p{5.5cm}}
+\toprule
+\textbf{Profile} & \textbf{Target System} & \textbf{Key Honeypots} \\
+\midrule
+ubuntu-web  & Ubuntu 22.04 Apache/MySQL & \texttt{.bash\_history}, \texttt{.ssh/authorized\_keys}, \texttt{.env} \\
+centos-db   & CentOS 8 PostgreSQL/Redis & \texttt{pg\_hba.conf}, \texttt{.pgpass}, \texttt{redis.conf} \\
+iot-camera  & Hikvision IP camera & \texttt{config.ini}, \texttt{/etc/passwd} \\
+windows-smb & Windows Server 2022 SMB & \texttt{passwords.xlsx}, \texttt{vpn-credentials.txt} \\
+k8s-node    & Kubernetes 1.29 worker & \texttt{admin.conf}, \texttt{etcd/ca.key}, SA \texttt{token} \\
+cicd-runner & GitHub Actions runner & AWS \texttt{credentials}, Docker \texttt{config.json}, GH \texttt{hosts.yml} \\
+ad-dc       & AD Domain Controller & \texttt{ntds.dit}, \texttt{SAM}, \texttt{krbtgt\_hash.txt}, \texttt{logon.bat} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Each profile defines \texttt{honeypots} (synthetic file entries), \texttt{tripwire\_dirs}
+(directories that trigger alerts on access), and \texttt{tripwire\_files} (filenames that
+trigger alerts on any operation).
+
+\section{Game-Theoretic Indistinguishability}
+
+The security game: challenger flips $b \in \{0,1\}$; if $b=0$ attacker queries real
+graph $G$, if $b=1$ queries projected $D_{FS}(G)$. After $Q$ adaptive queries, attacker
+outputs guess~$b'$. Advantage $= |\Pr[b'=b] - 1/2|$.
+
+\texttt{check\_indistinguishability()} bounds advantage from three channels:
+structural ($+0.5$ if invariants violated), curvature ($+0.2$ if edge ratio
+deviates), timing ($+0.1$ if size ratio $> 1.3\times$). Passthrough: advantage~$=0$.
+
+\section{Timing Side-Channel Calibration}
+
+\texttt{calibrate\_timing(real\_nodes, proj\_nodes, real\_edges, proj\_edges)} returns
+\texttt{TimingCalibration} with lookup/readdir/stat ratios. If deviation $>10\%$,
+recommends delay injection in nanoseconds.
+
+\section{Honeypot-Provenance Integration}
+
+\texttt{check\_honeypot\_access(profile, name, inode, op, cap, domain, ts)} returns
+\texttt{HoneypotAlert} with severity: Low (readdir), Medium (stat), High (read),
+Critical (write). Each alert carries full forensic chain for incident response.
+
+% ==============================================================================
+\chapter{SquirrelFS Comparison}
+
+Comparison benchmark (\texttt{sotfs-ops/benches/comparison\_bench.rs}) with four workloads
+matching SquirrelFS (OSDI'24) published experiments:
+
+\begin{description}
+\item[Workload A --- Metadata] create/mkdir/unlink/rename at 100/1K/10K scale.
+\item[Workload B --- Data I/O] write/read at 64B/4K/64K/1M.
+\item[Workload C --- Crash Consistency] invariant check, fsck, transaction commit/rollback.
+\item[Workload D --- Verification Overhead] curvature full vs incremental, deception projection.
+\end{description}
+
+Key trade-off: SquirrelFS achieves zero-cost crash ordering via NVM typestate
+(no runtime overhead). \sotFS{} adds runtime invariant checking + curvature
+monitoring (measurable overhead) but gains: unbounded Coq proofs, MSO queries,
+active deception, provenance tracking.
+
+% ==============================================================================
+\chapter{Artifact Evaluation}
+
+\section{Docker}
+\begin{lstlisting}[language=bash]
+docker build -t sotfs-artifact artifact/
+docker run --rm -v $(pwd)/results:/results sotfs-artifact full
+\end{lstlisting}
+
+Modes: \texttt{full} (tests + all benchmarks + TLC), \texttt{tests-only},
+\texttt{bench-only}, \texttt{tlc-only}.
+
+\section{Tables Reproduced}
+
+\begin{center}\small
+\begin{tabular}{clll}
+\toprule
+\textbf{Table} & \textbf{Content} & \textbf{Benchmark} & \textbf{Time} \\
+\midrule
+3 & Test suite (165+ tests)         & \texttt{cargo test}       & $\sim$30s \\
+4 & DPO operation latency           & \texttt{dpo\_bench}       & $\sim$2min \\
+5 & WAL index speedup               & \texttt{wal\_bench}       & $\sim$1min \\
+6 & Monitor scaling                  & \texttt{monitor\_bench}   & $\sim$3min \\
+7 & Real-world scale (1K--10K)      & \texttt{scale\_bench}     & $\sim$3min \\
+8 & SquirrelFS comparison           & \texttt{comparison\_bench} & $\sim$2min \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{DPO Rule Tutorial}
+
+The example \texttt{sotfs-ops/examples/custom\_dpo\_rule.rs} demonstrates how to
+write a new DPO rule in five steps:
+\begin{enumerate}
+\item Define preconditions (gluing conditions)
+\item Implement graph mutation
+\item Define affected nodes for incremental curvature
+\item Write tests (invariant preservation)
+\item Write Coq proof sketch
+\end{enumerate}
+
+Run: \texttt{cargo run --example custom\_dpo\_rule}
+
+% ==============================================================================
+\chapter{Updated Test Summary (April 2026)}
+
+\begin{center}\small
+\begin{tabular}{lrl}
+\toprule
+\textbf{Category} & \textbf{Count} & \textbf{Method} \\
+\midrule
+Arena allocator       & 16 & Unit tests \\
+RCU concurrency       &  9 & Multi-thread \\
+Graph invariants      &  3 & Unit tests \\
+Typestate             &  6 & Unit + compile-fail \\
+DPO operations        & 42 & Unit tests \\
+Provenance queries    &  3 & Unit tests \\
+Export (DOT/D3/GH)    &  4 & Unit tests \\
+Property-based        & 10 & proptest (10K iter) \\
+Storage/crash         &  7 & Integration (redb) \\
+Transaction           &  3 & Unit tests \\
+Loom concurrency      &  3 & Exhaustive \\
+Treewidth             & 20 & Unit + adversarial \\
+Curvature             & 14 & Unit + incremental \\
+Deception (5 + 11 new) & 16 & Projections + profiles + security \\
+Adversarial           & 13 & Security scenarios \\
+Doc test              &  1 & compile-fail \\
+\midrule
+\textbf{Total}        & \textbf{165+} & \textbf{All passing} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
 \end{document}
