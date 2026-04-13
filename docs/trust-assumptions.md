@@ -190,10 +190,17 @@ design document (§11).
 | Graph invariants (7 properties) | TLA+ model-checked | Bounded |
 | GTXN protocol (5 properties) | TLA+ model-checked | Bounded |
 | Capability safety (5 properties) | TLA+ model-checked | Bounded |
-| Crash recovery (3 properties) | TLA+ model-checked + integration tested | Bounded + tested |
+| Crash recovery (3 properties) | TLA+ model-checked + 7 integration tests | Bounded + tested |
 | State machine transitions | Rust typestate (compile-time) | **All inputs** |
-| Transaction isolation | Loom (exhaustive interleavings) | Bounded |
+| Transaction isolation | Loom (3 exhaustive interleaving tests) | Bounded |
 | Data persistence | Integration tests (redb ACID) | Tested |
-| DPO rule correctness | Runtime invariant checks (24 unit tests) | Tested |
+| DPO rule correctness | 23 unit tests + 10 property tests (10K iter each) | Tested |
+| Arena allocator | 16 unit tests (alloc/dealloc/reuse/stress) | Tested |
+| RCU concurrency | 9 unit tests (readers/writers/epochs) | Tested |
+| Treewidth monitoring | 20 unit tests + 13 adversarial scenarios | Tested |
+| Curvature monitoring | 14 unit tests (incremental + full recompute) | Tested |
+| Deception projections | 5 unit tests (passthrough/restrict/redirect/fabricate) | Tested |
 | Commit atomicity (unbounded) | Not yet verified | Planned (Coq) |
 | Treewidth preservation (unbounded) | Not yet verified | Planned (Coq) |
+
+**Total: 132 tests across 14 files, all passing (April 2026).**

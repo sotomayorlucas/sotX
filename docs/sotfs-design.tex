@@ -805,6 +805,81 @@ model the core graph (\texttt{sotfs\_graph.tla}), \GTXN{} protocol
 (\texttt{sotfs\_crash.tla}).
 
 % =============================================================================
+\section{Empirical Evaluation}\label{sec:evaluation}
+% =============================================================================
+
+The prototype comprises six Rust crates (\texttt{sotfs-graph}, \texttt{sotfs-ops},
+\texttt{sotfs-storage}, \texttt{sotfs-tx}, \texttt{sotfs-monitor}, \texttt{sotfs-fuse})
+totaling approximately 4{,}000 lines of library code plus 2{,}000 lines of tests and
+benchmarks.
+
+\subsection{Implementation Components}
+
+\textbf{Arena Allocator} (\texttt{arena.rs}).  Fixed-capacity, heap-backed storage pool
+with $O(1)$ alloc, dealloc, and lookup.  A free-list enables slot reuse after
+\textsc{Unlink}/\textsc{Rmdir}.  Default capacities: 65{,}536 for node pools,
+131{,}072 for edges.  The backing arrays use \texttt{Box<[MaybeUninit<T>]>} so that
+\texttt{TypeGraph} itself is only $\sim$744 bytes (pointers + counters), eliminating
+the stack-overflow risk of the original array-backed design.
+
+\textbf{Epoch-based RCU} (\texttt{rcu.rs}).  Lock-free reads via two heap-allocated
+\texttt{TypeGraph} copies with atomic swap.  Writers clone active $\to$ inactive,
+mutate, swap the active index, then wait for old-epoch readers to drain.  Eight
+concurrent reader slots; $O(1)$ reader entry/exit.
+
+\textbf{DynamicTreewidth} (\texttt{treewidth.rs}).  Incremental treewidth maintenance
+that caches the elimination ordering.  For small edits ($<$20\% dirty nodes), partial
+re-elimination avoids full $O(n^2)$ recomputation.
+
+\subsection{Test Suite}
+
+All tests executed on Windows~11 x86\_64 with Rust nightly 2026.
+
+\begin{table}[h]
+\centering
+\caption{Test suite summary --- 132 tests, all passing.}
+\label{tab:tests}
+\begin{tabularx}{\textwidth}{llrX}
+\toprule
+\textbf{Crate} & \textbf{Category} & \textbf{Tests} & \textbf{Framework} \\
+\midrule
+sotfs-graph & Arena allocator        & 16 & Unit \\
+sotfs-graph & RCU concurrency        &  9 & Unit \\
+sotfs-graph & Graph invariants       &  3 & Unit \\
+sotfs-graph & Typestate enforcement  &  6 & Unit \\
+sotfs-ops   & DPO rule validation    & 23 & Unit \\
+sotfs-ops   & Property-based (10K)   & 10 & proptest \\
+sotfs-storage & Crash consistency    &  7 & Integration (redb) \\
+sotfs-tx    & Transaction semantics  &  3 & Unit \\
+sotfs-tx    & Concurrency isolation  &  3 & loom \\
+sotfs-monitor & Treewidth            & 20 & Unit \\
+sotfs-monitor & Curvature            & 14 & Unit \\
+sotfs-monitor & Deception            &  5 & Unit \\
+sotfs-monitor & Adversarial security & 13 & Integration \\
+\midrule
+\textbf{Total} & & \textbf{132} & \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The property-based tests generate 10{,}000 random operation sequences per property
+(100{,}000+ total iterations) and verify that all seven graph invariants
+(I\textsubscript{1}--I\textsubscript{7}) are preserved under arbitrary compositions
+of DPO rules.  The loom tests exhaustively explore thread interleavings for GTXN
+isolation, rollback, and conflicting-write serialization.  The adversarial tests
+exercise ransomware detection (mass rename $\to$ curvature anomaly), hardlink bombs
+(treewidth spike), deep nesting bounds, and capability monotonic attenuation.
+
+\subsection{Benchmark Suite}
+
+Three Criterion benchmark suites are configured for performance regression tracking:
+DPO operations (create, mkdir, unlink, rename, link, write/read, invariant check at
+scales 10--1{,}000), WAL index (linear vs.\ indexed lookup at 10--1{,}000 entries),
+and structural monitors (treewidth and curvature on star/chain/tree topologies at
+50--10{,}000 nodes).  Full results will be reported after dedicated benchmark runs
+on a memory-unconstrained host.
+
+% =============================================================================
 \section{Conclusion and Future Work}
 % =============================================================================
 

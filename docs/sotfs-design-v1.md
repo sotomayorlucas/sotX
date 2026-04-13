@@ -1792,6 +1792,105 @@ Verus at the time of implementation.
 
 ---
 
+## 14. Empirical Evaluation
+
+### 14.1 Implementation Components
+
+The prototype comprises six Rust crates in the `sotfs/` workspace:
+
+| Crate | Description | Key Types |
+|-------|-------------|-----------|
+| `sotfs-graph` | Type graph data structures | `TypeGraph`, `Arena<T,N>`, `RcuGraph` |
+| `sotfs-ops` | DPO rewriting rules for POSIX operations | `create_file`, `mkdir`, `unlink`, `rename`, `link` |
+| `sotfs-storage` | Persistence via redb ACID backend | `save()`, `load()` round-trip |
+| `sotfs-tx` | Graph-level transaction manager (GTXN) | `GraphTransaction`, commit/rollback |
+| `sotfs-monitor` | Structural anomaly monitors | `compute_treewidth`, `OllivierRicci`, `DeceptiveProjection` |
+| `sotfs-fuse` | FUSE binding for Linux integration | Full POSIX VFS bridge |
+
+**Arena Allocator** (`sotfs-graph/src/arena.rs`). Fixed-capacity, heap-backed
+storage pool with O(1) alloc, dealloc, and lookup. Uses a free-list for slot
+reuse after `unlink`/`rmdir`, preventing fragmentation. Default capacities:
+65,536 for node pools, 131,072 for edges. The backing arrays are
+heap-allocated (`Box<[MaybeUninit<T>]>`) to avoid stack overflow at kernel
+scale — the TypeGraph struct itself is only ~744 bytes (pointers + counters).
+
+**Epoch-based RCU** (`sotfs-graph/src/rcu.rs`). Lock-free reads for directory
+operations (lookup, readdir, stat, path resolution) via two heap-allocated
+TypeGraph copies with atomic swap. Writers acquire exclusive access, clone
+active → inactive, mutate, swap the active index atomically, then wait for
+readers from the old epoch to drain. Eight concurrent reader slots; designed
+for the sotOS microkernel where `alloc` is available but `std` is not.
+
+**DynamicTreewidth** (`sotfs-monitor/src/treewidth.rs`). Incremental treewidth
+maintenance that caches the elimination ordering. For small graph edits
+(<20% dirty nodes), partial re-elimination avoids full O(n²) recomputation.
+Falls back to complete greedy min-degree elimination when the dirty fraction
+exceeds the threshold.
+
+### 14.2 Test Suite Summary
+
+All tests executed on Windows 11 x86_64 with Rust nightly 2026.
+
+| Crate | Category | Tests | Status |
+|-------|----------|------:|--------|
+| sotfs-graph | Arena allocator unit tests | 16 | PASS |
+| sotfs-graph | RCU concurrency tests | 9 | PASS |
+| sotfs-graph | Graph invariant tests | 3 | PASS |
+| sotfs-graph | Typestate enforcement | 6 | PASS |
+| sotfs-ops | DPO rule unit tests | 23 | PASS |
+| sotfs-ops | Property-based tests (10K iter) | 10 | PASS |
+| sotfs-storage | Backend unit test | 1 | PASS |
+| sotfs-storage | Crash consistency tests | 6 | PASS |
+| sotfs-tx | Transaction unit tests | 3 | PASS |
+| sotfs-tx | Loom concurrency tests | 3 | PASS |
+| sotfs-monitor | Treewidth tests | 20 | PASS |
+| sotfs-monitor | Curvature tests | 14 | PASS |
+| sotfs-monitor | Deception tests | 5 | PASS |
+| sotfs-monitor | Adversarial scenario tests | 13 | PASS |
+| **Total** | | **132** | **ALL PASS** |
+
+**Testing categories:**
+
+- **Deterministic unit tests** (109): Direct validation of invariants,
+  data structure correctness, DPO rule pre/postconditions.
+- **Property-based tests** (10 properties × 10,000 iterations = 100,000+
+  random sequences): Proptest generates arbitrary operation sequences and
+  verifies structural invariants are preserved. Properties include invariant
+  preservation, link count consistency, cycle freedom, chmod/chown isolation,
+  write/read round-trip, truncate semantics, and deep mkdir chain safety.
+- **Loom concurrency tests** (3): Exhaustive interleaving exploration for
+  GTXN isolation, rollback correctness, and conflicting write serialization.
+- **Crash consistency tests** (6): Round-trip persistence, atomic overwrite,
+  reopen survival, and complex operation sequences via redb ACID backend.
+- **Adversarial security tests** (13): Ransomware mass write/rename detection
+  via curvature anomaly, hardlink bomb treewidth spike, deep nesting bounds,
+  capability monotonic attenuation, deceptive projection correctness.
+
+### 14.3 Benchmark Suite
+
+Three Criterion benchmark suites are configured for performance regression
+tracking:
+
+**DPO Operations** (`sotfs-ops/benches/dpo_bench.rs`):
+- `create_file` at n=100, 500, 1000
+- `mkdir_chain` at depth=50, 200, 500
+- `unlink` at n=100, 500
+- `rename_same_dir` at n=100, 500
+- `hard_link` at n=10, 100, 500
+- `write_read` at sizes 64B, 1KB, 4KB, 64KB
+- `check_invariants` at n=10, 100, 500, 1000
+
+**WAL Index** (`sotfs-ops/benches/wal_bench.rs`):
+- Linear scan vs indexed lookup at 10, 100, 1000 entries
+- DPO sequence (indexed vs linear) at 10, 50, 100, 500 operations
+
+**Structural Monitors** (`sotfs-monitor/benches/monitor_bench.rs`):
+- Treewidth computation on star, chain, tree topologies at 50–500 nodes
+- Ollivier-Ricci curvature (full vs incremental) at 100–10,000 nodes
+- Treewidth check at 100, 500 nodes
+
+---
+
 ## Appendix A: VfsOp → DPO Rule Mapping
 
 | VfsOp (lib.rs:64-79) | DPO Rule | GTXN Tier | Graph Mutation |
