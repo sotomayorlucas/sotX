@@ -16,6 +16,7 @@ pub mod arena;
 pub mod types;
 pub mod graph;
 pub mod error;
+pub mod export;
 pub mod rcu;
 pub mod typestate;
 

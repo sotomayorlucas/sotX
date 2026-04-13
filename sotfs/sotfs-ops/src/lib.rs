@@ -1497,6 +1497,245 @@ fn has_cycle_dfs(
     false
 }
 
+// ===========================================================================
+// Provenance Log + MSO Query API (§6.4)
+// ===========================================================================
+
+/// Operation type recorded in provenance entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProvOp {
+    Create,
+    Mkdir,
+    Unlink,
+    Rmdir,
+    Link,
+    Rename,
+    Write,
+    Chmod,
+    Chown,
+    Setxattr,
+    Removexattr,
+    Symlink,
+    SetAcl,
+    CapDerive,
+    CapRevoke,
+    Read,
+    Stat,
+    Open,
+}
+
+/// A single provenance entry — who did what to which inode, when, via which cap.
+#[derive(Debug, Clone)]
+pub struct ProvenanceEntry {
+    pub timestamp: u64,
+    pub op: ProvOp,
+    pub inode_id: InodeId,
+    pub cap_id: Option<CapId>,
+    pub domain_id: u64,
+    pub detail: String,
+}
+
+/// Provenance log — append-only sequence of operations on the TypeGraph.
+///
+/// Records every DPO rule application with timestamp, capability, and inode.
+/// Enables temporal queries: "what touched this inode in window [t0, t1]?"
+#[derive(Debug, Clone)]
+pub struct ProvenanceLog {
+    entries: Vec<ProvenanceEntry>,
+}
+
+impl ProvenanceLog {
+    pub fn new() -> Self {
+        Self { entries: Vec::new() }
+    }
+
+    /// Record a provenance entry.
+    pub fn record(
+        &mut self,
+        timestamp: u64,
+        op: ProvOp,
+        inode_id: InodeId,
+        cap_id: Option<CapId>,
+        domain_id: u64,
+        detail: &str,
+    ) {
+        self.entries.push(ProvenanceEntry {
+            timestamp,
+            op,
+            inode_id,
+            cap_id,
+            domain_id,
+            detail: detail.into(),
+        });
+    }
+
+    /// Total number of recorded events.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Get all entries (for iteration).
+    pub fn entries(&self) -> &[ProvenanceEntry] {
+        &self.entries
+    }
+
+    // -------------------------------------------------------------------
+    // MSO-style provenance queries
+    // -------------------------------------------------------------------
+
+    /// **Q1: Capabilities that touched an inode in time window [t_start, t_end].**
+    ///
+    /// Returns all distinct (cap_id, operation) pairs for the given inode
+    /// within the time window.  This answers: "what caps accessed file F
+    /// in the last hour?"
+    pub fn caps_for_inode_in_window(
+        &self,
+        inode_id: InodeId,
+        t_start: u64,
+        t_end: u64,
+    ) -> Vec<(CapId, ProvOp, u64)> {
+        let mut result = Vec::new();
+        for e in &self.entries {
+            if e.inode_id == inode_id
+                && e.timestamp >= t_start
+                && e.timestamp <= t_end
+            {
+                if let Some(cid) = e.cap_id {
+                    result.push((cid, e.op, e.timestamp));
+                }
+            }
+        }
+        result
+    }
+
+    /// **Q2: Inodes touched by a specific capability in time window.**
+    ///
+    /// Returns all (inode_id, operation, timestamp) for operations performed
+    /// via the given capability.  Answers: "what did cap C access?"
+    pub fn inodes_touched_by_cap(
+        &self,
+        cap_id: CapId,
+        t_start: u64,
+        t_end: u64,
+    ) -> Vec<(InodeId, ProvOp, u64)> {
+        let mut result = Vec::new();
+        for e in &self.entries {
+            if e.timestamp >= t_start && e.timestamp <= t_end {
+                if e.cap_id == Some(cap_id) {
+                    result.push((e.inode_id, e.op, e.timestamp));
+                }
+            }
+        }
+        result
+    }
+
+    /// **Q3: Full provenance chain for an inode.**
+    ///
+    /// Returns all operations on the given inode in chronological order.
+    /// This is the complete audit trail for a file.
+    pub fn provenance_chain(&self, inode_id: InodeId) -> Vec<&ProvenanceEntry> {
+        self.entries
+            .iter()
+            .filter(|e| e.inode_id == inode_id)
+            .collect()
+    }
+
+    /// **Q4: Operations by domain in time window.**
+    ///
+    /// Returns all operations performed by a specific domain (process/thread group).
+    /// For forensics: "what did compromised domain D do?"
+    pub fn ops_by_domain(
+        &self,
+        domain_id: u64,
+        t_start: u64,
+        t_end: u64,
+    ) -> Vec<&ProvenanceEntry> {
+        self.entries
+            .iter()
+            .filter(|e| {
+                e.domain_id == domain_id
+                    && e.timestamp >= t_start
+                    && e.timestamp <= t_end
+            })
+            .collect()
+    }
+
+    /// **Q5: Anomaly window — burst detection.**
+    ///
+    /// Returns the count of operations on an inode in sliding windows of
+    /// `window_size` seconds.  Spikes indicate potential ransomware or
+    /// mass-modification attacks.
+    pub fn burst_detect(
+        &self,
+        inode_id: InodeId,
+        window_size: u64,
+    ) -> Vec<(u64, usize)> {
+        let relevant: Vec<u64> = self.entries
+            .iter()
+            .filter(|e| e.inode_id == inode_id)
+            .map(|e| e.timestamp)
+            .collect();
+        if relevant.is_empty() {
+            return Vec::new();
+        }
+        let t_min = relevant[0];
+        let t_max = *relevant.last().unwrap();
+        let mut windows = Vec::new();
+        let mut t = t_min;
+        while t <= t_max {
+            let count = relevant.iter().filter(|&&ts| ts >= t && ts < t + window_size).count();
+            if count > 0 {
+                windows.push((t, count));
+            }
+            t += window_size;
+        }
+        windows
+    }
+
+    /// **Q6: Cross-reference — capabilities and inodes involved in a time window.**
+    ///
+    /// Returns a summary: how many distinct caps and inodes were active in [t0, t1].
+    pub fn activity_summary(
+        &self,
+        t_start: u64,
+        t_end: u64,
+    ) -> ProvActivitySummary {
+        let mut caps = BTreeSet::new();
+        let mut inodes = BTreeSet::new();
+        let mut op_count = 0usize;
+        for e in &self.entries {
+            if e.timestamp >= t_start && e.timestamp <= t_end {
+                op_count += 1;
+                inodes.insert(e.inode_id);
+                if let Some(cid) = e.cap_id {
+                    caps.insert(cid);
+                }
+            }
+        }
+        ProvActivitySummary {
+            distinct_caps: caps.len(),
+            distinct_inodes: inodes.len(),
+            total_ops: op_count,
+            t_start,
+            t_end,
+        }
+    }
+}
+
+/// Summary of provenance activity in a time window.
+#[derive(Debug, Clone)]
+pub struct ProvActivitySummary {
+    pub distinct_caps: usize,
+    pub distinct_inodes: usize,
+    pub total_ops: usize,
+    pub t_start: u64,
+    pub t_end: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1936,5 +2175,123 @@ mod tests {
         let report = fsck(&g);
         assert!(!report.warnings.is_empty());
         assert!(report.warnings[0].contains("orphan"));
+    }
+
+    // === provenance tests ===
+
+    #[test]
+    fn provenance_record_and_query() {
+        let mut log = ProvenanceLog::new();
+        log.record(100, ProvOp::Create, 10, Some(1), 0, "create /a");
+        log.record(200, ProvOp::Write, 10, Some(1), 0, "write /a");
+        log.record(300, ProvOp::Read, 10, Some(2), 1, "read /a");
+        log.record(400, ProvOp::Create, 20, Some(1), 0, "create /b");
+
+        assert_eq!(log.len(), 4);
+
+        // Q1: caps that touched inode 10 in [100, 300]
+        let caps = log.caps_for_inode_in_window(10, 100, 300);
+        assert_eq!(caps.len(), 3);
+        assert_eq!(caps[0].0, 1); // cap 1
+        assert_eq!(caps[2].0, 2); // cap 2
+
+        // Q2: inodes touched by cap 1 in full range
+        let inodes = log.inodes_touched_by_cap(1, 0, 500);
+        assert_eq!(inodes.len(), 3); // inode 10 (create, write) + inode 20 (create)
+
+        // Q3: provenance chain for inode 10
+        let chain = log.provenance_chain(10);
+        assert_eq!(chain.len(), 3);
+        assert_eq!(chain[0].op, ProvOp::Create);
+        assert_eq!(chain[2].op, ProvOp::Read);
+    }
+
+    #[test]
+    fn provenance_burst_detect() {
+        let mut log = ProvenanceLog::new();
+        // Simulate burst: 5 ops in 10 seconds on inode 1
+        for t in 0..5 {
+            log.record(100 + t, ProvOp::Write, 1, Some(1), 0, "burst write");
+        }
+        // Normal: 1 op at t=200
+        log.record(200, ProvOp::Read, 1, Some(1), 0, "normal read");
+
+        let windows = log.burst_detect(1, 10);
+        assert!(!windows.is_empty());
+        assert_eq!(windows[0].1, 5); // 5 ops in first window
+    }
+
+    #[test]
+    fn provenance_activity_summary() {
+        let mut log = ProvenanceLog::new();
+        log.record(100, ProvOp::Create, 10, Some(1), 0, "");
+        log.record(200, ProvOp::Create, 20, Some(2), 0, "");
+        log.record(300, ProvOp::Write, 10, Some(1), 1, "");
+
+        let summary = log.activity_summary(0, 400);
+        assert_eq!(summary.distinct_caps, 2);
+        assert_eq!(summary.distinct_inodes, 2);
+        assert_eq!(summary.total_ops, 3);
+    }
+
+    // === export tests ===
+
+    #[test]
+    fn export_dot_produces_valid_output() {
+        use sotfs_graph::export::{to_dot, DotStyle};
+        let mut g = TypeGraph::new();
+        let rd = g.root_dir;
+        create_file(&mut g, rd, "hello.txt", 0, 0, Permissions::FILE_DEFAULT).unwrap();
+        mkdir(&mut g, rd, "sub", 0, 0, Permissions::DIR_DEFAULT).unwrap();
+
+        let dot = to_dot(&g, &DotStyle::default());
+        assert!(dot.starts_with("digraph sotFS {"));
+        assert!(dot.contains("hello.txt"));
+        assert!(dot.contains("sub"));
+        assert!(dot.ends_with("}\n"));
+    }
+
+    #[test]
+    fn export_d3_json_produces_valid_output() {
+        use sotfs_graph::export::to_d3_json;
+        let mut g = TypeGraph::new();
+        let rd = g.root_dir;
+        create_file(&mut g, rd, "f", 0, 0, Permissions::FILE_DEFAULT).unwrap();
+
+        let json = to_d3_json(&g);
+        assert!(json.contains("\"nodes\""));
+        assert!(json.contains("\"links\""));
+        assert!(json.contains("\"type\":\"inode\""));
+        assert!(json.contains("\"type\":\"contains\""));
+    }
+
+    #[test]
+    fn export_graph_hunter_temporal() {
+        use sotfs_graph::export::to_graph_hunter;
+        let mut g = TypeGraph::new();
+        let rd = g.root_dir;
+        create_file(&mut g, rd, "f", 0, 0, Permissions::FILE_DEFAULT).unwrap();
+
+        let gh = to_graph_hunter(&g);
+        assert!(gh.contains("\"format\":\"graph-hunter-temporal\""));
+        assert!(gh.contains("\"op\":\"add_node\""));
+        assert!(gh.contains("\"op\":\"add_edge\""));
+    }
+
+    #[test]
+    fn export_stats_correct() {
+        use sotfs_graph::export::stats;
+        let mut g = TypeGraph::new();
+        let rd = g.root_dir;
+        create_file(&mut g, rd, "a", 0, 0, Permissions::FILE_DEFAULT).unwrap();
+        create_file(&mut g, rd, "b", 0, 0, Permissions::FILE_DEFAULT).unwrap();
+        let sub = mkdir(&mut g, rd, "d", 0, 0, Permissions::DIR_DEFAULT).unwrap();
+        create_file(&mut g, sub.dir_id.unwrap(), "c", 0, 0, Permissions::FILE_DEFAULT).unwrap();
+
+        let s = stats(&g);
+        assert_eq!(s.inode_count, 5); // root + a + b + d + c
+        assert_eq!(s.dir_count, 2);   // root + d
+        assert_eq!(s.file_count, 3);  // a + b + c
+        assert_eq!(s.depth_estimate, 1); // root -> d (depth 1)
     }
 }

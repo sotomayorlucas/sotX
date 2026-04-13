@@ -23,3 +23,7 @@ harness = false
 [[bench]]
 name = "wal_bench"
 harness = false
+
+[[bench]]
+name = "scale_bench"
+harness = false
