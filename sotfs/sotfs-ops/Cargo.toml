@@ -15,6 +15,7 @@ sotfs-graph = { workspace = true, default-features = false }
 [dev-dependencies]
 proptest = "1"
 criterion = { version = "0.5", features = ["html_reports"] }
+sotfs-monitor = { path = "../sotfs-monitor" }
 
 [[bench]]
 name = "dpo_bench"
@@ -26,4 +27,8 @@ harness = false
 
 [[bench]]
 name = "scale_bench"
+harness = false
+
+[[bench]]
+name = "comparison_bench"
 harness = false
