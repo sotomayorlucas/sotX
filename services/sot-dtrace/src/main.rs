@@ -1,4 +1,4 @@
-//! sot-dtrace — DTrace-compatible probe consumer for sotBSD.
+//! sot-dtrace — DTrace-compatible probe consumer for sotX.
 //!
 //! **Project PANDORA Task 1** — first deliverable of the DTrace
 //! integration. Architecture aligned with the FreeBSD/Solaris DTrace
@@ -20,24 +20,24 @@
 //!
 //! sot-dtrace plugs into this at the **probe source** layer: instead
 //! of being invoked by scattered provider hooks throughout the
-//! kernel, the entire sotBSD provenance ring (every SOT operation
+//! kernel, the entire sotX provenance ring (every SOT operation
 //! recorded by `kernel/src/sot/provenance.rs`) is drained and
-//! translated into probe firings under the `sotbsd:::` provider
+//! translated into probe firings under the `sotx:::` provider
 //! namespace. Each `ProvenanceEntry` becomes one probe:
 //!
 //! ```text
-//!   sotbsd:::tx_commit        args: tx_id, epoch, _, _
-//!   sotbsd:::tx_abort         args: tx_id, epoch, _, _
-//!   sotbsd:::so_create        args: so_id, so_type, domain, _
-//!   sotbsd:::so_invoke        args: so_id, so_type, domain, version
-//!   sotbsd:::so_grant         args: so_id, _, domain, _
-//!   sotbsd:::so_revoke        args: so_id, _, domain, _
-//!   sotbsd:::provenance       args: operation, so_type, so_id, domain
+//!   sotx:::tx_commit        args: tx_id, epoch, _, _
+//!   sotx:::tx_abort         args: tx_id, epoch, _, _
+//!   sotx:::so_create        args: so_id, so_type, domain, _
+//!   sotx:::so_invoke        args: so_id, so_type, domain, version
+//!   sotx:::so_grant         args: so_id, _, domain, _
+//!   sotx:::so_revoke        args: so_id, _, domain, _
+//!   sotx:::provenance       args: operation, so_type, so_id, domain
 //! ```
 //!
 //! The service exposes an IPC endpoint `sot-dtrace` that a DTrace
 //! CLI client connects to. The client sends a D-script filter (or
-//! the raw probe-matching triple string like `sotbsd:::tx_commit`),
+//! the raw probe-matching triple string like `sotx:::tx_commit`),
 //! and the server streams back matching probe firings. A minimal
 //! D-script subset is implemented inline until the vendor libdtrace
 //! link lands.
@@ -54,7 +54,7 @@
 //! |  4  | LIST_PROVIDERS                   | tag=n, regs[0..6] = ascii     |
 //!
 //! The POLL reply packs a probe event into 7 u64 registers:
-//!   regs[0] = probe_id (sotbsd provider + DTrace name)
+//!   regs[0] = probe_id (sotx provider + DTrace name)
 //!   regs[1] = epoch
 //!   regs[2] = domain_id
 //!   regs[3] = so_id
@@ -142,7 +142,7 @@ fn entry_to_probe_id(e: &KernelProvEntry) -> u64 {
 // D-script filter: minimal probe-matching subset
 //
 // Supports `provider:module:function:name` with `*` wildcards and the
-// bare `sotbsd:::` form (equivalent to `sotbsd:*:*:*`). The full D
+// bare `sotx:::` form (equivalent to `sotx:*:*:*`). The full D
 // language (aggregations, predicates, variables) is not implemented --
 // the vendor libdtrace will cover it when linked.
 // ---------------------------------------------------------------------------
@@ -175,15 +175,15 @@ impl Filter {
     /// Match a probe id against this filter. The current encoding
     /// walks the colon-separated fields and compares each against
     /// the probe's provider/module/function/name. For the MVP we
-    /// support the bare `sotbsd:::` form (empty module/function/name
-    /// => wildcards) and the exact form `sotbsd:::<name>`.
+    /// support the bare `sotx:::` form (empty module/function/name
+    /// => wildcards) and the exact form `sotx:::<name>`.
     fn matches(&self, probe: u64) -> bool {
         let p = self.as_str();
         if p.is_empty() {
             return false;
         }
-        // First field must be "sotbsd" (anything else is unsupported).
-        if p.len() < 7 || &p[..7] != b"sotbsd:" {
+        // First field must be "sotx" (anything else is unsupported).
+        if p.len() < 7 || &p[..7] != b"sotx:" {
             return false;
         }
         // Walk past the 3 colons.
@@ -204,7 +204,7 @@ impl Filter {
             return false;
         }
         let name = &rest[name_start..];
-        // Empty name = wildcard, matches any sotbsd probe.
+        // Empty name = wildcard, matches any sotx probe.
         if name.is_empty() {
             return true;
         }
@@ -386,9 +386,9 @@ fn handle_list(_msg: &IpcMsg, reply: &mut IpcMsg) {
     // Return the built-in provider list as an ASCII blob. The client
     // prints it verbatim. Format: null-delimited entries.
     let list =
-        b"sotbsd:::tx_commit\0sotbsd:::tx_abort\0sotbsd:::so_create\0\
-          sotbsd:::so_invoke\0sotbsd:::so_grant\0sotbsd:::so_revoke\0\
-          sotbsd:::provenance\0";
+        b"sotx:::tx_commit\0sotx:::tx_abort\0sotx:::so_create\0\
+          sotx:::so_invoke\0sotx:::so_grant\0sotx:::so_revoke\0\
+          sotx:::provenance\0";
     let dst = unsafe {
         core::slice::from_raw_parts_mut(reply.regs.as_mut_ptr() as *mut u8, 64)
     };

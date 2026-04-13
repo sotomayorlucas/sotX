@@ -1,4 +1,4 @@
-//! sotos-pci — Userspace PCI bus enumeration library for sotOS.
+//! sotos-pci — Userspace PCI bus enumeration library for sotX.
 //!
 //! Provides PCI configuration space access via the legacy *Mechanism #1*
 //! I/O ports (`0xCF8` address, `0xCFC` data) defined in PCI Local Bus

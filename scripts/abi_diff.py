@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""ABI diff bot for sotOS.
+"""ABI diff bot for sotX.
 
 Usage:
     python scripts/abi_diff.py <base_ref> <head_ref>

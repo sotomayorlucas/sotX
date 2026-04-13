@@ -1,11 +1,11 @@
 #!/bin/bash
 # build_phase_f_bzimage.sh — compile a tiny Linux bzImage for Phase F
 #
-# Run this ONCE from WSL Ubuntu. Output: target/bzImage in the sotOS
+# Run this ONCE from WSL Ubuntu. Output: target/bzImage in the sotX
 # tree, ready to be baked into the initrd by `just initrd`.
 #
 # Usage (from Windows or WSL):
-#   wsl -e bash /mnt/c/Users/sotom/sotOS/scripts/build_phase_f_bzimage.sh
+#   wsl -e bash /mnt/c/Users/sotom/sotX/scripts/build_phase_f_bzimage.sh
 #
 # What it does:
 #   1. Apt-installs libssl-dev (the only missing build dep on WSL Ubuntu)
@@ -21,7 +21,7 @@
 
 set -euo pipefail
 
-# Resolve sotOS tree root from this script's location.
+# Resolve sotX tree root from this script's location.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOTOS_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 LINUX_DIR="/tmp/sotos-linux"
@@ -32,7 +32,7 @@ LINUX_DIR="/tmp/sotos-linux"
 LINUX_TAG="v6.6"
 JOBS="$(nproc)"
 
-echo "==> sotOS root: $SOTOS_ROOT"
+echo "==> sotX root: $SOTOS_ROOT"
 echo "==> Linux dir:  $LINUX_DIR"
 echo "==> Linux tag:  $LINUX_TAG"
 echo "==> Build jobs: $JOBS"

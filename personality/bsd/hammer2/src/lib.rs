@@ -1,4 +1,4 @@
-//! SOT-HAMMER2: HAMMER2 filesystem integration for sotOS.
+//! SOT-HAMMER2: HAMMER2 filesystem integration for sotX.
 //!
 //! CoW B-tree filesystem with instant snapshots and clustering
 //! for distributed deception (Phase 3).

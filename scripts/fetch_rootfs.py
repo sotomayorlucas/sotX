@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Download Alpine Mini RootFS and extract shared libraries for sotOS sysroot.
+"""Download Alpine Mini RootFS and extract shared libraries for sotX sysroot.
 
 Downloads the Alpine minirootfs tarball and extracts .so files into
 target/sysroot/{lib,usr/lib}. Also supports creating a disk image with
@@ -83,7 +83,7 @@ def download(url, output_path):
     print(f"  Target: {output_path}")
 
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "sotOS-fetch/1.0"})
+        req = urllib.request.Request(url, headers={"User-Agent": "sotX-fetch/1.0"})
         with urllib.request.urlopen(req, timeout=120) as resp:
             total = resp.headers.get('Content-Length')
             total = int(total) if total else None
@@ -273,7 +273,7 @@ def download_apkindex(repo="main"):
     # Always re-download APKINDEX (it's small, ~200KB)
     print(f"  Fetching APKINDEX for {repo}...")
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "sotOS-fetch/1.0"})
+        req = urllib.request.Request(url, headers={"User-Agent": "sotX-fetch/1.0"})
         with urllib.request.urlopen(req, timeout=60) as resp:
             data = resp.read()
         with open(out, 'wb') as f:
@@ -682,7 +682,7 @@ def fetch_apk_packages(pkg_names, sysroot_dir):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Download Alpine Mini RootFS and extract sysroot for sotOS")
+        description="Download Alpine Mini RootFS and extract sysroot for sotX")
     parser.add_argument("--extract-only", action="store_true",
                         help="Only extract from cached tarball (skip download)")
     parser.add_argument("--disk", action="store_true",
@@ -697,7 +697,7 @@ def main():
                         help="Download Ubuntu Base rootfs and extract glibc + test binaries")
     args = parser.parse_args()
 
-    print("=== sotOS Sysroot Builder ===\n")
+    print("=== sotX Sysroot Builder ===\n")
 
     # Collect APK packages to download
     apk_list = list(args.apk)

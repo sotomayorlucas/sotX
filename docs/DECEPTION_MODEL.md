@@ -4,7 +4,7 @@
 
 ### 1.1 Assumptions
 
-The adversary has achieved **arbitrary code execution** inside a sotBSD domain.
+The adversary has achieved **arbitrary code execution** inside a sotX domain.
 This is the starting point, not the event we are trying to prevent.
 
 The adversary can:
@@ -354,14 +354,14 @@ An adversary may try to fingerprint the underlying system through:
 
 - **CPU identification**: CPUID, /proc/cpuinfo. The deception profile
   specifies exact CPUID leaf values and cpuinfo contents.
-- **Memory layout**: ASLR patterns, stack addresses. sotBSD already
+- **Memory layout**: ASLR patterns, stack addresses. sotX already
   randomizes these; the deception profile can constrain the range
   to match the target OS.
 - **Timing signatures**: Interrupt rates, scheduler patterns. These
   are harder to control; the handler can only add noise, not
   perfectly replicate another OS's timing.
 - **Instruction behavior**: Some instructions behave differently under
-  virtualization. sotBSD is not a hypervisor; the domain runs on
+  virtualization. sotX is not a hypervisor; the domain runs on
   real hardware, so CPU-level fingerprinting shows a real x86_64 CPU.
 
 ### 6.3 Side Channels
@@ -378,7 +378,7 @@ An adversary may try to fingerprint the underlying system through:
 
 ### 7.1 Scenario
 
-A network-facing service is running in a sotBSD domain. The service has a
+A network-facing service is running in a sotX domain. The service has a
 vulnerability. When exploited, the adversary gains code execution inside
 the domain. The deception engine is activated.
 
@@ -463,7 +463,7 @@ suspicious activity.
 
 ### 7.4 What the Adversary Cannot See
 
-- They are running on sotBSD, not Linux.
+- They are running on sotX, not Linux.
 - There is no real nginx, no real sshd, no real network.
 - Every file they read is fabricated by the interposition handler.
 - Every network connection they attempt goes to a honeypot.

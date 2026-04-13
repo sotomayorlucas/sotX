@@ -1,4 +1,4 @@
-//! Deception subsystem for sotOS.
+//! Deception subsystem for sotX.
 //!
 //! Provides anomaly detection, capability interposition, deception
 //! profiles, and the migration orchestrator that transparently moves

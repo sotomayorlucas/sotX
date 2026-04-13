@@ -1,4 +1,4 @@
-//! BSD network stack domain for sotOS Project STYX.
+//! BSD network stack domain for sotX Project STYX.
 //!
 //! Implements the BSD socket model where every socket is a SecureObject
 //! governed by capabilities. The network domain owns protocol processing

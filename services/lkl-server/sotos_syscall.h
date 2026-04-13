@@ -1,5 +1,5 @@
 /*
- * sotos_syscall.h -- Inline asm wrappers for sotOS kernel syscalls.
+ * sotos_syscall.h -- Inline asm wrappers for sotX kernel syscalls.
  *
  * Mirrors the Rust ABI in libs/sotos-common/src/lib.rs exactly:
  *   rax = syscall number

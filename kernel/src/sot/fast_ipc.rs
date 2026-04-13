@@ -522,7 +522,7 @@ impl SharedMemoryRing {
 
     /// Convert the physical base to an HHDM-mapped pointer.
     ///
-    /// sotOS maps all physical memory at HHDM_OFFSET (set by Limine).
+    /// sotX maps all physical memory at HHDM_OFFSET (set by Limine).
     /// This returns a raw byte pointer into that mapping.
     #[inline]
     fn hhdm_ptr(&self) -> *mut u8 {

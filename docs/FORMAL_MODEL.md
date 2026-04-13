@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-sotBSD aims to provide mathematical guarantees about its security properties.
+sotX aims to provide mathematical guarantees about its security properties.
 The verification strategy uses a layered approach: TLA+ model checking for
 protocol-level properties, with a roadmap to Rust-level proofs via Verus/Kani.
 

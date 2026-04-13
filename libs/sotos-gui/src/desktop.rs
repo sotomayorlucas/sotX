@@ -210,14 +210,14 @@ pub fn draw_modern_desktop(display: &mut FramebufferDisplay, title: &[u8]) -> De
     .draw(display)
     .ok();
 
-    // "sotOS" branding (accent color)
+    // "sotX" branding (accent color)
     let brand_style = MonoTextStyleBuilder::new()
         .font(&FONT_10X20)
         .text_color(ACCENT)
         .build();
 
     Text::with_baseline(
-        "sotOS",
+        "sotX",
         Point::new(16, tb_y as i32 + 12),
         brand_style,
         Baseline::Top,
@@ -283,7 +283,7 @@ pub fn draw_modern_desktop(display: &mut FramebufferDisplay, title: &[u8]) -> De
         .font(&FONT_10X20)
         .text_color(TEXT_WHITE)
         .build();
-    let msg = "Welcome to sotOS";
+    let msg = "Welcome to sotX";
     let msg_w = msg.len() as i32 * 10;
     let msg_x = win_x as i32 + (win_w as i32 - msg_w) / 2;
     let msg_y = splash_y as i32 + (splash_h as i32 - 20) / 2;

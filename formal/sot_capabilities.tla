@@ -1,7 +1,7 @@
 ------------------------ MODULE sot_capabilities ------------------------
 \* TLA+ Specification of SOT Capability Safety Properties
 \*
-\* This specification models the sotOS capability system with epoch-based
+\* This specification models the sotX capability system with epoch-based
 \* revocation, rights attenuation, and capability interposition. It verifies
 \* three safety properties:
 \*   - NO_ESCALATION: no domain ever holds rights it was not explicitly granted

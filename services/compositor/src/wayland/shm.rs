@@ -94,7 +94,7 @@ impl ShmBuffer {
 /// Returns (pool_id, fd_or_shm_handle, size) for the caller to set up.
 ///
 /// Wire format: new_id(u32) + fd(i32) + size(i32)
-/// In sotOS IPC transport, the fd field carries the kernel SHM handle
+/// In sotX IPC transport, the fd field carries the kernel SHM handle
 /// if the client pre-created the shared memory object (>= 0).
 /// A value of -1 means the compositor should create the SHM itself.
 pub fn handle_create_pool(msg: &WlMessage) -> Option<(u32, i32, u32)> {

@@ -7,7 +7,7 @@
 ## Context
 
 sotFS needs to persist the metadata graph and file data to a block device.
-The sotOS capability system mediates all resource access — the question is
+The sotX capability system mediates all resource access — the question is
 at what granularity block-level capabilities are exposed.
 
 Two models are possible:

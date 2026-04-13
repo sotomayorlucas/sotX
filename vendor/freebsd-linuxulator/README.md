@@ -1,7 +1,7 @@
 # FreeBSD Linuxulator Syscall Tables
 
 Reference files extracted from the FreeBSD Linuxulator (Linux binary compatibility layer).
-These are data/translation tables used as reference for sotOS's Linux ABI implementation.
+These are data/translation tables used as reference for sotX's Linux ABI implementation.
 
 ## Source
 
@@ -71,6 +71,6 @@ POSSIBILITY OF SUCH DAMAGE.
 
 ## Usage
 
-These files are reference material only. They are not compiled as part of sotOS.
+These files are reference material only. They are not compiled as part of sotX.
 The Linuxulator's syscall tables, errno mappings, and signal translations serve as
-a verified reference for implementing Linux ABI compatibility in the sotOS microkernel.
+a verified reference for implementing Linux ABI compatibility in the sotX microkernel.

@@ -1,6 +1,6 @@
 //! Shared ring buffer for mouse events.
 //!
-//! Same pattern as the keyboard KB ring buffer used in sotOS.
+//! Same pattern as the keyboard KB ring buffer used in sotX.
 //! A single physical page is shared between the mouse driver process
 //! and the consumer process (e.g., init or a windowing server).
 

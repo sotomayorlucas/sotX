@@ -1,7 +1,7 @@
 // Build script for rump-vfs.
 //
 // Links the fused NetBSD rump kernel library (librump_fused.a) into the
-// freestanding sotOS service binary. The .a was produced by buildrump.sh
+// freestanding sotX service binary. The .a was produced by buildrump.sh
 // in WSL Ubuntu, then merged via `ld -r` against rumpuser_sot.o so that
 // the resulting archive only references rumpuser_*, link_set_* markers,
 // and the GOT — all of which are satisfied at final link time.

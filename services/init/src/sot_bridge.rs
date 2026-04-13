@@ -1,7 +1,7 @@
 //! SOT Bridge -- connects LUCAS process server to SOT exokernel primitives.
 //!
 //! This module wraps SOT syscalls (300-310) in high-level functions
-//! that the existing child_handler can call instead of raw sotOS primitives.
+//! that the existing child_handler can call instead of raw sotX primitives.
 //!
 //! Each function:
 //! 1. Calls the appropriate SOT syscall(s) via `sotos_common::sys::*`

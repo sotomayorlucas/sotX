@@ -1,4 +1,4 @@
-//! Shared types and constants between the sotOS kernel and userspace services.
+//! Shared types and constants between the sotX kernel and userspace services.
 //!
 //! This crate defines the ABI contract: syscall numbers, capability types,
 //! IPC message formats, and error codes. Both the kernel and userspace
@@ -1974,7 +1974,7 @@ pub mod sys {
     // ---------------------------------------------------------------------
     //
     // These wrappers issue real syscalls only on `target_os = "none"` (the
-    // sotOS userspace target). On the host (e.g. `cargo test -p sot-bhyve`),
+    // sotX userspace target). On the host (e.g. `cargo test -p sot-bhyve`),
     // they return `-ENOSYS` so that the type-level scaffolding still
     // builds and passes its host unit tests, exactly as the Phase B plan
     // requires.

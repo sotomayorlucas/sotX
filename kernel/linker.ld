@@ -1,5 +1,5 @@
 /*
- * sotOS Kernel Linker Script
+ * sotX Kernel Linker Script
  * Higher-half kernel at 0xFFFFFFFF80000000 using Limine boot protocol.
  */
 

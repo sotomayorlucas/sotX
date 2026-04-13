@@ -682,7 +682,7 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
                 if buf_ptr != 0 && buf_ptr < 0x0000_8000_0000_0000 {
                     let buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr as *mut u8, 390) };
                     for b in buf.iter_mut() { *b = 0; }
-                    let fields: [&[u8]; 5] = [b"Linux", b"sotos", b"6.1.0-sotOS", b"#1 SMP sotOS 0.1.0", b"x86_64"];
+                    let fields: [&[u8]; 5] = [b"Linux", b"sotos", b"6.1.0-sotX", b"#1 SMP sotX 0.1.0", b"x86_64"];
                     for (i, field) in fields.iter().enumerate() {
                         let off = i * 65;
                         let len = field.len().min(64);
@@ -967,7 +967,7 @@ fn lucas_open_proc(
         let secs = now.saturating_sub(boot) / 2_000_000_000 + UPTIME_OFFSET_SECS;
         *dir_len += format_uptime_into(&mut dir_buf[*dir_len..], secs);
     } else if name == b"/proc/version" {
-        let info = b"Linux version 5.15.0-sotOS (root@sotOS) (gcc 12.0) #1 SMP PREEMPT\n";
+        let info = b"Linux version 5.15.0-sotX (root@sotX) (gcc 12.0) #1 SMP PREEMPT\n";
         let n = info.len().min(dir_buf.len());
         dir_buf[..n].copy_from_slice(&info[..n]);
         *dir_len = n;

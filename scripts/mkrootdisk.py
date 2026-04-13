@@ -12,13 +12,13 @@ on the very first boot (useful for tests that want to skip the format step).
 
 Usage:
     python scripts/mkrootdisk.py [output] [--pre-format]
-    python scripts/mkrootdisk.py target/sotbsd-rootdisk.img
+    python scripts/mkrootdisk.py target/sotx-rootdisk.img
 """
 
 import os
 import sys
 
-DEFAULT_OUTPUT = os.path.join("target", "sotbsd-rootdisk.img")
+DEFAULT_OUTPUT = os.path.join("target", "sotx-rootdisk.img")
 DISK_SIZE = 64 * 1024 * 1024  # 64 MiB
 SECTOR_SIZE = 512
 SIGNATURE = b"SOTROOT\0"

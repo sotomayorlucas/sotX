@@ -743,7 +743,7 @@ pub(crate) fn sys_openat(ctx: &mut SyscallContext, msg: &IpcMsg) {
             let secs = if tsc > boot_tsc { (tsc - boot_tsc) / 2_000_000_000 } else { 0 } + UPTIME_OFFSET_SECS;
             gen_len = format_uptime_into(ctx.dir_buf, secs);
         } else if name == b"/proc/version" {
-            let info = b"Linux version 5.15.0-sotOS (root@sotOS) (gcc 12.0) #1 SMP PREEMPT\n";
+            let info = b"Linux version 5.15.0-sotX (root@sotX) (gcc 12.0) #1 SMP PREEMPT\n";
             let n = info.len().min(ctx.dir_buf.len());
             ctx.dir_buf[..n].copy_from_slice(&info[..n]);
             gen_len = n;

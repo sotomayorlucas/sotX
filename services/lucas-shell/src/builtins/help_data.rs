@@ -177,7 +177,7 @@ pub const ALL_DOCS: &[CommandDoc] = &[
         name: "ps",
         category: Category::System,
         usage: "ps",
-        summary: "List processes currently running in sotOS.",
+        summary: "List processes currently running in sotX.",
         examples: &["ps"],
     },
     CommandDoc {

@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 #
-# bootstrap-sotbsd.sh — PANDORA Task 2 pkgsrc bootstrap for sotBSD.
+# bootstrap-sotx.sh — PANDORA Task 2 pkgsrc bootstrap for sotX.
 #
-# Creates a sotBSD-flavored pkgsrc environment on the HOST (not inside
-# the running sotBSD image). Output is a directory skeleton that
+# Creates a sotX-flavored pkgsrc environment on the HOST (not inside
+# the running sotX image). Output is a directory skeleton that
 # mirrors the layout the sot-pkg service expects to see inside
 # initrd:
 #
 #     target/pkg-root/
-#         etc/mk.conf           -- sotBSD-specific pkgsrc defaults
-#         etc/sotbsd.conf       -- shim config (fetch routing, paths)
+#         etc/mk.conf           -- sotX-specific pkgsrc defaults
+#         etc/sotx.conf       -- shim config (fetch routing, paths)
 #         var/db/pkg/           -- installed package database
 #         var/db/pkg.refcount   -- opaque counter file
 #         bin/                  -- binary install prefix
@@ -18,7 +18,7 @@
 #         include/              -- headers
 #
 # The host-side prep stages the skeleton, generates a default
-# pkgsrc `mk.conf` that points at the sotBSD layout, and prepares
+# pkgsrc `mk.conf` that points at the sotX layout, and prepares
 # a sample "hello-1.0" package blob the sot-pkg service can register
 # on first boot to demonstrate the install flow end-to-end.
 #
@@ -30,8 +30,8 @@
 # toolchain when it lands.
 #
 # Usage:
-#     bash scripts/bootstrap-sotbsd.sh
-#     bash scripts/bootstrap-sotbsd.sh --root target/pkg-root
+#     bash scripts/bootstrap-sotx.sh
+#     bash scripts/bootstrap-sotx.sh --root target/pkg-root
 
 set -euo pipefail
 
@@ -45,27 +45,27 @@ while [ $# -gt 0 ]; do
             sed -n '3,28p' "$0"
             exit 0
             ;;
-        *) echo "bootstrap-sotbsd: unknown arg: $1"; exit 2 ;;
+        *) echo "bootstrap-sotx: unknown arg: $1"; exit 2 ;;
     esac
 done
 
-echo "bootstrap-sotbsd: staging pkg-root at $ROOT"
+echo "bootstrap-sotx: staging pkg-root at $ROOT"
 if [ -d "$ROOT" ] && [ "$FORCE" -eq 0 ]; then
-    echo "bootstrap-sotbsd: $ROOT already exists (pass --force to rebuild)"
+    echo "bootstrap-sotx: $ROOT already exists (pass --force to rebuild)"
 else
     rm -rf "$ROOT"
     mkdir -p "$ROOT"/{etc,var/db/pkg,bin,lib,share,include}
 fi
 
 # -----------------------------------------------------------------------
-# mk.conf — the canonical sotBSD pkgsrc defaults
+# mk.conf — the canonical sotX pkgsrc defaults
 # -----------------------------------------------------------------------
 cat > "$ROOT/etc/mk.conf" <<'MKCONF'
-# sotBSD pkgsrc defaults -- PANDORA Task 2 bootstrap output
+# sotX pkgsrc defaults -- PANDORA Task 2 bootstrap output
 #
-# Minimal overrides pointing pkgsrc at the sotBSD install hierarchy.
+# Minimal overrides pointing pkgsrc at the sotX install hierarchy.
 # Anything the vendor bootstrap would put into mk.conf goes here with
-# sotBSD-flavored paths.
+# sotX-flavored paths.
 
 LOCALBASE=            /pkg
 VARBASE=              /pkg/var
@@ -73,7 +73,7 @@ PKG_DBDIR=            /pkg/var/db/pkg
 PKG_SYSCONFDIR=       /pkg/etc
 PREFIX=               /pkg
 
-# Use the sotBSD fetch shim (routes HTTP/HTTPS through the sot-net
+# Use the sotX fetch shim (routes HTTP/HTTPS through the sot-net
 # service's socket API rather than the host's libfetch/curl).
 FETCH_CMD=            /pkg/bin/sot-fetch
 FETCH_USING=          custom
@@ -89,10 +89,10 @@ FETCH_USE_IPV6=         yes
 MKCONF
 
 # -----------------------------------------------------------------------
-# sotbsd.conf — the shim routing config consumed by sot-pkg
+# sotx.conf — the shim routing config consumed by sot-pkg
 # -----------------------------------------------------------------------
-cat > "$ROOT/etc/sotbsd.conf" <<'SHIMCONF'
-# sotBSD pkgsrc shim config
+cat > "$ROOT/etc/sotx.conf" <<'SHIMCONF'
+# sotX pkgsrc shim config
 # Consumed by services/sot-pkg at runtime to route pkg_add / pkg_info
 # / pkg_delete operations.
 
@@ -138,7 +138,7 @@ package. Installs one placeholder binary + one README.
 DESC
 
 cat > "$HELLO/+BUILD_INFO" <<'BI'
-OPSYS=sotBSD
+OPSYS=sotX
 OS_VERSION=0.1
 MACHINE_ARCH=x86_64
 PKGTOOLS_VERSION=20260407
@@ -147,20 +147,20 @@ BI
 
 # Also stage the fake binary and doc so their install is observable.
 echo '#!/pkg/bin/sh' > "$ROOT/bin/hello"
-echo 'echo hello from pkgsrc under sotBSD' >> "$ROOT/bin/hello"
+echo 'echo hello from pkgsrc under sotX' >> "$ROOT/bin/hello"
 chmod 0755 "$ROOT/bin/hello"
 
 mkdir -p "$ROOT/share/doc/hello"
 cat > "$ROOT/share/doc/hello/README" <<'RM'
-hello — sotBSD pkgsrc demo package
+hello — sotX pkgsrc demo package
 PANDORA Task 2 deliverable: demonstrates sot-pkg register/info/list/remove
 against a VFS-backed package database.
 RM
 
-echo "bootstrap-sotbsd: wrote pkg-root skeleton ($(find "$ROOT" -type f | wc -l) files)"
-echo "bootstrap-sotbsd: sample package: hello-1.0"
-echo "bootstrap-sotbsd: mk.conf at $ROOT/etc/mk.conf"
-echo "bootstrap-sotbsd: sotbsd.conf at $ROOT/etc/sotbsd.conf"
+echo "bootstrap-sotx: wrote pkg-root skeleton ($(find "$ROOT" -type f | wc -l) files)"
+echo "bootstrap-sotx: sample package: hello-1.0"
+echo "bootstrap-sotx: mk.conf at $ROOT/etc/mk.conf"
+echo "bootstrap-sotx: sotx.conf at $ROOT/etc/sotx.conf"
 echo
 echo "Next:"
 echo "  just build-sot-pkg && just image && just run"

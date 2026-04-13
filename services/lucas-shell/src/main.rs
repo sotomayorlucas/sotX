@@ -51,7 +51,7 @@ pub fn shell_loop() {
 
     // Set default env vars.
     env_set(b"SHELL", b"lucas");
-    env_set(b"OS", b"sotOS");
+    env_set(b"OS", b"sotX");
     env_set(b"VERSION", b"0.1.0");
     env_set(b"PATH", b"/bin:/usr/bin:/sbin:/usr/sbin");
     env_set(b"HOME", b"/root");
@@ -198,7 +198,7 @@ pub fn shell_loop() {
 pub extern "C" fn _start() -> ! {
     // Tokyo Night startup banner (drawn once, before the first prompt).
     prompt::print_banner(print);
-    print(b"sotOS LUCAS shell v0.3\n");
+    print(b"sotX LUCAS shell v0.3\n");
     // Load persistent history (silently no-ops on first run).
     load_from_vfs();
     shell_loop();

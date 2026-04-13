@@ -1,4 +1,4 @@
-//! hello-linux: standalone Linux ABI test binary for sotOS.
+//! hello-linux: standalone Linux ABI test binary for sotX.
 //!
 //! Exercises raw Linux syscalls (write, getpid, arch_prctl, brk, mmap,
 //! uname, exit_group) without any runtime or libc.  Runs under the LUCAS

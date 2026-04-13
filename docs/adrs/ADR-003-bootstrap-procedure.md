@@ -52,7 +52,7 @@ The on-disk layout after format:
 This layout extends the existing `ObjectStore` layout (defined in
 `libs/sotos-objstore/src/layout.rs`) by replacing the flat 128-byte directory
 entries with variable-size graph node/edge records. The superblock magic
-changes from `0x534F544F_53465321` ("SOTOSFS!") to `0x534F5446_53475248`
+changes from `0x534F544F_53465321` ("SOTXFS!") to `0x534F5446_53475248`
 ("SOTFSGRH" — sotFS Graph).
 
 ## Consequences

@@ -1,4 +1,4 @@
-//! AHCI (Advanced Host Controller Interface) SATA driver library for sotOS.
+//! AHCI (Advanced Host Controller Interface) SATA driver library for sotX.
 //!
 //! Implements the AHCI 1.3.1 specification for SATA disk I/O via MMIO registers
 //! (PCI BAR5). Supports port enumeration, IDENTIFY DEVICE, and 48-bit LBA

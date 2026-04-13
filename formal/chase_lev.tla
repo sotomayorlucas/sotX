@@ -1,6 +1,6 @@
 ------------------------------ MODULE chase_lev ------------------------------
 \* TLA+ specification of the Chase-Lev work-stealing deque used by the
-\* sotOS scheduler (see kernel/src/sched/wsdeque.rs).
+\* sotX scheduler (see kernel/src/sched/wsdeque.rs).
 \*
 \* The model is split into per-step actions so that TSO reorderings can be
 \* exhibited and so the load-bearing `mfence` between the owner-pop bottom

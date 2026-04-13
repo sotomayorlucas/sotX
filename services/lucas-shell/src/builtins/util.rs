@@ -12,7 +12,7 @@ use crate::{err, usage};
 // Kernel syscall helpers (bypass Linux translation layer)
 // ---------------------------------------------------------------------------
 
-/// Issue a sotOS kernel syscall with zero arguments (syscall number > 127).
+/// Issue a sotX kernel syscall with zero arguments (syscall number > 127).
 /// Separate from the Linux-ABI wrappers in syscall.rs because these bypass
 /// the child_handler Linux translation layer.
 #[inline(always)]
@@ -30,7 +30,7 @@ pub(crate) fn kernel_syscall0(nr: u64) -> i64 {
     ret
 }
 
-/// Issue a sotOS kernel syscall with two arguments.
+/// Issue a sotX kernel syscall with two arguments.
 #[inline(always)]
 fn kernel_syscall2(nr: u64, a1: u64, a2: u64) -> i64 {
     let ret: i64;
@@ -48,7 +48,7 @@ fn kernel_syscall2(nr: u64, a1: u64, a2: u64) -> i64 {
     ret
 }
 
-/// Issue a sotOS kernel syscall with three arguments.
+/// Issue a sotX kernel syscall with three arguments.
 #[inline(always)]
 fn kernel_syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     let ret: i64;
@@ -366,7 +366,7 @@ pub fn capture_command(cmd: &[u8], buf: &mut [u8]) -> usize {
         return if n < 0 { 0 } else { n as usize };
     }
     if eq(cmd, b"uname") {
-        let s = b"sotOS 0.1.0 x86_64 LUCAS\n";
+        let s = b"sotX 0.1.0 x86_64 LUCAS\n";
         let l = s.len().min(buf.len());
         buf[..l].copy_from_slice(&s[..l]);
         return l;

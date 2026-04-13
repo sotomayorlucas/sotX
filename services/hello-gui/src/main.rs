@@ -1,4 +1,4 @@
-//! hello-gui: Minimal Wayland client for sotOS.
+//! hello-gui: Minimal Wayland client for sotX.
 //!
 //! Demonstrates real SHM buffer sharing with the compositor:
 //! 1. Connect to compositor service via IPC

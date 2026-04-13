@@ -1,4 +1,4 @@
-//! sotOS Wayland Compositor Service
+//! sotX Wayland Compositor Service
 //!
 //! A minimal Wayland compositor that:
 //! - Registers as "compositor" via service registry
@@ -311,7 +311,7 @@ pub extern "C" fn _start() -> ! {
             physical_width_mm: phys_w_mm,
             physical_height_mm: phys_h_mm,
             subpixel: WL_OUTPUT_SUBPIXEL_UNKNOWN,
-            make: FixedStr::from_bytes(b"sotOS"),
+            make: FixedStr::from_bytes(b"sotX"),
             model: FixedStr::from_bytes(b"Framebuffer"),
             transform: WL_OUTPUT_TRANSFORM_NORMAL,
             width: w_px,
@@ -319,7 +319,7 @@ pub extern "C" fn _start() -> ! {
             refresh_mhz: 60_000,
             scale: 1,
             name: FixedStr::from_bytes(b"HEADLESS-0"),
-            description: FixedStr::from_bytes(b"sotOS framebuffer output"),
+            description: FixedStr::from_bytes(b"sotX framebuffer output"),
         });
     }
 

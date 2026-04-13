@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """ABI fuzz harness driver -- Unit 9.
 
-Boots sotOS under QEMU via `just run`, captures the serial log for at
+Boots sotX under QEMU via `just run`, captures the serial log for at
 most 240 seconds (4 minutes), and asserts that the
 `=== abi-fuzz: <ok>/<total> survived ===` marker emitted by the
 `services/abi-fuzz/` userspace binary appears in the output.
@@ -121,7 +121,7 @@ def run_just(timeout_seconds: int, iterations: int) -> tuple[int, bytes]:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Drive sotOS ABI fuzz harness under QEMU.")
+    ap = argparse.ArgumentParser(description="Drive sotX ABI fuzz harness under QEMU.")
     ap.add_argument(
         "--iterations",
         type=int,

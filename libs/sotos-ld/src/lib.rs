@@ -1,4 +1,4 @@
-//! Userspace dynamic linker for sotOS.
+//! Userspace dynamic linker for sotX.
 //!
 //! Loads ELF shared objects (.so, ET_DYN), performs relocations,
 //! and resolves symbols. Uses the `sotos-common` ELF parser for

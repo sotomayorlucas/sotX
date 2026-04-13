@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-SOT (Secure Object Transactional) is the kernel interface of sotBSD. It exposes
+SOT (Secure Object Transactional) is the kernel interface of sotX. It exposes
 five primitive object types and 11 syscalls. All higher-level abstractions
 (files, sockets, processes, device drivers) are built in userspace using these
 primitives.
@@ -434,7 +434,7 @@ SOT syscalls use `SYSCALL`/`SYSRET` with the following register mapping:
 
 ### 10.1 Current State
 
-The SOT specification describes the target design. The current sotOS/sotBSD
+The SOT specification describes the target design. The current sotX/sotX
 kernel implements the capability system (with CDT and generation-checked
 handles), synchronous and asynchronous IPC, scheduling domains, and frame
 allocation. The transaction engine and provenance system are specified but

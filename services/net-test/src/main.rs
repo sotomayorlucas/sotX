@@ -267,7 +267,7 @@ fn parse_dns_response(buf: &[u8], len: usize) -> u32 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
-    print(b"\n=== sotOS Network Test ===\n\n");
+    print(b"\n=== sotX Network Test ===\n\n");
 
     // ---------------------------------------------------------------
     // Test 1: DNS lookup for "example.com" via UDP to 10.0.2.3:53
@@ -460,7 +460,7 @@ pub extern "C" fn _start() -> ! {
     // ---------------------------------------------------------------
     // Summary
     // ---------------------------------------------------------------
-    print(b"\n=== sotOS is connected to the Internet! ===\n");
+    print(b"\n=== sotX is connected to the Internet! ===\n");
     exit(0);
 }
 

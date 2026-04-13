@@ -2,13 +2,13 @@
 
 Goal: a third party can run `just install TARGET=out.img` followed by
 `qemu-system-x86_64 -drive format=raw,file=out.img` and get a working
-sotBSD boot without touching the rest of the build system.
+sotX boot without touching the rest of the build system.
 
 ## Status
 
 | Item                         | State   | Notes                                                                                 |
 |------------------------------|---------|---------------------------------------------------------------------------------------|
-| Installer script             | Done    | `scripts/sotbsd-install.py` + `just install TARGET=...`                               |
+| Installer script             | Done    | `scripts/sotx-install.py` + `just install TARGET=...`                               |
 | Persistent rootdisk builder  | Done    | `just rootdisk` wraps `scripts/mkdisk.py`, creates ObjectStore v6 disk                |
 | `run-with-rootdisk` recipe   | Done    | Attaches `target/rootdisk.img` as a second virtio-blk drive                           |
 | SMP default = single CPU     | Done    | `just run` / `run-with-rootdisk` default to `-smp 1`; see scheduler race park below   |
@@ -21,14 +21,14 @@ sotBSD boot without touching the rest of the build system.
 ```
 just install TARGET=out.img            # writes a 512 MiB bootable image to out.img
 just install TARGET=/dev/sdb FORCE=1   # raw block device (Linux dd path)
-python scripts/sotbsd-install.py --target out.img --with-rootdisk --rootdisk-size 128
+python scripts/sotx-install.py --target out.img --with-rootdisk --rootdisk-size 128
 ```
 
 The installer is intentionally minimalist:
 
 1. It never touches a path that wasn't named on the command line.
 2. It refuses to overwrite anything unless `--force` is set.
-3. It ensures `target/sotos.img` exists (rebuilds via `just image` if
+3. It ensures `target/sotx.img` exists (rebuilds via `just image` if
    missing or stale) before copying.
 4. `--with-rootdisk` stages `target/rootdisk.img` alongside but does
    **not** merge it into the boot image — both files travel as
@@ -58,7 +58,7 @@ as a LibOS" story (see `docs/lkl-architecture.md` and the
 clean-room reference and its `rumpuser_sot.c` shim compiles
 cross-freestanding in CI.
 
-**Gated behind**: set `SOTOS_RUMP=1` env var to re-enable rump
+**Gated behind**: set `SOTX_RUMP=1` env var to re-enable rump
 boot-time init; default off.
 
 ### SMP work-stealing race

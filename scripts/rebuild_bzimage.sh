@@ -7,6 +7,6 @@ for cfg in BLK_DEV_INITRD BINFMT_ELF BINFMT_SCRIPT DEVTMPFS DEVTMPFS_MOUNT TMPFS
 done
 make ARCH=x86_64 olddefconfig
 make ARCH=x86_64 bzImage -j$(nproc)
-cp arch/x86/boot/bzImage /mnt/c/Users/sotom/sotOS/target/bzImage
+cp arch/x86/boot/bzImage /mnt/c/Users/sotom/sotX/target/bzImage
 echo "=== bzImage DONE ==="
-ls -la /mnt/c/Users/sotom/sotOS/target/bzImage
+ls -la /mnt/c/Users/sotom/sotX/target/bzImage

@@ -1248,7 +1248,7 @@ pub fn setup_host_state(vmcs_phys: u64, host_rsp: u64, host_rip: u64) -> Result<
     let tss_ptr = percpu::current_percpu().tss as u64;
     vmwrite(VMCS_HOST_TR_BASE, tss_ptr, vmcs_phys)?;
 
-    // SYSENTER MSRs (rarely used in kernel — sotOS uses SYSCALL — but
+    // SYSENTER MSRs (rarely used in kernel — sotX uses SYSCALL — but
     // the VMCS requires them).
     vmwrite(
         VMCS_HOST_IA32_SYSENTER_CS,

@@ -1,4 +1,4 @@
-/// txlog -- Transaction log viewer CLI for sotBSD/STYX.
+/// txlog -- Transaction log viewer CLI for sotX/STYX.
 ///
 /// Usage:
 ///   txlog tx list

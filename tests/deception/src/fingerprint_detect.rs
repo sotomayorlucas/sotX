@@ -54,7 +54,7 @@ mod tests {
     /// Attempt to detect deception via CPUID leaves.
     ///
     /// Technique: Execute CPUID and compare with /proc/cpuinfo.
-    /// Expected: Both should report the same CPU model. Since sotBSD
+    /// Expected: Both should report the same CPU model. Since sotX
     /// runs on real hardware (not a hypervisor), CPUID is genuine.
     #[test]
     fn fingerprint_cpuid_vs_cpuinfo() {

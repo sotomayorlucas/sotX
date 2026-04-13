@@ -5,7 +5,7 @@
 //! one table per node type, one table for edges.
 //!
 //! Phase 2 implementation — will be replaced with a custom CoW B+ tree
-//! in Phase 3 when porting to sotBSD.
+//! in Phase 3 when porting to sotX.
 
 pub mod backend;
 

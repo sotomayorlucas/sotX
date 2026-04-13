@@ -1,4 +1,4 @@
-//! Deception engine tests for sotBSD.
+//! Deception engine tests for sotX.
 //!
 //! These tests verify that the deception system correctly fabricates
 //! OS personalities, maintains cross-channel consistency, and resists

@@ -1,4 +1,4 @@
-//! SOT-ZFS: ZFS transactional integration for sotOS.
+//! SOT-ZFS: ZFS transactional integration for sotX.
 //!
 //! Connects SOT transactions to ZFS-style pool/dataset/snapshot semantics,
 //! enabling forensic-grade rollback via automatic snapshots on tx_commit.

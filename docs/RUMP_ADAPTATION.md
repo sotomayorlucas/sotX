@@ -22,9 +22,9 @@ traditional monolithic kernel or as a set of userspace libraries.
   and are used in production by Rumprun unikernels and various testing
   frameworks.
 
-### 1.2 Why Rump Kernels for sotBSD
+### 1.2 Why Rump Kernels for sotX
 
-sotBSD's BSD personality layer uses rump kernels to provide POSIX/BSD
+sotX's BSD personality layer uses rump kernels to provide POSIX/BSD
 semantics without any kernel-side implementation:
 
 1. The SOT kernel knows nothing about files, sockets, or processes.
@@ -33,7 +33,7 @@ semantics without any kernel-side implementation:
 3. The rumpuser hypercall interface maps to SOT primitives (channels,
    capabilities, secure objects).
 4. Bug-for-bug compatibility with NetBSD syscall semantics, with zero
-   ongoing maintenance burden on the sotBSD kernel.
+   ongoing maintenance burden on the sotX kernel.
 
 ---
 
@@ -157,7 +157,7 @@ Rump VFS
 
 - NetBSD source tree (or rump kernel release tarball)
 - Cross-compiler targeting x86_64-elf (freestanding)
-- sotBSD build environment (Rust nightly, just, Python 3)
+- sotX build environment (Rust nightly, just, Python 3)
 
 ### 4.2 Building the Rump Components
 
@@ -177,12 +177,12 @@ ls lib/librump*.a
 # librumpdev.a     - Device framework
 # librump.a        - Core rump runtime
 
-# 4. Cross-compile rumpuser implementation for sotBSD
-cd /path/to/sotbsd/services/rump-host
+# 4. Cross-compile rumpuser implementation for sotX
+cd /path/to/sotx/services/rump-host
 make RUMP_LIBS=/path/to/netbsd-src/lib
 ```
 
-### 4.3 Integrating with sotBSD
+### 4.3 Integrating with sotX
 
 The rump host service is a freestanding binary loaded from the initrd,
 similar to the LKL server:
@@ -221,7 +221,7 @@ Tests verify:
 
 ### 5.2 Integration Tests (QEMU)
 
-Boot sotBSD with the rump host service and run NetBSD test programs:
+Boot sotX with the rump host service and run NetBSD test programs:
 
 ```bash
 just run-rump-test

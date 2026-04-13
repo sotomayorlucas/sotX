@@ -1,4 +1,4 @@
-//! AC'97 audio driver library for sotOS.
+//! AC'97 audio driver library for sotX.
 //!
 //! Implements the Intel AC'97 (Audio Codec '97) specification for PCM audio
 //! playback through the ICH-compatible Audio Controller. Uses PIO registers

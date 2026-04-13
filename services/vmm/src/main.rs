@@ -1,4 +1,4 @@
-//! sotOS VMM (Virtual Memory Manager) Service Process
+//! sotX VMM (Virtual Memory Manager) Service Process
 //!
 //! Handles page faults for the init process and CoW-cloned child address
 //! spaces by allocating frames and mapping them.

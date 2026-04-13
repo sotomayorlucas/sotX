@@ -1,4 +1,4 @@
-//! sot-notify -- Tokyo Night notification daemon for the sotOS compositor.
+//! sot-notify -- Tokyo Night notification daemon for the sotX compositor.
 //!
 //! Registers as `"notify"` in the service registry. Other services send
 //! IPC messages with `(severity, timeout_ms, title, body)` to display
@@ -747,7 +747,7 @@ pub extern "C" fn _start() -> ! {
     }
 
     // ── Step 9: Send boot notification as smoke test ──
-    toast_push(0, 4000, b"sotOS", b"Boot complete");
+    toast_push(0, 4000, b"sotX", b"Boot complete");
     print(b"sot-notify: boot notification queued\n");
 
     // Redraw + damage + commit for the boot notification.

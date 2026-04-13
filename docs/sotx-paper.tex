@@ -48,7 +48,7 @@
   linkcolor=linkcolor,
   urlcolor=linkcolor,
   citecolor=linkcolor,
-  pdftitle={sotBSD: A Capability-Secure Microkernel with Graph-Structured Filesystem},
+  pdftitle={sotX: A Capability-Secure Microkernel with Graph-Structured Filesystem},
   pdfauthor={Lucas Sotomayor},
   pdfsubject={Microkernel OS, graph filesystem, formal verification},
   pdfkeywords={microkernel, capability, graph filesystem, DPO, treewidth, Ollivier-Ricci, deception, TLA+, Rust}
@@ -99,7 +99,7 @@
 % --- header / footer ----------------------------------------------------------
 \pagestyle{fancy}
 \fancyhf{}
-\fancyhead[L]{\textit{sotBSD: Capability-Secure Microkernel with Graph-Structured FS}}
+\fancyhead[L]{\textit{sotX: Capability-Secure Microkernel with Graph-Structured FS}}
 \fancyhead[R]{\textit{April 2026}}
 \fancyfoot[C]{\thepage}
 \renewcommand{\headrulewidth}{0.3pt}
@@ -121,8 +121,8 @@
 % --- custom commands ----------------------------------------------------------
 \newcommand{\TG}{\ensuremath{\mathcal{TG}}}
 \newcommand{\sotfs}{\textsc{sotFS}}
-\newcommand{\sotos}{\textsc{sotOS}}
-\newcommand{\sotbsd}{\textsc{sotBSD}}
+\newcommand{\sotos}{\textsc{sotX}}
+\newcommand{\sotx}{\textsc{sotX}}
 \newcommand{\DPO}{\textsc{dpo}}
 \newcommand{\MSO}{\textsc{mso}}
 \newcommand{\WAL}{\textsc{wal}}
@@ -140,7 +140,7 @@
 % --- title metadata -----------------------------------------------------------
 \title{
   \vspace{-1.5cm}
-  \textbf{sotBSD}: A Capability-Secure Microkernel with \\
+  \textbf{sotX}: A Capability-Secure Microkernel with \\
   Graph-Structured Filesystem, Algebraic Verification, \\
   and Deception-in-Depth \\[0.6em]
   \normalsize Conference Submission Draft
@@ -162,7 +162,7 @@
 % =============================================================================
 \begin{abstract}
 \noindent
-We present \sotbsd{}, a capability-secure microkernel operating system
+We present \sotx{}, a capability-secure microkernel operating system
 written entirely in Rust, featuring five kernel primitives and a
 SOT (Secure Object Transaction) exokernel layer. Atop this foundation
 we build \sotfs{}, the first filesystem whose metadata is modeled as a
@@ -205,7 +205,7 @@ detection requires expensive per-file heuristics rather than
 structural analysis.
 
 This paper presents two tightly integrated contributions. First,
-\sotbsd{}, a capability-secure microkernel with five primitives
+\sotx{}, a capability-secure microkernel with five primitives
 (scheduling, IPC, capabilities, IRQ virtualization, frame allocation)
 and a SOT exokernel providing transactional secure objects with
 provenance tracking. Second, \sotfs{}, a graph-structured filesystem
@@ -270,7 +270,7 @@ This paper makes five numbered contributions:
 The remainder of this paper is organized as follows.
 Section~\ref{sec:background} reviews necessary background.
 Section~\ref{sec:related} surveys related work.
-Section~\ref{sec:arch} presents the \sotbsd{} kernel architecture.
+Section~\ref{sec:arch} presents the \sotx{} kernel architecture.
 Section~\ref{sec:sotfs} defines \sotfs{} formally.
 Section~\ref{sec:deception} describes the deception engine.
 Section~\ref{sec:verification} details the verification chain.
@@ -448,7 +448,7 @@ the same degree in both cases.
 
 A \emph{capability} is an unforgeable reference to a kernel object
 paired with an access rights mask~\cite{dennis1966}. The
-\sotbsd{} capability model draws on seL4~\cite{klein2009},
+\sotx{} capability model draws on seL4~\cite{klein2009},
 Capsicum~\cite{watson2010}, and CHERI~\cite{woodruff2014}: capabilities
 are the \emph{only} mechanism for accessing kernel objects, forming a
 Capability Derivation Tree (\CDT{}) where rights can only be
@@ -457,7 +457,7 @@ attenuated (never amplified) through derivation.
 \subsection{Microkernel Design Principles}
 \label{sec:bg-ukernel}
 
-The \sotbsd{} kernel follows the L4 tradition~\cite{liedtke1993}:
+The \sotx{} kernel follows the L4 tradition~\cite{liedtke1993}:
 minimize the trusted computing base (TCB) to scheduling, IPC, and
 address-space management, delegating all policy---including virtual
 memory management, filesystems, and device drivers---to userspace
@@ -528,7 +528,7 @@ verification. Genode~\cite{feske2015} provided a practical capability
 framework. The L4 family~\cite{liedtke1993} demonstrated that
 microkernel IPC overhead can be minimized. Rump kernels~\cite{kantee2012}
 showed that NetBSD kernel components can run as userspace libraries.
-\sotbsd{} integrates ideas from all of these: L4-style synchronous
+\sotx{} integrates ideas from all of these: L4-style synchronous
 IPC, seL4-inspired capabilities with a CDT, Genode-like component
 isolation, and rump-kernel personality layers.
 
@@ -540,11 +540,11 @@ isolation, and rump-kernel personality layers.
 \subsection{Kernel Primitives}
 \label{sec:arch-primitives}
 
-The \sotbsd{} microkernel provides exactly five primitives:
+The \sotx{} microkernel provides exactly five primitives:
 
 \begin{definition}[Kernel Primitive Set]
 \label{def:primitives}
-The \sotbsd{} kernel implements the primitive set
+The \sotx{} kernel implements the primitive set
 $\mathcal{P} = \{\textsc{Sched}, \textsc{Ipc}, \textsc{Cap},
 \textsc{Irq}, \textsc{Frame}\}$ where:
 \begin{itemize}[leftmargin=1.4em]
@@ -1154,7 +1154,7 @@ by $\pi_\sigma$.
 \subsection{Deception Profiles}
 \label{sec:deception-profiles}
 
-\sotbsd{} ships with four deception profiles:
+\sotx{} ships with four deception profiles:
 
 \begin{enumerate}
 \item \textbf{Ubuntu Web Server:} Projects a fake
@@ -1179,7 +1179,7 @@ connecting functors:
 
 \begin{definition}[Category System]
 \label{def:cat-system}
-The \sotbsd{} deception framework comprises:
+The \sotx{} deception framework comprises:
 \begin{enumerate}[label=(\roman*)]
 \item $\cat{SO}$: Secure Objects. Objects are SOT entries; arrows are
   capability-mediated access operations.
@@ -1408,7 +1408,7 @@ and states. Layer~4 is designed to close this gap.
 \subsection{Codebase Structure}
 \label{sec:impl-codebase}
 
-\sotbsd{} is implemented entirely in Rust (nightly toolchain,
+\sotx{} is implemented entirely in Rust (nightly toolchain,
 \texttt{x86\_64-unknown-none} target) with minimal C glue for
 bootloader integration. The codebase comprises approximately 108{,}000
 lines of Rust across 69 crates, organized as follows:
@@ -1845,7 +1845,7 @@ The graph-structured approach with DPO rewriting and curvature
 monitoring is not inherently filesystem-specific. Any system whose
 state can be modeled as a typed graph---network topologies, access
 control graphs, service dependency graphs, software module
-graphs---could benefit from the same framework. The \sotbsd{} SOT
+graphs---could benefit from the same framework. The \sotx{} SOT
 layer already represents all kernel objects as typed secure objects
 with capability edges, suggesting that the monitoring infrastructure
 could be extended to cover the entire system state, not just
@@ -1914,7 +1914,7 @@ Five directions are immediate priorities:
 \label{sec:conclusion}
 % =============================================================================
 
-We have presented \sotbsd{}, a capability-secure microkernel operating
+We have presented \sotx{}, a capability-secure microkernel operating
 system, and \sotfs{}, a graph-structured filesystem with algebraic
 operational semantics. By making the graph structure of filesystem
 metadata explicit and equipping POSIX operations with DPO rewriting
@@ -1948,7 +1948,7 @@ and software architectures: wherever structure is implicit, making it
 explicit enables formal reasoning, efficient querying, and principled
 security monitoring.
 
-The \sotbsd{} microkernel and \sotfs{} filesystem are open-source and
+The \sotx{} microkernel and \sotfs{} filesystem are open-source and
 available for reproduction of all results reported in this paper.
 
 % =============================================================================

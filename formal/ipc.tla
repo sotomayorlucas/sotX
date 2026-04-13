@@ -1,8 +1,8 @@
 -------------------------------- MODULE ipc --------------------------------
-\* TLA+ Specification of sotOS IPC Protocol (Synchronous Endpoints)
+\* TLA+ Specification of sotX IPC Protocol (Synchronous Endpoints)
 \*
 \* This specification models the synchronous rendezvous IPC mechanism
-\* used by sotOS. It verifies:
+\* used by sotX. It verifies:
 \*   - Safety: no message loss, no duplicate delivery
 \*   - Progress: matching send/recv pairs always complete
 \*   - Mutual exclusion: at most one receiver per endpoint

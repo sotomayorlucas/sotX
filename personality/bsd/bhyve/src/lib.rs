@@ -1,4 +1,4 @@
-//! sot-bhyve -- Type-2 hypervisor domain framework for sotOS.
+//! sot-bhyve -- Type-2 hypervisor domain framework for sotX.
 //!
 //! Provides a bhyve-inspired VMM that extends SOT domain deception
 //! into VM introspection: CPUID/MSR spoofing, memory watches, and

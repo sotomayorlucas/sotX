@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-sotOS Cybersecurity Demo — Interactive Phase Testing.
+sotX Cybersecurity Demo — Interactive Phase Testing.
 Sends commands via serial stdin to QEMU. Uses LF (0x0A) as Enter
 because QEMU on Windows strips CR (0x0D) from serial stdio.
 """
@@ -17,12 +17,12 @@ def run():
     os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
     print("=" * 70)
-    print("  sotOS Cybersecurity Demo — Interactive Phase Testing")
+    print("  sotX Cybersecurity Demo — Interactive Phase Testing")
     print("=" * 70)
 
     proc = subprocess.Popen([
         QEMU,
-        '-drive', 'format=raw,file=target/sotos.img',
+        '-drive', 'format=raw,file=target/sotx.img',
         '-drive', 'if=none,format=raw,file=target/disk.img,id=disk0',
         '-device', 'virtio-blk-pci,drive=disk0,disable-modern=on',
         '-netdev', 'user,id=net0,hostfwd=udp::5555-:5555,hostfwd=tcp::7777-:7',
@@ -123,7 +123,7 @@ def run():
         ('Boot validation (13/13)',   'VALIDATION: 13 passed' in final),
         ('LUCAS shell started',       'v0.2' in final),
         ('Uptime >3 days',            '259' in final),
-        ('/proc/version shows sotOS', 'Linux version' in final and 'sotOS' in final),
+        ('/proc/version shows sotX', 'Linux version' in final and 'sotX' in final),
         ('Syslog entries visible',    'pid=' in final),
         ('Net mirror toggle',         'MIRROR' in final or 'mirroring' in final),
         ('wget downloaded HTML',      '<html' in final.lower() or 'DOCTYPE' in final or 'Example Domain' in final),

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Download Alpine APKs for git with SSL/TLS support and build a sysroot disk for sotOS.
+"""Download Alpine APKs for git with SSL/TLS support and build a sysroot disk for sotX.
 
 Downloads all Alpine packages needed for `git clone https://...` to work:
 git, libcurl, openssl, ca-certificates, and all transitive dependencies.
@@ -79,7 +79,7 @@ def download(url, output_path):
     print(f"  Target: {output_path}")
 
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "sotOS-fetch/1.0"})
+        req = urllib.request.Request(url, headers={"User-Agent": "sotX-fetch/1.0"})
         with urllib.request.urlopen(req, timeout=120) as resp:
             total = resp.headers.get('Content-Length')
             total = int(total) if total else None
@@ -157,7 +157,7 @@ def download_apkindex(repo="main"):
     # Always re-download APKINDEX (it's small, ~200KB)
     print(f"  Fetching APKINDEX for {repo}...")
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "sotOS-fetch/1.0"})
+        req = urllib.request.Request(url, headers={"User-Agent": "sotX-fetch/1.0"})
         with urllib.request.urlopen(req, timeout=60) as resp:
             data = resp.read()
         with open(out, 'wb') as f:
@@ -195,7 +195,7 @@ def extract_apk(apk_path, sysroot_dir):
 
     APK files are .tar.gz archives. We skip Alpine metadata files
     (.PKGINFO, .SIGN.*, .pre-install, .post-install, .trigger).
-    Symlinks are resolved by copying target data (sotOS VFS doesn't
+    Symlinks are resolved by copying target data (sotX VFS doesn't
     support symlinks).
     """
     total_files = 0
@@ -585,14 +585,14 @@ def fetch_apk_packages(pkg_names, sysroot_dir):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Download Alpine APKs for git with SSL/TLS and build sysroot for sotOS")
+        description="Download Alpine APKs for git with SSL/TLS and build sysroot for sotX")
     parser.add_argument("--disk", action="store_true",
                         help="Also create disk image via mkdisk.py")
     parser.add_argument("--disk-size", type=int, default=512,
                         help="Disk size in MiB when --disk is used (default: 512)")
     args = parser.parse_args()
 
-    print("=== sotOS Git+SSL Sysroot Builder ===\n")
+    print("=== sotX Git+SSL Sysroot Builder ===\n")
 
     steps = 5 + (1 if args.disk else 0)
     step = 0

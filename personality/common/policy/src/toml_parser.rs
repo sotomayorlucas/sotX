@@ -1,4 +1,4 @@
-//! Minimal policy file parser for sotBSD .policy files.
+//! Minimal policy file parser for sotX .policy files.
 //!
 //! Parses a subset of TOML sufficient for policy definitions:
 //! - `[section]` headers

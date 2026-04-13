@@ -426,7 +426,7 @@ fn generate_version(deception: &DeceptionPolicy) -> String {
             return out;
         }
     }
-    String::from("Linux version 6.1.0-sot (sot@sot) (gcc 12.2.0) #1 SMP PREEMPT_DYNAMIC sotOS\n")
+    String::from("Linux version 6.1.0-sot (sot@sot) (gcc 12.2.0) #1 SMP PREEMPT_DYNAMIC sotX\n")
 }
 
 fn generate_proc_stat(sys: &SystemInfo) -> String {

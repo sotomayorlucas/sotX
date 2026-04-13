@@ -1,7 +1,7 @@
 /*
- * host_ops.c -- LKL host operations for sotOS (real LKL API).
+ * host_ops.c -- LKL host operations for sotX (real LKL API).
  *
- * Maps each LKL host callback to sotOS kernel primitives.
+ * Maps each LKL host callback to sotX kernel primitives.
  * Uses the real struct lkl_host_operations from lkl/asm/host_ops.h.
  */
 
@@ -25,7 +25,7 @@
 
 struct lkl_sem {
     volatile int64_t count;
-    uint64_t         notify_cap;  /* sotOS notification for blocking */
+    uint64_t         notify_cap;  /* sotX notification for blocking */
 };
 
 static struct lkl_sem *lkl_sem_alloc(int count)

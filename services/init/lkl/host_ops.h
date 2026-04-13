@@ -1,5 +1,5 @@
 /*
- * host_ops.h -- LKL host operations backed by sotOS primitives.
+ * host_ops.h -- LKL host operations backed by sotX primitives.
  */
 
 #ifndef HOST_OPS_H
@@ -11,7 +11,7 @@
 #include "lkl_stub.h"
 #endif
 
-/* Fill in the lkl_host_operations struct with sotOS-backed implementations.
+/* Fill in the lkl_host_operations struct with sotX-backed implementations.
  * Must be called after arena_init(). */
 void host_ops_init(struct lkl_host_operations *ops);
 

@@ -372,7 +372,7 @@ fn ioctl_version(ctx: &mut SyscallContext, arg: u64) -> i64 {
     // name_len at offset 16 (size_t = u64)
     let name_len = u64::from_le_bytes(buf[16..24].try_into().unwrap()) as usize;
     let name_ptr = u64::from_le_bytes(buf[24..32].try_into().unwrap());
-    let drv_name = b"sotOS-drm";
+    let drv_name = b"sotX-drm";
     if name_ptr != 0 && name_len > 0 {
         guest_write_str(ctx, name_ptr, name_len, drv_name);
     }
@@ -390,7 +390,7 @@ fn ioctl_version(ctx: &mut SyscallContext, arg: u64) -> i64 {
     // desc_len at offset 48
     let desc_len = u64::from_le_bytes(buf[48..56].try_into().unwrap()) as usize;
     let desc_ptr = u64::from_le_bytes(buf[56..64].try_into().unwrap());
-    let drv_desc = b"sotOS virtual DRM";
+    let drv_desc = b"sotX virtual DRM";
     if desc_ptr != 0 && desc_len > 0 {
         guest_write_str(ctx, desc_ptr, desc_len, drv_desc);
     }

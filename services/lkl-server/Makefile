@@ -1,4 +1,4 @@
-# Makefile for lkl-server -- freestanding sotOS service in C
+# Makefile for lkl-server -- freestanding sotX service in C
 #
 # Cross-compile with x86_64-linux-gnu-gcc or x86_64-elf-gcc.
 # Links against liblkl.a if available in ../../lkl/output/.

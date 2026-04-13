@@ -1,4 +1,3 @@
-//! # Arena Allocator — fixed-capacity, no_std, no_alloc
 //! # Arena Allocator — fixed-capacity, heap-backed, no_std compatible
 //!
 //! Provides `Arena<T, CAPACITY>`: a dense storage pool with O(1) alloc,
@@ -45,8 +44,6 @@ enum SlotState {
 
 /// Fixed-capacity arena with amortized O(1) push and O(1) removal.
 ///
-/// Uses a backing array of `CAPACITY` elements stored as `MaybeUninit<T>`.
-/// A free-list enables O(1) deallocation and slot reuse.
 /// Uses a heap-allocated backing array of `CAPACITY` elements stored as
 /// `MaybeUninit<T>`. A free-list enables O(1) deallocation and slot reuse.
 /// When full, `alloc()` returns `None`.
@@ -54,14 +51,6 @@ enum SlotState {
 /// For the kernel service, `CAPACITY` is set high (65536).
 /// For tests, `CAPACITY` can be smaller (1024).
 pub struct Arena<T, const CAPACITY: usize> {
-    /// Backing storage. Only slots in `Occupied` state contain initialized values.
-    data: [MaybeUninit<T>; CAPACITY],
-    /// Per-slot state tracking.
-    state: [SlotState; CAPACITY],
-    /// Number of currently occupied slots.
-    len: usize,
-    /// Free list: stack of recently-freed slot indices for O(1) reuse.
-    free_list: [u32; CAPACITY],
     /// Backing storage (heap-allocated). Only slots in `Occupied` state
     /// contain initialized values.
     data: Box<[MaybeUninit<T>]>,
@@ -94,13 +83,6 @@ impl<T, const CAPACITY: usize> Arena<T, CAPACITY> {
     /// via bump pointer until the first dealloc.
     pub fn new() -> Self {
         Self {
-            // SAFETY: MaybeUninit<T> does not require initialization.
-            data: unsafe { MaybeUninit::<[MaybeUninit<T>; CAPACITY]>::uninit().assume_init() },
-            state: [SlotState::Vacant; CAPACITY],
-            len: 0,
-            // SAFETY: MaybeUninit<u32> is fine uninitialized; free_count=0 means
-            // no entries are read from free_list until a dealloc writes one.
-            free_list: [0u32; CAPACITY],
             data: boxed_uninit_slice(CAPACITY),
             state: vec![SlotState::Vacant; CAPACITY].into_boxed_slice(),
             len: 0,
@@ -328,23 +310,11 @@ impl<T, const CAPACITY: usize> Drop for Arena<T, CAPACITY> {
 
 impl<T: Clone, const CAPACITY: usize> Clone for Arena<T, CAPACITY> {
     fn clone(&self) -> Self {
-        let mut new_arena = Self {
-            data: unsafe { MaybeUninit::<[MaybeUninit<T>; CAPACITY]>::uninit().assume_init() },
-            state: self.state,
-            len: self.len,
-            free_list: self.free_list,
-            free_count: self.free_count,
-            next_bump: self.next_bump,
-        };
         let mut new_data = boxed_uninit_slice(CAPACITY);
         // Clone all occupied values.
         for i in 0..self.next_bump {
             if matches!(self.state[i], SlotState::Occupied) {
                 let val = unsafe { self.data[i].assume_init_ref() };
-                new_arena.data[i] = MaybeUninit::new(val.clone());
-            }
-        }
-        new_arena
                 new_data[i] = MaybeUninit::new(val.clone());
             }
         }
@@ -398,8 +368,6 @@ impl<'a, T, const CAPACITY: usize> Iterator for ArenaIter<'a, T, CAPACITY> {
 
 /// Mutable iterator over `(ArenaId, &mut T)` for occupied slots.
 pub struct ArenaIterMut<'a, T, const CAPACITY: usize> {
-    data: &'a mut [MaybeUninit<T>; CAPACITY],
-    state: &'a [SlotState; CAPACITY],
     data: &'a mut [MaybeUninit<T>],
     state: &'a [SlotState],
     pos: usize,
@@ -487,7 +455,6 @@ mod tests {
     fn alloc_dealloc_reuse() {
         let mut arena: Arena<u64, 1024> = Arena::new();
         let id1 = arena.alloc(10).unwrap();
-        let id2 = arena.alloc(20).unwrap();
         let _id2 = arena.alloc(20).unwrap();
         assert_eq!(arena.len(), 2);
 

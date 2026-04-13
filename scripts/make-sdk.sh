@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Sprint 3 -- build an exportable sotBSD SDK tarball.
+# Sprint 3 -- build an exportable sotX SDK tarball.
 #
 # The SDK lets a third party link their own component against the
-# frozen sotBSD ABI (see docs/ABI_v0.1.0.md) without needing to clone
+# frozen sotX ABI (see docs/ABI_v0.1.0.md) without needing to clone
 # the whole repo. It contains:
 #
-#   - target/sotos.img          bootable 512 MiB QEMU image
+#   - target/sotx.img          bootable 512 MiB QEMU image
 #   - kernel/sotos-kernel.elf   raw kernel ELF for gdb
 #   - abi/sotos-common/         frozen ABI crate (source)
 #   - abi/ABI_v0.1.0.md         frozen ABI reference document
@@ -14,9 +14,9 @@
 #   - README                    quick start
 #
 # Output:
-#   target/sotbsd-sdk-<VERSION>.tar.gz
-#   target/sotbsd-sdk-<VERSION>.tar.gz.sha256
-#   target/sotbsd-sdk-<VERSION>.tar.gz.sig    (only when a signing key is available)
+#   target/sotx-sdk-<VERSION>.tar.gz
+#   target/sotx-sdk-<VERSION>.tar.gz.sha256
+#   target/sotx-sdk-<VERSION>.tar.gz.sig    (only when a signing key is available)
 #
 # Versioning
 # ----------
@@ -34,7 +34,7 @@
 #      can be stored as raw bytes rather than a filesystem path.
 #   2. `SIGNIFY_KEY` env var: absolute path to a 32-byte raw Ed25519
 #      private key file already on disk.
-#   3. `~/.secrets/sotbsd-signify.key`: the per-developer fallback.
+#   3. `~/.secrets/sotx-signify.key`: the per-developer fallback.
 # If none of these exists the script logs a warning and does NOT fail
 # -- unsigned dev builds are still valid SDK artifacts. The signature
 # itself is byte-compatible with the format consumed by
@@ -77,7 +77,7 @@ while [ $# -gt 0 ]; do
             ;;
         -h|--help)
             cat <<'USAGE'
-make-sdk.sh -- build the sotBSD SDK tarball.
+make-sdk.sh -- build the sotX SDK tarball.
 
 Usage:
     bash scripts/make-sdk.sh [--version <tag>]
@@ -89,11 +89,11 @@ Options:
                       ABI_VERSION constant in libs/sotos-common.
 
 Outputs (under target/):
-    sotbsd-sdk-v<VERSION>.tar.gz
-    sotbsd-sdk-v<VERSION>.tar.gz.sha256
-    sotbsd-sdk-v<VERSION>.tar.gz.sig    (only if SIGNIFY_KEY_BYTES,
+    sotx-sdk-v<VERSION>.tar.gz
+    sotx-sdk-v<VERSION>.tar.gz.sha256
+    sotx-sdk-v<VERSION>.tar.gz.sig    (only if SIGNIFY_KEY_BYTES,
                                          SIGNIFY_KEY is set, or
-                                         ~/.secrets/sotbsd-signify.key
+                                         ~/.secrets/sotx-signify.key
                                          exists)
 
 See the comment block at the top of this file for full details.
@@ -125,7 +125,7 @@ else
     fi
 fi
 
-SDK_NAME="sotbsd-sdk-v${SDK_VERSION}"
+SDK_NAME="sotx-sdk-v${SDK_VERSION}"
 SDK_DIR="target/${SDK_NAME}"
 SDK_TAR="target/${SDK_NAME}.tar.gz"
 SDK_SHA="${SDK_TAR}.sha256"
@@ -135,10 +135,10 @@ rm -rf "$SDK_DIR" "$SDK_TAR" "$SDK_SHA" "$SDK_SIG"
 mkdir -p "$SDK_DIR/kernel" "$SDK_DIR/abi/sotos-common" "$SDK_DIR/docs"
 
 # -- bootable image --------------------------------------------------------
-if [ -f target/sotos.img ]; then
-    cp target/sotos.img "$SDK_DIR/"
+if [ -f target/sotx.img ]; then
+    cp target/sotx.img "$SDK_DIR/"
 else
-    echo "make-sdk: target/sotos.img missing -- continuing without bootable image (run 'just image' first for a complete SDK)" >&2
+    echo "make-sdk: target/sotx.img missing -- continuing without bootable image (run 'just image' first for a complete SDK)" >&2
 fi
 
 # -- raw kernel ELF (for gdb) ---------------------------------------------
@@ -163,16 +163,16 @@ fi
 # -- version + readme ------------------------------------------------------
 echo "$SDK_VERSION" > "$SDK_DIR/VERSION"
 cat > "$SDK_DIR/README" <<EOF
-sotBSD SDK v${SDK_VERSION}
+sotX SDK v${SDK_VERSION}
 ==========================
 
-This tarball bundles the frozen sotBSD ABI plus a bootable image.
+This tarball bundles the frozen sotX ABI plus a bootable image.
 It is produced by \`just sdk\` / \`scripts/make-sdk.sh\` from the
-public sotBSD source tree.
+public sotX source tree.
 
 Contents:
 
-  sotos.img              -- 512 MiB bootable disk image
+  sotx.img              -- 512 MiB bootable disk image
   kernel/                -- raw kernel ELF (sotos-kernel.elf) for gdb
   abi/sotos-common/      -- the frozen ABI Rust crate you link against
   abi/ABI_v0.1.0.md      -- authoritative ABI reference document
@@ -182,7 +182,7 @@ Contents:
 Quick start:
 
   1. Boot the image:
-       qemu-system-x86_64 -cpu max -drive format=raw,file=sotos.img \\
+       qemu-system-x86_64 -cpu max -drive format=raw,file=sotx.img \\
            -serial stdio -display none -no-reboot -m 2048M
 
   2. Build your own component against the frozen ABI:
@@ -228,7 +228,7 @@ printf "make-sdk: wrote %s\n" "$SDK_SHA"
 #      is what the GitHub Releases workflow passes from the
 #      SIGNIFY_KEY_B64 secret.
 #   2. SIGNIFY_KEY env var (absolute path to a 32-byte raw private key)
-#   3. ~/.secrets/sotbsd-signify.key (the workflow Lucas documents)
+#   3. ~/.secrets/sotx-signify.key (the workflow Lucas documents)
 # If none exist, log a warning and skip -- unsigned dev tarballs
 # are still valid SDK artifacts.
 SIGN_KEY_PATH=""
@@ -270,8 +270,8 @@ PY
     fi
 elif [ -n "${SIGNIFY_KEY:-}" ] && [ -f "${SIGNIFY_KEY}" ]; then
     SIGN_KEY_PATH="${SIGNIFY_KEY}"
-elif [ -f "${HOME:-/nonexistent}/.secrets/sotbsd-signify.key" ]; then
-    SIGN_KEY_PATH="${HOME}/.secrets/sotbsd-signify.key"
+elif [ -f "${HOME:-/nonexistent}/.secrets/sotx-signify.key" ]; then
+    SIGN_KEY_PATH="${HOME}/.secrets/sotx-signify.key"
 fi
 
 if [ -n "$SIGN_KEY_PATH" ]; then
@@ -313,7 +313,7 @@ PY
         printf "make-sdk: wrote %s\n" "$SDK_SIG"
     fi
 else
-    echo "make-sdk: no signing key found (set SIGNIFY_KEY_BYTES, SIGNIFY_KEY, or place one at ~/.secrets/sotbsd-signify.key) -- skipping .sig"
+    echo "make-sdk: no signing key found (set SIGNIFY_KEY_BYTES, SIGNIFY_KEY, or place one at ~/.secrets/sotx-signify.key) -- skipping .sig"
 fi
 
 printf "make-sdk: done -- artifacts in target/\n"

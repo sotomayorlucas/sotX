@@ -1,6 +1,6 @@
-//! sotOS Lua — Minimal Lua 5.4-compatible interpreter (subset).
+//! sotX Lua — Minimal Lua 5.4-compatible interpreter (subset).
 //!
-//! A `no_std` Lua interpreter for sotOS, providing:
+//! A `no_std` Lua interpreter for sotX, providing:
 //! - **Lexer**: Tokenizes Lua source into numbers, strings, keywords, operators, identifiers.
 //! - **Parser**: Parses to AST (assignments, function calls, if/while/for, return, local).
 //! - **VM**: Stack-based bytecode execution.

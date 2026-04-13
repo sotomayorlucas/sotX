@@ -1,4 +1,4 @@
-//! sotOS Mono 8x16 and 10x20 bitmap console fonts.
+//! sotX Mono 8x16 and 10x20 bitmap console fonts.
 //!
 //! Based on the IBM VGA CP437 8x16 font with hand-tuned improvements
 //! for better readability at low resolution. Glyphs `0`, `O`, `a`, `e`,
@@ -10,7 +10,7 @@
 //! in boot splash headers. Each row is stored as two bytes (big-endian,
 //! top 10 bits used).
 
-/// sotOS Mono 8x16 -- 256 glyphs, 16 bytes per glyph = 4096 bytes.
+/// sotX Mono 8x16 -- 256 glyphs, 16 bytes per glyph = 4096 bytes.
 /// Each byte is one row; MSB = leftmost pixel.
 pub static FONT_8X16: [u8; 4096] = [
     0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00, // 0x00
@@ -271,7 +271,7 @@ pub static FONT_8X16: [u8; 4096] = [
     0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00, // 0xFF
 ];
 
-/// sotOS Mono 10x20 -- 256 glyphs, 40 bytes per glyph = 10240 bytes.
+/// sotX Mono 10x20 -- 256 glyphs, 40 bytes per glyph = 10240 bytes.
 /// Each row is 2 bytes (big-endian); the top 10 bits are pixels.
 pub static FONT_10X20: [u8; 10240] = [
     0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00, // 0x00

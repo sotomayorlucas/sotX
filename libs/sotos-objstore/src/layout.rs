@@ -1,4 +1,4 @@
-//! On-disk layout structures for the sotOS object store.
+//! On-disk layout structures for the sotX object store.
 
 /// Superblock magic: "SOTOS_FS!" in ASCII.
 pub const SUPERBLOCK_MAGIC: u64 = 0x534F544F_53465321;

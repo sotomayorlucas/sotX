@@ -1,8 +1,8 @@
-//! sotos-term: a real Wayland terminal emulator for sotOS.
+//! sotos-term: a real Wayland terminal emulator for sotX.
 //!
 //! This is a native Wayland client: it looks up the compositor via the
 //! kernel service registry, walks the standard xdg_shell handshake to
-//! create an 80x24 `xdg_toplevel` titled "sotOS Terminal", then streams
+//! create an 80x24 `xdg_toplevel` titled "sotX Terminal", then streams
 //! bytes from the kernel debug port through `vte::Parser` and renders the
 //! resulting grid into an SHM buffer using embedded-graphics `FONT_6X10`.
 //!
@@ -203,7 +203,7 @@ pub extern "C" fn _start() -> ! {
     }
     {
         let mut msg = WireBuilder::new(XDG_TOPLEVEL_ID, 2); // set_title
-        msg.put_string(b"sotOS Terminal");
+        msg.put_string(b"sotX Terminal");
         wl_call_noreply(comp_ep, &msg.finish());
     }
     {
@@ -374,7 +374,7 @@ fn commit_frame(ep: u64) {
 /// Paint a centred banner into the grid at boot.
 fn write_banner() {
     let t = term::TERM.get();
-    let msg: &[u8] = b"sotOS Terminal";
+    let msg: &[u8] = b"sotX Terminal";
     let start_col = if term::COLS > msg.len() {
         (term::COLS - msg.len()) / 2
     } else {

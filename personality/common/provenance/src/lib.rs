@@ -8,7 +8,7 @@
 //! - **BlastRadius**: capability graph attack path analysis.
 //!   Computes what a compromised domain can reach via BFS through delegation chains.
 //!
-//! Both operate on fixed-size arrays (no heap) for use inside the sotOS microkernel
+//! Both operate on fixed-size arrays (no heap) for use inside the sotX microkernel
 //! or privileged userspace servers.
 
 #![no_std]

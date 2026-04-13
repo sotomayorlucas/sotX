@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build LKL (Linux Kernel Library) as a static library for sotOS.
+# Build LKL (Linux Kernel Library) as a static library for sotX.
 # Runs inside WSL2 on Windows 11.
 set -euo pipefail
 

@@ -1,4 +1,4 @@
-//! Phase C — sotOS kernel-backed control plane.
+//! Phase C — sotX kernel-backed control plane.
 //!
 //! Wraps the `SYS_VM_*` syscalls (200..207) in a small typed API so the
 //! rest of `sot-bhyve` (and tier4_demo) can talk to the kernel without
@@ -10,7 +10,7 @@
 
 use sotos_common::{VmIntrospectEvent, VmProfileSelector, sys};
 
-/// Opaque kernel VM capability handle. The raw `u64` is a sotOS
+/// Opaque kernel VM capability handle. The raw `u64` is a sotX
 /// `CapId` masked into the low 32 bits — opaque to userspace, but
 /// stable for the lifetime of the VM.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

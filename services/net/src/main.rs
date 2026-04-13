@@ -1,4 +1,4 @@
-//! sotOS Network Service — powered by smoltcp
+//! sotX Network Service — powered by smoltcp
 //!
 //! Replaces the manual TCP/IP stack with smoltcp for production-grade networking.
 //! Preserves the IPC command interface and Network Mirroring feature.

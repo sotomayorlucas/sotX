@@ -5,7 +5,7 @@
 
 /// Interrupt controller abstraction -- implemented per platform.
 ///
-/// On x86_64 in sotOS, the interrupt controller is the Local APIC + I/O APIC.
+/// On x86_64 in sotX, the interrupt controller is the Local APIC + I/O APIC.
 /// On AArch64, this would map to the GIC (Generic Interrupt Controller).
 /// On RISC-V, this would map to the PLIC (Platform-Level Interrupt Controller).
 pub trait InterruptController {

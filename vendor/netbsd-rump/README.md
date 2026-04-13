@@ -37,7 +37,7 @@ make check              # syntax-check only
 ```
 
 The output is `rumpuser_sot.o`, which is linked with the rump kernel object files
-and the sotBSD server binary.
+and the sotX server binary.
 
 ## Arena allocator
 
@@ -46,7 +46,7 @@ and the sotBSD server binary.
 
 ## Limitations
 
-- Single-CPU: `RUMPUSER_PARAM_NCPU` returns 1 (matches sotOS default).
+- Single-CPU: `RUMPUSER_PARAM_NCPU` returns 1 (matches sotX default).
 - Clock resolution limited by RDTSC granularity and assumed 2 GHz frequency.
 - No host filesystem: `rumpuser_open` returns ENOENT; all components must be
   statically linked.

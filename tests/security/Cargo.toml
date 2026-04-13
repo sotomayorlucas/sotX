@@ -2,7 +2,7 @@
 name = "sot-test-security"
 version = "0.1.0"
 edition = "2021"
-description = "Security tests for sotBSD: capability escalation, domain escape, revocation"
+description = "Security tests for sotX: capability escalation, domain escape, revocation"
 
 [workspace]
 

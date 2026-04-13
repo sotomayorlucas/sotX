@@ -1,4 +1,4 @@
-//! Security tests for sotBSD.
+//! Security tests for sotX.
 //!
 //! These tests attempt to violate the kernel's security invariants.
 //! Every test in this suite SHOULD FAIL to exploit the system. A passing

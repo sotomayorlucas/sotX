@@ -35,7 +35,7 @@
   linkcolor=linkcolor,
   urlcolor=linkcolor,
   citecolor=linkcolor,
-  pdftitle={sotBSD v0.2.0 -- a verified microkernel BSD personality with deception, SMF, Crossbow and FMA},
+  pdftitle={sotX v0.2.0 -- a verified microkernel BSD personality with deception, SMF, Crossbow and FMA},
   pdfauthor={Lucas Sotomayor (BASE4 Security)},
   pdfsubject={Microkernel operating system architecture and proposal},
   pdfkeywords={microkernel, Rust, capability-based security, deception, SMF, Crossbow, FMA, Wayland, formal verification, TLA+}
@@ -83,7 +83,7 @@
 % --- header / footer ----------------------------------------------------------
 \pagestyle{fancy}
 \fancyhf{}
-\fancyhead[L]{\textit{sotBSD v0.2.0 whitepaper}}
+\fancyhead[L]{\textit{sotX v0.2.0 whitepaper}}
 \fancyhead[R]{\textit{2026-04-08}}
 \fancyfoot[C]{\thepage}
 \renewcommand{\headrulewidth}{0.3pt}
@@ -91,7 +91,7 @@
 % --- title metadata -----------------------------------------------------------
 \title{
   \vspace{-1.5cm}
-  \textbf{sotBSD v0.2.0} \\[0.4em]
+  \textbf{sotX v0.2.0} \\[0.4em]
   \large A Verified Microkernel BSD Personality with \\
   Deception, SMF, Project Crossbow and FMA \\[0.6em]
   \normalsize Architecture, Implementation, and Proposal
@@ -112,7 +112,7 @@
 
 \begin{abstract}
 \noindent
-\textbf{sotBSD} is a verified microkernel operating system written from
+\textbf{sotX} is a verified microkernel operating system written from
 scratch in Rust, layered with a SOT (Secure Object) exokernel, a NetBSD
 \texttt{rump} kernel personality, a Linux ABI personality, a deception
 subsystem with capability interposition and live migration, and a v0.2.0+
@@ -124,7 +124,7 @@ C glue (Limine + LKL/rump shims), 6 TLA+ specifications under TLC model
 checking, and 16 PASS markers verified end-to-end in a single QEMU boot.
 This document describes the architecture, the threat model the system
 addresses, the v0.2.0 deliverables, and the technical proposal for what
-sotBSD enables that no other open-source operating system in 2026 does.
+sotX enables that no other open-source operating system in 2026 does.
 \end{abstract}
 
 \tableofcontents
@@ -134,7 +134,7 @@ sotBSD enables that no other open-source operating system in 2026 does.
 \section{Executive Summary}
 % =============================================================================
 
-sotBSD is the BSD personality branch of \texttt{sotOS}, a research
+sotX is the BSD personality branch of \texttt{sotX}, a research
 microkernel built from scratch over the past year. As of v0.2.0
 (commit \texttt{eb137e3}, 2026-04-08) it ships:
 
@@ -152,7 +152,7 @@ microkernel built from scratch over the past year. As of v0.2.0
         domains, and a per-CPU 4096-entry provenance ring.
 
   \item Real \textbf{NetBSD rump kernel} linked into a freestanding
-        sotOS service: \texttt{librump.a + librumpvfs.a +
+        sotX service: \texttt{librump.a + librumpvfs.a +
         librumpfs\_ffs.a + librumpdev.a + librumpdev\_disk.a + ...}
         ($\sim$2 MiB) bound through 60 hand-rolled \texttt{rumpuser\_*}
         hypercalls in \texttt{rumpuser\_sot.c}.
@@ -226,7 +226,7 @@ The proposition is straightforward: no open-source operating system
 in 2026 combines a verified microkernel core, a real NetBSD rump
 in-tree, capability-based deception with live migration, an Illumos-style
 service / network / fault management triad, and a formally-checked SOT
-exokernel layer. sotBSD is small enough (108\,k LOC of Rust) to be
+exokernel layer. sotX is small enough (108\,k LOC of Rust) to be
 auditable but rich enough to host real Linux binaries
 (\texttt{busybox}, \texttt{git clone}, dynamic glibc) and to drive
 Wayland clients with a modern theme.
@@ -235,9 +235,9 @@ Wayland clients with a modern theme.
 \section{Threat Model and Motivation}
 % =============================================================================
 
-\subsection{What sotBSD defends against}
+\subsection{What sotX defends against}
 
-sotBSD targets two threat classes that conventional operating systems
+sotX targets two threat classes that conventional operating systems
 handle poorly:
 
 \subsubsection*{Class A: post-exploitation lateral movement and
@@ -251,7 +251,7 @@ through the kernel network stack. Conventional defences (SELinux,
 AppArmor, seccomp) are policy filters that the attacker either bypasses
 once or works around with documented techniques.
 
-sotBSD changes the contract. Every kernel object is accessed through a
+sotX changes the contract. Every kernel object is accessed through a
 capability, and \emph{capabilities can be interposed} after the fact.
 The deception subsystem watches the per-CPU provenance ring, identifies
 the canonical \texttt{CredentialTheftAfterBackdoor} pattern (write a
@@ -297,7 +297,7 @@ instead of the open-ended hand-wave it tends to become on Linux.
 The deception and FMA layers cannot trust the very kernel they are
 trying to defend. On a monolithic kernel, an attacker who reaches
 \texttt{ring~0} via a single bug owns the deception detector itself.
-On sotBSD, the kernel implements \emph{five primitives} and 35-ish
+On sotX, the kernel implements \emph{five primitives} and 35-ish
 syscalls, of which the deception machinery is entirely userspace
 (\texttt{services/init/} and the personality crates). A bug in the
 deception detector cannot escalate. A bug in the personality cannot
@@ -438,7 +438,7 @@ The v0.2.0 batch (codename: \textbf{Project STYX}) takes inspiration
 from Illumos / OpenIndiana / Solaris and adds three major subsystems
 plus a Wayland compositor renewal and a 4-axis hygiene pass. All 20
 units shipped as PRs \#53--\#72 over 2026-04-07/08 and merged to
-\texttt{sotBSD} HEAD \texttt{eb137e3}.
+\texttt{sotX} HEAD \texttt{eb137e3}.
 
 \subsection{SMF (Service Management Facility)}
 
@@ -724,7 +724,7 @@ violation.
 \subsection{Reproducible builds}
 
 \texttt{repro.yml} runs a Linux + Windows matrix that builds
-\texttt{target/sotos.img} \emph{twice on each host} via
+\texttt{target/sotx.img} \emph{twice on each host} via
 \texttt{python scripts/mkimage.py}, then compares the two SHA-256s.
 A final \texttt{compare} job downloads both host artifacts and
 asserts they're equal. Determinism is enforced by pinning all FAT32
@@ -761,7 +761,7 @@ tarball with Ed25519 (key sourced from
 private key, decoded into a temp file with \texttt{trap} cleanup),
 and uploads \texttt{.tar.gz}, \texttt{.sha256} and \texttt{.sig} via
 \texttt{softprops/action-gh-release@v2}. A repo guard
-(\texttt{if: github.repository == 'sotomayorlucas/sotBSD'}) prevents
+(\texttt{if: github.repository == 'sotomayorlucas/sotX'}) prevents
 fork-tag accidents.
 
 % =============================================================================
@@ -848,7 +848,7 @@ re-implemented in Rust without rewriting the whole rump kernel). All
 other userspace and kernel code is Rust. There is zero C++.
 
 % =============================================================================
-\section{What sotBSD enables}
+\section{What sotX enables}
 % =============================================================================
 
 The proposition for v0.2.0+ is short:
@@ -967,7 +967,7 @@ The proposition for v0.2.0+ is short:
 \section{Conclusion}
 % =============================================================================
 
-sotBSD v0.2.0 ships a verified microkernel BSD personality OS in
+sotX v0.2.0 ships a verified microkernel BSD personality OS in
 $\sim$108\,k LOC of Rust, with a SOT exokernel layer, a real NetBSD
 \texttt{rump} kernel, a Linux ABI personality that runs real glibc
 and musl binaries, capability-based deception with live migration,
@@ -995,8 +995,8 @@ bhyve guest VMs, and HAMMER2 clustering for distributed deception.
 \hrule
 \vspace{0.5em}
 \noindent\textit{Repository:}
-\href{https://github.com/sotomayorlucas/sotBSD}{\texttt{github.com/sotomayorlucas/sotBSD}}
-\quad \textit{Branch:} \texttt{sotBSD}
+\href{https://github.com/sotomayorlucas/sotX}{\texttt{github.com/sotomayorlucas/sotX}}
+\quad \textit{Branch:} \texttt{sotX}
 \quad \textit{HEAD:} \texttt{eb137e3}
 \quad \textit{Date:} 2026-04-08
 

@@ -124,7 +124,7 @@ pub fn print_banner(print_fn: fn(&[u8])) {
     print_fn(TN_FG);
     print_fn(b"  v0.3 ");
     print_fn(TN_DIM);
-    print_fn(b"\xE2\x80\x94 sotOS microkernel shell\n"); // U+2014 em dash
+    print_fn(b"\xE2\x80\x94 sotX microkernel shell\n"); // U+2014 em dash
     print_fn(TN_DIM);
     print_fn(b"  Type \"help\" for commands\n");
     print_fn(RESET);

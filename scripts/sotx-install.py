@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""sotBSD installer.
+"""sotX installer.
 
 Writes the bootable disk image (kernel + initrd + Limine) to a target
 path, optionally alongside a persistent ObjectStore data disk that
@@ -9,13 +9,13 @@ the command line. It refuses to overwrite anything unless `--force`
 is passed.
 
 Usage:
-  python scripts/sotbsd-install.py --target /path/to/sotbsd.img
-  python scripts/sotbsd-install.py --target /dev/sdX --force          # raw block device
-  python scripts/sotbsd-install.py --target out.img --with-rootdisk   # also stage rootdisk.img next to it
+  python scripts/sotx-install.py --target /path/to/sotx.img
+  python scripts/sotx-install.py --target /dev/sdX --force          # raw block device
+  python scripts/sotx-install.py --target out.img --with-rootdisk   # also stage rootdisk.img next to it
 
 The script is the host-side bootstrap of "Sprint 1" -- the goal is
 that a third party with nothing more than this repo, just, python,
-and qemu can get a sotBSD image onto a USB stick or hypervisor
+and qemu can get a sotX image onto a USB stick or hypervisor
 without reading the rest of the build system.
 """
 
@@ -29,21 +29,21 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_IMAGE = REPO_ROOT / "target" / "sotos.img"
+DEFAULT_IMAGE = REPO_ROOT / "target" / "sotx.img"
 DEFAULT_ROOTDISK = REPO_ROOT / "target" / "rootdisk.img"
 
 
 def die(msg: str) -> None:
-    print(f"sotbsd-install: error: {msg}", file=sys.stderr)
+    print(f"sotx-install: error: {msg}", file=sys.stderr)
     sys.exit(1)
 
 
 def info(msg: str) -> None:
-    print(f"sotbsd-install: {msg}")
+    print(f"sotx-install: {msg}")
 
 
 def ensure_image_built(force_rebuild: bool) -> Path:
-    """Make sure target/sotos.img exists, optionally re-running `just image`."""
+    """Make sure target/sotx.img exists, optionally re-running `just image`."""
     if not DEFAULT_IMAGE.exists() or force_rebuild:
         info("running 'just image' to (re)build the bootable disk image...")
         rc = subprocess.call(["just", "image"], cwd=REPO_ROOT)
@@ -93,13 +93,13 @@ def install_image(src: Path, dst: Path, force: bool) -> None:
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description="Install sotBSD to a target image / device")
+    p = argparse.ArgumentParser(description="Install sotX to a target image / device")
     p.add_argument("--target", required=True,
                    help="output path (file or block device)")
     p.add_argument("--force", action="store_true",
                    help="overwrite an existing target without prompting")
     p.add_argument("--rebuild", action="store_true",
-                   help="rerun 'just image' even if target/sotos.img exists")
+                   help="rerun 'just image' even if target/sotx.img exists")
     p.add_argument("--with-rootdisk", action="store_true",
                    help="also create target/rootdisk.img alongside the boot image")
     p.add_argument("--rootdisk-size", type=int, default=64,

@@ -6,7 +6,7 @@ cp "$(which busybox)" /tmp/gird/bin/busybox
 chmod +x /tmp/gird/bin/busybox
 cat > /tmp/gird/init << 'EOF'
 #!/bin/busybox sh
-/bin/busybox echo "=== sotOS guest /init alive ==="
+/bin/busybox echo "=== sotX guest /init alive ==="
 /bin/busybox echo "PID 1 running busybox"
 exec /bin/busybox sh
 EOF
@@ -15,6 +15,6 @@ mknod /tmp/gird/dev/console c 5 1
 mknod /tmp/gird/dev/ttyS0 c 4 64
 mknod /tmp/gird/dev/null c 1 3
 cd /tmp/gird
-find . | cpio -o -H newc | gzip > /mnt/c/Users/sotom/sotOS/target/guest-initramfs.cpio.gz
+find . | cpio -o -H newc | gzip > /mnt/c/Users/sotom/sotX/target/guest-initramfs.cpio.gz
 echo "=== initramfs DONE ==="
-ls -la /mnt/c/Users/sotom/sotOS/target/guest-initramfs.cpio.gz
+ls -la /mnt/c/Users/sotom/sotX/target/guest-initramfs.cpio.gz

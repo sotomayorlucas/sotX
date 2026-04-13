@@ -1,4 +1,4 @@
-# sotOS (Secure Object Transactional Operating System) — Development Roadmap
+# sotX (Secure Object Transactional Operating System) — Development Roadmap
 
 > Current state: SMP-capable microkernel with scheduling domains, transactional object
 > store with WAL for crash consistency, and a POSIX-like VFS shim. All five kernel
@@ -305,10 +305,10 @@ budget-enforced thread groups (seL4-inspired model).
 
 ## Phase 10 — LUCAS (Legacy UNIX Compatibility Abstraction System) (IN PROGRESS ~80%)
 
-**Goal**: Run unmodified Linux/POSIX ELF binaries on sotOS.
+**Goal**: Run unmodified Linux/POSIX ELF binaries on sotX.
 
 LUCAS is a set of coordinated userspace servers that present a complete Linux illusion
-to legacy binaries. It translates monolithic UNIX semantics into sotOS's decentralized,
+to legacy binaries. It translates monolithic UNIX semantics into sotX's decentralized,
 capability-based primitives — entirely in Ring 3.
 
 ### 10.1 Syscall Interceptor (Trap Handler) (DONE)
@@ -320,9 +320,9 @@ capability-based primitives — entirely in Ring 3.
 - [x] musl-static, musl-dynamic, and glibc binary support (ELF loader, PT_INTERP, auxv)
 
 ### 10.2 Capability Mapper (Ambient Authority Emulator) (DONE)
-- [x] Maintain internal table: Linux file descriptors (FDs) → sotOS capabilities
+- [x] Maintain internal table: Linux file descriptors (FDs) → sotX capabilities
 - [x] Emulate UID/GID/permission model on top of capabilities
-- [x] Map Linux PIDs to sotOS ThreadIds (PROC_TGID, PROC_KERNEL_TID)
+- [x] Map Linux PIDs to sotX ThreadIds (PROC_TGID, PROC_KERNEL_TID)
 - [x] Hide CDT complexity from guest processes — present flat POSIX view
 - [x] Translate `open("/dev/...")` to capability lookups for device endpoints
 - [x] Per-process FD tables with shared FD groups (GRP_FDS, GRP_INITRD, GRP_VFS)
@@ -332,7 +332,7 @@ capability-based primitives — entirely in Ring 3.
 - [x] Intercept POSIX file operations: `open`, `read`, `write`, `close`, `stat`, `lseek`
 - [x] Translate path-based access to Object Store transactions
 - [x] Expose typed objects as flat byte streams (what POSIX expects)
-- [x] Implement `/proc` and `/sys` as synthetic views of sotOS state
+- [x] Implement `/proc` and `/sys` as synthetic views of sotX state
 - [x] Support `opendir`/`readdir` for directory enumeration (getdents64)
 - [x] Per-process CWD with `resolve_with_cwd()` for relative paths
 - [x] Sysroot initialization: /lib, /lib64, /bin, /usr/*, /tmp, virtual /etc/*
@@ -349,25 +349,25 @@ capability-based primitives — entirely in Ring 3.
 - [x] Nested fork: P4->P5->P6 verified (git remote helper protocol)
 
 ### 10.5 IPC & Network Translator (DONE)
-- [x] Translate UNIX pipes → sotOS pipe FDs with reference counting
+- [x] Translate UNIX pipes → sotX pipe FDs with reference counting
 - [x] Translate UNIX signals → async signal delivery (LAPIC timer + vDSO trampoline)
 - [x] Translate UNIX sockets:
   - [x] TCP sockets via IPC proxy to net service (connect, send, recv, close)
   - [x] UDP sockets via IPC proxy (bind, sendto, recvfrom with src_addr fill)
   - [x] AF_UNIX socketpair (bidirectional, SOCK_CLOEXEC)
-- [x] Emulate `select()`/`poll()`/`epoll()` over sotOS IPC primitives
+- [x] Emulate `select()`/`poll()`/`epoll()` over sotX IPC primitives
 - [x] eventfd, timerfd, memfd_create, pipe2, signalfd stubs
 
 ### 10.6 Security: Confinement by Design (DONE)
 - [x] LUCAS processes run in a strict capability sandbox
 - [x] No ambient authority: a compromised Linux binary cannot escape the LUCAS illusion
-- [x] RCE inside LUCAS = attacker trapped in emulated UNIX, no access to sotOS primitives
+- [x] RCE inside LUCAS = attacker trapped in emulated UNIX, no access to sotX primitives
 - [ ] Optional: per-binary capability policy (restrict which "Linux files" map to which capabilities)
 
 ### 10.7 LKL Fusion (IN PROGRESS)
 - [x] Linux 6.6 kernel compiled as LibOS (`personality/linux/lkl/`)
 - [x] Boot via `just run-lkl` — Linux kernel runs as a userspace library
-- [ ] Full ext4/networking passthrough from LKL to sotOS services
+- [ ] Full ext4/networking passthrough from LKL to sotX services
 
 ### 10.8 Remaining Work
 - [ ] Full IDL code generator (typed wrappers suffice for now)
@@ -378,7 +378,7 @@ capability-based primitives — entirely in Ring 3.
 
 ### Milestone (ACHIEVED): Busybox (wget, sh, ls, cat, grep, wc), Alpine git (init, clone over
 dumb HTTP), links, nano, musl-static/dynamic binaries, and glibc binaries (Ubuntu echo, ls)
-all run unmodified on sotOS via LUCAS. 200+ Linux syscalls translated. Real CoW fork, nested
+all run unmodified on sotX via LUCAS. 200+ Linux syscalls translated. Real CoW fork, nested
 fork, pipe infrastructure, async signals, futex, and epoll all working.
 
 ---
@@ -538,7 +538,7 @@ fork/exec/wait, CoW, signals, pipes, sockets, busybox/git/wget/nano all working.
 (Networking) is ~90% done — full IP/UDP/TCP/DNS/DHCP/HTTP stack operational. Current
 priorities:
 
-- **STYX boot verification**: sotBSD personality layer boot path + syscall wrappers (`personality/bsd/`).
+- **STYX boot verification**: sotX personality layer boot path + syscall wrappers (`personality/bsd/`).
 - **Wine PE compatibility**: Windows PE binary loading via Wine personality routing.
 - **Wayland compositor**: Native compositor (`services/compositor/`) + Weston DRM integration.
 - **Rump kernel integration**: NetBSD rump kernel for driver reuse (`personality/bsd/rump-sot/`).

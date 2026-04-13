@@ -11,7 +11,7 @@
 //! `mov rax, fs:[-(static_size - N)]`. R_X86_64_TPOFF64 stores that negative
 //! offset directly into the GOT slot.
 //!
-//! For sotOS we keep things simple: a single static TLS block per loaded
+//! For sotX we keep things simple: a single static TLS block per loaded
 //! library, allocated with `sys::frame_alloc`/`sys::map`. There's no DTV
 //! and no `__tls_get_addr`, so dynamic TLS access (DTPMOD64/DTPOFF64) is
 //! supported only for the trivial "module 1" case where the dtv slot is

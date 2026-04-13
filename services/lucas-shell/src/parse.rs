@@ -206,7 +206,7 @@ fn capture_command_extended(cmd: &[u8], buf: &mut [u8], in_fd: i64) -> usize {
         return 0;
     }
     if eq(cmd, b"uname") {
-        let s = b"sotOS 0.1.0 x86_64 LUCAS\n";
+        let s = b"sotX 0.1.0 x86_64 LUCAS\n";
         let l = s.len().min(buf.len());
         buf[..l].copy_from_slice(&s[..l]);
         return l;
@@ -919,7 +919,7 @@ pub fn dispatch_command(line: &[u8]) {
             let topic = trim(&line[4..]);
             crate::help::print_command_doc(topic);
         } else if eq(line, b"uname") {
-            print(b"sotOS 0.1.0 x86_64 LUCAS\n");
+            print(b"sotX 0.1.0 x86_64 LUCAS\n");
         } else if eq(line, b"uptime") {
             cmd_uptime();
         } else if eq(line, b"ps") {

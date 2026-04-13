@@ -1,6 +1,6 @@
-//! sotOS GUI — Window compositor and drawing primitives.
+//! sotX GUI — Window compositor and drawing primitives.
 //!
-//! Provides a minimal window management system for the sotOS framebuffer:
+//! Provides a minimal window management system for the sotX framebuffer:
 //! - Window creation, destruction, z-ordering, and focus management
 //! - Compositor: renders windows to framebuffer with overlap handling
 //! - Window decorations: title bar, close button, minimize button
@@ -885,7 +885,7 @@ impl WindowManager {
         alpha_fill_rect_fb(fb, st, 0, tb_y, sw, tb_h, bgra(15, 15, 25, 255), 210);
         fill_rect_fb(fb, st, 0, tb_y, sw, 1, bgra(80, 120, 200, 255));
         draw_string_fb(fb, st, sw, sh, 12, tb_y as i32 + 13,
-            b"sotOS", bgra(130, 170, 255, 255));
+            b"sotX", bgra(130, 170, 255, 255));
         fill_rect_fb(fb, st, 60, tb_y + 6, 1, tb_h - 12, bgra(60, 60, 80, 255));
 
         // Window pills in taskbar.

@@ -1,4 +1,4 @@
-/// deception-config -- Deception profile management CLI for sotBSD/STYX.
+/// deception-config -- Deception profile management CLI for sotX/STYX.
 ///
 /// Usage:
 ///   deception-config deception profiles

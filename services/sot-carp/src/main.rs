@@ -1,6 +1,6 @@
-//! sot-carp — sotBSD CARP + pfsync cluster service.
+//! sot-carp — sotX CARP + pfsync cluster service.
 //!
-//! **Project PANDORA Task 3** — the shim layer that lets sotBSD host
+//! **Project PANDORA Task 3** — the shim layer that lets sotX host
 //! OpenBSD's carp(4) high-availability + pfsync(4) state replication
 //! protocols without porting the in-kernel networking stack. The
 //! vendor C sources live under `vendor/openbsd-carp/sys/` and define

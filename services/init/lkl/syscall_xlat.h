@@ -2,7 +2,7 @@
  * syscall_xlat.h -- Translate x86_64 Linux syscall numbers to LKL (generic).
  *
  * LKL uses the generic syscall table (same as AArch64/RISC-V),
- * while apps on sotOS use x86_64 numbers. This table maps between them.
+ * while apps on sotX use x86_64 numbers. This table maps between them.
  */
 
 #ifndef SYSCALL_XLAT_H

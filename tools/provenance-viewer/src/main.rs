@@ -1,4 +1,4 @@
-/// provenance-viewer -- Provenance graph visualization (text mode) for sotBSD/STYX.
+/// provenance-viewer -- Provenance graph visualization (text mode) for sotX/STYX.
 ///
 /// Usage:
 ///   provenance-viewer prov query --domain <id>

@@ -2,7 +2,7 @@
 name = "sot-test-posix"
 version = "0.1.0"
 edition = "2021"
-description = "POSIX conformance tests for sotBSD personality layers (LTP subset)"
+description = "POSIX conformance tests for sotX personality layers (LTP subset)"
 
 [workspace]
 

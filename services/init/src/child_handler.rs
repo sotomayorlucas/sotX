@@ -1767,7 +1767,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                 let buf_ptr = msg.regs[0];
                 if buf_ptr != 0 && buf_ptr < 0x0000_8000_0000_0000 {
                     let mut buf = [0u8; 390];
-                    let fields: [&[u8]; 5] = [b"Linux", b"sotos", b"6.1.0-sotOS", b"#1 SMP sotOS 0.1.0", b"x86_64"];
+                    let fields: [&[u8]; 5] = [b"Linux", b"sotos", b"6.1.0-sotX", b"#1 SMP sotX 0.1.0", b"x86_64"];
                     for (i, field) in fields.iter().enumerate() {
                         let off = i * 65;
                         let len = field.len().min(64);

@@ -1,4 +1,4 @@
-# sotOS / sotBSD / sotFS — TODO
+# sotX / sotX / sotFS — TODO
 
 **Status**: sotFS complete (Phases 0-5 + QA). Kernel endpoint_close fix shipped. Manual + paper written.
 **Branch**: `main`
@@ -10,10 +10,10 @@
 
 - [ ] Run TLC model checker on 4 TLA+ specs (verify 24 invariants)
 - [ ] Mechanical proofs in Coq/Perennial (commit atomicity, rollback correctness, cap unforgeability, treewidth preservation)
-- [ ] Custom storage backend (replace redb with COW B+ tree for native sotBSD)
+- [ ] Custom storage backend (replace redb with COW B+ tree for native sotX)
 - [ ] End-to-end VFS delegation (LUCAS open("/sotfs/x") -> IPC -> sotfs service -> reply with data)
 - [ ] Persistent storage in bare-metal service (currently in-memory, lost on reboot)
-- [ ] Native API for explicit transactions and graph queries from sotBSD processes
+- [ ] Native API for explicit transactions and graph queries from sotX processes
 
 ## Kernel / IPC
 
@@ -65,7 +65,7 @@
 - [ ] Incremental curvature monitor integrated in bare-metal service
 - [ ] Treewidth enforcement in GTXN (reject ops that exceed the bound)
 
-- [x] QEMU boot test: STYX banner appears (`sotBSD/STYX exokernel v0.1.0`)
+- [x] QEMU boot test: STYX banner appears (`sotX/STYX exokernel v0.1.0`)
 - [x] SOT syscalls 300-310 reachable from userspace (7/7 PASS via styx-test)
 - [x] `services/styx-test/` minimal binary spawned by init at boot
   - Required fixes: kernel `handle_so_create` accepts type 1/3/4/5 as Memory placeholder;

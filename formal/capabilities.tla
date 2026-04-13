@@ -1,5 +1,5 @@
 ----------------------------- MODULE capabilities -----------------------------
-\* TLA+ Specification of sotOS Capability System
+\* TLA+ Specification of sotX Capability System
 \*
 \* This specification models the capability-based access control system.
 \* It verifies:

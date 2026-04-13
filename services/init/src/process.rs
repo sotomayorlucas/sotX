@@ -482,7 +482,7 @@ pub(crate) fn signal_deliver(ep_cap: u64, pid: usize, sig: u64, child_tid: u64, 
     child_write(child_as_cap, frame_rsp, frame_bytes);
 
     // NOTE: We do NOT block the signal during handler execution because
-    // sotOS rt_sigreturn (kernel-only) cannot restore sig_blocked from
+    // sotX rt_sigreturn (kernel-only) cannot restore sig_blocked from
     // the saved old_mask. Blocking without unblocking would permanently
     // block the signal. Wine specifically needs SIGSEGV re-entrant delivery.
     // The old_mask is still saved in the SignalFrame for future use.

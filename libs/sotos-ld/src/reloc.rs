@@ -66,7 +66,7 @@ pub fn applied_count() -> u64 {
 ///
 /// `tls_block` is `TlsBlock::empty()` for libraries without PT_TLS.
 /// `tls_module_id` is `1` for the main executable, `> 1` for shared libs;
-/// for now we only ever pass `1` because sotOS doesn't have a real DTV.
+/// for now we only ever pass `1` because sotX doesn't have a real DTV.
 ///
 /// `symtab_addr` / `strtab_addr` point at the loaded `.dynsym` / `.dynstr`
 /// (already adjusted by `base`) so the engine can resolve symbols defined

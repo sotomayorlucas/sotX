@@ -1,4 +1,4 @@
-//! sotOS Audio Service — AC97 sound output
+//! sotX Audio Service — AC97 sound output
 //!
 //! Detects AC97 audio on PCI, initializes the controller, and plays
 //! a boot chime (1 kHz sine wave for ~0.5 seconds).

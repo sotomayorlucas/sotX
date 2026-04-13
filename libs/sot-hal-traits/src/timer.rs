@@ -5,7 +5,7 @@
 
 /// Timer abstraction -- implemented per platform.
 ///
-/// On x86_64 in sotOS, the primary timer is the LAPIC timer (one-shot mode),
+/// On x86_64 in sotX, the primary timer is the LAPIC timer (one-shot mode),
 /// with TSC used for high-resolution monotonic timestamps.
 /// On AArch64, this maps to the ARM Generic Timer (`CNTPCT_EL0` / `CNTP_CVAL_EL0`).
 /// On RISC-V, this maps to the `mtime`/`mtimecmp` SBI timer.

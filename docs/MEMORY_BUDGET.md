@@ -1,9 +1,9 @@
-# sotBSD Kernel Static Memory Budget
+# sotX Kernel Static Memory Budget
 
 Per-pool inventory of every kernel-resident `static` / `static mut` /
 fixed-count array that contributes to the kernel's permanent memory
 footprint. All numbers are derived by inspecting `kernel/src/**/*.rs`
-at commit `ce4d80b` (sotBSD branch).
+at commit `ce4d80b` (sotX branch).
 
 ## Methodology
 

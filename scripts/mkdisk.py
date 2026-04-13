@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create a sotOS ObjectStore v5 disk image.
+"""Create a sotX ObjectStore v5 disk image.
 
 Modes:
   - Default (no --rootfs): Creates a small empty formatted disk.
@@ -721,7 +721,7 @@ class DiskBuilder:
         # BPB
         bpb = bytearray(512)
         bpb[0:3] = b'\xEB\x58\x90'
-        bpb[3:11] = b'sotOS   '
+        bpb[3:11] = b'sotX   '
         struct.pack_into('<H', bpb, 11, 512)       # bytes/sector
         bpb[13] = spc
         struct.pack_into('<H', bpb, 14, reserved)   # reserved sectors
@@ -779,7 +779,7 @@ class DiskBuilder:
         entry[0:8] = b'README  '
         entry[8:11] = b'TXT'
         entry[11] = 0x20  # archive
-        content = b'Hello from FAT32 on sotOS!\n'
+        content = b'Hello from FAT32 on sotX!\n'
         struct.pack_into('<H', entry, 26, 3)  # first cluster lo
         struct.pack_into('<I', entry, 28, len(content))
         self.data[data_start_off+32:data_start_off+64] = entry
@@ -796,7 +796,7 @@ class DiskBuilder:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Create a sotOS ObjectStore disk image")
+    parser = argparse.ArgumentParser(description="Create a sotX ObjectStore disk image")
     parser.add_argument("--output", default="target/disk.img",
                         help="Output disk image path")
     parser.add_argument("--size", type=int, default=256,

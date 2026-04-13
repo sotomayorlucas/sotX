@@ -1,4 +1,4 @@
-//! Layout and geometry constants shared across the sotOS UI.
+//! Layout and geometry constants shared across the sotX UI.
 //!
 //! These values are used by the compositor's window decorations,
 //! `sotos-gui`'s desktop renderer, and the init framebuffer console.

@@ -45,9 +45,9 @@
   linkcolor=linkcolor,
   urlcolor=linkcolor,
   citecolor=linkcolor,
-  pdftitle={sotBSD System Manual},
+  pdftitle={sotX System Manual},
   pdfauthor={Lucas Sotomayor},
-  pdfsubject={Comprehensive system manual for the sotBSD microkernel OS},
+  pdfsubject={Comprehensive system manual for the sotX microkernel OS},
   pdfkeywords={microkernel, Rust, capability, exokernel, BSD, deception, sotFS}
 }
 
@@ -120,7 +120,7 @@
 % --- header / footer ----------------------------------------------------------
 \pagestyle{fancy}
 \fancyhf{}
-\fancyhead[LE]{\textit{sotBSD System Manual}}
+\fancyhead[LE]{\textit{sotX System Manual}}
 \fancyhead[RO]{\textit{\leftmark}}
 \fancyfoot[C]{\thepage}
 \renewcommand{\headrulewidth}{0.3pt}
@@ -132,8 +132,8 @@
 \newtheorem{invariant}{Invariant}[chapter]
 
 % --- convenience macros -------------------------------------------------------
-\newcommand{\sotOS}{\texttt{sotOS}}
-\newcommand{\sotBSD}{\texttt{sotBSD}}
+\newcommand{\sotX}{\texttt{sotX}}
+\newcommand{\sotX}{\texttt{sotX}}
 \newcommand{\sotFS}{\texttt{sotFS}}
 \newcommand{\LUCAS}{\textsc{lucas}}
 \newcommand{\syscall}[1]{\texttt{#1}}
@@ -152,9 +152,9 @@
 \centering
 \vspace*{3cm}
 
-{\Huge\bfseries\color{tnblue} sotBSD System Manual\par}
+{\Huge\bfseries\color{tnblue} sotX System Manual\par}
 \vspace{0.8cm}
-{\Large\color{tnblue!70!black} The SOT Exokernel, sotBSD Microkernel,\\
+{\Large\color{tnblue!70!black} The SOT Exokernel, sotX Microkernel,\\
  and sotFS Filesystem\par}
 \vspace{0.5cm}
 {\large Version 0.2.0 --- Codename: Project STYX\par}
@@ -205,9 +205,9 @@
 \label{ch:intro}
 % ------------------------------------------------------------------------------
 
-\section{What is sotBSD?}
+\section{What is sotX?}
 
-\sotBSD{} is a verified microkernel operating system written from scratch in
+\sotX{} is a verified microkernel operating system written from scratch in
 Rust, designed around five core principles: minimal kernel surface, capability-based
 security, transactional secure objects, deception-aware personality layers, and
 formal verifiability. The system runs on the \texttt{x86\_64-unknown-none}
@@ -283,7 +283,7 @@ This manual is organized into five parts:
 
 \section{Architectural Overview}
 
-\sotBSD{} is structured as a layered system with a minimal microkernel at its
+\sotX{} is structured as a layered system with a minimal microkernel at its
 core. Figure~\ref{fig:arch-stack} shows the complete architecture stack from
 hardware to applications.
 
@@ -350,7 +350,7 @@ hardware to applications.
   \draw[arr] (rump) -- (apps);
   \draw[arr] (illumos) -- (apps);
 \end{tikzpicture}
-\caption{sotBSD architecture stack. The microkernel provides five primitives;
+\caption{sotX architecture stack. The microkernel provides five primitives;
          everything above runs in Ring~3 as capability-holding services.}
 \label{fig:arch-stack}
 \end{figure}
@@ -512,7 +512,7 @@ The boot configuration lives in \file{boot/limine.conf}:
 serial: yes
 timeout: 0
 
-/sotOS
+/sotX
   protocol: limine
   kernel_path: boot():/sotos-kernel
   module_path: boot():/initrd.cpio
@@ -993,7 +993,7 @@ via the standard INIT-SIPI-SIPI IPI sequence. Key SMP details:
 
 \section{Threat Model}
 
-\sotBSD{} defends against:
+\sotX{} defends against:
 \begin{itemize}[leftmargin=1.4em]
   \item Compromised userspace services (no ambient authority).
   \item Capability confusion attacks (generation counters).
@@ -1051,9 +1051,9 @@ the provenance log is detectable.
 \section{Architecture}
 
 \LUCAS{} (Linux User-mode Compatibility And Syscall translation) implements
-a comprehensive Linux system call interface on top of the \sotBSD{} kernel.
+a comprehensive Linux system call interface on top of the \sotX{} kernel.
 Rather than emulating a Linux kernel, \LUCAS{} translates Linux syscalls
-into sequences of \sotBSD{} IPC calls and local operations within the init
+into sequences of \sotX{} IPC calls and local operations within the init
 service's \texttt{child\_handler}.
 
 The key architectural insight is that the kernel intercepts
@@ -1211,7 +1211,7 @@ contents are generated on-the-fly. Supported paths include:
 \section{rump Kernel Integration}
 
 The BSD personality uses a real NetBSD rump kernel linked into a freestanding
-\sotOS{} service. The rump kernel provides a complete NetBSD kernel
+\sotX{} service. The rump kernel provides a complete NetBSD kernel
 environment including VFS, device drivers, and protocol stacks, running
 entirely in userspace.
 
@@ -1221,7 +1221,7 @@ The integration comprises:
     \texttt{librumpfs\_ffs.a}, \texttt{librumpdev.a},
     \texttt{librumpdev\_disk.a} (approximately 2\,MiB total).
   \item \textbf{Hypercalls:} 60 hand-rolled \texttt{rumpuser\_*} functions
-    in \texttt{rumpuser\_sot.c} that bridge the rump kernel to \sotBSD{}
+    in \texttt{rumpuser\_sot.c} that bridge the rump kernel to \sotX{}
     IPC and memory management.
   \item \textbf{Block device:} Connected to the virtio-blk or NVMe driver
     via IPC for persistent storage.
@@ -1372,7 +1372,7 @@ To resist timing-based detection, the engine employs:
 
 \section{Overview}
 
-\sotFS{} is the native filesystem for \sotBSD{}, designed around a type graph
+\sotFS{} is the native filesystem for \sotX{}, designed around a type graph
 model with formal verification guarantees. The implementation consists of 7
 Rust crates, 76 tests, and a mountable FUSE prototype for Linux development.
 
@@ -1745,7 +1745,7 @@ python scripts/mkimage.py
 
 # Boot in QEMU (2048M RAM, serial to terminal)
 "C:/Program Files/qemu/qemu-system-x86_64.exe" \
-  -drive format=raw,file=target/sotos.img \
+  -drive format=raw,file=target/sotx.img \
   -serial stdio -display none -no-reboot -m 2048M
 \end{lstlisting}
 
@@ -2108,7 +2108,7 @@ WRITE  & Inode $i$ & Inode $i$ & $i$, Ver $v$, Blk $b$, edges & $i$ identity \\
 \section{QEMU Flags}
 
 \begin{longtable}{l p{8cm}}
-\caption{Common QEMU flags used with sotBSD.} \\
+\caption{Common QEMU flags used with sotX.} \\
 \toprule
 \textbf{Flag} & \textbf{Purpose} \\
 \midrule

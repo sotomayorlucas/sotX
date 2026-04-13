@@ -1,4 +1,4 @@
-//! sotOS xHCI USB Host Controller Service Process
+//! sotX xHCI USB Host Controller Service Process
 //!
 //! Drives an xHCI USB 3.x controller via MMIO (BAR0 pre-mapped by kernel).
 //! Implements HID boot protocol keyboard support — converts USB HID reports

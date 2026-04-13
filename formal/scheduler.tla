@@ -1,5 +1,5 @@
 ------------------------------ MODULE scheduler ------------------------------
-\* TLA+ Specification of sotOS Scheduler
+\* TLA+ Specification of sotX Scheduler
 \*
 \* This specification models the preemptive priority scheduler with
 \* per-core run queues and work stealing. It verifies:

@@ -1,7 +1,7 @@
 //! HID boot protocol keyboard support.
 //!
 //! Converts USB HID boot protocol reports into PS/2 Set 1 scancodes
-//! compatible with the existing sotOS keyboard ring buffer.
+//! compatible with the existing sotX keyboard ring buffer.
 
 /// HID boot protocol keyboard report (8 bytes).
 ///

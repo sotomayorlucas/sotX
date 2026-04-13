@@ -57,7 +57,7 @@ attempt to swap the manifest+pubkey together.
         --output target/sigmanifest \
         --pair name1=path1 name2=path2 ...
 
-    SIGNIFY_KEY=/secrets/sotbsd-signify.key \
+    SIGNIFY_KEY=/secrets/sotx-signify.key \
         python scripts/build_signify_manifest.py ...
 """
 import argparse
@@ -73,7 +73,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 from cryptography.hazmat.primitives import serialization
 
 MAGIC_V2 = 0x53494732  # "SIG2"
-SIGKEY_SEED_TEXT = b"sotOS-tier5-signify-dev-seed-v1"
+SIGKEY_SEED_TEXT = b"sotX-tier5-signify-dev-seed-v1"
 GENERATED_RS = "services/init/src/sigkey_generated.rs"
 
 

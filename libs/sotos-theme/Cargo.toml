@@ -2,7 +2,7 @@
 name = "sotos-theme"
 version = "0.1.0"
 edition = "2021"
-description = "Canonical Tokyo Night palette, geometry, and ANSI helpers for sotOS"
+description = "Canonical Tokyo Night palette, geometry, and ANSI helpers for sotX"
 
 # Zero external dependencies — pure const data.
 [dependencies]

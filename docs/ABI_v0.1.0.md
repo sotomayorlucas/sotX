@@ -1,4 +1,4 @@
-# sotBSD ABI v0.1.0 — Frozen
+# sotX ABI v0.1.0 — Frozen
 
 **Status**: frozen for Sprint 3 (2026-04-07).
 **Source of truth**: `libs/sotos-common/src/lib.rs::ABI_VERSION`.

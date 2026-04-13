@@ -96,7 +96,7 @@ impl OutputDescriptor {
             physical_width_mm: 0,
             physical_height_mm: 0,
             subpixel: WL_OUTPUT_SUBPIXEL_UNKNOWN,
-            make: FixedStr::from_bytes(b"sotOS"),
+            make: FixedStr::from_bytes(b"sotX"),
             model: FixedStr::from_bytes(b"Framebuffer"),
             transform: WL_OUTPUT_TRANSFORM_NORMAL,
             width: 0,
@@ -104,7 +104,7 @@ impl OutputDescriptor {
             refresh_mhz: 60_000,
             scale: 1,
             name: FixedStr::from_bytes(b"HEADLESS-0"),
-            description: FixedStr::from_bytes(b"sotOS framebuffer output"),
+            description: FixedStr::from_bytes(b"sotX framebuffer output"),
         }
     }
 }

@@ -4,7 +4,7 @@
 \* Formalizes the refinement relation R_crash between the WAL-based
 \* concrete implementation and the abstract key-value store specification.
 \* This is the TLA+ encoding of Definition 3.1 (Crash Refinement) from
-\* the sotBSD paper (Section 3.2, Layer 2).
+\* the sotX paper (Section 3.2, Layer 2).
 \*
 \* Structure:
 \*   - Abstract spec: atomic key-value store (AbsWrite, AbsCrash)

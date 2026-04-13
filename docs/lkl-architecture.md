@@ -1,4 +1,4 @@
-# LKL Architecture for sotOS
+# LKL Architecture for sotX
 
 ## 1. Problem Statement
 
@@ -36,7 +36,7 @@ The common pattern: initial progress is fast (basic syscalls are straightforward
 but the long tail of compatibility is effectively infinite. The only projects that
 achieved full compatibility did so by running the real Linux kernel.
 
-### Where sotOS Stands Today
+### Where sotX Stands Today
 
 LUCAS (Legacy UNIX Compatibility Abstraction System) currently handles ~130 Linux
 syscall numbers in `child_handler.rs` with ~200 match arms. This is sufficient
@@ -72,12 +72,12 @@ Key properties:
   as a `write()` inside a normal Linux kernel, every struct layout, every errno,
   every edge case is correct by construction.
 
-### Why LKL Fits sotOS
+### Why LKL Fits sotX
 
-sotOS's core architectural principle is: **nothing in Ring 0 that can live in
+sotX's core architectural principle is: **nothing in Ring 0 that can live in
 userspace**. LKL is the purest expression of this principle applied to Linux
 compatibility. The real Linux kernel runs entirely as a userspace library,
-mediated by capabilities and IPC. The sotOS microkernel remains untouched ---
+mediated by capabilities and IPC. The sotX microkernel remains untouched ---
 it continues to know nothing about files, sockets, or POSIX.
 
 ---
@@ -103,7 +103,7 @@ it continues to know nothing about files, sockets, or POSIX.
 |  Layer 2: LUCAS Bridge                         (Ring 3)     |
 |                                                             |
 |  Thin IPC router — NOT a syscall emulator                   |
-|  Exposes sotOS resources to LKL host_ops:                   |
+|  Exposes sotX resources to LKL host_ops:                   |
 |    - ObjectStore (block device backing)                     |
 |    - Network queues (virtio-net via net service)            |
 |    - Shared memory channels (frame-backed)                  |
@@ -115,7 +115,7 @@ it continues to know nothing about files, sockets, or POSIX.
                            |
 +--------------------------v----------------------------------+
 |                                                             |
-|  Layer 1: sotOS Kernel                         (Ring 0)     |
+|  Layer 1: sotX Kernel                         (Ring 0)     |
 |                                                             |
 |  Pure pipeline engine — unchanged                           |
 |    - CPU scheduling (4-level MLQ + work stealing)           |
@@ -129,7 +129,7 @@ it continues to know nothing about files, sockets, or POSIX.
 
 The critical insight: Layer 2 shrinks from a 10,000+ line syscall emulator to
 a ~500 line host operations adapter. LUCAS stops translating POSIX semantics
-and becomes a thin bridge between LKL callbacks and sotOS IPC.
+and becomes a thin bridge between LKL callbacks and sotX IPC.
 
 ---
 
@@ -155,7 +155,7 @@ lkl-server (C, freestanding)
 ### Syscall Flow
 
 ```
-Child process                 sotOS Kernel              Init (child_handler)
+Child process                 sotX Kernel              Init (child_handler)
      |                            |                            |
      |--- syscall (e.g. open) --->|                            |
      |                            |--- redirect IPC msg ------>|
@@ -173,7 +173,7 @@ Child process                 sotOS Kernel              Init (child_handler)
      |                            |                        |
      |                            |                   host_ops.disk_read()
      |                            |                        |
-     |                            |<-- IPC to virtio-blk ->| (sotOS IPC)
+     |                            |<-- IPC to virtio-blk ->| (sotX IPC)
      |                            |                        |
      |                            |<-- reply (fd or err) --|
      |                            |                            |
@@ -242,14 +242,14 @@ each child process's address space as `liblinux.so`.
 |                                          |
 |  liblinux.so (LKL as shared library)    |
 |    - lkl_sys_*() functions               |
-|    - Host ops call sotOS syscalls        |
+|    - Host ops call sotX syscalls        |
 |                                          |
 +-----------------------------------------+
          |
-    sotOS syscalls (frame_alloc, map, IPC)
+    sotX syscalls (frame_alloc, map, IPC)
          |
 +-----------------------------------------+
-| sotOS Kernel (Ring 0)                    |
+| sotX Kernel (Ring 0)                    |
 +-----------------------------------------+
 ```
 
@@ -259,7 +259,7 @@ each child process's address space as `liblinux.so`.
 2. Instead of forwarding via IPC to Init, the redirect jumps to LKL's
    `lkl_sys_*()` entry point within the SAME address space
 3. LKL processes the syscall internally (VFS lookup, socket operation, etc.)
-4. When LKL needs I/O, its host_ops callbacks issue sotOS IPC to device services
+4. When LKL needs I/O, its host_ops callbacks issue sotX IPC to device services
 5. The result returns to the application with zero IPC hops for pure computation
 
 ### Benefits
@@ -272,7 +272,7 @@ each child process's address space as `liblinux.so`.
 | Concurrency | Single-threaded server bottleneck | O(1) state isolation, no contention |
 
 This is the true exokernel/LibOS model: each application carries its own
-operating system personality. The sotOS kernel provides only multiplexing
+operating system personality. The sotX kernel provides only multiplexing
 (CPU, memory, IPC), and applications choose their own abstraction layer.
 
 ---
@@ -280,20 +280,20 @@ operating system personality. The sotOS kernel provides only multiplexing
 ## 6. Host Operations Interface
 
 LKL requires the host to implement `struct lkl_host_operations`. Each callback
-maps to a sotOS primitive:
+maps to a sotX primitive:
 
 ### Thread Management
 
-| Host Op | Description | sotOS Implementation |
+| Host Op | Description | sotX Implementation |
 |---------|-------------|---------------------|
 | `thread_create` | Create a new kernel thread | `sys::thread_create()` or `sys::thread_create_in()` |
-| `thread_detach` | Detach thread (fire and forget) | No-op (sotOS threads are always detached) |
+| `thread_detach` | Detach thread (fire and forget) | No-op (sotX threads are always detached) |
 | `thread_join` | Wait for thread exit | `sys::recv()` on thread's notification cap |
 | `thread_exit` | Terminate current thread | `sys::thread_exit()` |
 
 ### Synchronization
 
-| Host Op | Description | sotOS Implementation |
+| Host Op | Description | sotX Implementation |
 |---------|-------------|---------------------|
 | `sem_alloc` | Create a semaphore | `sys::notify_create()` (binary semaphore) |
 | `sem_free` | Destroy a semaphore | Capability revocation |
@@ -305,17 +305,17 @@ maps to a sotOS primitive:
 
 ### Memory
 
-| Host Op | Description | sotOS Implementation |
+| Host Op | Description | sotX Implementation |
 |---------|-------------|---------------------|
 | `mem_alloc` | Allocate host memory | `sys::frame_alloc()` + `sys::map()` from arena region |
 | `mem_free` | Free host memory | `sys::unmap_free()` to return frame |
 
 The LKL heap is backed by a contiguous virtual region (arena). The host_ops
-allocator manages this arena, requesting physical frames from sotOS on demand.
+allocator manages this arena, requesting physical frames from sotX on demand.
 
 ### Timers
 
-| Host Op | Description | sotOS Implementation |
+| Host Op | Description | sotX Implementation |
 |---------|-------------|---------------------|
 | `timer_alloc` | Create a timer | Allocate slot in timer table |
 | `timer_set_oneshot` | Arm one-shot timer | Record RDTSC deadline; polling thread checks |
@@ -324,7 +324,7 @@ allocator manages this arena, requesting physical frames from sotOS on demand.
 
 ### Console/Print
 
-| Host Op | Description | sotOS Implementation |
+| Host Op | Description | sotX Implementation |
 |---------|-------------|---------------------|
 | `print` | Debug output | `sys::debug_print()` (COM1 serial, byte at a time) |
 | `panic` | Fatal error | Print message + `sys::thread_exit()` |
@@ -335,13 +335,13 @@ LKL does not directly perform disk/network I/O through host_ops. Instead, LKL's
 internal virtio drivers or custom block/net backends issue I/O requests that the
 host translates to IPC messages:
 
-| I/O Path | sotOS Mechanism |
+| I/O Path | sotX Mechanism |
 |----------|----------------|
 | Block read/write | IPC to virtio-blk service (existing) |
 | Network TX/RX | IPC to net service (existing TCP/UDP/ICMP stack) |
 | Initrd access | `sys::initrd_read()` (syscall 132) |
 
-The existing sotOS device services (virtio-blk, net) are unchanged. LKL
+The existing sotX device services (virtio-blk, net) are unchanged. LKL
 interacts with them through the same IPC protocol that LUCAS uses today.
 
 ---
@@ -350,7 +350,7 @@ interacts with them through the same IPC protocol that LUCAS uses today.
 
 ### IPC Message Format
 
-sotOS IPC messages use the `IpcMsg` structure:
+sotX IPC messages use the `IpcMsg` structure:
 
 ```rust
 #[repr(C)]
@@ -415,7 +415,7 @@ Address             Content                     Size
 0x82100000          Host ops state tables       64 KB
                     (timers, semaphores, etc.)
 
---- Standard sotOS service layout ---
+--- Standard sotX service layout ---
 0x900000            Service stack               16 KB (4 pages)
 0xB00000            BootInfo page               4 KB
 0xC00000+           MMIO (if needed)            varies
@@ -432,7 +432,7 @@ inode tables, dentry caches, and the network stack's socket buffers.
 ## 9. Preserved Guarantees
 
 The transition to LKL preserves every security and architectural property
-of sotOS:
+of sotX:
 
 | Property | Before (LUCAS emulation) | After (LKL) | Reason |
 |----------|--------------------------|--------------|--------|
@@ -487,8 +487,8 @@ microkernel-based OS, shipping on billions of devices.
 The original theoretical foundation. The exokernel multiplexes hardware
 resources (CPU, memory, disk) and delegates all abstraction to application-level
 library operating systems (LibOS). Each application links its own LibOS with its
-preferred abstractions. LKL on sotOS is a direct realization of this model:
-sotOS is the exokernel, LKL is the LibOS.
+preferred abstractions. LKL on sotX is a direct realization of this model:
+sotX is the exokernel, LKL is the LibOS.
 
 ### SGX-LKL (Imperial College London)
 
@@ -496,7 +496,7 @@ Runs LKL inside Intel SGX enclaves to provide a full Linux environment in a
 trusted execution context. Demonstrates that LKL's host_ops interface is
 clean enough to work in extremely constrained environments (no direct syscalls,
 limited memory, no threading support from the host). If LKL works inside SGX,
-it can work on sotOS.
+it can work on sotX.
 
 ### Unikraft LKL Port
 
@@ -523,9 +523,9 @@ trade-off than clean-room reimplementation.
 
 ## Summary
 
-LKL integration transforms sotOS from a microkernel with an ever-growing
+LKL integration transforms sotX from a microkernel with an ever-growing
 compatibility layer into a microkernel with a finished compatibility layer.
-The sotOS kernel remains pure (5 primitives, ~10K LOC, capability-secured).
+The sotX kernel remains pure (5 primitives, ~10K LOC, capability-secured).
 LUCAS evolves from a syscall translator into a thin bridge. And the real Linux
 kernel, running in Ring 3 as a library, provides the POSIX semantics that
 applications expect --- not approximately, but exactly.

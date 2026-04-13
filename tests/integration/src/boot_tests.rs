@@ -8,7 +8,7 @@
 mod tests {
     /// Verify that the kernel produces serial output during boot.
     ///
-    /// Expected: QEMU serial captures "sotOS kernel" banner within 5 seconds
+    /// Expected: QEMU serial captures "sotX kernel" banner within 5 seconds
     /// of boot. This confirms serial driver init, GDT/IDT setup, and early
     /// kprintln! are functional.
     #[test]

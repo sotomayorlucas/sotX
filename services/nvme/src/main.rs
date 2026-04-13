@@ -1,4 +1,4 @@
-//! sotOS NVMe Service Process
+//! sotX NVMe Service Process
 //!
 //! Runs as a separate process with its own address space.
 //! Drives an NVMe SSD via MMIO (BAR0 pre-mapped by kernel at 0xC00000).

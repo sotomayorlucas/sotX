@@ -1,6 +1,6 @@
-//! sot-pkg — sotBSD pkgsrc-compatible package manager service.
+//! sot-pkg — sotX pkgsrc-compatible package manager service.
 //!
-//! **Project PANDORA Task 2** — the shim layer that lets sotBSD host
+//! **Project PANDORA Task 2** — the shim layer that lets sotX host
 //! pkgsrc packages without porting NetBSD's `pkg_add`/`pkg_info`/
 //! `pkg_delete` tools to our LUCAS personality. The interface is
 //! pkgng-compatible at the directory layout level
@@ -12,7 +12,7 @@
 //!
 //! The package database is an in-memory table of `PkgEntry` slots,
 //! bootstrapped from files baked into initrd by
-//! `scripts/bootstrap-sotbsd.sh`. Persistence to the sotos-objstore
+//! `scripts/bootstrap-sotx.sh`. Persistence to the sotos-objstore
 //! VFS is tracked as a follow-up (the relevant plumbing is the same
 //! `SHARED_STORE_PTR` that `child_handler` uses for VFS writes).
 //!

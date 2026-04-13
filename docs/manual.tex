@@ -1,5 +1,5 @@
 % ==========================================================================
-% sotOS — Manual Técnico del Micronúcleo
+% sotX — Manual Técnico del Micronúcleo
 % Primera Mitad: Fundamentos (Capítulos 1–4)
 % ==========================================================================
 \documentclass[11pt,twoside,openright]{book}
@@ -85,7 +85,7 @@
 \newtheorem{invariant}{Invariante}[chapter]
 
 % --- Macros del proyecto ---
-\newcommand{\sotos}{\textsc{sotOS}}
+\newcommand{\sotos}{\textsc{sotX}}
 \newcommand{\capid}{\texttt{CapId}}
 \newcommand{\poolhandle}{\texttt{PoolHandle}}
 \newcommand{\bigO}{\mathcal{O}}
@@ -3054,7 +3054,7 @@ La configuración de Limine es mínima:
 serial: yes
 timeout: 0
 
-/sotOS
+/sotX
     protocol: limine
     resolution: 1024x768x32
     kernel_path: boot():/boot/sotos-kernel
@@ -3074,7 +3074,7 @@ La función \texttt{kmain()} ejecuta los siguientes pasos en orden estricto:
 \begin{enumerate}
     \item \textbf{Inicializar serial (COM1)}: Primera instrucción. Todas las
           aserciones y mensajes de debug dependen de la salida serial.
-          \texttt{kprintln!("sotOS v0.1.0 --- microkernel booting...")}.
+          \texttt{kprintln!("sotX v0.1.0 --- microkernel booting...")}.
 
     \item \textbf{GDT}: Instalar la Global Descriptor Table con segmentos
           de kernel (Ring~0) y usuario (Ring~3). Cargar el Task State Segment (TSS)
@@ -3204,7 +3204,7 @@ La línea de QEMU para \texttt{just run-net} (el target más completo) es:
 
 \begin{lstlisting}[language={},basicstyle=\ttfamily\scriptsize,frame=single,breaklines=true,caption={Comando QEMU para \texttt{just run-net}.},label={lst:qemu-cmd}]
 qemu-system-x86_64 \
-    -drive format=raw,file=target/sotos.img \
+    -drive format=raw,file=target/sotx.img \
     -drive if=none,format=raw,file=target/disk.img,id=disk0 \
     -device virtio-blk-pci,drive=disk0,disable-modern=on \
     -netdev user,id=net0,dns=8.8.8.8,

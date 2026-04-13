@@ -1,4 +1,4 @@
-//! sotOS Microkernel
+//! sotX Microkernel
 //!
 //! A formally-verifiable microkernel implementing five primitives:
 //! - Thread scheduling (preemptive with delegation)

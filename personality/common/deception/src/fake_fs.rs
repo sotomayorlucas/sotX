@@ -2,7 +2,7 @@
 //!
 //! An `FsOverlay` maps paths to fake content and can hide real paths.
 //! When a compromised domain reads `/etc/os-release`, the overlay returns
-//! "Ubuntu 22.04.3 LTS" instead of the real sotOS identity.
+//! "Ubuntu 22.04.3 LTS" instead of the real sotX identity.
 
 use crate::{
     DeceptionError, MAX_CONTENT_LEN, MAX_FS_OVERLAYS, MAX_HIDDEN_PATHS, MAX_PATH_LEN,

@@ -74,7 +74,7 @@ pub(crate) fn open_virtual_file(name: &[u8], dir_buf: &mut [u8]) -> Option<usize
             dir_buf[..n].copy_from_slice(&c[..n]);
             gen_len = n;
         } else if name == b"/etc/os-release" {
-            let c = b"PRETTY_NAME=\"sotOS (Exokernel)\"\nNAME=\"sotOS\"\nID=sotos\nVERSION=\"1.0\"\nVERSION_ID=\"1.0\"\nHOME_URL=\"https://github.com/nicksotomern/sotOS\"\n";
+            let c = b"PRETTY_NAME=\"sotX (Exokernel)\"\nNAME=\"sotX\"\nID=sotos\nVERSION=\"1.0\"\nVERSION_ID=\"1.0\"\nHOME_URL=\"https://github.com/nicksotomern/sotX\"\n";
             let n = c.len().min(dir_buf.len());
             dir_buf[..n].copy_from_slice(&c[..n]);
             gen_len = n;
@@ -185,7 +185,7 @@ pub(crate) fn open_virtual_file(name: &[u8], dir_buf: &mut [u8]) -> Option<usize
             dir_buf[..n].copy_from_slice(&w[..n]);
             gen_len = n;
         } else if name == b"/proc/version" {
-            let info = b"Linux version 5.15.0-sotOS (root@sotOS) (gcc 12.0) #1 SMP PREEMPT\n";
+            let info = b"Linux version 5.15.0-sotX (root@sotX) (gcc 12.0) #1 SMP PREEMPT\n";
             let n = info.len().min(dir_buf.len());
             dir_buf[..n].copy_from_slice(&info[..n]);
             gen_len = n;
@@ -207,11 +207,11 @@ pub(crate) fn open_virtual_file(name: &[u8], dir_buf: &mut [u8]) -> Option<usize
             dir_buf[..c.len()].copy_from_slice(c);
             gen_len = c.len();
         } else if name == b"/proc/sys/kernel/hostname" {
-            let c = b"sotOS\n";
+            let c = b"sotX\n";
             dir_buf[..c.len()].copy_from_slice(c);
             gen_len = c.len();
         } else if name == b"/proc/sys/kernel/osrelease" {
-            let c = b"5.15.0-sotOS\n";
+            let c = b"5.15.0-sotX\n";
             dir_buf[..c.len()].copy_from_slice(c);
             gen_len = c.len();
         } else if starts_with(name, b"/sys/devices/virtual/dmi/id/") {
@@ -292,7 +292,7 @@ pub(crate) fn open_virtual_file(name: &[u8], dir_buf: &mut [u8]) -> Option<usize
                     dir_buf[..pos].copy_from_slice(&w[..pos]);
                     gen_len = pos;
                 } else if subpath == b"cmdline" {
-                    let c = b"[sotOS]\0";
+                    let c = b"[sotX]\0";
                     dir_buf[..c.len()].copy_from_slice(c);
                     gen_len = c.len();
                 } else if subpath == b"status" {
@@ -309,7 +309,7 @@ pub(crate) fn open_virtual_file(name: &[u8], dir_buf: &mut [u8]) -> Option<usize
                     let vm_kb = (brk_sz + mmap_sz + elf_sz + 0x4000) / 1024;
                     let mut w = [0u8; 256];
                     let mut pos = 0;
-                    let hdr = b"Name:\tsotOS\nState:\t";
+                    let hdr = b"Name:\tsotX\nState:\t";
                     w[pos..pos+hdr.len()].copy_from_slice(hdr); pos += hdr.len();
                     w[pos..pos+state_str.len()].copy_from_slice(state_str); pos += state_str.len();
                     w[pos] = b'\n'; pos += 1;

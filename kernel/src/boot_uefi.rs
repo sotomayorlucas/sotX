@@ -1,7 +1,7 @@
 //! UEFI Boot Protocol Type Definitions — Design Document.
 //!
 //! This module contains the UEFI protocol type definitions needed for
-//! future UEFI boot support in sotOS. Currently, sotOS boots via the
+//! future UEFI boot support in sotX. Currently, sotX boots via the
 //! Limine BIOS protocol. This module defines the structures that would
 //! be needed for a UEFI boot path.
 //!

@@ -91,7 +91,7 @@ pub fn syscall6(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -
 #[inline(always)] pub fn linux_connect(fd: u64, addr: *const u8, len: u64) -> i64 { syscall3(42, fd, addr as u64, len) }
 #[inline(always)] pub fn linux_sendto(fd: u64, buf: *const u8, len: u64, flags: u64) -> i64 { syscall6(44, fd, buf as u64, len, flags, 0, 0) }
 #[inline(always)] pub fn linux_recvfrom(fd: u64, buf: *mut u8, len: u64, flags: u64) -> i64 { syscall6(45, fd, buf as u64, len, flags, 0, 0) }
-// Custom sotOS syscalls (intercepted by LUCAS)
+// Custom sotX syscalls (intercepted by LUCAS)
 #[inline(always)] pub fn linux_dns_resolve(name: *const u8, len: usize) -> u64 { syscall2(200, name as u64, len as u64) as u64 }
 #[inline(always)] pub fn linux_traceroute_hop(dst: u64, ttl: u64) -> u64 { syscall2(201, dst, ttl) as u64 }
 #[inline(always)] pub fn linux_icmp_ping(dst: u64, seq: u64) -> u64 { syscall2(202, dst, seq) as u64 }

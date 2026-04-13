@@ -128,13 +128,13 @@ pub(crate) fn run_linux_test() {
                 unsafe {
                     // Each field is 65 bytes in struct utsname
                     core::ptr::write_bytes(buf, 0, 390);
-                    let sysname = b"sotOS";
+                    let sysname = b"sotX";
                     core::ptr::copy_nonoverlapping(sysname.as_ptr(), buf, sysname.len());
                     let nodename = b"lucas";
                     core::ptr::copy_nonoverlapping(nodename.as_ptr(), buf.add(65), nodename.len());
                     let release = b"0.1.0";
                     core::ptr::copy_nonoverlapping(release.as_ptr(), buf.add(130), release.len());
-                    let version = b"sotOS 0.1.0 LUCAS";
+                    let version = b"sotX 0.1.0 LUCAS";
                     core::ptr::copy_nonoverlapping(version.as_ptr(), buf.add(195), version.len());
                     let machine = b"x86_64";
                     core::ptr::copy_nonoverlapping(machine.as_ptr(), buf.add(260), machine.len());
@@ -475,7 +475,7 @@ pub(crate) fn run_musl_test() {
                 if buf_ptr != 0 && buf_ptr < 0x0000_8000_0000_0000 {
                     let buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr as *mut u8, 390) };
                     for b in buf.iter_mut() { *b = 0; }
-                    let fields: [&[u8]; 5] = [b"sotOS", b"sotos", b"0.1.0", b"sotOS 0.1.0 LUCAS", b"x86_64"];
+                    let fields: [&[u8]; 5] = [b"sotX", b"sotos", b"0.1.0", b"sotX 0.1.0 LUCAS", b"x86_64"];
                     for (i, field) in fields.iter().enumerate() {
                         let off = i * 65;
                         let len = field.len().min(64);

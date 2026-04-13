@@ -181,7 +181,7 @@ pub(crate) fn format_proc_self_stat(buf: &mut [u8], pid: usize) -> usize {
     use core::sync::atomic::Ordering;
     let mut w = BufWriter::new(buf);
     if pid == 0 || pid > crate::process::MAX_PROCS {
-        let _ = uwrite!(w, "{} (sotOS) S 0 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n", pid);
+        let _ = uwrite!(w, "{} (sotX) S 0 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n", pid);
         return w.pos();
     }
     let p = &PROCESSES[pid - 1];
@@ -207,7 +207,7 @@ pub(crate) fn format_proc_self_stat(buf: &mut [u8], pid: usize) -> usize {
     // Fields: pid (comm) state ppid pgrp session tty_nr tpgid flags
     //   minflt cminflt majflt cmajflt utime stime cutime cstime
     //   priority nice num_threads itrealvalue starttime vsize rss ...
-    let _ = uwrite!(w, "{} (sotOS) {} {} {} {} 0 -1 0 0 0 0 0 {} {} 0 0 20 0 {} 0 0 {} {} 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
+    let _ = uwrite!(w, "{} (sotX) {} {} {} {} 0 -1 0 0 0 0 0 {} {} 0 0 20 0 {} 0 0 {} {} 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
         pid, state_ch, ppid, tgid, tgid,
         100u64, 50u64, // utime, stime (synthetic)
         nthreads, vsize, rss);

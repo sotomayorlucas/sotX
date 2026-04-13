@@ -202,7 +202,7 @@ fn pkg_which(name: &[u8]) {
 }
 
 // ---------------------------------------------------------------------------
-// apt -sotOS package manager
+// apt -sotX package manager
 // ---------------------------------------------------------------------------
 
 /// Package registry: tracks up to 64 packages (name, installed flag)
@@ -271,7 +271,7 @@ pub fn cmd_apt(args: &[u8]) {
     apt_init();
 
     if args.is_empty() || eq(args, b"help") || eq(args, b"--help") {
-        print(b"sotOS package manager\n");
+        print(b"sotX package manager\n");
         print(b"usage: apt install <pkg>    install package from /pkg/ to /bin/\n");
         print(b"       apt remove <pkg>     remove package from /bin/\n");
         print(b"       apt list             list all packages\n");

@@ -40,7 +40,7 @@
 //!
 //! # Pixel format
 //!
-//! `tiny-skia` produces premultiplied RGBA8888. The sotOS framebuffer is
+//! `tiny-skia` produces premultiplied RGBA8888. The sotX framebuffer is
 //! BGRA8888 (little-endian `u32`). `present()` performs the R/B channel
 //! swap per-pixel during upload, and clips destination coordinates to
 //! the framebuffer bounds.

@@ -1,4 +1,4 @@
-//! Hardware Abstraction Layer traits for sotOS / sotBSD.
+//! Hardware Abstraction Layer traits for sotX / sotX.
 //!
 //! This crate defines platform-portable trait interfaces for core hardware
 //! operations: CPU control, interrupt management, timers, and console I/O.

@@ -123,7 +123,7 @@
 % ── Header/Footer ────────────────────────────────────────────────────
 \pagestyle{fancy}
 \fancyhf{}
-\fancyhead[L]{\small\sffamily\color{accent} sotOS Architecture}
+\fancyhead[L]{\small\sffamily\color{accent} sotX Architecture}
 \fancyhead[R]{\small\sffamily\color{accent} v0.1.0}
 \fancyfoot[C]{\small\sffamily\thepage\ / \pageref{LastPage}}
 \renewcommand{\headrulewidth}{0.4pt}
@@ -158,7 +158,7 @@
   \node[draw=kernel, line width=2pt, rounded corners=8pt,
         minimum width=6cm, minimum height=6cm, fill=kernel!5] (logo) {};
   \node[font=\fontsize{48}{48}\selectfont\bfseries\sffamily\color{kernel}]
-    at (logo.center) {sotOS};
+    at (logo.center) {sotX};
   \node[font=\large\sffamily\color{kernel!70}, below=3mm]
     at (logo.south) {Verified Microkernel};
 \end{tikzpicture}
@@ -203,7 +203,7 @@ Operating systems have traditionally followed two opposing philosophies:
         it exposes raw hardware and lets applications manage their own resources.
 \end{itemize}
 
-sotOS is neither. It is a \textbf{verified microkernel with selective exokernel bypass}.
+sotX is neither. It is a \textbf{verified microkernel with selective exokernel bypass}.
 
 \begin{principalbox}{The Core Idea}
 The kernel is a formally verified microkernel managing exactly \textbf{five primitives}.
@@ -650,7 +650,7 @@ can map memory however it wants, without going through the VMM.
 \section{Security Model: Defense in Depth}
 % ═════════════════════════════════════════════════════════════════════
 
-sotOS implements four layers of defense. Each layer catches what the layers
+sotX implements four layers of defense. Each layer catches what the layers
 above it miss:
 
 \begin{center}
@@ -966,7 +966,7 @@ The same IPC interface works locally and remotely. But remote calls return
 with timeouts, disconnections, and network partitions.
 
 This is fundamentally different from CORBA/DCOM which pretended the network
-didn't exist. sotOS acknowledges the Fallacies of Distributed Computing.
+didn't exist. sotX acknowledges the Fallacies of Distributed Computing.
 
 \subsection{Failure Domain Hierarchy}
 
@@ -1100,7 +1100,7 @@ All other services receive a restricted subset --- the Principle of Least Author
   file/.style={font=\ttfamily\footnotesize, text=black!70},
 ]
 
-\node[dir] (root) at (0, 0) {sotOS/};
+\node[dir] (root) at (0, 0) {sotX/};
 \node[dir] at (0.5, -0.5) {kernel/src/};
 \node[file] at (1.2, -1.0) {main.rs \textnormal{\textit{--- entry point, Limine boot}}};
 \node[file] at (1.2, -1.5) {panic.rs \textnormal{\textit{--- panic handler}}};
@@ -1161,7 +1161,7 @@ When the kernel boots in QEMU, the serial output shows:
 \begin{lstlisting}[style=rust, numbers=none, frame=single, backgroundcolor=\color{black!90},
   basicstyle=\ttfamily\small\color{green!70}]
 limine: Loading executable `boot():/boot/sotos-kernel`...
-sotOS v0.1.0 -- microkernel booting...
+sotX v0.1.0 -- microkernel booting...
 [ok] GDT
 [ok] IDT
   frames: 268435456 total, 55982 free (218 MiB usable)
@@ -1181,7 +1181,7 @@ Halting -- no init service yet.
 \begin{center}
 \begin{tabularx}{\textwidth}{l *{4}{>{\centering\arraybackslash}X}}
 \toprule
-\textbf{Property} & \textbf{Legacy UNIX} & \textbf{seL4} & \textbf{Fuchsia} & \textbf{sotOS} \\
+\textbf{Property} & \textbf{Legacy UNIX} & \textbf{seL4} & \textbf{Fuchsia} & \textbf{sotX} \\
 \midrule
 Architecture      & Monolithic     & Microkernel    & Microkernel      & Micro + exo bypass \\
 Language          & C              & C + Isabelle   & C++ / Rust       & Rust + Verus \\
@@ -1200,7 +1200,7 @@ POSIX compat      & Native         & Manual         & Starnix layer    & \textbf
 \section{Observability}
 % ═════════════════════════════════════════════════════════════════════
 
-Every service in sotOS exposes metrics and traces natively:
+Every service in sotX exposes metrics and traces natively:
 
 \begin{itemize}[leftmargin=2em]
   \item \textbf{Distributed tracing}: Every IPC message carries a trace ID.
@@ -1274,13 +1274,13 @@ Userspace services can be updated without system restart:
 % ═════════════════════════════════════════════════════════════════════
 
 LUCAS is a userspace subsystem that allows \textbf{unmodified Linux/POSIX ELF binaries}
-to run natively on sotOS. Unlike a hypervisor that virtualizes hardware,
+to run natively on sotX. Unlike a hypervisor that virtualizes hardware,
 LUCAS is a \textit{paravirtualizer of interfaces} --- it translates monolithic
-UNIX semantics into sotOS's decentralized, capability-based primitives.
+UNIX semantics into sotX's decentralized, capability-based primitives.
 
 \begin{principalbox}{LUCAS in One Sentence}
 LUCAS presents the illusion of a complete Linux system to legacy binaries,
-while every operation is actually mediated by capabilities and sotOS IPC
+while every operation is actually mediated by capabilities and sotX IPC
 underneath. The guest binary thinks it's on Linux; it's actually sandboxed
 in a capability jail.
 \end{principalbox}
@@ -1321,9 +1321,9 @@ LUCAS is not a monolithic emulator --- it is a set of coordinated Ring~3 servers
       above left:LUCAS (Ring 3)}] (lucas) {};
 \end{scope}
 
-% sotOS services
+% sotX services
 \node[kern] (sotos) at (0, 0.5)
-  {\textbf{sotOS Primitives}: IPC Endpoints \textbullet{} Channels \textbullet{}
+  {\textbf{sotX Primitives}: IPC Endpoints \textbullet{} Channels \textbullet{}
    VMM Server \textbullet{} Object Store};
 
 % Arrows
@@ -1357,7 +1357,7 @@ LUCAS is not a monolithic emulator --- it is a set of coordinated Ring~3 servers
 \midrule
 \textbf{Capability Mapper} &
   Maintains an internal table mapping Linux file descriptors (FDs) and PIDs
-  to real sotOS capabilities. Emulates UID/GID permissions on top of the
+  to real sotX capabilities. Emulates UID/GID permissions on top of the
   capability model. Hides the CDT from the guest binary. \\
 \midrule
 \textbf{VFS Bridge} &
@@ -1374,7 +1374,7 @@ LUCAS is not a monolithic emulator --- it is a set of coordinated Ring~3 servers
   Translates UNIX pipes $\rightarrow$ ring buffer channels,
   signals $\rightarrow$ endpoint messages,
   sockets $\rightarrow$ channels (zero-copy for high throughput).
-  Emulates \texttt{epoll}/\texttt{select} over sotOS IPC. \\
+  Emulates \texttt{epoll}/\texttt{select} over sotX IPC. \\
 \bottomrule
 \end{tabularx}
 \end{center}
@@ -1441,7 +1441,7 @@ From a cybersecurity perspective, LUCAS operates as a \textbf{strict isolation s
 \node[draw=kernel, fill=kernel!5, rounded corners=5pt,
       minimum width=5cm, minimum height=3cm] (real) at (7, 0) {};
 \node[font=\sffamily\bfseries\footnotesize, text=kernel] at (7, 1.2)
-  {sotOS Reality};
+  {sotX Reality};
 \node[font=\sffamily\footnotesize, text=black!70, text width=4cm, align=center]
   at (7, 0.2)
   {Attacker has:\\[2pt]
@@ -1460,14 +1460,14 @@ From a cybersecurity perspective, LUCAS operates as a \textbf{strict isolation s
 \end{center}
 
 \begin{warningbox}{Why LUCAS Is Fundamentally More Secure Than Linux}
-In sotOS, there is \textbf{no ambient authority}. A Linux binary running inside LUCAS
+In sotX, there is \textbf{no ambient authority}. A Linux binary running inside LUCAS
 can only interact with resources that LUCAS explicitly provides capabilities for.
 Even if an attacker achieves Remote Code Execution (RCE) by exploiting a vulnerability
 in an emulated web server, the damage is confined:
 
 \begin{itemize}[leftmargin=1.5em]
   \item The compromised binary holds no native capabilities to interact with other
-        sotOS protection domains or the underlying hardware.
+        sotX protection domains or the underlying hardware.
   \item The attacker is trapped inside the ``Linux illusion'' --- they can corrupt
         the emulated environment but cannot escape the capability jail.
   \item Privilege escalation is structurally impossible: there is no \texttt{root},
@@ -1521,7 +1521,7 @@ Security model    & Shared kernel & Shared proc  & Handles             & Capabil
 
 \begin{center}
 \rule{0.5\textwidth}{0.4pt}\\[1em]
-{\large\sffamily\color{accent} sotOS --- The kernel guarantees isolation, not policy.}\\[0.5em]
+{\large\sffamily\color{accent} sotX --- The kernel guarantees isolation, not policy.}\\[0.5em]
 {\small\sffamily\color{gray} v0.1.0 \textbullet{} March 2026}
 \end{center}
 

@@ -308,7 +308,7 @@ pub fn cmd_wget(args: &[u8]) {
     let hlen = hostname.len().min(64);
     req[pos..pos + hlen].copy_from_slice(&hostname[..hlen]);
     pos += hlen;
-    let ua = b"\r\nUser-Agent: sotOS-wget/1.0\r\nConnection: close\r\n\r\n";
+    let ua = b"\r\nUser-Agent: sotX-wget/1.0\r\nConnection: close\r\n\r\n";
     req[pos..pos + ua.len()].copy_from_slice(ua);
     pos += ua.len();
 

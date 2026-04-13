@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-signify_keygen.py -- generate a real Ed25519 signing key for sotBSD.
+signify_keygen.py -- generate a real Ed25519 signing key for sotX.
 
 Writes a 32-byte raw private key to the path given on the command line.
 The matching public key is written next to it with a `.pub` suffix
@@ -15,10 +15,10 @@ Workflow
 ========
 
   # one-time, on a secure machine:
-  python scripts/signify_keygen.py --output ~/.secrets/sotbsd-signify.key
+  python scripts/signify_keygen.py --output ~/.secrets/sotx-signify.key
 
   # subsequent builds:
-  SIGNIFY_KEY=~/.secrets/sotbsd-signify.key just sigmanifest
+  SIGNIFY_KEY=~/.secrets/sotx-signify.key just sigmanifest
   just image
   # the public key embedded in init now matches the offline private key
 

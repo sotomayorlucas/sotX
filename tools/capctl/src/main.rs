@@ -1,4 +1,4 @@
-/// capctl -- Capability inspection and management CLI for sotBSD/STYX.
+/// capctl -- Capability inspection and management CLI for sotX/STYX.
 ///
 /// Usage:
 ///   capctl cap list <domain-id>

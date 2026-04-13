@@ -83,7 +83,7 @@ static int sotos_blk_request(struct lkl_disk disk, struct lkl_blk_req *req)
     return LKL_DEV_BLK_STATUS_OK;
 }
 
-/* Boot thread: runs lkl_start_kernel on a separate sotOS thread so init
+/* Boot thread: runs lkl_start_kernel on a separate sotX thread so init
  * can continue to the shell while the Linux kernel boots in background. */
 static void lkl_boot_thread_fn(void *arg)
 {

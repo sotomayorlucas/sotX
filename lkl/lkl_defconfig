@@ -1,5 +1,5 @@
 #
-# Minimal LKL (Linux Kernel Library) config for sotOS
+# Minimal LKL (Linux Kernel Library) config for sotX
 # Target: static liblkl.a with tmpfs, ext4, virtio-blk, virtio-net
 #
 
@@ -9,7 +9,7 @@ CONFIG_LKL=y
 # No loadable modules -- everything built-in
 # CONFIG_MODULES is not set
 
-# No /proc or /sys (sotOS emulates these in userspace)
+# No /proc or /sys (sotX emulates these in userspace)
 # CONFIG_PROC_FS is not set
 # CONFIG_SYSFS is not set
 

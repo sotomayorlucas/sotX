@@ -9,7 +9,7 @@ mod tests {
     /// LTP: open01
     #[test]
     fn open_creat_new_file() {
-        // TODO: Boot sotBSD, execute test binary that calls:
+        // TODO: Boot sotX, execute test binary that calls:
         //   fd = open("/tmp/test_file", O_CREAT | O_RDWR, 0644)
         // Verify: fd >= 0, file exists, mode matches.
     }

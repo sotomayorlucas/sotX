@@ -1,4 +1,4 @@
-//! drm-test: DRM dumb buffer pipeline test for sotOS.
+//! drm-test: DRM dumb buffer pipeline test for sotX.
 
 #![no_std]
 #![no_main]

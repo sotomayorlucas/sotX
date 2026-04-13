@@ -46,7 +46,7 @@ pub trait Cpu {
     /// Get number of CPUs (SMP).
     ///
     /// Returns the number of active processors as detected during boot.
-    /// On x86_64 in sotOS, this is determined from ACPI/MADT parsing.
+    /// On x86_64 in sotX, this is determined from ACPI/MADT parsing.
     fn cpu_count(&self) -> u32;
 }
 

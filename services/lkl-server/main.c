@@ -1,7 +1,7 @@
 /*
  * main.c -- LKL server service entry point.
  *
- * Runs as a freestanding sotOS userspace service:
+ * Runs as a freestanding sotX userspace service:
  *   1. Reads BootInfo at 0xB00000 for root capabilities
  *   2. Creates an IPC endpoint and registers as "lkl" service
  *   3. Initialises the arena allocator (128 MiB)

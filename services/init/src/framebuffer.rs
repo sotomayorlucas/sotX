@@ -115,7 +115,7 @@ pub(crate) unsafe fn drain_console_ring() {
 // Framebuffer text console
 // ---------------------------------------------------------------------------
 
-/// sotOS Mono 8x16 font -- 256 glyphs, 16 bytes per glyph = 4096 bytes.
+/// sotX Mono 8x16 font -- 256 glyphs, 16 bytes per glyph = 4096 bytes.
 /// Hand-tuned from IBM VGA CP437 for better readability (slashed zero,
 /// smoother curves on a/e/g/q/s/S/C/G/Q/@/f/j/p/r/t/y).
 static VGA_FONT: [u8; 4096] = [

@@ -1,7 +1,7 @@
-//! sotOS Theme — canonical Tokyo Night palette, geometry, and ANSI helpers.
+//! sotX Theme — canonical Tokyo Night palette, geometry, and ANSI helpers.
 //!
 //! `#![no_std]`, zero dependencies. Every color, layout constant, and ANSI
-//! escape sequence used across the sotOS UI lives here so that the five+
+//! escape sequence used across the sotX UI lives here so that the five+
 //! consumer crates (compositor, sotos-gui, init framebuffer, sot-statusbar,
 //! hello-gui) share a single source of truth instead of drifting copies.
 

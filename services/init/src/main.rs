@@ -248,7 +248,7 @@ pub extern "C" fn _start() -> ! {
         serial_str(b"\x1b[1;38;2;122;162;247m");
         // Top border
         serial_str(b"+------------------------------------+\r\n");
-        serial_str(b"|  sotOS init -- Tokyo Night         |\r\n");
+        serial_str(b"|  sotX init -- Tokyo Night         |\r\n");
         serial_str(b"+------------------------------------+\r\n");
         // Reset
         serial_str(b"\x1b[0m");
@@ -350,7 +350,7 @@ pub extern "C" fn _start() -> ! {
     spawn_process(b"styx-test");
 
     // --- Phase 6b2: POSIX-equivalence smoke (Tier 5 follow-up) ---
-    // Native sotOS-side conformance pass for thread/frame/IPC/sleep/io
+    // Native sotX-side conformance pass for thread/frame/IPC/sleep/io
     // primitives, complementing the LUCAS Linux ABI runners.
     spawn_process(b"posix-test");
     for _ in 0..2000 { sys::yield_now(); }
@@ -446,7 +446,7 @@ pub extern "C" fn _start() -> ! {
     // --- Phase 6g: Tier 6 PANDORA Task 1 — DTrace integration ---
     // Spawn the sot-dtrace service first, give it time to register,
     // then run the client demo that streams provenance-backed probes
-    // through the sotbsd::: provider namespace.
+    // through the sotx::: provider namespace.
     spawn_process(b"sot-dtrace");
     supervisor::record(b"sot-dtrace");
     for _ in 0..400 { sys::yield_now(); }
@@ -1055,7 +1055,7 @@ const ROOT_STORE_BASE: u64 = 0xEB0000;
 const ROOT_SIGNATURE: &[u8; 8] = b"SOTROOT\0";
 const ROOT_SECTOR_SIGNATURE: u64 = 0;
 const ROOT_SECTOR_MARKER: u64 = 2;
-const ROOT_MARKER_BODY: &[u8] = b"/persist/boot_marker\nsotOS persistent rootdisk OK\n";
+const ROOT_MARKER_BODY: &[u8] = b"/persist/boot_marker\nsotX persistent rootdisk OK\n";
 
 /// In-memory state for the persistent rootdisk. Lives at ROOT_STORE_BASE.
 /// Wraps the second VirtioBlk so child handlers can later borrow it for

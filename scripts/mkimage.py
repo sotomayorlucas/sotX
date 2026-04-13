@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Build a bootable disk image for sotOS.
+Build a bootable disk image for sotX.
 
 Creates an MBR-partitioned disk with a FAT32 partition containing the
 Limine BIOS bootloader, kernel, and boot config. Then runs `limine.exe
@@ -434,9 +434,9 @@ def build_image(kernel_path: str, output_path: str, size_mb: int, initrd_path: s
 def main():
     root = Path(__file__).parent.parent
     default_kernel = root / "target" / "x86_64-unknown-none" / "debug" / "sotos-kernel"
-    default_output = root / "target" / "sotos.img"
+    default_output = root / "target" / "sotx.img"
 
-    p = argparse.ArgumentParser(description="Build sotOS bootable disk image")
+    p = argparse.ArgumentParser(description="Build sotX bootable disk image")
     p.add_argument("--kernel", default=str(default_kernel))
     p.add_argument("--output", "-o", default=str(default_output))
     p.add_argument("--size", type=int, default=64, help="Disk size in MiB")
@@ -448,7 +448,7 @@ def main():
         print("Run 'cargo build --package sotos-kernel' first.")
         return 1
 
-    print("Building sotOS disk image...")
+    print("Building sotX disk image...")
     build_image(args.kernel, args.output, args.size, args.initrd)
     print("Done.")
     return 0

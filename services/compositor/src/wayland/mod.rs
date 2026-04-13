@@ -5,7 +5,7 @@
 //!   size_opcode: u32 -- upper 16 = size (bytes, including header), lower 16 = opcode
 //! Followed by arguments (padded to 4-byte boundaries).
 //!
-//! Transport over sotOS IPC:
+//! Transport over sotX IPC:
 //!   tag[15:0]  = WL_MSG_TAG (0x574C) to distinguish from control messages
 //!   tag[31:16] = byte count of wire data in regs[]
 //!   regs[0..7] = raw Wayland wire bytes (up to 64 bytes)

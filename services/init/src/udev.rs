@@ -23,7 +23,7 @@ pub(crate) fn sys_class_drm_content(path: &[u8]) -> Option<&'static [u8]> {
     }
     if path == b"/sys/dev/char/226:0/dev" { return Some(b"226:0\n"); }
     // /sys/class/drm/card0/device/driver → driver name
-    if path == b"/sys/class/drm/card0/device/driver" { return Some(b"sotOS-drm"); }
+    if path == b"/sys/class/drm/card0/device/driver" { return Some(b"sotX-drm"); }
     // sysattr: boot_vga (weston checks this)
     if path == b"/sys/class/drm/card0/device/boot_vga"
         || path == b"/sys/devices/pci0000:00/0000:00:02.0/boot_vga" { return Some(b"1\n"); }
@@ -34,7 +34,7 @@ pub(crate) fn sys_class_drm_content(path: &[u8]) -> Option<&'static [u8]> {
     }
     // Parent PCI device uevent (libudev walks up the device tree)
     if path == b"/sys/devices/pci0000:00/0000:00:02.0/uevent" {
-        return Some(b"PCI_ID=1234:1111\nPCI_SUBSYS_ID=1AF4:1100\nPCI_SLOT_NAME=0000:00:02.0\nDRIVER=sotOS-drm\nSUBSYSTEM=pci\n");
+        return Some(b"PCI_ID=1234:1111\nPCI_SUBSYS_ID=1AF4:1100\nPCI_SLOT_NAME=0000:00:02.0\nDRIVER=sotX-drm\nSUBSYSTEM=pci\n");
     }
     // subsystem link targets (content served as virtual file)
     if path == b"/sys/devices/pci0000:00/0000:00:02.0/drm/card0/subsystem" {
@@ -49,10 +49,10 @@ pub(crate) fn sys_class_drm_content(path: &[u8]) -> Option<&'static [u8]> {
     }
     // Parent input device info
     if path == b"/sys/devices/virtual/input/input0/uevent" {
-        return Some(b"PRODUCT=6/1/1/1\nNAME=\"sotOS Virtual Keyboard\"\nPHYS=\"\"\nUNIQ=\"\"\nPROP=0\nEV=120013\nKEY=fffffffffffffffe\nMSC=10\nREP=2\n");
+        return Some(b"PRODUCT=6/1/1/1\nNAME=\"sotX Virtual Keyboard\"\nPHYS=\"\"\nUNIQ=\"\"\nPROP=0\nEV=120013\nKEY=fffffffffffffffe\nMSC=10\nREP=2\n");
     }
     if path == b"/sys/devices/virtual/input/input1/uevent" {
-        return Some(b"PRODUCT=6/1/2/1\nNAME=\"sotOS Virtual Mouse\"\nPHYS=\"\"\nUNIQ=\"\"\nPROP=0\nEV=7\nKEY=70000 0 0 0 0\nREL=103\n");
+        return Some(b"PRODUCT=6/1/2/1\nNAME=\"sotX Virtual Mouse\"\nPHYS=\"\"\nUNIQ=\"\"\nPROP=0\nEV=7\nKEY=70000 0 0 0 0\nREL=103\n");
     }
     // seat assignment
     if path == b"/sys/class/drm/card0/device/id_seat"

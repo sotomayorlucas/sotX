@@ -5,7 +5,7 @@
 //! domain gets its own VNIC (virtual NIC) plugged into a virtual
 //! switch port, with bandwidth limits enforced per port.
 //!
-//! This crate is the sotOS port: a no_std, no-alloc, fixed-size
+//! This crate is the sotX port: a no_std, no-alloc, fixed-size
 //! implementation that complements the existing
 //! [`PfInterposer`](../sot_network/pf/struct.PfInterposer.html) by
 //! giving each deception-mode domain a dedicated VNIC and a token

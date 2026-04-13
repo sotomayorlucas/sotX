@@ -2,7 +2,7 @@
 // evdev.rs — Linux evdev input device emulation
 //
 // Provides /dev/input/event0 (keyboard) and /dev/input/event1 (mouse) for
-// libinput/Weston. Translates from sotOS hardware ring buffers (PS/2 scancodes
+// libinput/Weston. Translates from sotX hardware ring buffers (PS/2 scancodes
 // at KB_RING_ADDR, 3-byte mouse packets at MOUSE_RING_ADDR) into Linux
 // struct input_event sequences.
 // ---------------------------------------------------------------------------
@@ -520,9 +520,9 @@ pub(crate) fn evdev_ioctl(ctx: &mut SyscallContext, _fd: usize, cmd: u64, arg: u
         // ---------------------------------------------------------------
         EVIOCGNAME_NR => {
             let name: &[u8] = if device == EVDEV_KBD {
-                b"sotOS Virtual Keyboard\0"
+                b"sotX Virtual Keyboard\0"
             } else {
-                b"sotOS Virtual Mouse\0"
+                b"sotX Virtual Mouse\0"
             };
             let len = name.len().min(size);
             ctx.guest_write(arg, &name[..len]);

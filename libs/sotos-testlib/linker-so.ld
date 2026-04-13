@@ -1,4 +1,4 @@
-/* Linker script for sotOS shared objects (ET_DYN, PIC). */
+/* Linker script for sotX shared objects (ET_DYN, PIC). */
 
 PHDRS {
     text    PT_LOAD FLAGS(5);    /* R+X */

@@ -258,28 +258,28 @@ impl DynamicTreewidth {
         let mut id_map: BTreeMap<NodeId, u64> = BTreeMap::new();
         let mut next_uid = 0u64;
 
-        for &iid in graph.inodes.keys() {
-            id_map.insert(NodeId::Inode(iid), next_uid);
+        for aid in graph.inodes.keys() {
+            id_map.insert(NodeId::Inode(aid.0 as u64), next_uid);
             self.add_node_internal(next_uid);
             next_uid += 1;
         }
-        for &did in graph.dirs.keys() {
-            id_map.insert(NodeId::Directory(did), next_uid);
+        for aid in graph.dirs.keys() {
+            id_map.insert(NodeId::Directory(aid.0 as u64), next_uid);
             self.add_node_internal(next_uid);
             next_uid += 1;
         }
-        for &cid in graph.caps.keys() {
-            id_map.insert(NodeId::Capability(cid), next_uid);
+        for aid in graph.caps.keys() {
+            id_map.insert(NodeId::Capability(aid.0 as u64), next_uid);
             self.add_node_internal(next_uid);
             next_uid += 1;
         }
-        for &bid in graph.blocks.keys() {
-            id_map.insert(NodeId::Block(bid), next_uid);
+        for aid in graph.blocks.keys() {
+            id_map.insert(NodeId::Block(aid.0 as u64), next_uid);
             self.add_node_internal(next_uid);
             next_uid += 1;
         }
-        for &vid in graph.versions.keys() {
-            id_map.insert(NodeId::Version(vid), next_uid);
+        for aid in graph.versions.keys() {
+            id_map.insert(NodeId::Version(aid.0 as u64), next_uid);
             self.add_node_internal(next_uid);
             next_uid += 1;
         }

@@ -1,9 +1,10 @@
 # sotX — a verified microkernel personality OS
 
-**sotX** a microkernel operating system written from scratch in Rust. The kernel
-itself is `sotos-kernel`; sotX is what you get when you boot it with the
-SOT exokernel layer, the deception subsystem, the BSD personality
-services, and the production-hardening pipeline all wired together.
+**sotX** is a microkernel operating system written from scratch in Rust.
+The kernel itself is `sotos-kernel`; sotX is what you get when you boot
+it with the SOT exokernel layer, the deception subsystem, the BSD/Linux
+personality services, **sotFS** (graph-based filesystem), and the
+production-hardening pipeline all wired together.
 
 It exposes:
 
@@ -11,12 +12,15 @@ It exposes:
   IRQ virtualization, frame allocation),
 * a SOT exokernel layer (transactional Secure Objects, two-phase commit,
   per-CPU provenance ring, capability interposition),
+* **sotFS** — a graph-structured filesystem with DPO rewriting, bounded
+  treewidth, Ollivier-Ricci curvature anomaly detection, and deceptive
+  subgraph views (6 Rust crates, 4 TLA+ specs, 130+ tests),
 * an in-process NetBSD rump kernel linked into a `rump-vfs` service,
 * a deception subsystem (anomaly detector + migration orchestrator +
   Ed25519/SHA-256 signed boot chain),
 * a Linux ABI personality (LUCAS shell, glibc/musl binaries, vDSO),
 * a v0.2.0+ "Illumos Heirlooms" layer (SMF service manager, Project
-  Crossbow VNIC switch, FMA predictive self-healing engine), and
+  Crossbow VNIC switch, FMA predictive self-healing engine),
 * a Wayland compositor with Tokyo Night theme, layer-shell, popups,
   fractional scaling stub, anti-aliased fonts, multi-shape cursors,
   and per-rect damage tracking,
@@ -50,11 +54,11 @@ prints `PASS` or aborts the boot.
 |---|---|---|
 | **0 — Signify** | SHA-256 streaming hash of every signed initrd binary against an embedded manifest, then **Ed25519 verification** of the manifest itself with a public key compiled into init via `services/init/src/sigkey_generated.rs`. Pubkey-pinning rejects swap-with-self-signed attempts. Tampering test verified: corrupting one byte in `hello` after signing produces `signify: MISMATCH hello / want=... got=...`. | `services/init/src/signify.rs`, `scripts/build_signify_manifest.py` |
 | **1 — STYX** | All 11 SOT exokernel syscalls (300–310 + tx_prepare 311) called from a userspace test binary. `so_create`, `so_invoke`, `so_grant`, `so_observe`, `tx_begin/prepare/commit/abort`, channel create. | `services/styx-test/`, `kernel/src/syscall/sot.rs` |
-| **2 — rump-vfs** | A real **NetBSD rump kernel** built via `buildrump.sh` (`librump.a + librumpvfs.a + librumpfs_ffs.a + ...`, ~2 MiB) linked into a freestanding sotOS service. `rumpuser_sot.c` satisfies all 60 `rumpuser_*` hypercalls against SOT primitives. `rump_init()` boots on a worker thread (panic-isolated from the IPC server); the service exposes OPEN/READ/CLOSE/STAT IPC and serves `/etc/passwd` to init at boot. | `services/rump-vfs/`, `vendor/netbsd-rump/` |
+| **2 — rump-vfs** | A real **NetBSD rump kernel** built via `buildrump.sh` (`librump.a + librumpvfs.a + librumpfs_ffs.a + ...`, ~2 MiB) linked into a freestanding sotX service. `rumpuser_sot.c` satisfies all 60 `rumpuser_*` hypercalls against SOT primitives. `rump_init()` boots on a worker thread (panic-isolated from the IPC server); the service exposes OPEN/READ/CLOSE/STAT IPC and serves `/etc/passwd` to init at boot. | `services/rump-vfs/`, `vendor/netbsd-rump/` |
 | **3 — deception** | An **attacker** binary emits 3 provenance entries (`Write SystemBinary /sbin/sshd`, `Read Credential /etc/shadow`, `Read ConfigFile /proc/version`) under `owner_domain=7`. Init drains the kernel per-CPU provenance ring via `SYS_PROVENANCE_DRAIN (260)`, runs the SAME entries through `sotos_provenance::GraphHunter` AND `sotos_deception::AnomalyDetector`, fires `CredentialTheftAfterBackdoor` (confidence 90), calls `MigrationOrchestrator::migrate()` with the `ubuntu-22.04-webserver` profile, and prints the spoofed `Linux 5.15.0-91-generic` `/proc/version` the migrated attacker now sees. A `DECEPTION-WATCHDOG` worker thread keeps draining post-demo and detects subsequent attacker runs. | `services/init/src/deception_demo.rs`, `services/attacker/`, `kernel/src/sot/provenance.rs` |
 | **4 — advanced** | Three sub-sections: **storage** (real `tx_begin/commit/abort` syscalls produce `OP_TX_COMMIT/ABORT` provenance events that drive `sot_zfs::SnapshotManager` and `sot_hammer2::Hammer2SnapshotManager` to create snapshots and resolve rollback targets), **bhyve** (instantiates a `VmDomain` with the `bare_metal_intel` `VmDeceptionProfile`, decodes spoofed CPUID to verify `GenuineIntel`, Cascade Lake `family=6 model=85 stepping=7`, hypervisor bit OFF, hypervisor leaf zero, plus `IA32_FEATURE_CONTROL` MSR), and **PF firewall** (a `PfInterposer` with default-pass + UDP log rule and an attacker domain in deception mode is intercepted with `PfDecision::Deception` before any rule runs). | `services/init/src/tier4_demo.rs`, `personality/bsd/{zfs,hammer2,bhyve,network}/` |
 | **5 — hardening** | Seven sections: **A** IPC throughput (`sys::yield_now`, `sys::provenance_emit` cy/op), **B** provenance ring throughput (4000 push / drain), **C** `MigrationOrchestrator::check_interposition` overhead on a 32-cap migrated domain, **D** real **two-phase commit** for the new `TxTier::MultiObject` — `BEGIN→PREPARE→COMMIT` and `BEGIN→PREPARE→ABORT` happy paths plus negative paths, **E** 5000 randomized SOT syscalls with garbage args (survival 5000/5000), **F** concurrent transaction stress (main + worker thread, 1000/1000), **G** TCG-calibrated perf comparison: a tight `lfence; rdtsc` loop derives the inflation factor (~17×), then prints `sys::yield_now` and `sys::provenance_emit` in both raw-TCG and estimated-native columns next to published seL4 / NOVA / Fiasco / Linux pipe reference numbers. | `services/init/src/tier5_demo.rs`, `kernel/src/sot/tx.rs` |
-| **5b — POSIX smoke** | `services/posix-test/`, a no_std sotOS-native binary that covers the OTHER side of the personality split from the LUCAS Linux ABI runners. Asserts the SOT primitives the Linux personalities ride on: `frame_alloc + map + unmap_free + readback`, `thread_create + worker sync via AtomicU32`, `endpoint_create + call_timeout`, `provenance_emit + drain`. 11/11 PASS at boot. | `services/posix-test/` |
+| **5b — POSIX smoke** | `services/posix-test/`, a no_std sotX-native binary that covers the OTHER side of the personality split from the LUCAS Linux ABI runners. Asserts the SOT primitives the Linux personalities ride on: `frame_alloc + map + unmap_free + readback`, `thread_create + worker sync via AtomicU32`, `endpoint_create + call_timeout`, `provenance_emit + drain`. 11/11 PASS at boot. | `services/posix-test/` |
 
 ## SOT — the exokernel layer
 
@@ -187,6 +191,35 @@ Each runs in its own address space.
 | `services/abi-fuzz` | **Nightly**: 10 000-iteration random syscall fuzzer with deterministic xorshift64 seed |
 | `services/sot-statusbar` | Wayland layer-shell client (Top layer): Tokyo Night status bar with TSC clock + free memory + thread count |
 
+## sotFS — Graph-Structured Filesystem
+
+`sotfs/` is a workspace of 6 Rust crates implementing a formally verified
+filesystem where metadata is an explicit typed graph and POSIX operations
+are algebraic DPO (Double Pushout) rewriting rules.
+
+| Crate | Purpose |
+|---|---|
+| `sotfs-graph` | Type graph: 6 node types, 6 edge types, arena-backed pools (65K nodes, 131K edges), epoch-based RCU for lock-free reads |
+| `sotfs-ops` | 7 DPO rewriting rules (CREATE, MKDIR, RMDIR, LINK, UNLINK, RENAME, WRITE) with gluing-condition checks |
+| `sotfs-tx` | Graph-level transaction manager (GTXN) with rollback |
+| `sotfs-storage` | ACID persistence via redb key-value store |
+| `sotfs-monitor` | Structural anomaly detection: bounded treewidth (Theorem 8.1), Ollivier-Ricci curvature, deceptive subgraph views |
+| `sotfs-fuse` | FUSE prototype for Linux |
+
+**Formal verification**: 4 TLA+ specs in `formal/` (graph invariants,
+transactions, capabilities, crash recovery) — 21 properties model-checked.
+
+**Testing**: 130+ tests across 14 files — unit tests, property-based
+(proptest 10K iterations), loom concurrency, crash consistency, and
+adversarial security scenarios.
+
+**Benchmarks**: Criterion suites for DPO operations, WAL indexing, and
+monitor scaling (treewidth + curvature).
+
+- [docs/sotfs-design.pdf](docs/sotfs-design.pdf) — design document (LaTeX)
+- [docs/sotfs-design-v1.md](docs/sotfs-design-v1.md) — design document (Markdown)
+- [docs/trust-assumptions.md](docs/trust-assumptions.md) — verification status
+
 ## Storage
 
 - Virtio-BLK driver with transactional object store (WAL, bitmap, directory)
@@ -240,7 +273,7 @@ The `.github/workflows/` tree ships **15+ jobs** across multiple workflows
 | **`audit / cargo-audit`** | NEW: `cargo audit` (RustSec) on every push/PR. Hard-fail on advisories. |
 | **`audit / cargo-deny`** | NEW: `cargo deny check` against `deny.toml` license / source / advisory allowlist. |
 | **`abi-diff`** | NEW: per-PR ABI diff bot. Parses `libs/sotos-common::Syscall` enum from base + head, posts a sticky markdown diff comment. |
-| **`repro / build-linux + build-windows + compare`** | NEW: matrix builds `target/sotos.img` twice per host then cross-compares SHA-256 to enforce reproducibility (`SOURCE_DATE_EPOCH`). |
+| **`repro / build-linux + build-windows + compare`** | NEW: matrix builds `target/sotx.img` twice per host then cross-compares SHA-256 to enforce reproducibility (`SOURCE_DATE_EPOCH`). |
 | **`fuzz` (nightly cron)** | NEW: runs the `services/abi-fuzz` random-syscall harness for 10 000 iterations under QEMU; fails if the kernel panics. |
 | **`release` (on tag `v*`)** | NEW: builds the SDK tarball, runs the boot-smoke pass, signs with Ed25519 (`SIGNIFY_KEY_BYTES` base64 secret), uploads `.tar.gz + .sha256 + .sig` to the GitHub Release. |
 
@@ -282,6 +315,8 @@ libs/                   Userspace libraries (sotos-common, sotos-net, sotos-objs
                         sotos-virtio, sotos-pci, sotos-nvme, sotos-xhci, sotos-wasm,
                         sotos-ld, sotos-ahci, sotos-audio, sotos-gui, sotos-mouse,
                         sotos-lua, sotos-pkg, sotos-usb-storage)
+sotfs/                  Graph-structured filesystem (6 crates: graph, ops, tx, storage,
+                        monitor, fuse)
 personality/            BSD + Linux + common personality crates (see table above)
 services/               Userspace services (see table above)
 vendor/netbsd-rump/     NetBSD rump kernel sources + rumpuser_sot.c hypervisor +
@@ -296,12 +331,20 @@ docs/                   Technical paper (LaTeX, CLRS-style)
 
 ## Documentation
 
-- [docs/sotBSD_v0.2.0_whitepaper.pdf](docs/sotBSD_v0.2.0_whitepaper.pdf) — **comprehensive system + proposal whitepaper** (architecture, SOT layer, deception model, GUI stack, v0.2.0 Illumos heirlooms)
+**System-level:**
+- [docs/sotX_v0.2.0_whitepaper.pdf](docs/sotX_v0.2.0_whitepaper.pdf) — comprehensive system + proposal whitepaper
 - [docs/manual.pdf](docs/manual.pdf) — full user / developer manual
-- [docs/sotos-architecture.pdf](docs/sotos-architecture.pdf) — kernel architecture deep-dive
+- [docs/sotx-architecture.pdf](docs/sotx-architecture.pdf) — kernel architecture deep-dive
 - [docs/paper.pdf](docs/paper.pdf) — research paper writeup
-- [docs/MEMORY_BUDGET.md](docs/MEMORY_BUDGET.md) — kernel static memory inventory
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/SOT_SPEC.md](docs/SOT_SPEC.md), [docs/DECEPTION_MODEL.md](docs/DECEPTION_MODEL.md), [docs/FORMAL_MODEL.md](docs/FORMAL_MODEL.md), [docs/RUMP_ADAPTATION.md](docs/RUMP_ADAPTATION.md), [docs/ABI_v0.1.0.md](docs/ABI_v0.1.0.md)
+
+**sotFS:**
+- [docs/sotfs-design.pdf](docs/sotfs-design.pdf) — sotFS design document (DPO rules, treewidth, curvature)
+- [docs/sotfs-design-v1.md](docs/sotfs-design-v1.md) — same in Markdown
+- [docs/trust-assumptions.md](docs/trust-assumptions.md) — four-layer verification status
+
+**Reference:**
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/SOT_SPEC.md](docs/SOT_SPEC.md), [docs/DECEPTION_MODEL.md](docs/DECEPTION_MODEL.md), [docs/FORMAL_MODEL.md](docs/FORMAL_MODEL.md), [docs/MEMORY_BUDGET.md](docs/MEMORY_BUDGET.md)
+- [docs/RUMP_ADAPTATION.md](docs/RUMP_ADAPTATION.md), [docs/ABI_v0.1.0.md](docs/ABI_v0.1.0.md)
 - [docs/SPRINT1_STATUS.md](docs/SPRINT1_STATUS.md), [docs/SPRINT2_STATUS.md](docs/SPRINT2_STATUS.md), [docs/SPRINT3_STATUS.md](docs/SPRINT3_STATUS.md)
 
 ## Roadmap

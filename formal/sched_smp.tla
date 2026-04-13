@@ -1,5 +1,5 @@
 ------------------------------ MODULE sched_smp ------------------------------
-\* TLA+ specification of the sotOS reschedule-IPI delivery hazard (R1).
+\* TLA+ specification of the sotX reschedule-IPI delivery hazard (R1).
 \*
 \* This model is intentionally narrow: its only job is to verify that the
 \* `enqueue_to_cpu_pri` → reschedule IPI path delivers the IPI to the

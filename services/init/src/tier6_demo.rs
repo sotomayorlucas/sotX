@@ -2,19 +2,19 @@
 //!
 //! End-to-end deliverable for PANDORA Task 1: this module acts as a
 //! DTrace client. It runs at boot, exercises the `sot-dtrace` service,
-//! and proves that the `dtrace -n 'sotbsd::: { trace(arg0); }'`
+//! and proves that the `dtrace -n 'sotx::: { trace(arg0); }'`
 //! workflow works over real kernel provenance events.
 //!
 //! Sequence:
 //!
 //!   1. `svc_lookup("sot-dtrace")` -- fetch the service endpoint
 //!   2. TAG_LIST -- ask the service for its provider list, print it
-//!   3. TAG_SUBSCRIBE with filter `sotbsd:::` (matches all sotbsd
-//!      probes; equivalent to `dtrace -n 'sotbsd::: { trace(arg0); }'`)
+//!   3. TAG_SUBSCRIBE with filter `sotx:::` (matches all sotx
+//!      probes; equivalent to `dtrace -n 'sotx::: { trace(arg0); }'`)
 //!   4. Fire some provenance events by doing a handful of tx_begin /
 //!      tx_commit syscalls on this thread -- the kernel records
 //!      OP_TX_COMMIT entries that the sot-dtrace service then
-//!      classifies as `sotbsd:::tx_commit` probes.
+//!      classifies as `sotx:::tx_commit` probes.
 //!   5. Loop TAG_POLL several times, capture probe firings, print
 //!      `trace(...)` output lines that mirror what the real DTrace
 //!      CLI would emit.
@@ -39,14 +39,14 @@ const PROBE_GENERIC:   u64 = 0x000F_0001;
 
 fn probe_name(id: u64) -> &'static [u8] {
     match id {
-        PROBE_TX_COMMIT => b"sotbsd:::tx_commit",
-        PROBE_TX_ABORT  => b"sotbsd:::tx_abort",
-        PROBE_SO_CREATE => b"sotbsd:::so_create",
-        PROBE_SO_INVOKE => b"sotbsd:::so_invoke",
-        PROBE_SO_GRANT  => b"sotbsd:::so_grant",
-        PROBE_SO_REVOKE => b"sotbsd:::so_revoke",
-        PROBE_GENERIC   => b"sotbsd:::provenance",
-        _               => b"sotbsd:::unknown",
+        PROBE_TX_COMMIT => b"sotx:::tx_commit",
+        PROBE_TX_ABORT  => b"sotx:::tx_abort",
+        PROBE_SO_CREATE => b"sotx:::so_create",
+        PROBE_SO_INVOKE => b"sotx:::so_invoke",
+        PROBE_SO_GRANT  => b"sotx:::so_grant",
+        PROBE_SO_REVOKE => b"sotx:::so_revoke",
+        PROBE_GENERIC   => b"sotx:::provenance",
+        _               => b"sotx:::unknown",
     }
 }
 
@@ -86,8 +86,8 @@ pub fn run() {
         }
     }
 
-    // Step 3: subscribe with the bare `sotbsd:::` filter.
-    let filter = b"sotbsd:::";
+    // Step 3: subscribe with the bare `sotx:::` filter.
+    let filter = b"sotx:::";
     let mut sub_msg = IpcMsg::empty();
     sub_msg.tag = TAG_SUBSCRIBE;
     {
@@ -107,13 +107,13 @@ pub fn run() {
         }
         Err(_) => { print(b"DTRACE: subscribe call failed\n"); return; }
     };
-    print(b"DTRACE: subscribed to 'sotbsd:::' (session=");
+    print(b"DTRACE: subscribed to 'sotx:::' (session=");
     print_u64(session_id);
     print(b")\n");
 
     // Step 4: generate a burst of tx events that the kernel records
     // to the provenance ring via handle_tx_commit / handle_tx_abort.
-    // These become sotbsd:::tx_commit / sotbsd:::tx_abort probes.
+    // These become sotx:::tx_commit / sotx:::tx_abort probes.
     for _ in 0..5 {
         if let Ok(id) = sys::tx_begin(0) {
             let _ = sys::tx_commit(id);

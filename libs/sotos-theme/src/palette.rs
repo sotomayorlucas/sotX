@@ -1,13 +1,13 @@
 //! Tokyo Night color palette.
 //!
 //! All colors are BGRA `0xAARRGGBB` (alpha in high byte, red next, then green,
-//! then blue). This matches the convention used by the sotOS framebuffer,
+//! then blue). This matches the convention used by the sotX framebuffer,
 //! compositor, and all Wayland clients.
 //!
 //! Values taken from the canonical Tokyo Night (storm) spec:
 //! <https://github.com/folke/tokyonight.nvim/blob/main/extras/lua/tokyonight_night.lua>
 
-/// A named color palette with all the values needed across the sotOS UI.
+/// A named color palette with all the values needed across the sotX UI.
 #[derive(Clone, Copy)]
 pub struct Palette {
     // -- Backgrounds --
@@ -55,7 +55,7 @@ pub struct Palette {
     pub title_inactive: u32,
 }
 
-/// The canonical Tokyo Night palette used across all of sotOS.
+/// The canonical Tokyo Night palette used across all of sotX.
 pub const TOKYO_NIGHT: Palette = Palette {
     // Backgrounds
     bg:           0xFF1A1B26,

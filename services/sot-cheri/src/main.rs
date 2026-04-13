@@ -1,6 +1,6 @@
-//! sot-cheri — software CHERI capability model for sotBSD.
+//! sot-cheri — software CHERI capability model for sotX.
 //!
-//! **Project PANDORA Task 4** — the shim layer that gives sotBSD a
+//! **Project PANDORA Task 4** — the shim layer that gives sotX a
 //! CHERI-compatible capability machine without shipping a Morello or
 //! CHERI-RISC-V target yet. The canonical 128-bit compressed-cap wire
 //! ABI lives under `vendor/cheri-compressed-cap/` (from CTSRD-CHERI):

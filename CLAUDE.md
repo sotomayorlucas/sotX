@@ -1,4 +1,4 @@
-# sotOS — Microkernel Operating System
+# sotX — Microkernel Operating System
 
 ## Architecture
 Verified microkernel (~10K LOC target) with selective exokernel bypass.
@@ -17,7 +17,7 @@ Manual steps:
 ```
 cargo build --package sotos-kernel
 python scripts/mkimage.py
-"C:/Program Files/qemu/qemu-system-x86_64.exe" -drive format=raw,file=target/sotos.img -serial stdio -display none -no-reboot -m 256M
+"C:/Program Files/qemu/qemu-system-x86_64.exe" -drive format=raw,file=target/sotx.img -serial stdio -display none -no-reboot -m 256M
 ```
 
 ## Key Technical Details

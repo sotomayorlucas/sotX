@@ -1,7 +1,7 @@
-# LKL (Linux Kernel Library) for sotOS
+# LKL (Linux Kernel Library) for sotX
 
 LKL compiles the real Linux kernel as a static userspace library (`liblkl.a`).
-sotOS will link against it to get production-grade filesystem, networking, and
+sotX will link against it to get production-grade filesystem, networking, and
 block-device support without re-implementing those subsystems.
 
 ## Prerequisites
@@ -40,7 +40,7 @@ The script will:
 
 ```
 lkl/output/
-  liblkl.a          -- static library to link into sotOS userspace
+  liblkl.a          -- static library to link into sotX userspace
   include/           -- LKL public headers (lkl.h, lkl_host.h, ...)
 ```
 

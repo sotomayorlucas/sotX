@@ -644,7 +644,7 @@ fn run_cap_interpose_fuzz() -> bool {
 // is the inflation factor.
 //
 // Calibrated estimates aren't precise -- TCG inflation isn't uniform
-// across instruction mixes -- but they let us put sotBSD numbers next
+// across instruction mixes -- but they let us put sotX numbers next
 // to published seL4 / L4 figures with the right order of magnitude.
 // ---------------------------------------------------------------------------
 
@@ -719,7 +719,7 @@ fn run_perf_compare() -> bool {
     //   Linux pipe(2):                ~3000 cy
     //
     // Our `provenance_emit` is one syscall transition + ring push, so
-    // it's the closest sotBSD primitive to "minimal kernel call" --
+    // it's the closest sotX primitive to "minimal kernel call" --
     // not a full IPC round-trip but the same lower bound. Comparing
     // estimated_native against the seL4 number is a rough but useful
     // sanity check.
@@ -728,7 +728,7 @@ fn run_perf_compare() -> bool {
     print(b"      NOVA         ~700\n");
     print(b"      Fiasco.OC    ~900\n");
     print(b"      Linux pipe  ~3000\n");
-    print(b"      sotBSD prov_emit (estimated_native): ");
+    print(b"      sotX prov_emit (estimated_native): ");
     print_u64(emit_native);
     print(b"\n");
 

@@ -1,4 +1,4 @@
-//! Virtio device drivers for sotOS userspace.
+//! Virtio device drivers for sotX userspace.
 
 #![no_std]
 

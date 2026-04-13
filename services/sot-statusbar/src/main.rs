@@ -1,11 +1,11 @@
-//! sot-statusbar -- Tokyo Night layer-shell status bar for the sotOS compositor.
+//! sot-statusbar -- Tokyo Night layer-shell status bar for the sotX compositor.
 //!
 //! Connects to the native `compositor` IPC service, walks the Wayland
 //! handshake (get_registry, bind wl_compositor/wl_shm/zwlr_layer_shell_v1),
 //! and anchors a 24 px top bar with exclusive_zone = 24 so regular
 //! toplevels stop at y=24. Content, left to right:
 //!
-//!   [sotOS logo] ... [time] | [CPU% + sparkline] | [free mem %] | [threads]
+//!   [sotX logo] ... [time] | [CPU% + sparkline] | [free mem %] | [threads]
 //!
 //! Post unit 15 (compositor advertises and dispatches layer_shell fully),
 //! the bar draws pixels into an SHM buffer and commits once every ~500 ms.
@@ -454,7 +454,7 @@ fn draw_sparkline(pool: *mut u32, x: i32, y: i32, samples: &[u8], color: u32) {
 /// from there without updating the vDSO at the same time.
 const TSC_HZ: u64 = 2_000_000_000;
 
-/// Max thread pool index we sweep when summing CPU ticks. A real sotOS
+/// Max thread pool index we sweep when summing CPU ticks. A real sotX
 /// image peaks around 40 active threads; 64 gives headroom.
 const MAX_THREAD_SAMPLES: u32 = 64;
 
@@ -663,8 +663,8 @@ fn draw_bar(pool: *mut u32, rt: &Runtime, m: &Metrics) {
     clear_bar(pool);
     fill_rect(pool, 0, BAR_H as i32 - 1, BAR_W, 1, TN_ACCENT);
 
-    // Left side: sotOS logo.
-    draw_text(pool, 8, TEXT_Y, b"sotOS", TN_ACCENT);
+    // Left side: sotX logo.
+    draw_text(pool, 8, TEXT_Y, b"sotX", TN_ACCENT);
 
     // Right-to-left metrics. Each metric pulls `right_edge` further left,
     // leaving room for a thin divider between groups.
@@ -820,7 +820,7 @@ pub extern "C" fn _start() -> ! {
     }
 
     // Per wlr-layer-shell-unstable-v1, the surface is NOT mapped until we
-    // ack the compositor's configure event. sotOS accepts any serial as an
+    // ack the compositor's configure event. sotX accepts any serial as an
     // ack, so falling through with 0 (when the event did not arrive in the
     // get_layer_surface reply) is safe.
     {

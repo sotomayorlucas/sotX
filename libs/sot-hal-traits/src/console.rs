@@ -5,7 +5,7 @@
 
 /// Console I/O trait -- implemented per platform.
 ///
-/// On x86_64 in sotOS, the console is COM1 (I/O port 0x3F8) using 8250 UART.
+/// On x86_64 in sotX, the console is COM1 (I/O port 0x3F8) using 8250 UART.
 /// On AArch64, this would typically be a PL011 UART.
 /// On RISC-V, this would use SBI console putchar/getchar.
 pub trait Console {

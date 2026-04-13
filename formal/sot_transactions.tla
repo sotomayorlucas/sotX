@@ -1,5 +1,5 @@
 --------------------------- MODULE sot_transactions ---------------------------
-\* TLA+ Specification of sotOS Three-Tier Transaction Engine
+\* TLA+ Specification of sotX Three-Tier Transaction Engine
 \*
 \* This specification models the SOT (Secure Object Transaction) engine
 \* with three tiers of concurrency control. It verifies:

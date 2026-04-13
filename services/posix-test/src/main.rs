@@ -1,4 +1,4 @@
-//! POSIX-equivalence smoke suite for sotBSD.
+//! POSIX-equivalence smoke suite for sotX.
 //!
 //! Tier 5 follow-up: stand-in for the full Linux Test Project (LTP)
 //! suite. LTP itself is blocked on the rump_init scheduler bisect, and
@@ -8,7 +8,7 @@
 //! all run on top.
 //!
 //! This binary plugs the gap on the **other** side of the personality
-//! split: it runs as a native sotOS process and asserts that the SOT
+//! split: it runs as a native sotX process and asserts that the SOT
 //! syscalls those Linux personalities ultimately ride on -- thread
 //! lifecycle, frame allocation, IPC round-trips, capability/endpoint
 //! creation, transactional state -- behave correctly. Together with
@@ -16,7 +16,7 @@
 //! us a real conformance / smoke pass over the kernel's two-layer ABI:
 //!
 //!   * styx-test:  SOT primitives (so_create, so_invoke, tx_*, ...)
-//!   * posix-test: native sotOS sys::*  (thread, frame, IPC, time)
+//!   * posix-test: native sotX sys::*  (thread, frame, IPC, time)
 //!   * run_musl_test / run_busybox_test: Linux ABI personality
 //!
 //! Coverage in this binary:
@@ -201,7 +201,7 @@ pub extern "C" fn _start() -> ! {
         assert_ok(&mut c, b"call_timeout(self_ep, 1tick) surfaces result", surfaced);
     }
 
-    // ----- sotOS-style provenance ring exists (called as a smoke test) -----
+    // ----- sotX-style provenance ring exists (called as a smoke test) -----
     sys::provenance_emit(1, 0, 0xC0FFEE, 12345);
     let mut buf = [0u8; 64 * 48];
     let n = unsafe { sys::provenance_drain(buf.as_mut_ptr(), 64, 0) };

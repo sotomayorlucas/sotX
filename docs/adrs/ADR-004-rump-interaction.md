@@ -6,8 +6,8 @@
 
 ## Context
 
-sotBSD uses NetBSD rump kernels for POSIX compatibility. The rump adaptation
-layer (`docs/RUMP_ADAPTATION.md`) maps rump hypercalls to sotOS IPC:
+sotX uses NetBSD rump kernels for POSIX compatibility. The rump adaptation
+layer (`docs/RUMP_ADAPTATION.md`) maps rump hypercalls to sotX IPC:
 
 - `rumpuser_bio(dev, blkno, data, len, flags)` → `chan_send(blk_driver_cap, ...)`
 - The rump VFS layer provides standard `mount`, `lookup`, `read`, `write` etc.
@@ -89,7 +89,7 @@ sotFS should coexist with FFS during the transition period (Phases 2-3).
 ### B. Implement sotFS as a rump kernel component
 
 Run sotFS inside the rump kernel's address space rather than as a
-separate sotOS domain.
+separate sotX domain.
 
 **Rejected because:** This would place the graph rewriting engine and
 GTXN logic inside the rump kernel, making it harder to verify formally

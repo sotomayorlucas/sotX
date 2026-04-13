@@ -5,7 +5,7 @@
 //! checking from the sotFS design document (§5).
 //!
 //! Supports both `std` (default, for FUSE prototype) and `no_std` + `alloc`
-//! (for bare-metal sotOS service).
+//! (for bare-metal sotX service).
 
 #![cfg_attr(not(feature = "std"), no_std)]
 

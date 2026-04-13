@@ -107,31 +107,17 @@ impl TypeGraph {
 
     /// Create a new type graph with the root directory (CREATE-ROOT DPO rule).
     ///
-    /// **Warning**: Each `TypeGraph` is ~35 MB due to arena storage.
-    /// Constructing on the stack will overflow most thread stacks.
-    /// Prefer `new_boxed()` which heap-allocates directly.
+    /// With heap-backed arenas, TypeGraph is ~744 bytes on the stack.
+    /// Use `new_boxed()` if you need a `Box<TypeGraph>`.
     pub fn new() -> Self {
-        // Delegate to new_boxed and unbox. Callers that need heap allocation
-        // should use new_boxed() directly to avoid the intermediate stack copy.
         *Self::new_boxed()
     }
 
-    /// Create a new type graph on the heap, avoiding stack overflow from the
-    /// ~35 MB of arena storage. This is the recommended constructor.
+    /// Create a new type graph on the heap (CREATE-ROOT DPO rule).
     ///
-    /// # Safety rationale
-    ///
-    /// `alloc_zeroed` produces valid initial state because:
-    /// - `Arena` fields: `MaybeUninit<T>` arrays are valid zeroed,
-    ///   `SlotState::Vacant` has discriminant 0, and all counters start at 0.
-    /// - `BTreeMap`: zero-initialized is a valid empty map (null root pointer).
-    /// - Scalar ID counters: overwritten explicitly below.
+    /// With heap-backed arenas, TypeGraph itself is only ~744 bytes (pointers
+    /// + counters), so Box::new() is safe — no stack overflow risk.
     pub fn new_boxed() -> Box<Self> {
-        #[cfg(feature = "std")]
-        use std::alloc as heap;
-        #[cfg(not(feature = "std"))]
-        use alloc::alloc as heap;
-
         let inode_id = 1u64;
         let dir_id = 1u64;
 
@@ -150,27 +136,7 @@ impl TypeGraph {
             name: ".".into(),
         };
 
-        // Heap-allocate zeroed memory. All-zeros is valid for every field:
-        // Arenas (MaybeUninit + Vacant=0 + counters=0), BTreeMaps (null root),
-        // scalars (overwritten below where non-zero).
-        let mut g: Box<Self> = unsafe {
-            let layout = core::alloc::Layout::new::<Self>();
-            let ptr = heap::alloc_zeroed(layout) as *mut Self;
-            if ptr.is_null() {
-                heap::handle_alloc_error(layout);
-            }
-            // Non-zero scalars — written directly to heap, no stack intermediary.
-            (*ptr).next_inode = 2;
-            (*ptr).next_dir = 2;
-            (*ptr).next_cap = 1;
-            (*ptr).next_txn = 1;
-            (*ptr).next_version = 1;
-            (*ptr).next_block = 1;
-            (*ptr).next_edge = 2;
-            (*ptr).root_dir = dir_id;
-            (*ptr).root_inode = inode_id;
-            Box::from_raw(ptr)
-        let mut g = Self {
+        let mut g = Box::new(Self {
             inodes: Arena::new(),
             dirs: Arena::new(),
             caps: Arena::new(),
@@ -194,14 +160,11 @@ impl TypeGraph {
             next_edge: 2,
             root_dir: dir_id,
             root_inode: inode_id,
-        };
+        });
 
-        // Insert root inode with link_count=2 (entry from parent "." + self ".")
-        // For root, there's no parent, so link_count = 1 (just ".")
-        // Actually POSIX: root has nlink=2 for "." even without parent.
+        // Insert root inode: link_count = 1 (just ".") -- G3 excludes ".."
         let mut ri = root_inode;
-        ri.link_count = 1; // just "." — G3 excludes ".."
-        ri.link_count = 1; // just "." -- G3 excludes ".."
+        ri.link_count = 1;
         g.inodes.insert_at(id_to_arena(inode_id), ri);
         g.dirs.insert_at(id_to_arena(dir_id), root_dir);
 
@@ -218,49 +181,12 @@ impl TypeGraph {
         g
     }
 
-    /// Clone this graph into a new heap allocation without touching the stack.
+    /// Clone this graph into a new heap allocation.
     ///
-    /// Uses `alloc_zeroed` + field-by-field clone to avoid placing the ~35 MB
-    /// struct on the stack at any point.
+    /// With heap-backed arenas, TypeGraph is ~744 bytes on the stack,
+    /// so Box::new(clone()) is safe.
     pub fn clone_boxed(&self) -> Box<Self> {
-        #[cfg(feature = "std")]
-        use std::alloc as heap;
-        #[cfg(not(feature = "std"))]
-        use alloc::alloc as heap;
-
-        unsafe {
-            let layout = core::alloc::Layout::new::<Self>();
-            let ptr = heap::alloc_zeroed(layout) as *mut Self;
-            if ptr.is_null() {
-                heap::handle_alloc_error(layout);
-            }
-            // Clone each field in-place. Arena::clone() is large but the
-            // compiler can elide the intermediate when writing through a pointer.
-            core::ptr::write(&mut (*ptr).inodes, self.inodes.clone());
-            core::ptr::write(&mut (*ptr).dirs, self.dirs.clone());
-            core::ptr::write(&mut (*ptr).caps, self.caps.clone());
-            core::ptr::write(&mut (*ptr).transactions, self.transactions.clone());
-            core::ptr::write(&mut (*ptr).versions, self.versions.clone());
-            core::ptr::write(&mut (*ptr).blocks, self.blocks.clone());
-            core::ptr::write(&mut (*ptr).edges, self.edges.clone());
-            core::ptr::write(&mut (*ptr).dir_contains, self.dir_contains.clone());
-            core::ptr::write(&mut (*ptr).inode_incoming_contains, self.inode_incoming_contains.clone());
-            core::ptr::write(&mut (*ptr).inode_points_to, self.inode_points_to.clone());
-            core::ptr::write(&mut (*ptr).cap_grants, self.cap_grants.clone());
-            core::ptr::write(&mut (*ptr).cap_parent, self.cap_parent.clone());
-            core::ptr::write(&mut (*ptr).cap_children, self.cap_children.clone());
-            core::ptr::write(&mut (*ptr).file_data, self.file_data.clone());
-            (*ptr).next_inode = self.next_inode;
-            (*ptr).next_dir = self.next_dir;
-            (*ptr).next_cap = self.next_cap;
-            (*ptr).next_txn = self.next_txn;
-            (*ptr).next_version = self.next_version;
-            (*ptr).next_block = self.next_block;
-            (*ptr).next_edge = self.next_edge;
-            (*ptr).root_dir = self.root_dir;
-            (*ptr).root_inode = self.root_inode;
-            Box::from_raw(ptr)
-        }
+        Box::new(self.clone())
     }
 
     // -----------------------------------------------------------------------
@@ -329,107 +255,66 @@ impl TypeGraph {
     #[inline]
     pub fn insert_edge(&mut self, id: EdgeId, edge: Edge) {
         self.edges.insert_at(id_to_arena(id), edge);
-    // Typed accessors (thin wrappers for forward-compatibility with Arena)
-    // -----------------------------------------------------------------------
-
-    /// Insert an inode.
-    #[inline]
-    pub fn insert_inode(&mut self, id: InodeId, inode: Inode) {
-        self.inodes.insert(id, inode);
-    }
-
-    /// Insert a directory.
-    #[inline]
-    pub fn insert_dir(&mut self, id: DirId, dir: Directory) {
-        self.dirs.insert(id, dir);
-    }
-
-    /// Insert a capability.
-    #[inline]
-    pub fn insert_cap(&mut self, id: CapId, cap: Capability) {
-        self.caps.insert(id, cap);
-    }
-
-    /// Insert a block.
-    #[inline]
-    pub fn insert_block(&mut self, id: BlockId, block: Block) {
-        self.blocks.insert(id, block);
-    }
-
-    /// Insert an edge.
-    #[inline]
-    pub fn insert_edge(&mut self, id: EdgeId, edge: Edge) {
-        self.edges.insert(id, edge);
     }
 
     /// Get a reference to an inode by ID.
     #[inline]
     pub fn get_inode(&self, id: InodeId) -> Option<&Inode> {
         self.inodes.get(id_to_arena(id))
-        self.inodes.get(&id)
     }
 
     /// Get a mutable reference to an inode by ID.
     #[inline]
     pub fn get_inode_mut(&mut self, id: InodeId) -> Option<&mut Inode> {
         self.inodes.get_mut(id_to_arena(id))
-        self.inodes.get_mut(&id)
     }
 
     /// Get a reference to a directory by ID.
     #[inline]
     pub fn get_dir(&self, id: DirId) -> Option<&Directory> {
         self.dirs.get(id_to_arena(id))
-        self.dirs.get(&id)
     }
 
     /// Get a reference to a capability by ID.
     #[inline]
     pub fn get_cap(&self, id: CapId) -> Option<&Capability> {
         self.caps.get(id_to_arena(id))
-        self.caps.get(&id)
     }
 
     /// Get a reference to a block by ID.
     #[inline]
     pub fn get_block(&self, id: BlockId) -> Option<&Block> {
         self.blocks.get(id_to_arena(id))
-        self.blocks.get(&id)
     }
 
     /// Get a mutable reference to a block by ID.
     #[inline]
     pub fn get_block_mut(&mut self, id: BlockId) -> Option<&mut Block> {
         self.blocks.get_mut(id_to_arena(id))
-        self.blocks.get_mut(&id)
     }
 
     /// Get a reference to an edge by ID.
     #[inline]
     pub fn get_edge(&self, id: EdgeId) -> Option<&Edge> {
         self.edges.get(id_to_arena(id))
-        self.edges.get(&id)
     }
 
     /// Get a mutable reference to an edge by ID.
     #[inline]
     pub fn get_edge_mut(&mut self, id: EdgeId) -> Option<&mut Edge> {
         self.edges.get_mut(id_to_arena(id))
-        self.edges.get_mut(&id)
     }
 
     /// Check if an inode exists.
     #[inline]
     pub fn contains_inode(&self, id: InodeId) -> bool {
         self.inodes.contains(id_to_arena(id))
-        self.inodes.contains_key(&id)
     }
 
     /// Check if a directory exists.
     #[inline]
     pub fn contains_dir(&self, id: DirId) -> bool {
         self.dirs.contains(id_to_arena(id))
-        self.dirs.contains_key(&id)
     }
 
     /// Check if a capability exists.
@@ -448,7 +333,6 @@ impl TypeGraph {
     #[inline]
     pub fn contains_version(&self, id: VersionId) -> bool {
         self.versions.contains(id_to_arena(id))
-        self.caps.contains_key(&id)
     }
 
     /// Check if a block exists.
@@ -479,31 +363,6 @@ impl TypeGraph {
     #[inline]
     pub fn remove_edge(&mut self, id: EdgeId) -> Option<Edge> {
         self.edges.remove(id_to_arena(id))
-        self.blocks.contains_key(&id)
-    }
-
-    /// Remove an inode.
-    #[inline]
-    pub fn remove_inode(&mut self, id: InodeId) -> Option<Inode> {
-        self.inodes.remove(&id)
-    }
-
-    /// Remove a directory.
-    #[inline]
-    pub fn remove_dir(&mut self, id: DirId) -> Option<Directory> {
-        self.dirs.remove(&id)
-    }
-
-    /// Remove a block.
-    #[inline]
-    pub fn remove_block(&mut self, id: BlockId) -> Option<Block> {
-        self.blocks.remove(&id)
-    }
-
-    /// Remove an edge.
-    #[inline]
-    pub fn remove_edge(&mut self, id: EdgeId) -> Option<Edge> {
-        self.edges.remove(&id)
     }
 
     // -----------------------------------------------------------------------
@@ -957,7 +816,6 @@ mod tests {
 
     #[test]
     fn root_link_count_is_one() {
-        let g = TypeGraph::new_boxed();
         let g = TypeGraph::new();
         assert_eq!(g.get_inode(g.root_inode).unwrap().link_count, 1);
     }

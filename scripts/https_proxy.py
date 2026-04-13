@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-sotOS HTTPS Proxy -- bridges HTTP (guest) to HTTPS (internet).
+sotX HTTPS Proxy -- bridges HTTP (guest) to HTTPS (internet).
 
 The guest OS connects via plain HTTP to this proxy. The proxy
 fetches the target URL over HTTPS and returns the response.
@@ -87,7 +87,7 @@ class HTTPSProxyHandler(http.server.BaseHTTPRequestHandler):
         try:
             ctx = ssl.create_default_context()
             headers = {
-                "User-Agent": self.headers.get("User-Agent", "sotOS-HTTPS-Proxy/2.0"),
+                "User-Agent": self.headers.get("User-Agent", "sotX-HTTPS-Proxy/2.0"),
             }
             # Forward important headers from the client
             for h in ("Content-Type", "Accept", "Accept-Encoding",
@@ -248,13 +248,13 @@ class ThreadedHTTPServer(http.server.HTTPServer):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="sotOS HTTPS Proxy")
+    parser = argparse.ArgumentParser(description="sotX HTTPS Proxy")
     parser.add_argument("--port", "-p", type=int, default=8080,
                         help="Port to listen on (default: 8080)")
     args = parser.parse_args()
 
     server = ThreadedHTTPServer(("0.0.0.0", args.port), HTTPSProxyHandler)
-    print(f"sotOS HTTPS proxy listening on port {args.port}")
+    print(f"sotX HTTPS proxy listening on port {args.port}")
     print(f"")
     print(f"Mode 1 (URL rewriting):")
     print(f"  wget http://10.0.2.2:{args.port}/https://example.com/")

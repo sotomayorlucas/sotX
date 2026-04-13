@@ -1,10 +1,10 @@
-//! sotos-xhci — Userspace xHCI USB host-controller driver for sotOS.
+//! sotos-xhci — Userspace xHCI USB host-controller driver for sotX.
 //!
 //! Implements enough of the *eXtensible Host Controller Interface
 //! Specification 1.2* to bring up an emulated xHCI controller (QEMU
 //! `-device qemu-xhci`), enumerate root-hub ports, address USB 2.0/3.0
 //! devices, run the HID-keyboard boot protocol, and walk a USB hub one
-//! level deep. Designed for the sotOS userspace driver model: the
+//! level deep. Designed for the sotX userspace driver model: the
 //! kernel hands the driver an `IoMem` capability for BAR0 plus a small
 //! pool of caller-allocated DMA pages, and the driver does the rest.
 //!
@@ -21,7 +21,7 @@
 //! - [`usb`]: USB setup-packet helpers and config-descriptor parsers
 //!   for HID boot keyboards and Mass-Storage BBB interfaces.
 //! - [`hid`]: HID boot-protocol report → PS/2 Set 1 scancode
-//!   translator that drives the existing sotOS keyboard ring buffer.
+//!   translator that drives the existing sotX keyboard ring buffer.
 //! - [`hub`]: USB hub class requests and downstream-port enumeration.
 //!
 //! # Constraints

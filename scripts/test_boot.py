@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-sotOS Boot TDD Verification Suite
+sotX Boot TDD Verification Suite
 ===================================
 Builds the OS image, boots QEMU headless, captures serial output, and verifies
 that every expected boot stage appears (in order) and no regression markers
@@ -29,7 +29,7 @@ import time
 # ---------------------------------------------------------------------------
 
 QEMU = os.environ.get("QEMU", r"C:\Program Files\qemu\qemu-system-x86_64.exe")
-IMAGE = os.path.join("target", "sotos.img")
+IMAGE = os.path.join("target", "sotx.img")
 DISK = os.path.join("target", "disk.img")
 TRANSCRIPT = os.path.join("target", "boot_transcript.txt")
 SCREENDUMP = os.path.join("target", "boot_screendump.ppm")
@@ -242,7 +242,7 @@ def print_results(stage_results, regression_results, pass_count, fail_count, reg
     """Print the summary table."""
     print()
     print("=" * 60)
-    print("  sotOS Boot TDD Results")
+    print("  sotX Boot TDD Results")
     print("=" * 60)
     print()
 
@@ -288,9 +288,9 @@ def save_transcript(transcript, path):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="sotOS Boot TDD Verification Suite")
+    parser = argparse.ArgumentParser(description="sotX Boot TDD Verification Suite")
     parser.add_argument("--no-build", action="store_true",
-                        help="Skip building image (use existing target/sotos.img)")
+                        help="Skip building image (use existing target/sotx.img)")
     parser.add_argument("--transcript", metavar="FILE",
                         help="Parse an existing transcript file (skip QEMU boot)")
     parser.add_argument("--verbose", action="store_true",

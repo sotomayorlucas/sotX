@@ -1,7 +1,7 @@
 /*
  * allocator.c -- Arena bump allocator with free-list reuse.
  *
- * Maps 128 MiB of physical frames at ARENA_BASE using sotOS frame_alloc+map.
+ * Maps 128 MiB of physical frames at ARENA_BASE using sotX frame_alloc+map.
  * arena_alloc bumps a pointer; arena_free adds to a size-bucketed free-list.
  */
 

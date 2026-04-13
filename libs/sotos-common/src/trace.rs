@@ -1,4 +1,4 @@
-//! Shared tracing constants for sotOS.
+//! Shared tracing constants for sotX.
 //!
 //! Pure data module — no I/O, no allocation. Used by kernel and userspace alike
 //! to agree on trace levels, category bitmasks, and syscall name lookups.

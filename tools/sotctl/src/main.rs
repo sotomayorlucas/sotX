@@ -1,4 +1,4 @@
-/// sotctl -- Domain lifecycle management CLI for sotBSD/STYX.
+/// sotctl -- Domain lifecycle management CLI for sotX/STYX.
 ///
 /// Usage:
 ///   sotctl domain list

@@ -1,6 +1,6 @@
-//! sotOS Package Manager — package registry and dependency management.
+//! sotX Package Manager — package registry and dependency management.
 //!
-//! Provides a minimal package management system for sotOS:
+//! Provides a minimal package management system for sotX:
 //! - Package registration with name, version, description, dependencies
 //! - Dependency checking (are all deps installed?)
 //! - Install/uninstall (marks packages; actual binary loading uses initrd)

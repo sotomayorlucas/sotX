@@ -11,7 +11,7 @@ sotFS models filesystem metadata as a typed graph and POSIX operations as DPO
 either the entire graph transformation succeeds (including all invariant checks)
 or nothing changes.
 
-The sotOS kernel already provides a generic transaction engine with three tiers
+The sotX kernel already provides a generic transaction engine with three tiers
 (specified in `formal/sot_transactions.tla`):
 
 - **Tier 0 (RCU):** Read-only snapshots, no logging, < 100 ns.
@@ -92,7 +92,7 @@ require the FS server to manually verify invariants before each SO write
 Extend the kernel's transaction engine with graph-aware operations (e.g.,
 `tx_graph_rewrite(rule, match)`).
 
-**Rejected because:** This violates sotOS's core principle that the kernel
+**Rejected because:** This violates sotX's core principle that the kernel
 does not know about filesystems (see FOUNDATIONS.md §1.1). It would also
 increase the kernel's trusted computing base, undermining the verification
 effort.

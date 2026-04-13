@@ -1,4 +1,4 @@
-//! Mouse driver library for sotOS.
+//! Mouse driver library for sotX.
 //!
 //! Supports both PS/2 mice (3-byte and 4-byte IntelliMouse protocol)
 //! and USB HID boot protocol mice. Provides a unified `MouseEvent`

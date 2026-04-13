@@ -1,4 +1,4 @@
-//! Test shared library for sotOS dynamic linking.
+//! Test shared library for sotX dynamic linking.
 //!
 //! Contains simple functions to verify dl_open/dl_sym/dl_close, plus a
 //! `#[thread_local]` variable so the dynamic linker exercises the TLS

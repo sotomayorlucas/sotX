@@ -1,11 +1,11 @@
-# sotOS Build System
+# sotX Build System
 # Requires: rust nightly, python3, QEMU
 
 set shell := ["C:/Program Files/Git/bin/bash.exe", "-c"]
 
 QEMU := if os() == "windows" { "C:/Program Files/qemu/qemu-system-x86_64.exe" } else { "qemu-system-x86_64" }
 KERNEL := "target/x86_64-unknown-none/debug/sotos-kernel"
-IMAGE := "target/sotos.img"
+IMAGE := "target/sotx.img"
 USER_INIT := "services/init/target/x86_64-unknown-none/debug/sotos-init"
 USER_SHELL := "services/lucas-shell/target/x86_64-unknown-none/debug/sotos-lucas-shell"
 USER_KBD := "services/kbd/target/x86_64-unknown-none/debug/sotos-kbd"
@@ -214,11 +214,11 @@ release:
     cargo build --package sotos-kernel --release
 
 # Tier 5 production: generate a real Ed25519 signing key for signify.
-# Default OUTPUT lands in ~/.secrets/sotbsd-signify.key with mode 0600.
+# Default OUTPUT lands in ~/.secrets/sotx-signify.key with mode 0600.
 # After generation, set SIGNIFY_KEY=<that path> in your environment so
 # subsequent `just sigmanifest` runs use the production key instead of
 # the deterministic dev seed embedded in build_signify_manifest.py.
-signify-keygen OUTPUT="$HOME/.secrets/sotbsd-signify.key":
+signify-keygen OUTPUT="$HOME/.secrets/sotx-signify.key":
     python scripts/signify_keygen.py --output {{OUTPUT}}
 
 # Tier 5 close: clippy on the kernel + sotos-common (warnings as errors).
@@ -309,17 +309,17 @@ initrd: build-user build-shell build-kbd build-net build-nvme build-xhci build-v
 image: build initrd
     python scripts/mkimage.py --kernel {{KERNEL}} --initrd {{INITRD}} --output {{IMAGE}} --size 512
 
-# Sprint 1 -- create a 64M persistent ObjectStore rootdisk for sotBSD.
+# Sprint 1 -- create a 64M persistent ObjectStore rootdisk for sotX.
 # Survives reboots; attach via `just run-with-rootdisk`.
 rootdisk:
     python scripts/mkdisk.py --output target/rootdisk.img --size 64
 
-# Sprint 1 -- install sotBSD to a target file or block device.
+# Sprint 1 -- install sotX to a target file or block device.
 # Examples:
 #     just install TARGET=out.img
 #     just install TARGET=/dev/sdb FORCE=1
 install TARGET FORCE="0":
-    python scripts/sotbsd-install.py --target {{TARGET}} {{ if FORCE == "1" { "--force" } else { "" } }}
+    python scripts/sotx-install.py --target {{TARGET}} {{ if FORCE == "1" { "--force" } else { "" } }}
 
 # Sprint 1 -- boot with a persistent rootdisk attached as a second drive.
 run-with-rootdisk: image rootdisk
@@ -333,9 +333,9 @@ run-with-rootdisk: image rootdisk
         -m 2048M
 
 # Sprint 3 -- generate a production signify keypair.
-# Convention: lands in ~/.secrets/sotbsd-signify-prod.key (mode 0600).
+# Convention: lands in ~/.secrets/sotx-signify-prod.key (mode 0600).
 sigkey-prod:
-    python scripts/signify_keygen.py --output "$HOME/.secrets/sotbsd-signify-prod.key"
+    python scripts/signify_keygen.py --output "$HOME/.secrets/sotx-signify-prod.key"
 
 # Sprint 3 -- export an SDK tarball that third parties can build against.
 sdk: image
@@ -367,10 +367,10 @@ run-fast: image create-test-disk
 # Run under KVM in WSL with nested VMX exposed.
 #
 # Required for the bhyve VT-x project (Phase B+) — WHPX does not expose
-# nested virtualization to its guests, so VMXON inside sotOS only works
+# nested virtualization to its guests, so VMXON inside sotX only works
 # under KVM (Linux) where nested VMX is supported by default.
 #
-# Boots the same target/sotos.img via WSL+QEMU, with `-cpu host,+vmx`
+# Boots the same target/sotx.img via WSL+QEMU, with `-cpu host,+vmx`
 # (full host CPU passthrough including VMX/EPT/VPID). Serial output is
 # captured to bootlog_kvm.txt in the workspace root via /mnt/c.
 #
@@ -381,8 +381,8 @@ run-kvm: image
         -accel kvm \
         -cpu host,+vmx \
         -machine q35 \
-        -drive format=raw,file=/mnt/c/Users/sotom/sotOS/{{IMAGE}} \
-        -serial file:/mnt/c/Users/sotom/sotOS/bootlog_kvm.txt \
+        -drive format=raw,file=/mnt/c/Users/sotom/sotX/{{IMAGE}} \
+        -serial file:/mnt/c/Users/sotom/sotX/bootlog_kvm.txt \
         -display none \
         -no-reboot \
         -m 2048M"
@@ -513,7 +513,7 @@ run-nvme: image create-test-disk create-nvme-disk
         -drive if=none,format=raw,file=target/disk.img,id=disk0 \
         -device virtio-blk-pci,drive=disk0,disable-modern=on \
         -drive file=target/nvme-disk.img,format=raw,if=none,id=nvme0 \
-        -device nvme,serial=sotOS-NVMe,drive=nvme0 \
+        -device nvme,serial=sotX-NVMe,drive=nvme0 \
         -serial stdio \
         -no-reboot \
         -m 2048M
@@ -537,7 +537,7 @@ run-full: image create-test-disk create-nvme-disk
         -drive if=none,format=raw,file=target/disk.img,id=disk0 \
         -device virtio-blk-pci,drive=disk0,disable-modern=on \
         -drive file=target/nvme-disk.img,format=raw,if=none,id=nvme0 \
-        -device nvme,serial=sotOS-NVMe,drive=nvme0 \
+        -device nvme,serial=sotX-NVMe,drive=nvme0 \
         -netdev user,id=net0,dns=8.8.8.8,hostfwd=udp::5555-:5555,hostfwd=tcp::7777-:7 \
         -device virtio-net-pci,netdev=net0,disable-modern=on \
         -device qemu-xhci,id=xhci \
@@ -551,7 +551,7 @@ run-full: image create-test-disk create-nvme-disk
 
 # Automated validation: build everything, boot with 90s timeout, verify no panics
 run-all: image create-test-disk
-    @echo "=== sotOS run-all: automated build + boot validation ==="
+    @echo "=== sotX run-all: automated build + boot validation ==="
     timeout 90 "{{QEMU}}" \
         -drive format=raw,file={{IMAGE}} \
         -drive if=none,format=raw,file=target/disk.img,id=disk0 \
@@ -574,7 +574,7 @@ run-all: image create-test-disk
     fi
     @echo "--- Key boot milestones ---"
     @grep -E "NET:.*MAC|DHCP.*IP=|PONG|async.*completed|FAT32-TEST:.*SUCCESS|LUCAS:.*starting" target/test-output.log || true
-    @echo "=== PASS: sotOS booted successfully without panics ==="
+    @echo "=== PASS: sotX booted successfully without panics ==="
 
 # Run comprehensive test suite (boots QEMU, tests all features via serial)
 test *ARGS: image
@@ -584,7 +584,7 @@ test *ARGS: image
 test-verbose: image
     python scripts/test_system.py --verbose
 
-# Flash sotOS image to a disk/USB drive (usage: just flash DISK=/dev/sdX)
+# Flash sotX image to a disk/USB drive (usage: just flash DISK=/dev/sdX)
 flash DISK: image
     @echo "WARNING: This will OVERWRITE all data on {{DISK}}"
     @echo "Press Ctrl+C to cancel, or Enter to continue..."
@@ -650,7 +650,7 @@ image-lkl: build initrd-lkl
 
 # Create a 64 MiB ext4 disk image (requires WSL with Ubuntu)
 create-ext4-disk:
-    [ -f target/ext4.img ] || wsl -d Ubuntu -- bash -c "dd if=/dev/zero of=/mnt/c/Users/sotom/sotOS/target/ext4.img bs=1M count=64 && mkfs.ext4 -F /mnt/c/Users/sotom/sotOS/target/ext4.img"
+    [ -f target/ext4.img ] || wsl -d Ubuntu -- bash -c "dd if=/dev/zero of=/mnt/c/Users/sotom/sotX/target/ext4.img bs=1M count=64 && mkfs.ext4 -F /mnt/c/Users/sotom/sotX/target/ext4.img"
 
 # Run with LKL server (ext4 disk + virtio-net)
 run-lkl: image-lkl create-ext4-disk
@@ -673,7 +673,7 @@ test-boot *ARGS: image
 
 # Create a 64 MiB raw image for the rootdisk (init formats it on first boot)
 create-rootdisk-disk:
-    python scripts/mkrootdisk.py target/sotbsd-rootdisk.img
+    python scripts/mkrootdisk.py target/sotx-rootdisk.img
 
 # Run with a primary virtio-blk (ObjectStore) and a SECOND virtio-blk
 # acting as the persistent rootdisk that init mounts and writes /persist/boot_marker into.
@@ -682,7 +682,7 @@ run-rootdisk: image create-test-disk create-rootdisk-disk
         -drive format=raw,file={{IMAGE}} \
         -drive if=none,format=raw,file=target/disk.img,id=disk0 \
         -device virtio-blk-pci,drive=disk0,disable-modern=on \
-        -drive if=none,format=raw,file=target/sotbsd-rootdisk.img,id=root0 \
+        -drive if=none,format=raw,file=target/sotx-rootdisk.img,id=root0 \
         -device virtio-blk-pci,drive=root0,disable-modern=on \
         -serial stdio \
         -display none \
@@ -704,7 +704,7 @@ run-full-quick: image create-test-disk create-nvme-disk
         -drive if=none,format=raw,file=target/disk.img,id=disk0 \
         -device virtio-blk-pci,drive=disk0,disable-modern=on \
         -drive file=target/nvme-disk.img,format=raw,if=none,id=nvme0 \
-        -device nvme,serial=sotOS-NVMe,drive=nvme0 \
+        -device nvme,serial=sotX-NVMe,drive=nvme0 \
         -netdev user,id=net0,dns=8.8.8.8,hostfwd=udp::5555-:5555,hostfwd=tcp::7777-:7 \
         -device virtio-net-pci,netdev=net0,disable-modern=on \
         -device AC97 \

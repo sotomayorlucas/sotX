@@ -14,7 +14,7 @@
 /* ---------------------------------------------------------------
  * LKL host operations struct
  *
- * LKL calls these to interact with the host (sotOS).
+ * LKL calls these to interact with the host (sotX).
  * We fill in function pointers in host_ops.c.
  * --------------------------------------------------------------- */
 struct lkl_host_operations {

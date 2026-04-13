@@ -155,7 +155,7 @@ design document (§11).
 
 ### Design Assumptions
 
-1. **IPC reliability:** The sotOS IPC primitive (synchronous send/recv)
+1. **IPC reliability:** The sotX IPC primitive (synchronous send/recv)
    is assumed to deliver messages exactly once, in order, without
    corruption. This is verified by a separate TLA+ spec (`formal/ipc.tla`).
 2. **Capability unforgery:** We assume the kernel correctly enforces

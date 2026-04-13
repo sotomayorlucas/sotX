@@ -1,4 +1,4 @@
-//! sot-fma — Fault Management Architecture for sotBSD/sotOS.
+//! sot-fma — Fault Management Architecture for sotX/sotX.
 //!
 //! A predictive self-healing engine inspired by Solaris' FMA. The
 //! [`FaultManagement`] state machine consumes two streams:

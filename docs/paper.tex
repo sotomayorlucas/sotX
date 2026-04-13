@@ -49,12 +49,12 @@
 \newtheorem{invariant}{Invariant}[section]
 
 % --- Title ---
-\title{\textbf{sotOS: A 4th-Generation Microkernel with Per-Core IPC,\\
+\title{\textbf{sotX: A 4th-Generation Microkernel with Per-Core IPC,\\
 Full Driver Stack, Distributed Computing, and Formal Verification}\\[0.5em]
 \large Technical Report --- v2.0}
 
 \author{Santiago Sotomonte\\
-\texttt{sotOS Project}}
+\texttt{sotX Project}}
 
 \date{March 2026}
 
@@ -62,7 +62,7 @@ Full Driver Stack, Distributed Computing, and Formal Verification}\\[0.5em]
 \maketitle
 
 \begin{abstract}
-We present \textbf{sotOS} (Secure Object Transactional Operating System), a
+We present \textbf{sotX} (Secure Object Transactional Operating System), a
 microkernel operating system implemented from scratch in Rust for the x86\_64
 architecture. The kernel implements exactly five primitives---scheduling, IRQ
 virtualization, IPC, capability management, and frame allocation---with all
@@ -94,7 +94,7 @@ device drivers and subsystems in kernel space, but a single bug can compromise
 the entire system. Microkernels (L4, seL4, QNX) improve safety by minimizing
 the trusted code base, but historically suffer IPC overhead.
 
-\textbf{sotOS} resolves this tension through a combination of techniques:
+\textbf{sotX} resolves this tension through a combination of techniques:
 \begin{itemize}[nosep]
     \item \textbf{Capability-based security}: Every kernel object is accessed
           through capabilities with explicit rights, enabling fine-grained
@@ -155,14 +155,14 @@ the trusted code base, but historically suffer IPC overhead.
     \draw[arrow] (nvme) -- ++(0,-1.3);
     \draw[arrow] (xhci) -- ++(0,-1.3);
 \end{tikzpicture}
-\caption{sotOS architecture: five kernel primitives, all drivers in userspace.}
+\caption{sotX architecture: five kernel primitives, all drivers in userspace.}
 \label{fig:arch}
 \end{figure}
 
 The kernel implements exactly five primitives:
 
 \begin{definition}[Kernel Primitives]
-The sotOS kernel provides:
+The sotX kernel provides:
 \begin{enumerate}[nosep]
     \item \textbf{Scheduling}: Preemptive priority multi-level queue with
           per-core run queues and work stealing.
@@ -308,7 +308,7 @@ Out-of-bounds accesses trap immediately without corrupting other memory.}
 
 \subsection{Implementation}
 
-The sotOS WASM runtime (\texttt{libs/sotos-wasm/}) is a \texttt{no\_std}
+The sotX WASM runtime (\texttt{libs/sotos-wasm/}) is a \texttt{no\_std}
 stack-based interpreter supporting:
 
 \begin{itemize}[nosep]
@@ -359,7 +359,7 @@ TCB size & CPU microcode + kernel & WASM interpreter ($\sim$1500 LOC) \\
 
 \subsection{Design}
 
-Every kernel object in sotOS is accessed through \emph{capabilities}:
+Every kernel object in sotX is accessed through \emph{capabilities}:
 unforgeable tokens that combine an object reference with a set of rights.
 Capabilities are stored in a generation-checked pool, making stale references
 detectable in O(1) time.
@@ -483,7 +483,7 @@ offload to the appropriate accelerator.
 % ============================================================================
 
 The IPC routing layer extends endpoint addressing with a 16-bit node ID,
-enabling transparent message delivery across a network of sotOS nodes:
+enabling transparent message delivery across a network of sotX nodes:
 
 \begin{figure}[h]
 \centering
@@ -565,7 +565,7 @@ The scheduler specification verifies:
 \label{sec:security}
 % ============================================================================
 
-sotOS implements defense-in-depth security:
+sotX implements defense-in-depth security:
 
 \begin{enumerate}[nosep]
     \item \textbf{W\^{}X Enforcement}: Pages cannot be both writable and
@@ -655,7 +655,7 @@ The v2.0 networking stack adds:
 \label{sec:drivers}
 % ============================================================================
 
-sotOS v2.0 includes 9 device driver libraries, all running in userspace:
+sotX v2.0 includes 9 device driver libraries, all running in userspace:
 
 \begin{table}[h]
 \centering
@@ -845,7 +845,7 @@ Stack canary check sites & $\sim$1,800/binary \\
 \section{Conclusion}
 % ============================================================================
 
-sotOS demonstrates that a formally-verifiable microkernel can scale to a
+sotX demonstrates that a formally-verifiable microkernel can scale to a
 full-featured operating system while maintaining capability-based security and
 per-core architecture. Key contributions:
 
@@ -867,7 +867,7 @@ The system comprises over 31,000 lines of Rust across 15+ crates, all compiled w
 
 Future work includes:
 \begin{itemize}[nosep]
-    \item Self-hosting (port a language toolchain to sotOS)
+    \item Self-hosting (port a language toolchain to sotX)
     \item Custom bootloader replacing Limine (pure 64-bit long mode from scratch)
     \item GPU/NPU driver integration for real heterogeneous dispatch
     \item Mechanized proofs using Coq or Lean for the verified kernel subset

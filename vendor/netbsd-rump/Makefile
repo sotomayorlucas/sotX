@@ -2,7 +2,7 @@
 #
 # This compiles rumpuser_sot.c for the x86_64-unknown-none target using
 # GCC or Clang in freestanding mode.  The resulting .o is linked with
-# the rump kernel components and the sotOS server binary.
+# the rump kernel components and the sotX server binary.
 #
 # Usage:
 #   make                  -- build rumpuser_sot.o
@@ -15,7 +15,7 @@ CC      ?= x86_64-elf-gcc
 OBJDUMP ?= x86_64-elf-objdump
 
 # Freestanding flags: no libc, no standard startup, no stack protector,
-# no red zone (kernel/server code), no PIC (static linking in sotOS).
+# no red zone (kernel/server code), no PIC (static linking in sotX).
 CFLAGS  = -std=c11 \
           -ffreestanding \
           -fno-stack-protector \

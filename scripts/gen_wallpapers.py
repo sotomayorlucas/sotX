@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Generate built-in wallpapers for sotOS compositor.
+Generate built-in wallpapers for sotX compositor.
 
 Produces 24-bit uncompressed BMP files (bottom-up scanline order).
 
 Wallpapers:
   tokyo-night.bmp  -- 1024x768 vertical gradient #1A1B26 -> #10101C
-  sotos-logo.bmp   -- same gradient + centered "sotOS" text in #C0CAF5
+  sotos-logo.bmp   -- same gradient + centered "sotX" text in #C0CAF5
 
 Usage:
     python scripts/gen_wallpapers.py [--output-dir assets/wallpapers]
@@ -50,7 +50,7 @@ def make_tokyo_night(w, h):
 
 
 def make_sotos_logo(w, h):
-    """Gradient wallpaper with centered 'sotOS' text."""
+    """Gradient wallpaper with centered 'sotX' text."""
     img = make_gradient(w, h)
     draw = ImageDraw.Draw(img)
 
@@ -69,7 +69,7 @@ def make_sotos_logo(w, h):
         # PIL default bitmap font -- smaller but works everywhere
         font = ImageFont.load_default()
 
-    text = "sotOS"
+    text = "sotX"
     bbox = draw.textbbox((0, 0), text, font=font)
     tw = bbox[2] - bbox[0]
     th = bbox[3] - bbox[1]
@@ -80,7 +80,7 @@ def make_sotos_logo(w, h):
 
 
 def main():
-    p = argparse.ArgumentParser(description="Generate sotOS wallpapers")
+    p = argparse.ArgumentParser(description="Generate sotX wallpapers")
     p.add_argument("--output-dir", default="assets/wallpapers",
                    help="Directory to write BMP files")
     args = p.parse_args()

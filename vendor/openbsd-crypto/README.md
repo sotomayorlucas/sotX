@@ -1,7 +1,7 @@
 # OpenBSD Security Primitives
 
 Standalone C files fetched from [OpenBSD src](https://github.com/openbsd/src)
-(master branch) for use in sotOS userspace security components.
+(master branch) for use in sotX userspace security components.
 
 ## Contents
 
@@ -48,7 +48,7 @@ https://github.com/openbsd/src/blob/master/usr.bin/signify/signify.c
 ## Notes
 
 These are the upstream OpenBSD sources and may reference OpenBSD-specific
-headers (e.g., `<sys/param.h>` macros, `DEF_WEAK`). For use in sotOS, a
+headers (e.g., `<sys/param.h>` macros, `DEF_WEAK`). For use in sotX, a
 compatibility shim or minor edits may be needed. The signify tool has
 additional dependencies (libcrypto for Ed25519) not included here.
 

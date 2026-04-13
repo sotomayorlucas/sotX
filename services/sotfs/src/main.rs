@@ -1,4 +1,4 @@
-//! # sotFS Native Service for sotOS
+//! # sotFS Native Service for sotX
 //!
 //! Userspace filesystem server implementing the sotFS type graph engine.
 //! Receives VfsOp IPC messages and translates them to DPO graph rewriting

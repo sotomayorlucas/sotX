@@ -17,7 +17,7 @@
  *   Random      -> RDRAND instruction (x86_64)
  *   Console     -> SYS_DEBUG_PRINT (serial COM1)
  *
- * Copyright (c) 2025-2026 sotOS contributors.
+ * Copyright (c) 2025-2026 sotX contributors.
  * BSD 2-Clause License (matching NetBSD rump kernel licensing).
  */
 
@@ -1254,7 +1254,7 @@ void rumpuser_unmap(void *addr, size_t len)
  * Block I/O
  *
  * The rump kernel calls rumpuser_bio for disk reads and writes.
- * We forward these to the sotOS "blk" service via IPC, mirroring
+ * We forward these to the sotX "blk" service via IPC, mirroring
  * the protocol used by lkl-server's disk_backend.c.
  *
  * Protocol:
@@ -1494,7 +1494,7 @@ int rumpuser_syncfd(int fd, int flags, uint64_t start, uint64_t len)
  * Clock
  *
  * RDTSC-based with assumed 2 GHz frequency.  This matches the
- * approach used by the vDSO and LKL host_ops in sotOS.
+ * approach used by the vDSO and LKL host_ops in sotX.
  * --------------------------------------------------------------- */
 
 /*
@@ -1664,14 +1664,14 @@ int rumpuser_getrandom(void *buf, size_t buflen, int flags, size_t *retp)
 int rumpuser_getparam(const char *name, void *buf, size_t blen)
 {
     if (ru_strcmp(name, "_RUMPUSER_NCPU") == 0) {
-        /* sotOS runs single-CPU by default. */
+        /* sotX runs single-CPU by default. */
         char *b = (char *)buf;
         b[0] = '1'; b[1] = '\0';
         return 0;
     }
 
     if (ru_strcmp(name, "_RUMPUSER_HOSTNAME") == 0) {
-        const char *hostname = "sotbsd-rump";
+        const char *hostname = "sotx-rump";
         size_t len = ru_strlen(hostname);
         if (len >= blen) len = blen - 1;
         ru_memcpy(buf, hostname, len);

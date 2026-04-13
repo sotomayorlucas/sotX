@@ -1,5 +1,5 @@
 /*
- * disk_backend.c -- Block device I/O bridge (LKL fusion <-> sotOS blk service).
+ * disk_backend.c -- Block device I/O bridge (LKL fusion <-> sotX blk service).
  *
  * Fusion variant: LKL runs inside init process. This backend uses IPC to
  * init's "blk" service for real sector read/write on virtio-blk.

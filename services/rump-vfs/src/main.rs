@@ -1,10 +1,10 @@
-//! sotOS rump-vfs service.
+//! sotX rump-vfs service.
 //!
 //! Tier 2 BSD personality milestone: a real NetBSD `librump.a + librumpvfs.a +
 //! librumpfs_ffs.a` (built via buildrump.sh, see vendor/netbsd-rump/) linked
-//! into a freestanding sotOS service. The rump hypercalls (`rumpuser_*`) are
+//! into a freestanding sotX service. The rump hypercalls (`rumpuser_*`) are
 //! satisfied by `vendor/netbsd-rump/rumpuser_sot.{c,h}` which maps them to
-//! sotOS syscalls.
+//! sotX syscalls.
 //!
 //! Bootstrap sequence:
 //!   1. `rump_init()` brings up the in-process NetBSD kernel.
@@ -82,9 +82,9 @@ mod rump {
 
 const PASSWD: &[u8] = b"root:x:0:0:root:/root:/bin/sh\n\
 daemon:x:1:1:daemon:/:/sbin/nologin\n\
-sotos:x:1000:1000:sotOS user:/home/sotos:/bin/lucas\n";
-const HOSTNAME: &[u8] = b"sotbsd\n";
-const MOTD: &[u8] = b"Welcome to sotBSD (real librump backend)\n";
+sotos:x:1000:1000:sotX user:/home/sotos:/bin/lucas\n";
+const HOSTNAME: &[u8] = b"sotx\n";
+const MOTD: &[u8] = b"Welcome to sotX (real librump backend)\n";
 
 struct Entry {
     /// Path inside the rump VFS namespace, NUL-terminated.

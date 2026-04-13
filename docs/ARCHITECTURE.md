@@ -1,8 +1,8 @@
-# sotBSD Architecture
+# sotX Architecture
 
 ## 1. Vision: A Fourth-Generation Operating System
 
-sotBSD is an adversary-aware operating system designed for hostile environments.
+sotX is an adversary-aware operating system designed for hostile environments.
 It combines a verified exokernel with capability-based security, transactional
 storage, mandatory provenance, and a deception engine that can present arbitrary
 OS personalities to untrusted code.
@@ -14,12 +14,12 @@ OS personalities to untrusted code.
 | 1st | 1960s-1970s | Multiprogramming, time-sharing | CTSS, Multics, early UNIX |
 | 2nd | 1980s-1990s | Microkernel isolation, formal IPC | Mach, L4, QNX |
 | 3rd | 2000s-2010s | Capability security, verified kernels | seL4, CHERI, Capsicum |
-| 4th | 2020s- | Adversary-aware: deception, provenance, live personality switching | **sotBSD** |
+| 4th | 2020s- | Adversary-aware: deception, provenance, live personality switching | **sotX** |
 
 A 4th-generation OS assumes the adversary has already achieved code execution
 inside a domain. The question is not "can we prevent compromise?" but "can we
 detect, contain, and deceive the adversary while maintaining a complete audit
-trail?" sotBSD answers yes through three pillars:
+trail?" sotX answers yes through three pillars:
 
 1. **Capability confinement** -- no ambient authority, no escalation path.
 2. **Mandatory provenance** -- every IPC message, every capability operation
@@ -108,7 +108,7 @@ struct Capability {
 ### 3.3 Epoch-Based Revocation
 
 Instead of walking the CDT to invalidate descendants (O(n) in tree size),
-sotBSD uses epoch-based revocation:
+sotX uses epoch-based revocation:
 
 1. Each SO has a monotonic `current_epoch` counter.
 2. Each capability records the epoch at which it was created.
@@ -259,7 +259,7 @@ used for kernel-internal threads and the init service.
 
 ## 7. Personality Layers
 
-sotBSD presents OS personalities to guest code through userspace servers.
+sotX presents OS personalities to guest code through userspace servers.
 The kernel knows nothing about POSIX, BSD, or Linux -- all translation
 happens in Ring 3.
 
@@ -294,7 +294,7 @@ Used for simple binaries; LKL handles complex applications.
 
 ### 7.3 Deception Personalities
 
-Through capability interposition, sotBSD can present a fabricated OS
+Through capability interposition, sotX can present a fabricated OS
 personality to a compromised domain. The domain sees Ubuntu 22.04 with
 apt, systemd, and a full /proc filesystem -- but every operation is
 mediated and logged. See the Deception Engine section below.
@@ -381,7 +381,7 @@ Virtual Address          Content                    Size
 ## 10. Repository Structure
 
 ```
-sotBSD/
+sotX/
   kernel/                    The microkernel (Ring 0, ~10K LOC target)
     src/
       arch/x86_64/           CPU-specific: serial, GDT, IDT, LAPIC, percpu
@@ -465,7 +465,7 @@ just debug              # Boot with GDB server (port 1234)
 cargo build --package sotos-kernel
 python scripts/mkimage.py
 qemu-system-x86_64 \
-    -drive format=raw,file=target/sotos.img \
+    -drive format=raw,file=target/sotx.img \
     -serial stdio \
     -display none \
     -no-reboot \
@@ -490,9 +490,9 @@ qemu-system-x86_64 \
 | Genode | Framework | L4Linux server | No | No | Partial |
 | macOS/XNU | Mach hybrid | BSD server | No | Limited (DTrace) | No |
 | Qubes OS | Xen hypervisor | Full VMs | No | No | No |
-| **sotBSD** | SOT exokernel | Rump + LKL + deception | **Yes** | **Mandatory** | TLA+ + Verus |
+| **sotX** | SOT exokernel | Rump + LKL + deception | **Yes** | **Mandatory** | TLA+ + Verus |
 
-sotBSD is unique in combining capability security, mandatory provenance,
+sotX is unique in combining capability security, mandatory provenance,
 and active deception in a single verified kernel. No prior system offers
 all three.
 

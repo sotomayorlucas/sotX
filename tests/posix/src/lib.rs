@@ -1,10 +1,10 @@
-//! POSIX conformance tests for sotBSD personality layers.
+//! POSIX conformance tests for sotX personality layers.
 //!
 //! These tests verify that the BSD (rump) and Linux (LKL/LUCAS) personality
 //! layers correctly implement POSIX/SUS semantics. The test categories
 //! follow the Linux Test Project (LTP) organization.
 //!
-//! Tests are host-side runners that boot sotBSD in QEMU and execute
+//! Tests are host-side runners that boot sotX in QEMU and execute
 //! test binaries via the personality layer, checking results via serial.
 
 mod file_ops;

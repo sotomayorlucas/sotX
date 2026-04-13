@@ -1,9 +1,9 @@
-//! sotos-nvme — NVMe SSD driver library for sotOS.
+//! sotos-nvme — NVMe SSD driver library for sotX.
 //!
 //! Implements the NVM Express base specification 1.4 in userspace for a
 //! single-controller, single-namespace block device. Built on top of an
 //! MMIO BAR0 mapping (UC) and a small set of caller-provided DMA pages.
-//! Designed for the sotOS userspace driver model: the kernel hands the
+//! Designed for the sotX userspace driver model: the kernel hands the
 //! driver an `IoMem` capability for the BAR plus a few physical frames
 //! for queues, and the driver does the rest.
 //!

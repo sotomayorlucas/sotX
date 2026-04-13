@@ -455,7 +455,7 @@ pub(crate) fn run_busybox_test() {
                 let buf = msg.regs[0] as *mut u8;
                 unsafe {
                     core::ptr::write_bytes(buf, 0, 390);
-                    core::ptr::copy_nonoverlapping(b"sotOS".as_ptr(), buf, 5);
+                    core::ptr::copy_nonoverlapping(b"sotX".as_ptr(), buf, 5);
                     core::ptr::copy_nonoverlapping(b"lucas".as_ptr(), buf.add(65), 5);
                     core::ptr::copy_nonoverlapping(b"0.1.0".as_ptr(), buf.add(130), 5);
                     core::ptr::copy_nonoverlapping(b"x86_64".as_ptr(), buf.add(260), 6);

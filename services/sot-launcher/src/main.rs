@@ -1,4 +1,4 @@
-//! sot-launcher -- Keyboard-driven app launcher for the sotOS compositor.
+//! sot-launcher -- Keyboard-driven app launcher for the sotX compositor.
 //!
 //! Wayland client that creates a layer-shell Overlay (or xdg_toplevel
 //! fallback) presenting a centered 500x400 modal with fuzzy search.
@@ -950,7 +950,7 @@ pub extern "C" fn _start() -> ! {
         }
         {
             let mut m = WireBuilder::new(XDG_TOPLEVEL_ID, 2);
-            m.put_string(b"sotOS Launcher");
+            m.put_string(b"sotX Launcher");
             let _ = wl_call(comp_ep, &m.finish());
         }
     }

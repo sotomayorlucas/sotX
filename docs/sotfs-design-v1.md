@@ -40,7 +40,7 @@ conventional filesystems:
    *visibility*: different security domains see different projections of the
    filesystem graph, enabling deception-in-depth against compromised processes.
 
-sotFS is designed for sotOS, a capability-based microkernel written in Rust.
+sotFS is designed for sotX, a capability-based microkernel written in Rust.
 It runs as a userspace server domain, communicating via IPC and persisting
 state through the SOT exokernel's transactional Secure Object primitives.
 A four-layer verification plan — TLA+ model checking, crash refinement,
@@ -335,7 +335,7 @@ crash refinement proof to leverage category-theoretic properties.
 
 ## 4. Architecture Overview
 
-### 4.1 sotFS Within the sotOS Stack
+### 4.1 sotFS Within the sotX Stack
 
 ```
 ┌──────────────────────────────────────────────────┐
@@ -363,7 +363,7 @@ crash refinement proof to leverage category-theoretic properties.
 │  │  Bulk block-device capability (ADR-002)    │   │
 │  └────────────────────────────────────────────┘   │
 ├──────────────────────────────────────────────────┤
-│  sotOS Microkernel  (Ring 0)                      │
+│  sotX Microkernel  (Ring 0)                      │
 │  IPC routing │ Scheduling │ Frame alloc │ Caps    │
 ├──────────────────────────────────────────────────┤
 │  Hardware (NVMe/virtio-blk)                       │
@@ -1544,7 +1544,7 @@ curvature spike?"
 
 ### 10.1 Capability-Gated Graph Projections
 
-In the sotOS deception model (`docs/DECEPTION_MODEL.md`), capability
+In the sotX deception model (`docs/DECEPTION_MODEL.md`), capability
 interposition allows a domain's view of resources to be fabricated. sotFS
 extends this from individual operations to **graph structure**: a domain
 with interposed capabilities sees a **projected subgraph** of TG.
@@ -1739,7 +1739,7 @@ Verus at the time of implementation.
   invariants under model checking.
 - **Phase 2:** Build a FUSE prototype on Linux, with the type graph,
   DPO engine, and GTXN manager as Rust crates.
-- **Phase 3:** Port to sotBSD as a native filesystem server domain.
+- **Phase 3:** Port to sotX as a native filesystem server domain.
 - **Phase 4:** Apply the formal verification layers incrementally.
 - **Phase 5:** Implement the structural differentiators (bounded treewidth
   enforcement, curvature monitoring, deceptive projections).

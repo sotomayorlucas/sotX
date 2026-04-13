@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Download Wine64 minimal files for running 'wine64 --version' on sotOS.
+"""Download Wine64 minimal files for running 'wine64 --version' on sotX.
 
 Only 5 files needed:
   /bin/wine64          - ELF loader (dynamically linked)
@@ -47,7 +47,7 @@ def download(url, output_path):
     print(f"  Downloading: {url}")
 
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "sotOS-fetch/1.0"})
+        req = urllib.request.Request(url, headers={"User-Agent": "sotX-fetch/1.0"})
         with urllib.request.urlopen(req, timeout=120) as resp:
             total = resp.headers.get('Content-Length')
             total = int(total) if total else None
@@ -561,7 +561,7 @@ def find_deb_url(packages_data, pkg_name):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Fetch Wine64 for sotOS")
+    parser = argparse.ArgumentParser(description="Fetch Wine64 for sotX")
     parser.add_argument("--disk", action="store_true",
                         help="Also create disk image with Wine sysroot")
     parser.add_argument("--disk-size", type=int, default=512,
@@ -571,7 +571,7 @@ def main():
     os.makedirs(CACHE_DIR, exist_ok=True)
     os.makedirs(SYSROOT, exist_ok=True)
 
-    print("=== sotOS Wine64 Sysroot Builder ===\n")
+    print("=== sotX Wine64 Sysroot Builder ===\n")
 
     # Step 1: Download Packages index to find exact .deb URLs
     print("[1/4] Fetching Debian package index...")

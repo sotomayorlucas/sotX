@@ -1,4 +1,4 @@
-//! Integration tests for sotBSD.
+//! Integration tests for sotX.
 //!
 //! These tests verify end-to-end behavior: boot sequence, IPC message
 //! delivery, domain lifecycle, and service registration. They are

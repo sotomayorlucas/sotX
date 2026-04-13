@@ -1,4 +1,4 @@
-//! sotOS WASM Runtime — Bare-metal WebAssembly interpreter.
+//! sotX WASM Runtime — Bare-metal WebAssembly interpreter.
 //!
 //! A minimal, `no_std`-compatible WASM bytecode interpreter for
 //! Software Fault Isolation (SFI). Services compiled to WASM can
