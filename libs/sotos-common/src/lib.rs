@@ -637,6 +637,62 @@ pub const SYS_SHM_UNMAP: u64 = 182;
 /// Destroy shared memory, free frames when refcount=0.
 pub const SYS_SHM_DESTROY: u64 = 183;
 
+/// Enumerate occupied slots of the global capability table.
+///
+/// `rdi` = userspace pointer to `[CapInfo; N]`, `rsi` = N (max entries).
+/// Returns number of entries written, or negative `SysError` on failure.
+/// Kernel bounds `max_count` to [`CAP_LIST_MAX`] regardless of caller.
+pub const SYS_CAP_LIST: u64 = 190;
+
+/// Hard cap on entries returned by a single [`SYS_CAP_LIST`] call.
+/// Matches the kernel-side safety clamp in `syscall::cap::handle`.
+pub const CAP_LIST_MAX: usize = 256;
+
+/// One entry returned by [`SYS_CAP_LIST`]. Kernel writes these as a contiguous
+/// `#[repr(C)]` array into the caller's buffer.
+///
+/// `kind` values mirror `kernel::cap::CapObject` variant discriminants:
+///   0 = Null/empty, 1 = Memory, 2 = Endpoint, 3 = Channel, 4 = Thread,
+///   5 = Irq, 6 = IoPort, 7 = Notification, 8 = Domain, 9 = AddrSpace,
+///   10 = Interposed, 11 = Vm, 12 = Msi.
+///
+/// `rights` is the raw `Rights` bitmask (READ=1, WRITE=2, EXECUTE=4,
+/// GRANT=8, REVOKE=16).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CapInfo {
+    /// Raw `CapId` (slot index + generation packed into a u32, zero-extended).
+    pub cap_id: u64,
+    /// `CapObject` discriminant — see constants below.
+    pub kind: u32,
+    /// `Rights` bitmask.
+    pub rights: u32,
+}
+
+impl CapInfo {
+    pub const KIND_NULL: u32 = 0;
+    pub const KIND_MEMORY: u32 = 1;
+    pub const KIND_ENDPOINT: u32 = 2;
+    pub const KIND_CHANNEL: u32 = 3;
+    pub const KIND_THREAD: u32 = 4;
+    pub const KIND_IRQ: u32 = 5;
+    pub const KIND_IOPORT: u32 = 6;
+    pub const KIND_NOTIFICATION: u32 = 7;
+    pub const KIND_DOMAIN: u32 = 8;
+    pub const KIND_ADDR_SPACE: u32 = 9;
+    pub const KIND_INTERPOSED: u32 = 10;
+    pub const KIND_VM: u32 = 11;
+    pub const KIND_MSI: u32 = 12;
+
+    pub const fn zeroed() -> Self {
+        Self {
+            cap_id: 0,
+            kind: 0,
+            rights: 0,
+        }
+    }
+}
+
 /// Special syscall number used by the async signal trampoline.
 /// When the kernel redirects a user thread to the signal trampoline (from
 /// timer interrupt), the trampoline calls this syscall which gets redirected
@@ -1828,6 +1884,31 @@ pub mod sys {
     #[inline(always)]
     pub fn thread_count() -> u64 {
         syscall0(super::Syscall::ThreadCount as u64)
+    }
+
+    /// Enumerate the occupied slots of the kernel's capability table.
+    ///
+    /// Fills `out` with up to `out.len()` `CapInfo` entries. Returns the number
+    /// actually written, or a negative errno. The kernel clamps the count to
+    /// [`super::CAP_LIST_MAX`] regardless of buffer size.
+    ///
+    /// Used by `sotsh`'s `cap` builtin to introspect process capabilities.
+    #[inline(always)]
+    pub fn cap_list(out: &mut [super::CapInfo]) -> Result<usize, i64> {
+        // SAFETY: kernel writes at most `out.len()` contiguous `#[repr(C)]`
+        // `CapInfo` entries into `out.as_mut_ptr()`. The buffer is &mut so
+        // the caller has exclusive ownership for the duration of the call.
+        let ret = syscall2(
+            super::SYS_CAP_LIST,
+            out.as_mut_ptr() as u64,
+            out.len() as u64,
+        );
+        let signed = ret as i64;
+        if signed < 0 {
+            Err(signed)
+        } else {
+            Ok(signed as usize)
+        }
     }
 
     /// Register a death notification for a target thread.
