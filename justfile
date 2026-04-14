@@ -892,14 +892,14 @@ image-minimal: build-trace initrd-minimal
 # block I/O to the firmware so Limine's reads hit host speeds instead of
 # the emulated ~1 MB/s legacy channel. Use this by default; only fall back
 # to the BIOS target (`run-sotsh-minimal-bios`) if OVMF can't be fetched.
-# Uses TCG, not WHPX. WHPX on Windows can't emulate the MMIO paths that
-# OVMF+virtio-blk hit during early firmware enumeration and bails with
-# "Failed to emulate MMIO access" / MSI injection failures. TCG is slower
-# at CPU-bound work but handles the firmware path cleanly, and UEFI disk
-# reads are still far faster than BIOS INT 13h, so the net win holds.
+# Uses TCG, not WHPX (WHPX+OVMF+virtio-blk injection fails). No `-machine
+# q35` either: q35's PCIe topology puts virtio-blk-pci on a root-port
+# bridge above bus 0, and init's PCI walker (libs/sotos-pci) only
+# enumerates bus 0. Leaving the machine at the QEMU default (pc-i440fx)
+# keeps virtio-blk on bus 0 slot N where the walker can see it. Matches
+# the known-working `run-uefi` target.
 run-sotsh-minimal: image-minimal create-test-disk fetch-ovmf
     "{{QEMU}}" \
-        -machine q35 \
         -drive if=pflash,format=raw,readonly=on,file=tools/ovmf/OVMF.fd \
         -drive format=raw,file={{IMAGE}} \
         -drive if=none,format=raw,file=target/disk.img,id=disk0 \
