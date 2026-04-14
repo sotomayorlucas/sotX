@@ -358,6 +358,13 @@ pub extern "C" fn _start() -> ! {
     signify::verify_manifest();
 
     // --- Phase 6: Userspace process spawning ---
+    // Everything between here and just before `vfs_service::start_vfs_service`
+    // is boot-time demo/QA scaffolding (test harnesses, deception / tier4-6
+    // demos, supervisor walk). With `--features minimal-boot`, skip the whole
+    // lot and go straight to the native VFS service + sotsh spawn — useful
+    // when the graphical stack is misbehaving and you just want a shell.
+    #[cfg(not(feature = "minimal-boot"))]
+    {
     spawn_process(b"hello");
 
     // --- Phase 6a: Tokyo Night layer-shell status bar ---
@@ -556,6 +563,8 @@ pub extern "C" fn _start() -> ! {
     // run_busybox_test();
     // if let Some(ref mut b) = blk { run_fat_test(b); }
     // run_phase_validation();
+
+    } // end of `#[cfg(not(feature = "minimal-boot"))]` demo/QA block
 
     // --- Phase 9: LUCAS shell ---
     // (framebuffer::suspend() already called right after drain_console_ring

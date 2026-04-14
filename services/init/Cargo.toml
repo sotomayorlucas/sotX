@@ -52,6 +52,11 @@ shell-lucas = []
 # (`just build-user-sotsh` / `just run-sotsh`). Spawns sotsh + lucas-shell
 # both, matching the pre-B5 `shell-sotsh` semantics. Slated for removal.
 shell-sotsh = ["shell-lucas"]
+# Minimal boot: skip the entire phase 6 QA/demo block (hello spawn, test
+# services, deception/tier4-5-6 demos, supervisor SMF walk). Goes straight
+# from early bring-up to vfs_service + spawn_sotsh_native. Use this when
+# the graphical stack is misbehaving and you just want sotsh on serial.
+minimal-boot = []
 
 [profile.dev]
 panic = "abort"
