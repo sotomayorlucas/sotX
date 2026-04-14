@@ -6,6 +6,17 @@
  *   lkl_bridge_syscall() — translate x86_64 syscall + guest memory bridge + lkl_syscall()
  *
  * All LKL calls happen in the same address space as init (no IPC).
+ *
+ * Concurrency model (per docs/lkl-futex-fix-design.md, Solution A):
+ *   Previously a single process-wide `bridge_lock` serialized every entry
+ *   into this function. That deadlocked FUTEX_WAIT: a waiter held the lock
+ *   while blocked inside LKL, so the waker could never acquire it.
+ *
+ *   Each child pid has exactly one init-side IPC handler thread, so the
+ *   static scratch buffers only need per-pid isolation, not a global lock.
+ *   `g_scratch[pid - 1]` gives each handler its own buffer and LKL handles
+ *   its own internal serialization via `lkl_cpu_get/put`. `bridge_lock` is
+ *   therefore removed entirely.
  */
 
 #include <stdint.h>
@@ -25,15 +36,20 @@
 #include "lkl_stub.h"
 #endif
 
-/* Static scratch buffers for guest memory bridge. */
-static char g_path_buf[4096];
-static char g_path_buf2[4096];
-static char g_data_buf[4096];
-static char g_stat_buf[256];
-static char g_sockaddr_buf[128];
+/* Per-pid scratch buffers for guest memory bridge (see file header for
+ * the concurrency rationale). MAX_THREADS must match MAX_PROCS in
+ * services/init/src/process.rs. */
+#define MAX_THREADS 64
+struct per_thread_bridge_scratch {
+    char path_buf[4096];
+    char path_buf2[4096];
+    char data_buf[4096];
+    char stat_buf[256];
+    char sockaddr_buf[128];
+};
+static struct per_thread_bridge_scratch g_scratch[MAX_THREADS];
 
 static volatile int lkl_ready = 0;
-static volatile int bridge_lock = 0;
 
 #ifdef HAS_LKL
 static struct lkl_host_operations g_host_ops;
@@ -293,23 +309,19 @@ int lkl_bridge_init(void)
 int64_t lkl_bridge_syscall(uint64_t x86_nr, const uint64_t *args,
                            uint64_t as_cap, uint64_t pid)
 {
-    (void)pid;
     if (!lkl_ready) return -38; /* -ENOSYS */
+
+    /* Child pids are allocated in 1..=MAX_THREADS by services/init/src/process.rs.
+     * Reject anything out of range rather than silently aliasing slot 0. */
+    if (pid == 0 || pid > MAX_THREADS) return -22; /* -EINVAL */
+    struct per_thread_bridge_scratch *s = &g_scratch[pid - 1];
 
 #ifdef HAS_LKL
     /* Process expired LKL timers (TCP retransmit, delayed work, etc.) */
     host_ops_tick();
 
-    /* Serialize access to static scratch buffers (g_data_buf, g_path_buf, etc.)
-     * to prevent data races when multiple child handlers call us concurrently. */
-    while (__sync_lock_test_and_set(&bridge_lock, 1))
-        sys_yield();
-
     long lkl_nr = xlat_syscall_x86_to_lkl((long)x86_nr);
-    if (lkl_nr < 0) {
-        __sync_lock_release(&bridge_lock);
-        return -38;
-    }
+    if (lkl_nr < 0) return -38;
 
     long result;
 
@@ -326,16 +338,16 @@ int64_t lkl_bridge_syscall(uint64_t x86_nr, const uint64_t *args,
 
     /* ── open(path, flags, mode) → openat(AT_FDCWD, ...) ── */
     case 2: {
-        guest_read_str(as_cap, args[0], g_path_buf, 4096);
-        long p[6] = {-100, (long)g_path_buf, (long)args[1], (long)args[2], 0, 0};
+        guest_read_str(as_cap, args[0], s->path_buf, 4096);
+        long p[6] = {-100, (long)s->path_buf, (long)args[1], (long)args[2], 0, 0};
         result = lkl_syscall(lkl_nr, p);
         break;
     }
 
     /* ── openat(dirfd, path, flags, mode) ── */
     case 257: {
-        guest_read_str(as_cap, args[1], g_path_buf, 4096);
-        long p[6] = {(long)args[0], (long)g_path_buf, (long)args[2], (long)args[3], 0, 0};
+        guest_read_str(as_cap, args[1], s->path_buf, 4096);
+        long p[6] = {(long)args[0], (long)s->path_buf, (long)args[2], (long)args[3], 0, 0};
         result = lkl_syscall(lkl_nr, p);
         break;
     }
@@ -343,17 +355,17 @@ int64_t lkl_bridge_syscall(uint64_t x86_nr, const uint64_t *args,
     /* ── read(fd, buf, count) ── */
     case 0: {
         size_t c = (size_t)args[2]; if (c > 4096) c = 4096;
-        long p[6] = {(long)args[0], (long)g_data_buf, (long)c, 0, 0, 0};
+        long p[6] = {(long)args[0], (long)s->data_buf, (long)c, 0, 0, 0};
         result = lkl_syscall(lkl_nr, p);
-        if (result > 0 && as_cap) guest_write(as_cap, args[1], g_data_buf, (size_t)result);
+        if (result > 0 && as_cap) guest_write(as_cap, args[1], s->data_buf, (size_t)result);
         break;
     }
 
     /* ── write(fd, buf, count) ── */
     case 1: {
         size_t c = (size_t)args[2]; if (c > 4096) c = 4096;
-        if (as_cap) guest_read(as_cap, args[1], g_data_buf, c);
-        long p[6] = {(long)args[0], (long)g_data_buf, (long)c, 0, 0, 0};
+        if (as_cap) guest_read(as_cap, args[1], s->data_buf, c);
+        long p[6] = {(long)args[0], (long)s->data_buf, (long)c, 0, 0, 0};
         result = lkl_syscall(lkl_nr, p);
         break;
     }
@@ -367,31 +379,31 @@ int64_t lkl_bridge_syscall(uint64_t x86_nr, const uint64_t *args,
 
     /* ── stat/lstat(path, statbuf) → fstatat ── */
     case 4: case 6: {
-        guest_read_str(as_cap, args[0], g_path_buf, 4096);
-        memset(g_stat_buf, 0, 256);
+        guest_read_str(as_cap, args[0], s->path_buf, 4096);
+        memset(s->stat_buf, 0, 256);
         int fl = (x86_nr == 6) ? 0x100 : 0;
-        long p[6] = {-100, (long)g_path_buf, (long)g_stat_buf, (long)fl, 0, 0};
+        long p[6] = {-100, (long)s->path_buf, (long)s->stat_buf, (long)fl, 0, 0};
         result = lkl_syscall(lkl_nr, p);
-        if (result == 0 && as_cap) guest_write(as_cap, args[1], g_stat_buf, 144);
+        if (result == 0 && as_cap) guest_write(as_cap, args[1], s->stat_buf, 144);
         break;
     }
 
     /* ── fstat(fd, statbuf) ── */
     case 5: {
-        memset(g_stat_buf, 0, 256);
-        long p[6] = {(long)args[0], (long)g_stat_buf, 0, 0, 0, 0};
+        memset(s->stat_buf, 0, 256);
+        long p[6] = {(long)args[0], (long)s->stat_buf, 0, 0, 0, 0};
         result = lkl_syscall(lkl_nr, p);
-        if (result == 0 && as_cap) guest_write(as_cap, args[1], g_stat_buf, 144);
+        if (result == 0 && as_cap) guest_write(as_cap, args[1], s->stat_buf, 144);
         break;
     }
 
     /* ── fstatat(dirfd, path, statbuf, flags) ── */
     case 262: {
-        guest_read_str(as_cap, args[1], g_path_buf, 4096);
-        memset(g_stat_buf, 0, 256);
-        long p[6] = {(long)args[0], (long)g_path_buf, (long)g_stat_buf, (long)args[3], 0, 0};
+        guest_read_str(as_cap, args[1], s->path_buf, 4096);
+        memset(s->stat_buf, 0, 256);
+        long p[6] = {(long)args[0], (long)s->path_buf, (long)s->stat_buf, (long)args[3], 0, 0};
         result = lkl_syscall(lkl_nr, p);
-        if (result == 0 && as_cap) guest_write(as_cap, args[2], g_stat_buf, 144);
+        if (result == 0 && as_cap) guest_write(as_cap, args[2], s->stat_buf, 144);
         break;
     }
 
@@ -404,74 +416,74 @@ int64_t lkl_bridge_syscall(uint64_t x86_nr, const uint64_t *args,
 
     /* ── getcwd(buf, size) ── */
     case 79: {
-        memset(g_path_buf, 0, 4096);
+        memset(s->path_buf, 0, 4096);
         size_t sz = (size_t)args[1]; if (sz > 4096) sz = 4096;
-        long p[6] = {(long)g_path_buf, (long)sz, 0, 0, 0, 0};
+        long p[6] = {(long)s->path_buf, (long)sz, 0, 0, 0, 0};
         result = lkl_syscall(lkl_nr, p);
         if (result >= 0 && as_cap) {
-            size_t l = 0; while (l < sz && g_path_buf[l]) l++;
-            guest_write(as_cap, args[0], g_path_buf, l + 1);
+            size_t l = 0; while (l < sz && s->path_buf[l]) l++;
+            guest_write(as_cap, args[0], s->path_buf, l + 1);
         }
         break;
     }
 
     /* ── chdir(path) ── */
     case 80: {
-        guest_read_str(as_cap, args[0], g_path_buf, 4096);
-        long p[6] = {(long)g_path_buf, 0, 0, 0, 0, 0};
+        guest_read_str(as_cap, args[0], s->path_buf, 4096);
+        long p[6] = {(long)s->path_buf, 0, 0, 0, 0, 0};
         result = lkl_syscall(lkl_nr, p);
         break;
     }
 
     /* ── access(path, mode) → faccessat ── */
     case 21: {
-        guest_read_str(as_cap, args[0], g_path_buf, 4096);
-        long p[6] = {-100, (long)g_path_buf, (long)args[1], 0, 0, 0};
+        guest_read_str(as_cap, args[0], s->path_buf, 4096);
+        long p[6] = {-100, (long)s->path_buf, (long)args[1], 0, 0, 0};
         result = lkl_syscall(lkl_nr, p);
         break;
     }
 
     /* ── mkdir(path, mode) → mkdirat ── */
     case 83: {
-        guest_read_str(as_cap, args[0], g_path_buf, 4096);
-        long p[6] = {-100, (long)g_path_buf, (long)args[1], 0, 0, 0};
+        guest_read_str(as_cap, args[0], s->path_buf, 4096);
+        long p[6] = {-100, (long)s->path_buf, (long)args[1], 0, 0, 0};
         result = lkl_syscall(lkl_nr, p);
         break;
     }
 
     /* ── unlink(path) → unlinkat ── */
     case 87: {
-        guest_read_str(as_cap, args[0], g_path_buf, 4096);
-        long p[6] = {-100, (long)g_path_buf, 0, 0, 0, 0};
+        guest_read_str(as_cap, args[0], s->path_buf, 4096);
+        long p[6] = {-100, (long)s->path_buf, 0, 0, 0, 0};
         result = lkl_syscall(lkl_nr, p);
         break;
     }
 
     /* ── readlinkat(dirfd, path, buf, bufsiz) ── */
     case 267: {
-        guest_read_str(as_cap, args[1], g_path_buf, 4096);
+        guest_read_str(as_cap, args[1], s->path_buf, 4096);
         size_t bsz = (size_t)args[3]; if (bsz > 4096) bsz = 4096;
-        long p[6] = {(long)args[0], (long)g_path_buf, (long)g_data_buf, (long)bsz, 0, 0};
+        long p[6] = {(long)args[0], (long)s->path_buf, (long)s->data_buf, (long)bsz, 0, 0};
         result = lkl_syscall(lkl_nr, p);
-        if (result > 0 && as_cap) guest_write(as_cap, args[2], g_data_buf, (size_t)result);
+        if (result > 0 && as_cap) guest_write(as_cap, args[2], s->data_buf, (size_t)result);
         break;
     }
 
     /* ── getdents64(fd, dirp, count) ── */
     case 217: {
         size_t c = (size_t)args[2]; if (c > 4096) c = 4096;
-        long p[6] = {(long)args[0], (long)g_data_buf, (long)c, 0, 0, 0};
+        long p[6] = {(long)args[0], (long)s->data_buf, (long)c, 0, 0, 0};
         result = lkl_syscall(lkl_nr, p);
-        if (result > 0 && as_cap) guest_write(as_cap, args[1], g_data_buf, (size_t)result);
+        if (result > 0 && as_cap) guest_write(as_cap, args[1], s->data_buf, (size_t)result);
         break;
     }
 
     /* ── getrandom(buf, count, flags) ── */
     case 318: {
         size_t c = (size_t)args[1]; if (c > 4096) c = 4096;
-        long p[6] = {(long)g_data_buf, (long)c, (long)args[2], 0, 0, 0};
+        long p[6] = {(long)s->data_buf, (long)c, (long)args[2], 0, 0, 0};
         result = lkl_syscall(lkl_nr, p);
-        if (result > 0 && as_cap) guest_write(as_cap, args[0], g_data_buf, (size_t)result);
+        if (result > 0 && as_cap) guest_write(as_cap, args[0], s->data_buf, (size_t)result);
         break;
     }
 
@@ -540,24 +552,24 @@ int64_t lkl_bridge_syscall(uint64_t x86_nr, const uint64_t *args,
     case 42: case 49: {
         size_t addrlen = (size_t)args[2];
         if (addrlen > 128) addrlen = 128;
-        memset(g_sockaddr_buf, 0, 128);
-        if (as_cap) guest_read(as_cap, args[1], g_sockaddr_buf, addrlen);
-        long p[6] = {(long)args[0], (long)g_sockaddr_buf, (long)addrlen, 0, 0, 0};
+        memset(s->sockaddr_buf, 0, 128);
+        if (as_cap) guest_read(as_cap, args[1], s->sockaddr_buf, addrlen);
+        long p[6] = {(long)args[0], (long)s->sockaddr_buf, (long)addrlen, 0, 0, 0};
         result = lkl_syscall(lkl_nr, p);
         break;
     }
 
     /* ── accept(fd, addr, addrlen*) / accept4(fd, addr, addrlen*, flags) ── */
     case 43: case 288: {
-        memset(g_sockaddr_buf, 0, 128);
+        memset(s->sockaddr_buf, 0, 128);
         uint32_t klen = 128;
         if (as_cap && args[2]) guest_read(as_cap, args[2], &klen, 4);
         if (klen > 128) klen = 128;
         int flags4 = (x86_nr == 288) ? (int)args[3] : 0;
-        long p[6] = {(long)args[0], (long)g_sockaddr_buf, (long)&klen, (long)flags4, 0, 0};
+        long p[6] = {(long)args[0], (long)s->sockaddr_buf, (long)&klen, (long)flags4, 0, 0};
         result = lkl_syscall(lkl_nr, p);
         if (result >= 0 && as_cap) {
-            if (args[1]) guest_write(as_cap, args[1], g_sockaddr_buf, klen);
+            if (args[1]) guest_write(as_cap, args[1], s->sockaddr_buf, klen);
             if (args[2]) guest_write(as_cap, args[2], &klen, 4);
         }
         break;
@@ -565,14 +577,14 @@ int64_t lkl_bridge_syscall(uint64_t x86_nr, const uint64_t *args,
 
     /* ── getsockname/getpeername(fd, addr, addrlen*) ── */
     case 51: case 52: {
-        memset(g_sockaddr_buf, 0, 128);
+        memset(s->sockaddr_buf, 0, 128);
         uint32_t klen = 128;
         if (as_cap && args[2]) guest_read(as_cap, args[2], &klen, 4);
         if (klen > 128) klen = 128;
-        long p[6] = {(long)args[0], (long)g_sockaddr_buf, (long)&klen, 0, 0, 0};
+        long p[6] = {(long)args[0], (long)s->sockaddr_buf, (long)&klen, 0, 0, 0};
         result = lkl_syscall(lkl_nr, p);
         if (result == 0 && as_cap) {
-            guest_write(as_cap, args[1], g_sockaddr_buf, klen);
+            guest_write(as_cap, args[1], s->sockaddr_buf, klen);
             guest_write(as_cap, args[2], &klen, 4);
         }
         break;
@@ -608,12 +620,12 @@ int64_t lkl_bridge_syscall(uint64_t x86_nr, const uint64_t *args,
     /* ── sendto(fd, buf, len, flags, dest_addr, addrlen) ── */
     case 44: {
         size_t c = (size_t)args[2]; if (c > 4096) c = 4096;
-        if (as_cap) guest_read(as_cap, args[1], g_data_buf, c);
-        memset(g_sockaddr_buf, 0, 128);
+        if (as_cap) guest_read(as_cap, args[1], s->data_buf, c);
+        memset(s->sockaddr_buf, 0, 128);
         size_t addrlen = (size_t)args[5]; if (addrlen > 128) addrlen = 128;
-        if (as_cap && args[4]) guest_read(as_cap, args[4], g_sockaddr_buf, addrlen);
-        long p[6] = {(long)args[0], (long)g_data_buf, (long)c, (long)args[3],
-                     args[4] ? (long)g_sockaddr_buf : 0, (long)addrlen};
+        if (as_cap && args[4]) guest_read(as_cap, args[4], s->sockaddr_buf, addrlen);
+        long p[6] = {(long)args[0], (long)s->data_buf, (long)c, (long)args[3],
+                     args[4] ? (long)s->sockaddr_buf : 0, (long)addrlen};
         result = lkl_syscall(lkl_nr, p);
         break;
     }
@@ -621,17 +633,17 @@ int64_t lkl_bridge_syscall(uint64_t x86_nr, const uint64_t *args,
     /* ── recvfrom(fd, buf, len, flags, src_addr, addrlen*) ── */
     case 45: {
         size_t c = (size_t)args[2]; if (c > 4096) c = 4096;
-        memset(g_sockaddr_buf, 0, 128);
+        memset(s->sockaddr_buf, 0, 128);
         uint32_t klen = 128;
         if (as_cap && args[5]) guest_read(as_cap, args[5], &klen, 4);
         if (klen > 128) klen = 128;
-        long p[6] = {(long)args[0], (long)g_data_buf, (long)c, (long)args[3],
-                     args[4] ? (long)g_sockaddr_buf : 0,
+        long p[6] = {(long)args[0], (long)s->data_buf, (long)c, (long)args[3],
+                     args[4] ? (long)s->sockaddr_buf : 0,
                      args[5] ? (long)&klen : 0};
         result = lkl_syscall(lkl_nr, p);
-        if (result > 0 && as_cap) guest_write(as_cap, args[1], g_data_buf, (size_t)result);
+        if (result > 0 && as_cap) guest_write(as_cap, args[1], s->data_buf, (size_t)result);
         if (result >= 0 && as_cap && args[4])
-            guest_write(as_cap, args[4], g_sockaddr_buf, klen);
+            guest_write(as_cap, args[4], s->sockaddr_buf, klen);
         if (result >= 0 && as_cap && args[5])
             guest_write(as_cap, args[5], &klen, 4);
         break;
@@ -643,50 +655,50 @@ int64_t lkl_bridge_syscall(uint64_t x86_nr, const uint64_t *args,
 
     /* ── rename(old, new) → renameat(AT_FDCWD, old, AT_FDCWD, new) ── */
     case 82: {
-        guest_read_str(as_cap, args[0], g_path_buf, 4096);
-        guest_read_str(as_cap, args[1], g_path_buf2, 4096);
+        guest_read_str(as_cap, args[0], s->path_buf, 4096);
+        guest_read_str(as_cap, args[1], s->path_buf2, 4096);
         /* LKL generic renameat = 38 */
-        long p[6] = {-100, (long)g_path_buf, -100, (long)g_path_buf2, 0, 0};
+        long p[6] = {-100, (long)s->path_buf, -100, (long)s->path_buf2, 0, 0};
         result = lkl_syscall(38, p);
         break;
     }
 
     /* ── rmdir(path) → unlinkat(AT_FDCWD, path, AT_REMOVEDIR) ── */
     case 84: {
-        guest_read_str(as_cap, args[0], g_path_buf, 4096);
-        long p[6] = {-100, (long)g_path_buf, 0x200 /* AT_REMOVEDIR */, 0, 0, 0};
+        guest_read_str(as_cap, args[0], s->path_buf, 4096);
+        long p[6] = {-100, (long)s->path_buf, 0x200 /* AT_REMOVEDIR */, 0, 0, 0};
         result = lkl_syscall(35 /* unlinkat */, p);
         break;
     }
 
     /* ── chmod(path, mode) → fchmodat(AT_FDCWD, path, mode, 0) ── */
     case 90: {
-        guest_read_str(as_cap, args[0], g_path_buf, 4096);
-        long p[6] = {-100, (long)g_path_buf, (long)args[1], 0, 0, 0};
+        guest_read_str(as_cap, args[0], s->path_buf, 4096);
+        long p[6] = {-100, (long)s->path_buf, (long)args[1], 0, 0, 0};
         result = lkl_syscall(53 /* fchmodat */, p);
         break;
     }
 
     /* ── faccessat(dirfd, path, mode, flags) ── */
     case 269: case 439: {
-        guest_read_str(as_cap, args[1], g_path_buf, 4096);
-        long p[6] = {(long)args[0], (long)g_path_buf, (long)args[2], (long)args[3], 0, 0};
+        guest_read_str(as_cap, args[1], s->path_buf, 4096);
+        long p[6] = {(long)args[0], (long)s->path_buf, (long)args[2], (long)args[3], 0, 0};
         result = lkl_syscall(48 /* faccessat */, p);
         break;
     }
 
     /* ── unlinkat(dirfd, path, flags) ── */
     case 263: {
-        guest_read_str(as_cap, args[1], g_path_buf, 4096);
-        long p[6] = {(long)args[0], (long)g_path_buf, (long)args[2], 0, 0, 0};
+        guest_read_str(as_cap, args[1], s->path_buf, 4096);
+        long p[6] = {(long)args[0], (long)s->path_buf, (long)args[2], 0, 0, 0};
         result = lkl_syscall(35 /* unlinkat */, p);
         break;
     }
 
     /* ── mkdirat(dirfd, path, mode) ── */
     case 258: {
-        guest_read_str(as_cap, args[1], g_path_buf, 4096);
-        long p[6] = {(long)args[0], (long)g_path_buf, (long)args[2], 0, 0, 0};
+        guest_read_str(as_cap, args[1], s->path_buf, 4096);
+        long p[6] = {(long)args[0], (long)s->path_buf, (long)args[2], 0, 0, 0};
         result = lkl_syscall(34 /* mkdirat */, p);
         break;
     }
@@ -698,17 +710,17 @@ int64_t lkl_bridge_syscall(uint64_t x86_nr, const uint64_t *args,
     /* ── pread64(fd, buf, count, offset) ── */
     case 17: {
         size_t c = (size_t)args[2]; if (c > 4096) c = 4096;
-        long p[6] = {(long)args[0], (long)g_data_buf, (long)c, (long)args[3], 0, 0};
+        long p[6] = {(long)args[0], (long)s->data_buf, (long)c, (long)args[3], 0, 0};
         result = lkl_syscall(lkl_nr, p);
-        if (result > 0 && as_cap) guest_write(as_cap, args[1], g_data_buf, (size_t)result);
+        if (result > 0 && as_cap) guest_write(as_cap, args[1], s->data_buf, (size_t)result);
         break;
     }
 
     /* ── pwrite64(fd, buf, count, offset) ── */
     case 18: {
         size_t c = (size_t)args[2]; if (c > 4096) c = 4096;
-        if (as_cap) guest_read(as_cap, args[1], g_data_buf, c);
-        long p[6] = {(long)args[0], (long)g_data_buf, (long)c, (long)args[3], 0, 0};
+        if (as_cap) guest_read(as_cap, args[1], s->data_buf, c);
+        long p[6] = {(long)args[0], (long)s->data_buf, (long)c, (long)args[3], 0, 0};
         result = lkl_syscall(lkl_nr, p);
         break;
     }
@@ -723,10 +735,10 @@ int64_t lkl_bridge_syscall(uint64_t x86_nr, const uint64_t *args,
         for (int i = 0; i < iovcnt; i++) {
             size_t c = (size_t)giov[i].len; if (c > 4096) c = 4096;
             /* use read (generic 63) for each iovec */
-            long p[6] = {(long)args[0], (long)g_data_buf, (long)c, 0, 0, 0};
+            long p[6] = {(long)args[0], (long)s->data_buf, (long)c, 0, 0, 0};
             long r = lkl_syscall(63, p);
             if (r > 0) {
-                if (as_cap) guest_write(as_cap, giov[i].base, g_data_buf, (size_t)r);
+                if (as_cap) guest_write(as_cap, giov[i].base, s->data_buf, (size_t)r);
                 total += r;
             }
             if (r < (long)c) break;
@@ -744,9 +756,9 @@ int64_t lkl_bridge_syscall(uint64_t x86_nr, const uint64_t *args,
         long total = 0;
         for (int i = 0; i < iovcnt; i++) {
             size_t c = (size_t)giov[i].len; if (c > 4096) c = 4096;
-            if (as_cap) guest_read(as_cap, giov[i].base, g_data_buf, c);
+            if (as_cap) guest_read(as_cap, giov[i].base, s->data_buf, c);
             /* use write (generic 64) for each iovec */
-            long p[6] = {(long)args[0], (long)g_data_buf, (long)c, 0, 0, 0};
+            long p[6] = {(long)args[0], (long)s->data_buf, (long)c, 0, 0, 0};
             long r = lkl_syscall(64, p);
             if (r > 0) total += r;
             if (r < (long)c) break;
@@ -805,27 +817,27 @@ int64_t lkl_bridge_syscall(uint64_t x86_nr, const uint64_t *args,
         struct { uint64_t base; uint64_t len; } giov[8];
         memset(giov, 0, sizeof(giov));
         if (as_cap && iov_ptr) guest_read(as_cap, iov_ptr, giov, iov_len * 16);
-        /* Flatten all iovecs into g_data_buf */
+        /* Flatten all iovecs into s->data_buf */
         size_t total = 0;
         for (uint64_t i = 0; i < iov_len && total < 4096; i++) {
             size_t c = (size_t)giov[i].len;
             if (c > 4096 - total) c = 4096 - total;
             if (as_cap && giov[i].base)
-                guest_read(as_cap, giov[i].base, g_data_buf + total, c);
+                guest_read(as_cap, giov[i].base, s->data_buf + total, c);
             total += c;
         }
         /* Build kernel iovec pointing to contiguous buffer */
         struct { void *base; uint64_t len; } kiov;
-        kiov.base = g_data_buf; kiov.len = total;
+        kiov.base = s->data_buf; kiov.len = total;
         /* Build kernel msghdr */
         char kmhdr[56]; memset(kmhdr, 0, 56);
         /* Copy name if present */
         uint64_t name_ptr = *(uint64_t *)(mhdr + 0);
         uint32_t name_len = *(uint32_t *)(mhdr + 8);
         if (name_ptr && name_len > 0 && name_len <= 128) {
-            memset(g_sockaddr_buf, 0, 128);
-            if (as_cap) guest_read(as_cap, name_ptr, g_sockaddr_buf, name_len);
-            *(uint64_t *)(kmhdr + 0) = (uint64_t)g_sockaddr_buf;
+            memset(s->sockaddr_buf, 0, 128);
+            if (as_cap) guest_read(as_cap, name_ptr, s->sockaddr_buf, name_len);
+            *(uint64_t *)(kmhdr + 0) = (uint64_t)s->sockaddr_buf;
             *(uint32_t *)(kmhdr + 8) = name_len;
         }
         *(uint64_t *)(kmhdr + 16) = (uint64_t)&kiov;
@@ -850,11 +862,11 @@ int64_t lkl_bridge_syscall(uint64_t x86_nr, const uint64_t *args,
         size_t total_cap = 0;
         for (uint64_t i = 0; i < iov_len; i++) total_cap += giov[i].len;
         if (total_cap > 4096) total_cap = 4096;
-        kiov.base = g_data_buf; kiov.len = total_cap;
+        kiov.base = s->data_buf; kiov.len = total_cap;
         /* Kernel msghdr */
         char kmhdr[56]; memset(kmhdr, 0, 56);
-        memset(g_sockaddr_buf, 0, 128);
-        *(uint64_t *)(kmhdr + 0) = (uint64_t)g_sockaddr_buf;
+        memset(s->sockaddr_buf, 0, 128);
+        *(uint64_t *)(kmhdr + 0) = (uint64_t)s->sockaddr_buf;
         *(uint32_t *)(kmhdr + 8) = 128;
         *(uint64_t *)(kmhdr + 16) = (uint64_t)&kiov;
         *(uint64_t *)(kmhdr + 24) = 1;
@@ -866,7 +878,7 @@ int64_t lkl_bridge_syscall(uint64_t x86_nr, const uint64_t *args,
             for (uint64_t i = 0; i < iov_len && off < (size_t)result; i++) {
                 size_t c = (size_t)giov[i].len;
                 if (c > (size_t)result - off) c = (size_t)result - off;
-                guest_write(as_cap, giov[i].base, g_data_buf + off, c);
+                guest_write(as_cap, giov[i].base, s->data_buf + off, c);
                 off += c;
             }
             /* Write back msg_name and msg_namelen */
@@ -874,7 +886,7 @@ int64_t lkl_bridge_syscall(uint64_t x86_nr, const uint64_t *args,
             uint32_t ret_namelen = *(uint32_t *)(kmhdr + 8);
             if (guest_name && ret_namelen > 0) {
                 if (ret_namelen > 128) ret_namelen = 128;
-                guest_write(as_cap, guest_name, g_sockaddr_buf, ret_namelen);
+                guest_write(as_cap, guest_name, s->sockaddr_buf, ret_namelen);
             }
             /* Write back msg_namelen + msg_flags to guest msghdr */
             *(uint32_t *)(mhdr + 8) = ret_namelen;
@@ -973,8 +985,8 @@ int64_t lkl_bridge_syscall(uint64_t x86_nr, const uint64_t *args,
 
     /* ── memfd_create(name, flags) ── */
     case 319: {
-        guest_read_str(as_cap, args[0], g_path_buf, 256);
-        long p[6] = {(long)g_path_buf, (long)args[1], 0, 0, 0, 0};
+        guest_read_str(as_cap, args[0], s->path_buf, 256);
+        long p[6] = {(long)s->path_buf, (long)args[1], 0, 0, 0, 0};
         result = lkl_syscall(lkl_nr, p);
         break;
     }
@@ -1018,10 +1030,9 @@ int64_t lkl_bridge_syscall(uint64_t x86_nr, const uint64_t *args,
     }
     }
 
-    __sync_lock_release(&bridge_lock);
     return (int64_t)result;
 #else
-    (void)args; (void)as_cap;
+    (void)args; (void)as_cap; (void)s;
     return -38;
 #endif
 }
