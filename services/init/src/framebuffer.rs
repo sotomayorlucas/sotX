@@ -13,6 +13,19 @@ use crate::framebuffer_palette::{
 /// Whether the framebuffer is active (set in fb_init).
 static FB_ACTIVE: SyncUnsafeCell<bool> = SyncUnsafeCell::new(false);
 
+/// Suspend init's framebuffer rendering so a downstream owner (typically the
+/// Wayland compositor) can take over exclusively. After this call every
+/// `fb_putchar` / `fb_draw_glyph_at` path becomes a no-op; subsequent text
+/// output still reaches serial via `sys::debug_print` but no longer races
+/// the compositor's repaint cycle.
+///
+/// Idempotent: safe to call many times. No way to resume other than a
+/// reboot — once the compositor is up we don't want two renderers touching
+/// the framebuffer again.
+pub fn suspend() {
+    unsafe { *FB_ACTIVE.get() = false; }
+}
+
 pub(crate) fn print(s: &[u8]) {
     for &b in s {
         sys::debug_print(b);

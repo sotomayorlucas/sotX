@@ -516,6 +516,19 @@ pub extern "C" fn _start() -> ! {
     // if let Some(ref mut b) = blk { run_fat_test(b); }
     // run_phase_validation();
 
+    // --- Phase 8.9: Hand the framebuffer off to the compositor ---
+    //
+    // Every init-side text path (kernel ring drain, `print!`, VTE glyph
+    // rasteriser, the sotos-gui chrome from `fb_init_gui`) has done its
+    // job by now: boot banner, stage progress, cap dumps, and SMF sweep
+    // are all on screen. From here on the Wayland compositor owns every
+    // pixel. Without this suspend, init's ~5-10 glyphs/sec of ongoing
+    // output would race the compositor's ~30 fps wallpaper repaint and
+    // corrupt the display on any framebuffer that doesn't match the
+    // legacy 1024x768 window chrome (observed on HP Pavilion 1366x768 /
+    // 1920x1080 panels as "pedazos de texto superpuestos").
+    framebuffer::suspend();
+
     // --- Phase 9: LUCAS shell ---
     let boot_info = unsafe { &*(BOOT_INFO_ADDR as *const BootInfo) };
     print(b"LUCAS-DBG: guest_entry=");
