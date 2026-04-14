@@ -1152,6 +1152,13 @@ impl ObjectStore {
     /// Read all directory sectors from disk into memory.
     fn read_dir(&mut self) -> Result<(), &'static str> {
         for s in 0..DIR_SECTORS as usize {
+            if s % 256 == 0 {
+                dbg(b"MOUNT: read_dir sector ");
+                dbg_u64(s as u64);
+                dbg(b"/");
+                dbg_u64(DIR_SECTORS as u64);
+                dbg(b"\n");
+            }
             self.blk.read_sector((SECTOR_DIR + s as u32) as u64)?;
             let src = unsafe { core::slice::from_raw_parts(self.blk.data_ptr(), SECTOR_SIZE) };
             let base = s * DIR_ENTRIES_PER_SECTOR;
