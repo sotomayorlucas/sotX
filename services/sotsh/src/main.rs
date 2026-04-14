@@ -18,6 +18,7 @@ use sotos_sotsh::ast::Ast;
 use sotos_sotsh::builtins;
 use sotos_sotsh::context::Context;
 use sotos_sotsh::error::Error;
+use sotos_sotsh::history::History;
 use sotos_sotsh::linedit::LineEditor;
 use sotos_sotsh::parser;
 use sotos_sotsh::runtime;
@@ -93,9 +94,15 @@ pub extern "C" fn _start() -> ! {
 
     let mut ctx = Context::new();
     let mut editor = LineEditor::new();
+    let mut history = History::new();
+    // Persistent history would live at `/var/sotsh/history`; `save_to`
+    // returns -ENOSYS pending a `vfs_write` wrapper, so we skip the
+    // load-from-disk round-trip for now. Uncomment once the write path
+    // lands:
+    //     let _ = history.load_from(b"/var/sotsh/history");
 
     loop {
-        let line = editor.read_line(PROMPT);
+        let line = editor.read_line(PROMPT, &mut history);
         let trimmed = line.trim_ascii();
         if trimmed.is_empty() {
             continue;
