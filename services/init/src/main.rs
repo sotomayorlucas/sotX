@@ -326,7 +326,10 @@ pub extern "C" fn _start() -> ! {
     }
 
     // --- Phase 4: Virtio-BLK + Object Store ---
+    print(b"DBG: phase 4 entering init_block_storage\n");
     let mut blk = init_block_storage(boot_info);
+    print(b"DBG: phase 4 done, blk=");
+    if blk.is_some() { print(b"Some\n"); } else { print(b"None\n"); }
 
     // --- Phase 4b (Unit 3): persistent rootdisk on the SECOND virtio-blk ---
     // Safe no-op when only one drive is present (e.g. plain `just run`).
@@ -938,14 +941,23 @@ fn spawn_process(name: &[u8]) -> Option<u64> {
 // ---------------------------------------------------------------------------
 
 fn init_virtio_blk(boot_info: &BootInfo) -> Option<VirtioBlk> {
+    print(b"DBG: init_virtio_blk called, cap_count=");
+    print_u64(boot_info.cap_count);
+    print(b"\n");
     if boot_info.cap_count <= CAP_PCI as u64 {
         print(b"BLK: no PCI cap, skipping\n");
         return None;
     }
+    print(b"DBG: caps[0]=");
+    print_u64(boot_info.caps[0]);
+    print(b" (expected IoPort for 0xCF8-0xCFF)\n");
     let pci_cap = boot_info.caps[CAP_PCI];
     let pci = PciBus::new(pci_cap);
 
     let (devices, count) = pci.enumerate::<32>();
+    print(b"DBG: pci.enumerate returned count=");
+    print_u64(count as u64);
+    print(b"\n");
     if count > 0 {
         print(b"PCI: ");
         print_u64(count as u64);
@@ -972,6 +984,7 @@ fn init_virtio_blk(boot_info: &BootInfo) -> Option<VirtioBlk> {
     let blk_dev = match pci.find_device(0x1AF4, 0x1001) {
         Some(d) => d,
         None => {
+            print(b"DBG: pci.find_device(0x1AF4, 0x1001) returned None\n");
             return None;
         }
     };
