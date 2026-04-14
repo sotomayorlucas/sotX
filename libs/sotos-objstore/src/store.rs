@@ -1152,7 +1152,9 @@ impl ObjectStore {
     /// Read all directory sectors from disk into memory.
     fn read_dir(&mut self) -> Result<(), &'static str> {
         for s in 0..DIR_SECTORS as usize {
-            if s % 256 == 0 {
+            // Dense trace for the first 32 sectors (to catch per-sector hangs),
+            // then every 256 for progress.
+            if s < 32 || s % 256 == 0 {
                 dbg(b"MOUNT: read_dir sector ");
                 dbg_u64(s as u64);
                 dbg(b"/");
