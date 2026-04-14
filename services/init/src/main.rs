@@ -90,6 +90,7 @@ mod udev;
 mod child_handler;
 mod lucas_handler;
 mod lkl;
+mod vfs_service;
 mod wine_diag;
 mod boot_tests;
 mod sot_types;
@@ -555,6 +556,14 @@ pub extern "C" fn _start() -> ! {
     print(b"LUCAS-DBG: guest_entry=");
     print_u64(boot_info.guest_entry);
     print(b"\n");
+
+    // Spawn the sotOS-native VFS-IPC service (for sotsh + future clients).
+    // Registers as "vfs" in the service registry; clients reach it via
+    // `sotos_common::vfs::*`. Ops use the shared ObjectStore owned by
+    // lucas_handler, so any VFS op issued before that mount completes
+    // returns -EIO until SHARED_STORE_PTR is set.
+    vfs_service::start_vfs_service();
+
     start_lucas(blk);
 
     sys::thread_exit();
