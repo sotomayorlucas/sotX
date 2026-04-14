@@ -713,7 +713,7 @@ image-lkl: build initrd-lkl
 
 # Create a 64 MiB ext4 disk image (requires WSL with Ubuntu)
 create-ext4-disk:
-    [ -f target/ext4.img ] || wsl -d Ubuntu -- bash -c "dd if=/dev/zero of=/mnt/c/Users/sotom/sotX/target/ext4.img bs=1M count=64 && mkfs.ext4 -F /mnt/c/Users/sotom/sotX/target/ext4.img"
+    [ -f target/ext4.img ] || wsl -d Ubuntu -- bash -c "dd if=/dev/zero of=/mnt/c/Users/sotom/sotOS/target/ext4.img bs=1M count=64 && mkfs.ext4 -F /mnt/c/Users/sotom/sotOS/target/ext4.img"
 
 # Run with LKL server (ext4 disk + virtio-net)
 run-lkl: image-lkl create-ext4-disk

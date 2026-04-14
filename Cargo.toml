@@ -65,6 +65,7 @@ exclude = [
     "tests/posix",
     "tests/deception",
     "sotfs",
+    ".claude",
 ]
 
 [profile.dev]
