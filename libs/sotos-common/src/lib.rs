@@ -642,6 +642,24 @@ pub const SYS_SHM_DESTROY: u64 = 183;
 /// to LUCAS for signal frame construction.
 pub const SYS_SIGNAL_TRAMPOLINE: u64 = 0x7F00;
 
+/// Sentinel bit OR-ed into `rax` when a redirected userspace process
+/// (LUCAS shell, busybox under ABI translation, etc.) wants to call a
+/// **sotX-native** kernel syscall directly, bypassing the init-side
+/// Linux-ABI redirect dispatcher in `services/init/src/lucas_handler.rs`.
+///
+/// The kernel's syscall entry strips this bit and dispatches the request
+/// against its native handler tables (cap, ipc, mm, sched, debug, ...) as
+/// if the thread had no `redirect_ep` set. Without the flag, every raw
+/// `syscall` from a redirected thread is sent to init for translation —
+/// fine for Linux ABI numbers but pointless for sotX-native numbers
+/// (130, 142, 252, 257, ...) that happen to overlap with unrelated Linux
+/// syscall slots (`sigaltstack`, `sched_setparam`, `ioprio_get`, ...).
+///
+/// Use bit 63 because Linux syscall numbers fit comfortably in u32 and
+/// the kernel's sotX-native numbers also stay well below 2^32, so the
+/// top bit is guaranteed unused on both sides.
+pub const SOTX_NATIVE_FLAG: u64 = 1 << 63;
+
 /// Raw syscall wrappers for userspace programs.
 ///
 /// These issue the `syscall` instruction directly. Only usable from

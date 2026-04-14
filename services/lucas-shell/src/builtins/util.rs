@@ -12,16 +12,24 @@ use crate::{err, usage};
 // Kernel syscall helpers (bypass Linux translation layer)
 // ---------------------------------------------------------------------------
 
+/// SOTX_NATIVE_FLAG: bit 63 in rax tells the kernel "skip the LUCAS
+/// redirect, dispatch this as a sotX-native syscall directly". Without it,
+/// every raw `syscall` from a redirected thread is sent to init's
+/// lucas_handler for Linux-ABI translation, which can't make sense of
+/// numbers like 252 (DebugFreeFrames) / 142 (ThreadCount) / 131 (SvcLookup)
+/// — they overlap unrelated Linux numbers (ioprio_get / sched_setparam /
+/// sigaltstack). Mirror of `sotos_common::SOTX_NATIVE_FLAG`.
+const SOTX_NATIVE_FLAG: u64 = 1 << 63;
+
 /// Issue a sotX kernel syscall with zero arguments (syscall number > 127).
-/// Separate from the Linux-ABI wrappers in syscall.rs because these bypass
-/// the child_handler Linux translation layer.
+/// Bypasses init's Linux-ABI translation via SOTX_NATIVE_FLAG.
 #[inline(always)]
 pub(crate) fn kernel_syscall0(nr: u64) -> i64 {
     let ret: i64;
     unsafe {
         core::arch::asm!(
             "syscall",
-            inlateout("rax") nr => ret,
+            inlateout("rax") nr | SOTX_NATIVE_FLAG => ret,
             lateout("rcx") _,
             lateout("r11") _,
             options(nostack),
@@ -37,7 +45,7 @@ fn kernel_syscall2(nr: u64, a1: u64, a2: u64) -> i64 {
     unsafe {
         core::arch::asm!(
             "syscall",
-            inlateout("rax") nr => ret,
+            inlateout("rax") nr | SOTX_NATIVE_FLAG => ret,
             in("rdi") a1,
             in("rsi") a2,
             lateout("rcx") _,
@@ -55,7 +63,7 @@ fn kernel_syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     unsafe {
         core::arch::asm!(
             "syscall",
-            inlateout("rax") nr => ret,
+            inlateout("rax") nr | SOTX_NATIVE_FLAG => ret,
             in("rdi") a1,
             in("rsi") a2,
             in("rdx") a3,

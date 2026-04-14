@@ -334,12 +334,19 @@ pub extern "C" fn syscall_dispatch(frame: &mut TrapFrame) {
     use crate::arch::x86_64::percpu;
     let mut saved_user_rsp = percpu::current_percpu().user_rsp_save;
 
-    // --- LUCAS syscall redirect (ρ_fuse optimized) ---
-    // Fused: prepare_redirect() does get_redirect_ep + save_regs + get_tid
-    // in ONE SCHEDULER.lock() (was 3 separate). call_fused() batches
-    // write_ipc_msg + wake + set_ipc + block into 1 SCHEDULER.lock() + 2 per-thread
-    // IPC locks (was 7 separate SCHEDULER.lock()). Net: 10 → 2 SCHEDULER locks.
-    if let Some((ep_raw, caller_tid)) = sched::prepare_redirect(frame, saved_user_rsp) {
+    // --- sotX-native bypass for redirected threads ---
+    // If the caller OR-ed `SOTX_NATIVE_FLAG` (bit 63) into rax it wants to
+    // skip the init-side redirect dispatcher and hit the kernel's native
+    // syscall tables directly. Strip the flag and fall through to the
+    // native dispatch chain below; `prepare_redirect` is never consulted
+    // for these calls. Used by LUCAS shell builtins (meminfo, threads,
+    // services, bench, shutdown) that explicitly issue sotX-native
+    // syscall numbers and don't want them tunnelled through Linux-ABI
+    // translation in init.
+    if frame.rax & sotos_common::SOTX_NATIVE_FLAG != 0 {
+        frame.rax &= !sotos_common::SOTX_NATIVE_FLAG;
+        // Fall through to native dispatch; do not invoke prepare_redirect.
+    } else if let Some((ep_raw, caller_tid)) = sched::prepare_redirect(frame, saved_user_rsp) {
         // Intercept arch_prctl — requires Ring 0 (FS_BASE/GS_BASE MSR writes).
         // Linux syscall 158 = arch_prctl: rdi = subcommand, rsi = addr.
         if frame.rax == 158 {
