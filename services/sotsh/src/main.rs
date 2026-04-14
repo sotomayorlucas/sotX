@@ -14,12 +14,13 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use sotos_common::sys;
 
-use sotos_sotsh::ast::{Ast, Command};
+use sotos_sotsh::ast::Ast;
 use sotos_sotsh::builtins;
 use sotos_sotsh::context::Context;
 use sotos_sotsh::error::Error;
 use sotos_sotsh::linedit::LineEditor;
 use sotos_sotsh::parser;
+use sotos_sotsh::runtime;
 use sotos_sotsh::value::Value;
 
 // ---------------------------------------------------------------------------
@@ -165,17 +166,14 @@ fn handle_meta(line: &[u8]) -> Option<bool> {
 
 fn run_line(line: &str, ctx: &mut Context) -> Result<Value, Error> {
     let ast = parser::parse(line)?;
-    let Ast::Pipeline(cmds) = ast;
-    execute_pipeline(&cmds, ctx)
-}
-
-fn execute_pipeline(cmds: &[Command], ctx: &mut Context) -> Result<Value, Error> {
-    let mut last = Value::Nil;
-    for cmd in cmds {
+    let Ast::Pipeline(pipeline) = ast;
+    // Capability check every stage *before* dispatching anything — keeps
+    // the failure mode deterministic even when one mid-pipeline built-in
+    // would have failed its own check.
+    for cmd in &pipeline.commands {
         check_caps(&cmd.name)?;
-        last = builtins::dispatch(&cmd.name, &cmd.args, ctx)?;
     }
-    Ok(last)
+    runtime::execute_pipeline(&pipeline, ctx)
 }
 
 /// Stub capability check. B2+ will wire this to the real cap set held

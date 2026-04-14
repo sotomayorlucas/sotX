@@ -23,4 +23,5 @@ pub mod context;
 pub mod error;
 pub mod linedit;
 pub mod parser;
+pub mod runtime;
 pub mod value;
