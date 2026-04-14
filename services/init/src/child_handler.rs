@@ -372,11 +372,12 @@ pub(crate) extern "C" fn child_handler() -> ! {
                     forward_to_lkl(ep_cap, syscall_nr, &msg, pid, child_as_cap);
                     true
                 }
-                // ── Category A: info/time syscalls (always LKL) ──
-                // Note: SYS_FUTEX stays in LUCAS — bridge_lock would deadlock on FUTEX_WAIT.
+                // ── Category A: info/time/sync syscalls (always LKL) ──
+                // SYS_FUTEX is safe now that bridge_lock is gone (per-pid scratch, PR #123).
                 SYS_UNAME | SYS_SYSINFO | SYS_GETRANDOM |
                 SYS_GETTIMEOFDAY | SYS_CLOCK_GETTIME | SYS_CLOCK_GETRES |
-                SYS_NANOSLEEP | SYS_CLOCK_NANOSLEEP => {
+                SYS_NANOSLEEP | SYS_CLOCK_NANOSLEEP |
+                SYS_FUTEX => {
                     forward_to_lkl(ep_cap, syscall_nr, &msg, pid, child_as_cap);
                     true
                 }
@@ -1927,7 +1928,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                 syscalls_info::sys_getrandom(&mut ctx, &msg);
             }
 
-            // SYS_futex
+            // SYS_futex — fallback when LKL is not ready (routed to LKL upstream when it is).
             SYS_FUTEX => {
                 let mut ctx = make_ctx!();
                 syscalls_info::sys_futex(&mut ctx, &msg);
