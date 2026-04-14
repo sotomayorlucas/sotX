@@ -11,9 +11,15 @@ use super::{SYS_DEBUG_PRINT, SYS_DEBUG_READ, SYS_SHUTDOWN};
 /// Handle debug/profiling syscalls. Returns `true` if the syscall was handled.
 pub fn handle(frame: &mut TrapFrame, nr: u64) -> bool {
     match nr {
-        // SYS_DEBUG_PRINT — write a single byte to serial
+        // SYS_DEBUG_PRINT — write a single byte to serial. Also mirror to
+        // the kernel-side framebuffer text renderer; after
+        // `fb_text::hand_off_to_init()` this is a no-op, so QEMU behaviour
+        // is unchanged. On real hardware built with `trace-boot` the byte
+        // stays visible on the laptop screen.
         SYS_DEBUG_PRINT => {
-            serial::write_byte(frame.rdi as u8);
+            let b = frame.rdi as u8;
+            serial::write_byte(b);
+            crate::arch::x86_64::fb_text::putchar(b);
             frame.rax = 0;
         }
 

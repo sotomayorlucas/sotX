@@ -229,6 +229,9 @@ extern "C" fn kmain() -> ! {
 
     // Suppress verbose output during splash (kinfo!/kdebug! become no-ops).
     // Errors still print via kerror!/kerr!.
+    // Skipped under `trace-boot`: every `kinfo!` stays visible so we can
+    // watch the kernel crawl through Stages 0-4 on a laptop screen.
+    #[cfg(not(feature = "trace-boot"))]
     boot_splash::VERBOSE.store(false, Ordering::Release);
 
     // Show centered Tokyo Night boot splash with empty progress bar.
@@ -423,6 +426,12 @@ extern "C" fn kmain() -> ! {
     // userspace vte renderer owns the screen; kernel `kprintln!` output only
     // reaches serial and the console ring (for init's parser) — not direct
     // FB pixels — so we don't clobber init's overlay.
+    //
+    // Skipped under `trace-boot`: the kernel keeps drawing directly to the
+    // FB through the full boot, and SYS_DEBUG_PRINT also mirrors to the FB,
+    // so Pavilion-style boot hangs are visible on the laptop screen instead
+    // of lost to a nonexistent serial port.
+    #[cfg(not(feature = "trace-boot"))]
     arch::fb_text::hand_off_to_init();
 
     // M2 validation hook — when built with --features test-shutdown, trigger
