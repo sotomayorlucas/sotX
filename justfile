@@ -887,10 +887,10 @@ image-minimal: build-trace initrd-minimal
 
 run-sotsh-minimal: image-minimal create-test-disk
     "{{QEMU}}" \
-        -cpu max \
+        -accel whpx -machine q35 \
         -drive format=raw,file={{IMAGE}} \
         -drive if=none,format=raw,file=target/disk.img,id=disk0 \
         -device virtio-blk-pci,drive=disk0,disable-modern=on \
         -serial stdio \
         -no-reboot \
-        -m 512M
+        -m 2048M
