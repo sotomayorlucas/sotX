@@ -65,6 +65,9 @@ impl fmt::Write for SerialWriter {
                 super::fb_console::push_byte(byte);
             }
             write_byte(byte);
+            // Mirror to the kernel framebuffer renderer. No-op once init
+            // service takes over via `fb_text::hand_off_to_init()`.
+            super::fb_text::putchar(byte);
         }
         Ok(())
     }

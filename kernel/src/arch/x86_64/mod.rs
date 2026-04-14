@@ -1,6 +1,7 @@
 pub mod ept;
-pub mod fb_font;
 pub mod fb_console;
+pub mod fb_font;
+pub mod fb_text;
 pub mod gdt;
 pub mod idt;
 pub mod io;

@@ -158,6 +158,10 @@ pub(super) const SYS_GET_FSBASE: u64 = 161;
 pub(super) const SYS_CHMOD: u64 = 150;
 pub(super) const SYS_CHOWN: u64 = 151;
 
+/// Power off the machine via ACPI (with hardware fallbacks). Never returns.
+/// Number 253 is taken by SYS_DEBUG_READ so we land at 257.
+pub(super) const SYS_SHUTDOWN: u64 = 257;
+
 /// Syscall numbers — thread info and resource limits.
 pub(super) const SYS_THREAD_INFO: u64 = 140;
 pub(super) const SYS_RESOURCE_LIMIT: u64 = 141;

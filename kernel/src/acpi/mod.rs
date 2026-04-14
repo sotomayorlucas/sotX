@@ -31,6 +31,8 @@
 use core::mem::size_of;
 use spin::Once;
 
+pub mod shutdown;
+
 /// Ensure the 4 KiB page containing `phys` is mapped at its HHDM
 /// virtual address in the boot CR3. Idempotent — `AddressSpace::map_page`
 /// silently overwrites an existing leaf with the same target frame
@@ -128,9 +130,24 @@ impl MadtData {
     }
 }
 
+/// Subset of FADT fields needed for ACPI power-off.
+#[derive(Clone, Copy)]
+pub struct FadtData {
+    /// I/O port for the PM1a Control Block. Writing
+    /// `(SLP_TYPa << 10) | (1 << 13)` to the low 16-bit half powers off
+    /// the system.
+    pub pm1a_cnt_blk: u32,
+    /// Same as PM1a but for the optional second power-management chipset.
+    /// Almost always zero on modern hardware.
+    pub pm1b_cnt_blk: u32,
+}
+
 /// Singleton populated once during boot. Subsequent reads are
 /// lock-free; writes only happen inside `init()`.
 static MADT: Once<MadtData> = Once::new();
+
+/// FADT data, populated alongside MADT.
+static FADT: Once<FadtData> = Once::new();
 
 // ---------------------------------------------------------------------------
 // On-disk ACPI structures
@@ -208,6 +225,30 @@ struct MadtIso {
     flags: u16,
 }
 
+// FADT (Fixed ACPI Description Table) — only the prefix we need for power-off.
+// Full structure runs to ~276 bytes in ACPI 6.x but we read just up through
+// PM1b_CNT_BLK and let the rest fall off the end. Field layout per ACPI 6.5
+// spec section 5.2.9.
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
+struct FadtPrefix {
+    header: AcpiHeader,
+    firmware_ctrl: u32,
+    dsdt: u32,
+    _reserved_44: u8,
+    _preferred_pm_profile: u8,
+    _sci_int: u16,
+    _smi_cmd: u32,
+    _acpi_enable: u8,
+    _acpi_disable: u8,
+    _s4bios_req: u8,
+    _pstate_cnt: u8,
+    _pm1a_evt_blk: u32, // offset 56
+    _pm1b_evt_blk: u32, // offset 60
+    pm1a_cnt_blk: u32,  // offset 64
+    pm1b_cnt_blk: u32,  // offset 68
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -243,6 +284,12 @@ pub fn ioapics() -> &'static [Option<IoApicEntry>] {
     }
 }
 
+/// Get the FADT data parsed at boot. Returns `None` if no FADT was
+/// found in the SDT (rare — almost every firmware ships one).
+pub fn fadt() -> Option<&'static FadtData> {
+    FADT.get()
+}
+
 /// Look up the GSI a legacy ISA IRQ is wired to. Returns `Some(gsi)`
 /// if an ISO entry overrides the identity mapping; `None` if the
 /// caller should assume `gsi == legacy_irq`.
@@ -262,6 +309,28 @@ pub fn iso_lookup(legacy_irq: u8) -> Option<u32> {
 // ---------------------------------------------------------------------------
 // Parser
 // ---------------------------------------------------------------------------
+
+/// Parse the FADT at `phys` and return its power-off-relevant fields.
+/// Returns `None` if the table header is malformed or too short.
+fn parse_fadt(phys: u64) -> Option<FadtData> {
+    let hhdm = crate::mm::hhdm_offset();
+    ensure_phys_page_mapped(phys);
+    let virt = phys + hhdm;
+    // SAFETY: page mapped above; AcpiHeader is 36 bytes.
+    let header = unsafe { *(virt as *const AcpiHeader) };
+    let len = header.length as usize;
+    if len < size_of::<FadtPrefix>() {
+        crate::kprintln!("  acpi: FADT length {} too small", len);
+        return None;
+    }
+    ensure_phys_range_mapped(phys, len);
+    // SAFETY: full table mapped above; FadtPrefix is the spec-defined prefix.
+    let f = unsafe { *(virt as *const FadtPrefix) };
+    Some(FadtData {
+        pm1a_cnt_blk: { f.pm1a_cnt_blk },
+        pm1b_cnt_blk: { f.pm1b_cnt_blk },
+    })
+}
 
 /// Validate the bytes of an ACPI table sum to 0 modulo 256.
 fn checksum_ok(ptr: *const u8, len: usize) -> bool {
@@ -330,8 +399,11 @@ fn parse(rsdp_phys: u64) -> Option<MadtData> {
     let entries_len = sdt_total_len - size_of::<AcpiHeader>();
     let n_entries = entries_len / entry_size;
 
-    // Walk the entry pointer array looking for the MADT (signature "APIC").
+    // Walk the entry pointer array looking for the MADT ("APIC") and the
+    // FADT ("FACP"). Don't break early — we want both in one pass so a
+    // missing MADT doesn't prevent FADT from being parsed (and vice versa).
     let mut madt_phys: Option<u64> = None;
+    let mut fadt_phys: Option<u64> = None;
     for i in 0..n_entries {
         // SAFETY: in-bounds — `entries_len` was bounds-checked above.
         let entry_ptr_addr = unsafe { entries_ptr.add(i * entry_size) };
@@ -346,10 +418,27 @@ fn parse(rsdp_phys: u64) -> Option<MadtData> {
         let table_virt = phys + hhdm;
         // SAFETY: page mapped above; we only read the header.
         let header = unsafe { *(table_virt as *const AcpiHeader) };
-        if &header.signature == b"APIC" {
+        if &header.signature == b"APIC" && madt_phys.is_none() {
             madt_phys = Some(phys);
-            break;
+        } else if &header.signature == b"FACP" && fadt_phys.is_none() {
+            fadt_phys = Some(phys);
         }
+    }
+
+    // Parse FADT if we found one. Failure to parse is non-fatal — the
+    // shutdown path falls back to QEMU debug ports / 8042 reset / triple
+    // fault, all of which work without FADT.
+    if let Some(phys) = fadt_phys {
+        if let Some(fd) = parse_fadt(phys) {
+            crate::kprintln!(
+                "  acpi: FADT pm1a_cnt={:#x} pm1b_cnt={:#x}",
+                fd.pm1a_cnt_blk,
+                fd.pm1b_cnt_blk
+            );
+            FADT.call_once(|| fd);
+        }
+    } else {
+        crate::kprintln!("  acpi: no FADT (FACP) entry — shutdown will fall back");
     }
 
     let madt_phys = madt_phys.or_else(|| {

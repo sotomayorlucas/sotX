@@ -6,7 +6,7 @@ use crate::cap::{self, CapObject, Rights};
 use crate::mm;
 use sotos_common::SysError;
 
-use super::{SYS_DEBUG_PRINT, SYS_DEBUG_READ};
+use super::{SYS_DEBUG_PRINT, SYS_DEBUG_READ, SYS_SHUTDOWN};
 
 /// Handle debug/profiling syscalls. Returns `true` if the syscall was handled.
 pub fn handle(frame: &mut TrapFrame, nr: u64) -> bool {
@@ -22,6 +22,14 @@ pub fn handle(frame: &mut TrapFrame, nr: u64) -> bool {
             frame.rax = serial::read_byte_nonblocking()
                 .map(|b| b as u64)
                 .unwrap_or(u64::MAX); // -1 as unsigned = no data
+        }
+
+        // SYS_SHUTDOWN — power off the machine via ACPI with HW fallbacks.
+        // Never returns. Open to any caller for now (no capability check) —
+        // the laptop bringup needs `poweroff` to work from LUCAS shell.
+        // Tighten with a `Reboot` capability once the security model gels.
+        SYS_SHUTDOWN => {
+            crate::acpi::shutdown::shutdown();
         }
 
         // SYS_DEBUG_FREE_FRAMES (252) — return number of free physical frames

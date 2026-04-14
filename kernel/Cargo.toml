@@ -7,6 +7,11 @@ edition = "2021"
 default = []
 verbose = []
 ipc-audit = []
+# Enable to fire `acpi::shutdown::shutdown()` ~3s after boot completes.
+# Used to validate the M2 power-off path end-to-end without a userspace
+# trigger — when set, QEMU exits cleanly (exit 0) instead of hanging at
+# the LUCAS prompt.
+test-shutdown = []
 
 [dependencies]
 limine = "0.5"

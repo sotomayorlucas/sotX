@@ -207,6 +207,26 @@ extern "C" fn kmain() -> ! {
     // Serial MUST be first — we need debug output before anything else.
     arch::serial::init();
 
+    // Kernel-side framebuffer text — visible on laptop screens with no serial
+    // port. Without this, any crash between here and the init service running
+    // its vte renderer leaves a black panel. Safe to call before `mm::init`
+    // because we only write through Limine's pre-existing HHDM mapping;
+    // visibility is forced via `clflush` rather than re-mapping page tables.
+    if let Some(fb_resp) = FRAMEBUFFER_REQUEST.get_response() {
+        if let Some(fb) = fb_resp.framebuffers().next() {
+            arch::fb_text::init(
+                fb.addr() as u64,
+                fb.width() as u32,
+                fb.height() as u32,
+                fb.pitch() as u32,
+                fb.bpp() as u32,
+                fb.red_mask_shift(),
+                fb.green_mask_shift(),
+                fb.blue_mask_shift(),
+            );
+        }
+    }
+
     // Suppress verbose output during splash (kinfo!/kdebug! become no-ops).
     // Errors still print via kerror!/kerr!.
     boot_splash::VERBOSE.store(false, Ordering::Release);
@@ -398,6 +418,22 @@ extern "C" fn kmain() -> ! {
 
     // Re-enable verbose output now that splash is done.
     boot_splash::VERBOSE.store(true, Ordering::Release);
+
+    // Hand the framebuffer over to the init service. From here on, the
+    // userspace vte renderer owns the screen; kernel `kprintln!` output only
+    // reaches serial and the console ring (for init's parser) — not direct
+    // FB pixels — so we don't clobber init's overlay.
+    arch::fb_text::hand_off_to_init();
+
+    // M2 validation hook — when built with --features test-shutdown, trigger
+    // acpi::shutdown::shutdown() right before we'd hand off to the scheduler.
+    // QEMU should exit cleanly (exit 0) via the PM1a port. Placed here, not
+    // post-`interrupts::enable`, because once the timer fires the scheduler
+    // never returns to this thread.
+    #[cfg(feature = "test-shutdown")]
+    {
+        crate::acpi::shutdown::shutdown();
+    }
 
     // Enable interrupts.
     x86_64::instructions::interrupts::enable();
