@@ -572,6 +572,14 @@ pub extern "C" fn _start() -> ! {
     // returns -EIO until SHARED_STORE_PTR is set.
     vfs_service::start_vfs_service();
 
+    // B3: opt-in sotSh boot integration. When the `shell-sotsh` cargo feature
+    // is enabled (e.g. `just run-sotsh`), load the native sotOS shell from
+    // initrd and spawn it as a plain (non-redirected) thread IN ADDITION to
+    // lucas-shell. Both are live; test rigs can interact with either over IPC.
+    // Default build: feature off, only lucas-shell runs -- behavior unchanged.
+    #[cfg(feature = "shell-sotsh")]
+    spawn_sotsh_native();
+
     start_lucas(blk);
 
     sys::thread_exit();
@@ -1365,6 +1373,107 @@ fn start_lucas(blk: Option<VirtioBlk>) {
         ep_cap,
     ).unwrap_or_else(|_| panic_halt());
     let _ = sys::signal_entry(guest_thread_cap, vdso::SIGNAL_TRAMPOLINE_ADDR);
+}
+
+// ---------------------------------------------------------------------------
+// B3 -- sotSh native boot integration (opt-in via `shell-sotsh` cargo feature)
+// ---------------------------------------------------------------------------
+//
+// sotSh is a native sotOS userspace binary (B1 port: no_std, x86_64-unknown-
+// none). Unlike lucas-shell it does NOT speak the Linux ABI -- it talks to
+// kernel syscalls and the `vfs`/`deception`/etc. services directly. So it
+// must be spawned with `sys::thread_create` (no syscall redirect), not
+// `sys::thread_create_redirected`.
+//
+// The kernel does not load sotsh at boot (it only loads `shell`, hardcoded
+// in kernel/src/main.rs). Under the `shell-sotsh` feature, init reads the
+// `sotsh` entry from initrd, loads its ELF segments into its own AS at the
+// binary's linked vaddr (0x1000000 -- same slot as lucas-shell, which is
+// fine since we use the kernel-loaded mapping there but sotsh's
+// map_elf_segments overwrites that region with sotsh's code before the
+// thread runs), allocates a fresh stack, and spawns a native thread.
+//
+// On success the boot log prints `sotsh: spawned (entry=..)` so a `grep
+// 'sotsh: spawned'` on serial output confirms the feature-gated path ran.
+#[cfg(feature = "shell-sotsh")]
+fn spawn_sotsh_native() {
+    use exec::{EXEC_BUF_BASE, EXEC_BUF_PAGES, EXEC_LOCK, MAP_WRITABLE,
+               map_elf_segments, map_temp_buf, parse_elf_goblin, unmap_temp_buf};
+
+    // Serialize with any concurrent ELF loading (shares EXEC_BUF_BASE buffer).
+    while EXEC_LOCK.compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed).is_err() {
+        sys::yield_now();
+    }
+
+    let cleanup = |unmap: bool| {
+        if unmap { unmap_temp_buf(EXEC_BUF_BASE, EXEC_BUF_PAGES); }
+        EXEC_LOCK.store(0, Ordering::Release);
+    };
+
+    if map_temp_buf(EXEC_BUF_BASE, EXEC_BUF_PAGES).is_err() {
+        print(b"sotsh: map_temp_buf failed\n");
+        cleanup(false);
+        return;
+    }
+
+    let bin_name = b"sotsh";
+    let file_size = match sys::initrd_read(
+        bin_name.as_ptr() as u64,
+        bin_name.len() as u64,
+        EXEC_BUF_BASE,
+        EXEC_BUF_PAGES * 0x1000,
+    ) {
+        Ok(sz) => sz as usize,
+        Err(_) => {
+            print(b"sotsh: initrd_read failed (binary missing?)\n");
+            cleanup(true);
+            return;
+        }
+    };
+
+    let elf_data = unsafe { core::slice::from_raw_parts(EXEC_BUF_BASE as *const u8, file_size) };
+    let (info, segments, seg_count, _interp) = match parse_elf_goblin(elf_data) {
+        Ok(p) => p,
+        Err(_) => {
+            print(b"sotsh: ELF parse failed\n");
+            cleanup(true);
+            return;
+        }
+    };
+    // sotsh is static ET_EXEC (linker.ld fixes .text at 0x1000000), so
+    // base = 0 and no PT_INTERP handling needed.
+    if map_elf_segments(EXEC_BUF_BASE, &info, &segments, seg_count, 0, 0).is_err() {
+        print(b"sotsh: map_elf_segments failed\n");
+        cleanup(true);
+        return;
+    }
+    cleanup(true);
+
+    const SOTSH_STACK_PAGES: u64 = 16;
+    let stack_base = process::NEXT_CHILD_STACK
+        .fetch_add(SOTSH_STACK_PAGES * 0x1000 + 0x1000, Ordering::SeqCst);
+    for i in 0..SOTSH_STACK_PAGES {
+        let f = match sys::frame_alloc() {
+            Ok(f) => f,
+            Err(_) => { print(b"sotsh: stack frame_alloc failed\n"); return; }
+        };
+        if sys::map(stack_base + i * 0x1000, f, MAP_WRITABLE).is_err() {
+            print(b"sotsh: stack map failed\n");
+            return;
+        }
+    }
+    let stack_top = stack_base + SOTSH_STACK_PAGES * 0x1000;
+
+    let tid = match sys::thread_create(info.entry, stack_top) {
+        Ok(t) => t,
+        Err(_) => { print(b"sotsh: thread_create failed\n"); return; }
+    };
+
+    print(b"sotsh: spawned (entry=");
+    print_hex64(info.entry);
+    print(b" tid=");
+    print_u64(tid);
+    print(b")\n");
 }
 
 fn panic_halt() -> ! {

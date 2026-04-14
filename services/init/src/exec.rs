@@ -9,7 +9,7 @@ use ufmt::uwrite;
 
 /// Parse an ELF binary using goblin, returning our existing types.
 /// Resets the bump allocator after extracting all needed data.
-fn parse_elf_goblin(data: &[u8]) -> Result<(ElfInfo, [LoadSegment; MAX_LOAD_SEGMENTS], usize, Option<InterpInfo>), i64> {
+pub(crate) fn parse_elf_goblin(data: &[u8]) -> Result<(ElfInfo, [LoadSegment; MAX_LOAD_SEGMENTS], usize, Option<InterpInfo>), i64> {
     use goblin::elf::Elf;
 
     // Reset bump allocator BEFORE parsing to ensure enough heap space.

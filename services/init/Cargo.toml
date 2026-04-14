@@ -43,6 +43,10 @@ https-proxy = []
 # downstream configs can toggle backends symmetrically.
 backend-lucas = ["sotos-linux-abi/backend-lucas"]
 backend-lkl = ["sotos-linux-abi/backend-lkl"]
+# B3: opt-in native sotSh shell. When enabled, init spawns sotsh alongside
+# lucas-shell on boot. Select via `just build-user-sotsh` / `just run-sotsh`.
+# Default boot still runs lucas-shell only.
+shell-sotsh = []
 
 [profile.dev]
 panic = "abort"
