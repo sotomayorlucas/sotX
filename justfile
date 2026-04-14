@@ -882,10 +882,32 @@ initrd-minimal: build-user-minimal build-kbd build-sotsh
 build-trace:
     cargo build --package sotos-kernel --features trace-boot
 
+# Smaller disk (48 MiB) — just kernel (~9 MB) + initrd (~28 MB) + limine +
+# FAT overhead fits. BIOS reads are O(disk size) for metadata scans, so
+# keeping this tight shaves seconds off cold boot.
 image-minimal: build-trace initrd-minimal
-    python scripts/mkimage.py --kernel {{KERNEL}} --initrd {{INITRD}} --output {{IMAGE}} --size 128
+    python scripts/mkimage.py --kernel {{KERNEL}} --initrd {{INITRD}} --output {{IMAGE}} --size 48
 
-run-sotsh-minimal: image-minimal create-test-disk
+# UEFI path is dramatically faster than BIOS INT 13h — OVMF exposes real
+# block I/O to the firmware so Limine's reads hit host speeds instead of
+# the emulated ~1 MB/s legacy channel. Use this by default; only fall back
+# to the BIOS target (`run-sotsh-minimal-bios`) if OVMF can't be fetched.
+run-sotsh-minimal: image-minimal create-test-disk fetch-ovmf
+    "{{QEMU}}" \
+        -accel whpx -machine q35 \
+        -drive if=pflash,format=raw,readonly=on,file=tools/ovmf/OVMF.fd \
+        -drive format=raw,file={{IMAGE}} \
+        -drive if=none,format=raw,file=target/disk.img,id=disk0 \
+        -device virtio-blk-pci,drive=disk0,disable-modern=on \
+        -serial stdio \
+        -no-reboot \
+        -m 2048M
+
+# Legacy BIOS fallback (only use if OVMF.fd isn't available). Slow:
+# BIOS INT 13h caps out around 1 MB/s in QEMU, so the 36 MB of kernel +
+# initrd reads take ~30-60 s on cold boot. Kept for parity with the
+# original target; prefer `run-sotsh-minimal`.
+run-sotsh-minimal-bios: image-minimal create-test-disk
     "{{QEMU}}" \
         -accel whpx -machine q35 \
         -drive format=raw,file={{IMAGE}} \
