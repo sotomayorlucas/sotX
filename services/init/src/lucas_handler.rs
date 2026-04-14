@@ -750,15 +750,45 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             // ═══════════════════════════════════════════════════════════
             // sotX-native syscalls forwarded from redirected LUCAS threads
             // ═══════════════════════════════════════════════════════════
-            // Numbers >= 250 are reserved for sotX debug/kernel info calls.
             // LUCAS tries to bypass the redirect via raw `syscall` but the
             // kernel dispatcher always routes redirected threads here first.
             // Init isn't redirected, so we can re-issue the syscall from
             // our own context and forward the result.
+            //
+            // Architectural note: the medium-term plan is to add a
+            // kernel-side "bypass" list for these native syscalls so they
+            // don't round-trip through init at all. Until then, passthroughs.
             252 => {
                 // SYS_DEBUG_FREE_FRAMES — used by LUCAS `meminfo` builtin.
                 let frames = sys::debug_free_frames() as i64;
                 reply_val(ep_cap, frames);
+            }
+            142 => {
+                // SYS_THREAD_COUNT — used by LUCAS `threads` builtin.
+                let count = sys::thread_count() as i64;
+                reply_val(ep_cap, count);
+            }
+            131 => {
+                // SYS_SVC_LOOKUP — used by LUCAS `services` builtin.
+                // The user pointer lives in LUCAS's AS; init can read it
+                // directly because the kernel maintains the user mapping
+                // across the redirect IPC for short-lived reads (same
+                // pattern `copy_guest_path` relies on).
+                let name_ptr = msg.regs[0];
+                let name_len = msg.regs[1] as usize;
+                if name_ptr == 0 || name_len == 0 || name_len > 64 {
+                    reply_val(ep_cap, -22); // -EINVAL
+                } else {
+                    let mut buf = [0u8; 64];
+                    let n = name_len.min(64);
+                    for i in 0..n {
+                        buf[i] = unsafe { *((name_ptr + i as u64) as *const u8) };
+                    }
+                    match sys::svc_lookup(buf.as_ptr() as u64, n as u64) {
+                        Ok(cap) => reply_val(ep_cap, cap as i64),
+                        Err(e) => reply_val(ep_cap, e),
+                    }
+                }
             }
 
             // ═══════════════════════════════════════════════════════════
