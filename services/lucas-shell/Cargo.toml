@@ -4,6 +4,7 @@
 name = "sotos-lucas-shell"
 version = "0.1.0"
 edition = "2021"
+description = "DEPRECATED (post-B5): legacy Linux-ABI guest shell. Use sotsh (services/sotsh) instead. Slated for removal after the post-B4 soak window."
 
 [dependencies]
 sotos-common = { path = "../../libs/sotos-common" }

@@ -43,10 +43,15 @@ https-proxy = []
 # downstream configs can toggle backends symmetrically.
 backend-lucas = ["sotos-linux-abi/backend-lucas"]
 backend-lkl = ["sotos-linux-abi/backend-lkl"]
-# B3: opt-in native sotSh shell. When enabled, init spawns sotsh alongside
-# lucas-shell on boot. Select via `just build-user-sotsh` / `just run-sotsh`.
-# Default boot still runs lucas-shell only.
-shell-sotsh = []
+# B5: default shell swap. Post-B5, init *always* spawns sotsh (native sotOS
+# shell, B1 port). The legacy Linux-ABI lucas-shell is now opt-in via
+# `shell-lucas` -- enable it for the soak window before lucas-shell is
+# removed entirely. Select via `just build-user-lucas` / `just run-lucas`.
+shell-lucas = []
+# Deprecated alias kept for backward-compat with B3-era invocations
+# (`just build-user-sotsh` / `just run-sotsh`). Spawns sotsh + lucas-shell
+# both, matching the pre-B5 `shell-sotsh` semantics. Slated for removal.
+shell-sotsh = ["shell-lucas"]
 
 [profile.dev]
 panic = "abort"

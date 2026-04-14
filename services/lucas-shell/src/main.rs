@@ -1,5 +1,17 @@
 #![no_std]
 #![no_main]
+// =============================================================================
+// DEPRECATED -- lucas-shell (Linux-ABI guest shell)
+// =============================================================================
+// Post-B5, lucas-shell is no longer the default boot shell. The native sotOS
+// shell (`services/sotsh`) is now spawned unconditionally by init. lucas-shell
+// remains compilable + bootable as an opt-in legacy via the `shell-lucas`
+// cargo feature on init (e.g. `just run-lucas`), to cover the post-B4 soak
+// window. Once that window closes, lucas-shell will be removed entirely.
+//
+// New code should target sotsh and the native sotOS syscall surface, NOT the
+// Linux-ABI redirect path that lucas-shell drives.
+// =============================================================================
 
 pub mod syscall;
 pub mod util;
