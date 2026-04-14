@@ -885,10 +885,12 @@ build-trace:
 image-minimal: build-trace initrd-minimal
     python scripts/mkimage.py --kernel {{KERNEL}} --initrd {{INITRD}} --output {{IMAGE}} --size 128
 
-run-sotsh-minimal: image-minimal
+run-sotsh-minimal: image-minimal create-test-disk
     "{{QEMU}}" \
         -cpu max \
         -drive format=raw,file={{IMAGE}} \
+        -drive if=none,format=raw,file=target/disk.img,id=disk0 \
+        -device virtio-blk-pci,drive=disk0,disable-modern=on \
         -serial stdio \
         -no-reboot \
         -m 512M
