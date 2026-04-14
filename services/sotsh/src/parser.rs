@@ -1,10 +1,11 @@
 //! Minimal pipeline parser for sotSh.
 //!
-//! Grammar (B4a: pipes + redirection):
+//! Grammar (B4a + B4d: pipes, redirection, env var prefixes):
 //!
 //! ```text
 //! pipeline = command ( '|' command )*
-//! command  = ident arg* redirect*
+//! command  = assignment* ( ident arg* redirect* )?
+//! assignment = ident '=' ( quoted_string | bare_word )
 //! arg      = quoted_string | bare_word
 //! redirect = ( '>>' | '>' | '<' ) path
 //! path     = quoted_string | bare_word
@@ -16,8 +17,13 @@
 //! to the *last* one for each direction (shell-standard behaviour).
 //!
 //! Bare words that parse cleanly as an i64 are promoted to [`Value::Int`];
-//! everything else stays a [`Value::Str`]. No env-var substitution, no
-//! subshells.
+//! everything else stays a [`Value::Str`]. `$VAR` is *not* expanded here —
+//! the runtime walks string args and substitutes against `ctx.env`, which
+//! keeps the parser stateless.
+//!
+//! `VAR=val` prefixes à la bash: `FOO=bar cmd args...` scopes `FOO` to the
+//! one command; `FOO=bar` on its own line (no command) asks the runtime to
+//! set `FOO` permanently in `ctx.env`.
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -83,7 +89,8 @@ fn pipeline_parser() -> impl Parser<char, Ast, Error = Simple<char>> {
 
     // Bare word: any non-whitespace, non-pipe, non-quote, non-redirect run.
     // Parsed as an integer if every char (after an optional leading '-') is
-    // a digit; otherwise kept as a Str.
+    // a digit; otherwise kept as a Str. `$` is a valid bare-word char; the
+    // runtime does the substitution pass later.
     let bare_str = filter::<_, _, Simple<char>>(|c: &char| {
         !c.is_whitespace() && *c != '|' && *c != '"' && *c != '>' && *c != '<'
     })
@@ -97,7 +104,7 @@ fn pipeline_parser() -> impl Parser<char, Ast, Error = Simple<char>> {
         Err(_) => Value::Str(s),
     });
 
-    let arg = choice((quoted_arg, bare_arg));
+    let arg = choice((quoted_arg.clone(), bare_arg.clone()));
 
     let hspace = filter::<_, _, Simple<char>>(|c: &char| *c == ' ' || *c == '\t')
         .repeated()
@@ -132,9 +139,55 @@ fn pipeline_parser() -> impl Parser<char, Ast, Error = Simple<char>> {
 
     let suffix = choice((redir_append, redir_trunc, redir_stdin, arg.map(Suffix::Arg)));
 
-    let command = ident
-        .then(hspace.ignore_then(suffix).repeated())
-        .map(|(name, suffixes)| fold_suffixes(name, suffixes));
+    // `VAR=val` — an identifier immediately followed by `=` and a value.
+    // The value is either a quoted string (which keeps spaces) or a bare
+    // word with the same char set as args (minus whitespace). Using
+    // `ident.then(just('='))` with no whitespace between is what gives the
+    // parser a cheap look-ahead: if the `=` isn't there, backtracking falls
+    // through to the normal `ident + suffixes` path for the command name.
+    let assign_value = choice((quoted_str.clone(), bare_str.clone()));
+    let assignment = ident
+        .clone()
+        .then_ignore(just('='))
+        .then(assign_value)
+        .map(|(k, v)| (k, v));
+
+    // Zero or more `VAR=val` prefixes separated by horizontal space, then
+    // an optional command (ident + suffixes). A line of *only* assignments
+    // produces a command with an empty name; the runtime treats that as
+    // "set these in ctx.env permanently".
+    let assignments = assignment
+        .clone()
+        .then_ignore(hspace.clone())
+        .repeated();
+
+    let command_tail = ident
+        .then(hspace.clone().ignore_then(suffix).repeated())
+        .map(|(name, suffixes)| (name, suffixes));
+
+    let command = assignments
+        .then(command_tail.or_not())
+        .try_map(|(prefix_env, tail), span| {
+            match tail {
+                Some((name, suffixes)) => Ok(fold_suffixes(name, suffixes, prefix_env)),
+                None => {
+                    if prefix_env.is_empty() {
+                        // Nothing at all — empty command is a parse error.
+                        Err(Simple::custom(span, "empty command"))
+                    } else {
+                        // `VAR=val` line with no command.
+                        Ok(Command {
+                            name: String::new(),
+                            args: Vec::new(),
+                            stdin: None,
+                            stdout: None,
+                            append: false,
+                            prefix_env,
+                        })
+                    }
+                }
+            }
+        });
 
     let pipe_sep = opt_hspace
         .clone()
@@ -151,7 +204,11 @@ fn pipeline_parser() -> impl Parser<char, Ast, Error = Simple<char>> {
 
 /// Collapse the flat `Suffix` list produced by the parser into a fully-
 /// formed [`Command`]. Stdin / stdout redirects use last-wins semantics.
-fn fold_suffixes(name: String, suffixes: Vec<Suffix>) -> Command {
+fn fold_suffixes(
+    name: String,
+    suffixes: Vec<Suffix>,
+    prefix_env: Vec<(String, String)>,
+) -> Command {
     let mut args: Vec<Value> = Vec::new();
     let mut stdin: Option<Redirect> = None;
     let mut stdout: Option<Redirect> = None;
@@ -166,5 +223,5 @@ fn fold_suffixes(name: String, suffixes: Vec<Suffix>) -> Command {
             }
         }
     }
-    Command { name, args, stdin, stdout, append }
+    Command { name, args, stdin, stdout, append, prefix_env }
 }
