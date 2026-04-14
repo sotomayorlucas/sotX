@@ -49,6 +49,7 @@ exclude = [
     "services/sot-statusbar",
     "services/abi-fuzz",
     "services/sotfs",
+    "services/sotsh",
     "services/cap-escalation-test",
     "services/ipc-storm",
     "services/smp-stress",

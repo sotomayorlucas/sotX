@@ -1,0 +1,9 @@
+[build]
+target = "x86_64-pc-windows-msvc"
+
+# The repo-root .cargo/config.toml sets [unstable] build-std for the kernel
+# target. Cargo merges config arrays rather than replacing, so we cannot
+# disable build-std for this crate. Add std/test/panic_abort so chumsky,
+# rustyline, and #[test] harnesses link against the same rebuilt core.
+[unstable]
+build-std = ["std", "test", "panic_abort", "proc_macro"]
