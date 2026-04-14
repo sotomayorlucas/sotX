@@ -1170,17 +1170,28 @@ fn load_initrd(cr3: u64) {
         kdebug!("  initrd: found 'xhci' ({} bytes)", xhci_data.len());
         load_xhci_process(xhci_data, cr3);
     }
-    if let Some(comp_data) = found[7] {
-        kdebug!("  initrd: found 'compositor' ({} bytes)", comp_data.len());
-        load_compositor_process(comp_data, cr3);
+    // Under `trace-boot` we skip every Wayland/GUI service so the kernel
+    // framebuffer text renderer stays the only thing touching the screen.
+    // Without this the compositor repaints the wallpaper every ~33 ms in
+    // `compose()`, burying the kernel's boot logs before they can be read.
+    #[cfg(not(feature = "trace-boot"))]
+    {
+        if let Some(comp_data) = found[7] {
+            kdebug!("  initrd: found 'compositor' ({} bytes)", comp_data.len());
+            load_compositor_process(comp_data, cr3);
+        }
+        if let Some(gui_data) = found[8] {
+            kdebug!("  initrd: found 'hello-gui' ({} bytes)", gui_data.len());
+            load_hello_gui_process(gui_data);
+        }
+        if let Some(term_data) = found[11] {
+            kdebug!("  initrd: found 'sotos-term' ({} bytes)", term_data.len());
+            load_sotos_term_process(term_data);
+        }
     }
-    if let Some(gui_data) = found[8] {
-        kdebug!("  initrd: found 'hello-gui' ({} bytes)", gui_data.len());
-        load_hello_gui_process(gui_data);
-    }
-    if let Some(term_data) = found[11] {
-        kdebug!("  initrd: found 'sotos-term' ({} bytes)", term_data.len());
-        load_sotos_term_process(term_data);
+    #[cfg(feature = "trace-boot")]
+    {
+        kerr!("trace-boot: compositor/hello-gui/sotos-term suppressed");
     }
 }
 
