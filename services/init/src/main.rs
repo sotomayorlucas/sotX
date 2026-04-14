@@ -4,6 +4,13 @@
 extern crate alloc;
 
 use sotos_common::sys;
+use sotos_linux_abi::lucas::LucasBackend;
+
+/// Wave-1 seed of the LUCAS -> LKL migration: a type-marker backend so the
+/// rest of the tree can hold a `&'static dyn sotos_linux_abi::LinuxBackend`.
+/// Dispatch still runs through `child_handler` today -- see the adapter at
+/// libs/sotos-linux-abi/src/lucas.rs.
+pub(crate) static LUCAS_BACKEND: LucasBackend = LucasBackend;
 
 // ======================================================================
 // Bump allocator for goblin ELF parsing (128 KiB, resettable)
@@ -284,6 +291,12 @@ pub extern "C" fn _start() -> ! {
         print_u64(boot_info.self_as_cap);
         print(b"\n");
     }
+
+    // Wave-1 seed of the LUCAS -> LKL migration: observable-only marker
+    // confirming the LucasBackend adapter (LUCAS_BACKEND, static) linked.
+    // Dispatch still runs through child_handler today.
+    let _ = &LUCAS_BACKEND;
+    print(b"LinuxBackend: LucasBackend registered\n");
 
     // --- Phase 2/3: SPSC test + benchmarks ---
     {

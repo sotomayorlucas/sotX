@@ -1,0 +1,23 @@
+[package]
+name = "sotos-linux-abi"
+version = "0.1.0"
+edition = "2021"
+
+# Wave-1 seed of the LUCAS -> LKL migration. Defines the `LinuxBackend` trait
+# that both the legacy hand-rolled Linux ABI layer ("LUCAS", lives in
+# services/init/src/child_handler.rs) and the new LKL (Linux Kernel Library)
+# backend will eventually implement. The adapter in `lucas.rs` is a type
+# marker only -- the real dispatch still happens inside child_handler.
+
+[dependencies]
+sotos-common = { path = "../sotos-common" }
+
+[features]
+default = ["backend-lucas"]
+# Enables the LucasBackend adapter shim (zero-sized type marker).
+backend-lucas = []
+# Enables the LKL backend (not yet implemented in this crate -- actual LKL
+# bindings live in services/init/src/lkl.rs, gated by SOTOS_LKL=1 at build
+# time). This flag is reserved for a follow-up wave that moves the LKL
+# dispatch glue into this crate.
+backend-lkl = []

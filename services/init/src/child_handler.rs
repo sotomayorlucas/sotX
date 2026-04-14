@@ -5,6 +5,12 @@
 // Virtual file emulation lives in crate::virtual_files.
 // ---------------------------------------------------------------------------
 
+// Wave-1 migration seed: trait is imported but not yet used -- dispatch
+// still runs through the match arms below. Kept here so follow-up waves
+// have a stable import site.
+#[allow(unused_imports)]
+use sotos_linux_abi::LinuxBackend;
+
 use sotos_common::sys;
 use sotos_common::{BootInfo, BOOT_INFO_ADDR};
 use sotos_common::linux_abi::*;
