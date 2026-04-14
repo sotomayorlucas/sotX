@@ -25,3 +25,5 @@ pub mod anomaly;
 pub mod interpose;
 pub mod migration;
 pub mod profile;
+
+pub use profile::{ProfileEntry, ProfileRegistry, BUILTIN_PROFILE_COUNT};
