@@ -326,10 +326,7 @@ pub extern "C" fn _start() -> ! {
     }
 
     // --- Phase 4: Virtio-BLK + Object Store ---
-    print(b"DBG: phase 4 entering init_block_storage\n");
     let mut blk = init_block_storage(boot_info);
-    print(b"DBG: phase 4 done, blk=");
-    if blk.is_some() { print(b"Some\n"); } else { print(b"None\n"); }
 
     // --- Phase 4b (Unit 3): persistent rootdisk on the SECOND virtio-blk ---
     // Safe no-op when only one drive is present (e.g. plain `just run`).
@@ -940,45 +937,44 @@ fn spawn_process(name: &[u8]) -> Option<u64> {
 // Block storage initialization
 // ---------------------------------------------------------------------------
 
-fn init_virtio_blk(boot_info: &BootInfo) -> Option<VirtioBlk> {
-    print(b"DBG: init_virtio_blk called, cap_count=");
-    print_u64(boot_info.cap_count);
+fn init_virtio_blk(_boot_info: &BootInfo) -> Option<VirtioBlk> {
+    // Find the PCI I/O port capability by type, not by position. The old
+    // `CAP_PCI = 0` assumption broke whenever kernel-internal caps landed
+    // at lower CapIds (happens routinely with trace-boot / UEFI boot where
+    // ACPI + IOAPIC bring-up creates its own IoPort caps before init's
+    // PCI cap is minted). `sys::cap_list` gives us every cap with its
+    // `CapObject` kind tag, so we can scan for IOPORT whose base covers
+    // 0xCF8-0xCFF.
+    let mut buf = [sotos_common::CapInfo::zeroed(); 32];
+    let n = match sys::cap_list(&mut buf) {
+        Ok(n) => n,
+        Err(e) => {
+            print(b"BLK: cap_list failed errno=");
+            print_u64(e as u64);
+            print(b"\n");
+            return None;
+        }
+    };
+    let mut pci_cap: Option<u64> = None;
+    for entry in &buf[..n] {
+        if entry.kind == sotos_common::CapInfo::KIND_IOPORT {
+            pci_cap = Some(entry.cap_id);
+            break;
+        }
+    }
+    let pci_cap = match pci_cap {
+        Some(c) => c,
+        None => {
+            print(b"BLK: no IoPort cap in table\n");
+            return None;
+        }
+    };
+    print(b"BLK: PCI IoPort cap=");
+    print_u64(pci_cap);
     print(b"\n");
-    if boot_info.cap_count <= CAP_PCI as u64 {
-        print(b"BLK: no PCI cap, skipping\n");
-        return None;
-    }
-    print(b"DBG: caps[0]=");
-    print_u64(boot_info.caps[0]);
-    print(b" (expected IoPort for 0xCF8-0xCFF)\n");
-    // Direct port_in32 test — bypasses the enumeration loop so we can
-    // see exactly what the syscall returns.
-    let pci_cap_raw = boot_info.caps[CAP_PCI];
-    print(b"DBG: port_out32(cap, 0xCF8, 0x80000000) -> ");
-    match sys::port_out32(pci_cap_raw, 0xCF8, 0x80000000) {
-        Ok(()) => print(b"Ok\n"),
-        Err(e) => { print(b"Err("); print_u64(e as u64); print(b")\n"); }
-    }
-    print(b"DBG: port_in32(cap, 0xCFC) -> ");
-    match sys::port_in32(pci_cap_raw, 0xCFC) {
-        Ok(v) => { print(b"Ok(0x"); print_hex(v); print(b") (expected 0x12378086 on i440fx)\n"); }
-        Err(e) => { print(b"Err("); print_u64(e as u64); print(b")\n"); }
-    }
-    // Also enumerate ALL caps in boot_info
-    print(b"DBG: all caps: ");
-    for idx in 0..boot_info.cap_count as usize {
-        if idx >= boot_info.caps.len() { break; }
-        print_u64(boot_info.caps[idx]);
-        print(b" ");
-    }
-    print(b"\n");
-    let pci_cap = boot_info.caps[CAP_PCI];
     let pci = PciBus::new(pci_cap);
 
     let (devices, count) = pci.enumerate::<32>();
-    print(b"DBG: pci.enumerate returned count=");
-    print_u64(count as u64);
-    print(b"\n");
     if count > 0 {
         print(b"PCI: ");
         print_u64(count as u64);
@@ -1005,7 +1001,7 @@ fn init_virtio_blk(boot_info: &BootInfo) -> Option<VirtioBlk> {
     let blk_dev = match pci.find_device(0x1AF4, 0x1001) {
         Some(d) => d,
         None => {
-            print(b"DBG: pci.find_device(0x1AF4, 0x1001) returned None\n");
+            print(b"BLK: virtio-blk (0x1AF4:0x1001) not found on bus 0\n");
             return None;
         }
     };

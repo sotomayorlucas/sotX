@@ -56,11 +56,7 @@ pub fn handle(frame: &mut TrapFrame, nr: u64) -> bool {
 
         // SYS_PORT_IN — read from I/O port (rdi=cap, rsi=port, rdx=width 1/2/4, requires READ)
         // Width defaults to 1 for any value other than 2 or 4 (backward compatible).
-        SYS_PORT_IN => {
-            let _dbg_res = cap::validate(frame.rdi as u32, Rights::READ);
-            crate::kprintln!("KDBG: SYS_PORT_IN cap={} port={:#x} validate={:?}",
-                frame.rdi as u32, frame.rsi as u16, _dbg_res.as_ref().map(|_| "ok").map_err(|e| *e as i64));
-            match cap::validate(frame.rdi as u32, Rights::READ) {
+        SYS_PORT_IN => match cap::validate(frame.rdi as u32, Rights::READ) {
             Ok(CapObject::IoPort { base, count }) => {
                 let port = frame.rsi as u16;
                 let width: u16 = match frame.rdx {
@@ -82,7 +78,6 @@ pub fn handle(frame: &mut TrapFrame, nr: u64) -> bool {
             }
             Ok(_) => frame.rax = SysError::InvalidCap as i64 as u64,
             Err(e) => frame.rax = e as i64 as u64,
-            }
         },
 
         // SYS_PORT_OUT — write to I/O port (rdi=cap, rsi=port, rdx=value, r8=width 1/2/4, requires WRITE)
