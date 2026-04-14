@@ -1096,10 +1096,12 @@ fn init_block_storage(boot_info: &BootInfo) -> Option<VirtioBlk> {
         }
     }
 
+    print(b"DBG: calling init_objstore\n");
     init_objstore(blk)
 }
 
 fn init_objstore(blk: VirtioBlk) -> Option<VirtioBlk> {
+    print(b"DBG: init_objstore entered, calling ObjectStore::mount\n");
     match ObjectStore::mount(blk) {
         Ok(store) => {
             // List first 32 root entries (avoid 256KB stack alloc for full DIR_ENTRY_COUNT)
