@@ -150,6 +150,43 @@ pub fn hcc1_csz(hcc1: u32) -> bool {
     hcc1 & (1 << 2) != 0
 }
 
+/// Extract xECP (Extended Capabilities Pointer) from HCCPARAMS1.
+/// Bits 31:16 give the offset in DWORDs from the MMIO base (multiply by 4
+/// for byte offset). 0 means there are no extended capabilities.
+pub fn hcc1_xecp(hcc1: u32) -> u32 {
+    (hcc1 >> 16) & 0xFFFF
+}
+
+// ---------------------------------------------------------------------------
+// Extended Capabilities — USB Legacy Support (cap ID 0x01)
+// ---------------------------------------------------------------------------
+
+/// Extended Capability ID for USB Legacy Support (xHCI 1.x §7.1).
+pub const XECP_ID_USBLEGSUP: u32 = 0x01;
+/// Extended Capability ID for Supported Protocol (xHCI 1.x §7.2).
+/// Used to learn which root-hub ports are USB2 vs USB3 — xHCI splits the
+/// port number space between the two and the same physical port appears
+/// twice (once per protocol).
+pub const XECP_ID_SUPPORTED_PROTOCOL: u32 = 0x02;
+
+/// USBLEGSUP byte offset relative to the cap base (the first dword of
+/// the cap is the cap header itself).
+pub const USBLEGSUP_OFFSET: usize = 0x00;
+/// USBLEGCTLSTS — control/status follows USBLEGSUP at +4. Bits 0..4 are
+/// SMI enables, bits 16..19 are SMI status.
+pub const USBLEGCTLSTS_OFFSET: usize = 0x04;
+
+/// HC BIOS Owned Semaphore — set to 1 by BIOS to claim the controller,
+/// cleared by BIOS when the OS takes over.
+pub const USBLEGSUP_BIOS_OWNED: u32 = 1 << 16;
+/// HC OS Owned Semaphore — written by the OS to request ownership.
+pub const USBLEGSUP_OS_OWNED: u32 = 1 << 24;
+
+/// Mask of all SMI enable bits in USBLEGCTLSTS (bits 0..4 + 13..16).
+/// We clear these after handoff so a buggy BIOS can't pull SMIs that
+/// trap back into firmware while we're using the controller.
+pub const USBLEGCTLSTS_SMI_ENABLES: u32 = 0xFFFF_0000;
+
 // ---------------------------------------------------------------------------
 // Port register offset
 // ---------------------------------------------------------------------------

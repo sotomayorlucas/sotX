@@ -119,6 +119,84 @@ impl UsbDevice {
     }
 }
 
+/// BIOS → OS handoff for the USB Legacy Support extended capability.
+///
+/// Walks the xECP linked list at `(HCCPARAMS1.xECP * 4)` looking for
+/// cap ID `XECP_ID_USBLEGSUP` (0x01). When found, sets `HC OS Owned`,
+/// polls until `HC BIOS Owned` clears (with a generous timeout — some
+/// firmwares run several SMI handlers before releasing ownership), and
+/// disables every SMI source in USBLEGCTLSTS so the kernel doesn't
+/// re-enter SMM on every doorbell.
+///
+/// On real Intel PCH chipsets, **without this handoff every doorbell
+/// write silently traps to SMM and the controller never advances**.
+/// QEMU's `qemu-xhci` doesn't implement the extended cap list so this
+/// becomes a no-op (xECP=0). On both platforms the function returns
+/// without error so callers can call it unconditionally.
+///
+/// # Safety
+/// `mmio_base` must point to a valid UC-mapped xHCI BAR0 region; the
+/// extended capability list is contained within BAR0.
+unsafe fn legacy_handoff(mmio_base: *mut u8, hcc1: u32, wait: WaitFn) {
+    let xecp = regs::hcc1_xecp(hcc1);
+    if xecp == 0 {
+        return; // No extended capabilities advertised.
+    }
+
+    let mut offset = (xecp as usize) * 4;
+    // Hard cap on the walk so a bogus firmware loop doesn't spin us
+    // forever. 64 capabilities is well past anything real hardware ships.
+    for _ in 0..64 {
+        let cap = regs::read32(mmio_base as *const u8, offset);
+        let cap_id = cap & 0xFF;
+        let next = (cap >> 8) & 0xFF;
+
+        if cap_id == regs::XECP_ID_USBLEGSUP {
+            // Request ownership: set HC_OS_OWNED, leaving HC_BIOS_OWNED for
+            // BIOS to clear when it has finished tearing down its handler.
+            regs::write32(mmio_base, offset + regs::USBLEGSUP_OFFSET,
+                cap | regs::USBLEGSUP_OS_OWNED);
+
+            // Poll for BIOS to release. 1M iterations × ~1µs MMIO read on
+            // real HW = ~1s budget; on QEMU it's faster but still bounded.
+            // BIOS handlers commonly take 100-500ms so allow margin.
+            for i in 0..1_000_000_u32 {
+                let v = regs::read32(mmio_base as *const u8,
+                    offset + regs::USBLEGSUP_OFFSET);
+                if v & regs::USBLEGSUP_BIOS_OWNED == 0 {
+                    break;
+                }
+                if (i & 0xFF) == 0 {
+                    wait();
+                }
+            }
+
+            // Final state: even if BIOS missed the deadline (some quirky
+            // firmwares never release), force-clear BIOS_OWNED. Per spec
+            // this is allowed once OS_OWNED has been set — the OS is now
+            // authoritative.
+            let v = regs::read32(mmio_base as *const u8,
+                offset + regs::USBLEGSUP_OFFSET);
+            regs::write32(mmio_base, offset + regs::USBLEGSUP_OFFSET,
+                (v | regs::USBLEGSUP_OS_OWNED) & !regs::USBLEGSUP_BIOS_OWNED);
+
+            // Disable every SMI source: write 0 to the enable bits and
+            // 1s to the RW1C status bits in USBLEGCTLSTS so we leave a
+            // clean slate. Without this, BIOS may keep generating SMIs
+            // on port events / OS ownership changes that trap into SMM
+            // mid-driver-init.
+            regs::write32(mmio_base, offset + regs::USBLEGCTLSTS_OFFSET,
+                regs::USBLEGCTLSTS_SMI_ENABLES);
+            return;
+        }
+
+        if next == 0 {
+            return; // End of list, no USBLEGSUP found.
+        }
+        offset += (next as usize) * 4;
+    }
+}
+
 /// xHCI host-controller driver state.
 ///
 /// Caches the MMIO sub-base pointers (operational, doorbell, runtime)
@@ -168,9 +246,16 @@ impl XhciController {
         // 2. Read HCSPARAMS1 → max_slots, max_ports; HCSPARAMS2 → max_scratchpad.
         let hcs1 = regs::read32(mmio_base as *const u8, regs::CAP_HCSPARAMS1);
         let hcs2 = regs::read32(mmio_base as *const u8, regs::CAP_HCSPARAMS2);
+        let hcc1 = regs::read32(mmio_base as *const u8, regs::CAP_HCCPARAMS1);
         let max_slots = regs::hcs1_max_slots(hcs1);
         let max_ports = regs::hcs1_max_ports(hcs1);
         let max_scratch = regs::hcs2_max_scratchpad(hcs2);
+
+        // 2.5. BIOS → OS legacy handoff. Critical on Intel PCH xHCI: BIOS
+        // holds USB ownership via SMM and silently swallows our writes
+        // until we explicitly claim it. QEMU's qemu-xhci has no extended
+        // capabilities so this is a no-op there.
+        legacy_handoff(mmio_base, hcc1, wait);
 
         // 3. Halt: clear USBCMD.RS, wait for USBSTS.HCH=1.
         // TCG fix (run-full deadlock U1): cap loop + yield only every 256 iters.
