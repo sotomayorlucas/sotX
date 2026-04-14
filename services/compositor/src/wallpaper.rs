@@ -312,49 +312,71 @@ pub fn draw(fb: &mut Framebuffer, x: i32, y: i32, w: i32, h: i32) {
         return;
     }
     let wp = unsafe { &*WALLPAPER.get() };
+    let has_image = wp.has_image && unsafe { *IMAGE_VALID.get() };
+    let cache_h = wp.gradient_height;
 
-    // If we have a decoded BMP image, blit it
-    if wp.has_image && unsafe { *IMAGE_VALID.get() } {
-        let cache = unsafe { &*IMAGE_CACHE.get() };
-        let iw = IMG_W as i32;
-        let ih = IMG_H as i32;
+    let fb_w = fb.width as i32;
+    let fb_h = fb.height as i32;
+    let x0 = x.max(0);
+    let y0 = y.max(0);
+    let x1 = (x + w).min(fb_w);
+    let y1 = (y + h).min(fb_h);
+    if x0 >= x1 || y0 >= y1 {
+        return;
+    }
 
-        let fb_w = fb.width as i32;
-        let fb_h = fb.height as i32;
-        let x0 = x.max(0);
-        let y0 = y.max(0);
-        let x1 = (x + w).min(fb_w).min(iw);
-        let y1 = (y + h).min(fb_h).min(ih);
-        if x0 >= x1 || y0 >= y1 {
-            return;
-        }
+    let pixels_per_row = (fb.pitch / 4) as usize;
+    let fb_base = fb.addr as *mut u32;
+    let iw = IMG_W as i32;
+    let ih = IMG_H as i32;
 
-        let pixels_per_row = (fb.pitch / 4) as usize;
-        let fb_base = fb.addr as *mut u32;
+    // Center the BMP image on the framebuffer. Anything outside that
+    // region gets the Tokyo Night gradient so resolutions larger than
+    // 1024x768 (Pavilion defaults to 1366x768 / 1920x1080) don't leave
+    // naked black strips showing the kernel clear color underneath.
+    let img_x = (fb_w - iw) / 2;
+    let img_y = (fb_h - ih) / 2;
 
-        for py in y0..y1 {
-            let src_row = (py as usize) * IMG_W;
-            let dst_row = unsafe { fb_base.add((py as usize) * pixels_per_row) };
-            for px in x0..x1 {
-                let pixel = cache[src_row + px as usize];
-                unsafe {
-                    dst_row.add(px as usize).write_volatile(pixel);
+    let image_cache = if has_image {
+        Some(unsafe { &*IMAGE_CACHE.get() })
+    } else {
+        None
+    };
+
+    for py in y0..y1 {
+        let dst_row = unsafe { fb_base.add((py as usize) * pixels_per_row) };
+
+        // Which image row (if any) maps to this framebuffer row.
+        let in_img_y = image_cache.is_some()
+            && py >= img_y
+            && py < img_y + ih;
+        let img_src_row = if in_img_y {
+            Some(((py - img_y) as usize) * IMG_W)
+        } else {
+            None
+        };
+
+        // Gradient color for this row — same for the whole horizontal span.
+        let grad_color = if cache_h > 0 {
+            wp.gradient_cache[(py as usize).min(cache_h - 1)]
+        } else {
+            BG_BOT
+        };
+
+        for px in x0..x1 {
+            let pixel = if let Some(src_row) = img_src_row {
+                if px >= img_x && px < img_x + iw {
+                    // Inside image: blit from cache.
+                    image_cache.unwrap()[src_row + (px - img_x) as usize]
+                } else {
+                    grad_color
                 }
+            } else {
+                grad_color
+            };
+            unsafe {
+                dst_row.add(px as usize).write_volatile(pixel);
             }
         }
-        return;
-    }
-
-    // Gradient fallback: one cached color per row, drawn as a horizontal span.
-    let cache_h = wp.gradient_height;
-    if cache_h == 0 {
-        return;
-    }
-    for py in y..(y + h) {
-        if py < 0 {
-            continue;
-        }
-        let row = (py as usize).min(cache_h - 1);
-        fb.fill_rect(x, py, w as u32, 1, wp.gradient_cache[row]);
     }
 }
