@@ -235,6 +235,7 @@ pub extern "C" fn _start() -> ! {
     // synced text console (`fb_init`) still runs so kernel panics and
     // early-boot logs remain visible on the framebuffer before the
     // compositor finishes coming up.
+    #[cfg(not(feature = "minimal-boot"))]
     if boot_info.fb_addr != 0 {
         unsafe { fb_init(boot_info); }
         // Draw Tokyo Night desktop GUI (positions terminal in window)
@@ -266,6 +267,7 @@ pub extern "C" fn _start() -> ! {
     // Clear kernel boot splash on serial and show Tokyo Night init header.
     // Box-drawing uses ASCII-safe substitutes (+, -, |) for maximum
     // terminal compatibility (serial consoles may not have Unicode).
+    #[cfg(not(feature = "minimal-boot"))]
     {
         fn serial_str(s: &[u8]) {
             for &b in s { sys::debug_print(b); }

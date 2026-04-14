@@ -874,7 +874,15 @@ build-user-minimal:
 initrd-minimal: build-user-minimal build-kbd build-sotsh
     python scripts/mkinitrd.py --output {{INITRD}} --file init={{USER_INIT}} --file kbd={{USER_KBD}} --file sotsh={{USER_SOTSH}}
 
-image-minimal: build initrd-minimal
+# Kernel with `trace-boot` — skips `fb_text::hand_off_to_init()` so the
+# kernel's framebuffer text console stays live for the whole boot. Every
+# `sys::debug_print` byte is tee'd onto the screen, which is how `sotsh`
+# output becomes visible in the QEMU display (sotsh has no direct fb access
+# of its own yet — it writes through `sys::debug_print`).
+build-trace:
+    cargo build --package sotos-kernel --features trace-boot
+
+image-minimal: build-trace initrd-minimal
     python scripts/mkimage.py --kernel {{KERNEL}} --initrd {{INITRD}} --output {{IMAGE}} --size 128
 
 run-sotsh-minimal: image-minimal

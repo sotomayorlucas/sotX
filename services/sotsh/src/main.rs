@@ -228,8 +228,32 @@ fn write_display<T: core::fmt::Display>(v: &T) {
 // ---------------------------------------------------------------------------
 
 #[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
-    write_bytes(b"SOTSH PANIC\n");
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    write_bytes(b"SOTSH PANIC");
+    if let Some(loc) = info.location() {
+        write_bytes(b" at ");
+        write_bytes(loc.file().as_bytes());
+        write_bytes(b":");
+        // Small u32 → decimal printer, no alloc::format! to avoid re-entering
+        // the allocator during a panic (which is often itself an OOM).
+        let mut n = loc.line();
+        let mut buf = [0u8; 10];
+        let mut i = buf.len();
+        if n == 0 {
+            i -= 1;
+            buf[i] = b'0';
+        }
+        while n > 0 {
+            i -= 1;
+            buf[i] = b'0' + (n % 10) as u8;
+            n /= 10;
+        }
+        write_bytes(&buf[i..]);
+    }
+    // The panic payload is only available as `&dyn core::fmt::Display` in
+    // stable Rust without the `panic_info_message` nightly feature. We skip
+    // it to keep the panic handler allocation-free.
+    write_bytes(b"\n");
     loop {
         sys::yield_now();
     }
