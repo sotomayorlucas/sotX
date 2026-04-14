@@ -197,6 +197,68 @@ unsafe fn legacy_handoff(mmio_base: *mut u8, hcc1: u32, wait: WaitFn) {
     }
 }
 
+/// One entry returned by [`walk_supported_protocols`]. Describes a
+/// contiguous range of xHCI root-hub ports that belong to one USB
+/// protocol major revision (2 = USB2.x, 3 = USB3.x).
+#[derive(Clone, Copy, Debug)]
+pub struct SupportedProtocol {
+    /// Major revision (`2` or `3`).
+    pub major: u8,
+    /// Minor revision within the major (e.g. `0` for 2.0, `10` for 2.10).
+    pub minor: u8,
+    /// 1-based first root-hub port in this range.
+    pub port_offset: u8,
+    /// Number of ports in this range.
+    pub port_count: u8,
+}
+
+/// Walk the xECP list for Supported Protocol capabilities (cap ID 0x02)
+/// and return up to `out.len()` entries. Returns the number of entries
+/// written. No-op when xECP is zero.
+///
+/// # Safety
+/// `mmio_base` must point to a valid UC-mapped xHCI BAR0 region. The
+/// library never itself prints; callers are responsible for logging
+/// the returned info through whatever channel they have available
+/// (kernel has kprintln!, userspace drivers have `sys::debug_print`).
+pub unsafe fn walk_supported_protocols(
+    mmio_base: *mut u8,
+    hcc1: u32,
+    out: &mut [SupportedProtocol],
+) -> usize {
+    let xecp = regs::hcc1_xecp(hcc1);
+    if xecp == 0 {
+        return 0;
+    }
+    let mut offset = (xecp as usize) * 4;
+    let mut found = 0usize;
+    for _ in 0..64 {
+        let cap = regs::read32(mmio_base as *const u8, offset);
+        let cap_id = cap & 0xFF;
+        let next = (cap >> 8) & 0xFF;
+
+        if cap_id == regs::XECP_ID_SUPPORTED_PROTOCOL && found < out.len() {
+            let minor_rev = ((cap >> 16) & 0xFF) as u8;
+            let major_rev = ((cap >> 24) & 0xFF) as u8;
+            // Dword 2 at +8: port offset (bits 0..7), port count (bits 8..15).
+            let w2 = regs::read32(mmio_base as *const u8, offset + 8);
+            out[found] = SupportedProtocol {
+                major: major_rev,
+                minor: minor_rev,
+                port_offset: (w2 & 0xFF) as u8,
+                port_count: ((w2 >> 8) & 0xFF) as u8,
+            };
+            found += 1;
+        }
+
+        if next == 0 {
+            break;
+        }
+        offset += (next as usize) * 4;
+    }
+    found
+}
+
 /// xHCI host-controller driver state.
 ///
 /// Caches the MMIO sub-base pointers (operational, doorbell, runtime)
@@ -374,6 +436,17 @@ impl XhciController {
             max_slots,
             max_ports,
         }))
+    }
+
+    /// Return Supported Protocol capabilities by re-reading the xECP list
+    /// through this controller's cached MMIO base. Fills up to `out.len()`
+    /// entries and returns the count written. Useful for userspace services
+    /// that want to print USB2/USB3 port mapping after `init()` succeeds.
+    pub fn supported_protocols(&self, out: &mut [SupportedProtocol]) -> usize {
+        unsafe {
+            let hcc1 = regs::read32(self.mmio_base as *const u8, regs::CAP_HCCPARAMS1);
+            walk_supported_protocols(self.mmio_base, hcc1, out)
+        }
     }
 
     /// Ring the command doorbell (doorbell register 0).

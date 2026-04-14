@@ -801,14 +801,17 @@ fn map_bar0_mmio(addr_space: &mm::paging::AddressSpace, bar0_phys: u64, pages: u
 }
 
 /// Scan PCI bus 0 for a device matching the given class/subclass (and optional prog_if).
-/// Returns (BAR0 physical address, IRQ line) if found.
-/// Enables bus mastering + memory space in the PCI command register.
+/// Returns (BAR0 physical address, BAR0 size in bytes, IRQ line) if found.
+/// Probes the BAR size via the standard write-all-1s / read-back trick, then
+/// enables bus mastering + memory space in the PCI command register. The
+/// size probe happens **before** memory-space enable so we don't generate
+/// bogus transactions while the BAR is masked.
 fn scan_pci_for_device(
     class: u8,
     subclass: u8,
     prog_if: Option<u8>,
     name: &str,
-) -> Option<(u64, u8)> {
+) -> Option<(u64, u32, u8)> {
     use x86_64::instructions::port::Port;
 
     let mut addr_port = Port::<u32>::new(PCI_CONFIG_PORT);
@@ -854,16 +857,54 @@ fn scan_pci_for_device(
         }
         let bar_type = (bar0 >> 1) & 3;
         let base_lo = (bar0 & !0xF) as u64;
-        let bar0_phys = if bar_type == 2 {
-            // 64-bit BAR: read BAR1 (offset 0x14).
+
+        // Probe BAR0 size. Standard protocol: save original value, write all
+        // 1s, read back, restore. The bits that stay 0 are below the size;
+        // size = (!readback) + 1 after masking the type bits.
+        unsafe {
+            addr_port.write(address | 0x10);
+            data_port.write(0xFFFF_FFFF);
+            addr_port.write(address | 0x10);
+        }
+        let bar0_probe = unsafe { data_port.read() };
+        unsafe {
+            addr_port.write(address | 0x10);
+            data_port.write(bar0);
+        }
+
+        let bar0_phys;
+        let bar_size: u32;
+        if bar_type == 2 {
+            // 64-bit BAR: read BAR1 (offset 0x14) + probe its size too.
             unsafe {
                 addr_port.write(address | 0x14);
             }
             let bar1 = unsafe { data_port.read() };
-            base_lo | ((bar1 as u64) << 32)
+            bar0_phys = base_lo | ((bar1 as u64) << 32);
+
+            unsafe {
+                addr_port.write(address | 0x14);
+                data_port.write(0xFFFF_FFFF);
+                addr_port.write(address | 0x14);
+            }
+            let bar1_probe = unsafe { data_port.read() };
+            unsafe {
+                addr_port.write(address | 0x14);
+                data_port.write(bar1);
+            }
+
+            // 64-bit combined size. For consumer HW NVMe/xHCI BARs never
+            // exceed 4 GiB in practice, so clamp to u32::MAX if the high
+            // dword is non-zero — callers only need a page-rounded count.
+            let full = ((bar1_probe as u64) << 32)
+                | ((bar0_probe & !0xF) as u64);
+            let sz = (!full).wrapping_add(1);
+            bar_size = if sz > u32::MAX as u64 { u32::MAX } else { sz as u32 };
         } else {
-            base_lo
-        };
+            bar0_phys = base_lo;
+            let masked = bar0_probe & !0xF;
+            bar_size = (!masked).wrapping_add(1);
+        }
 
         // Read IRQ line (offset 0x3C).
         unsafe {
@@ -885,13 +926,14 @@ fn scan_pci_for_device(
         }
 
         kdebug!(
-            "  {}: PCI dev={} BAR0={:#x} IRQ={}",
+            "  {}: PCI dev={} BAR0={:#x} size={:#x} IRQ={}",
             name,
             dev,
             bar0_phys,
+            bar_size,
             irq_line
         );
-        return Some((bar0_phys, irq_line));
+        return Some((bar0_phys, bar_size, irq_line));
     }
     None
 }
@@ -1342,13 +1384,21 @@ fn write_net_boot_info(_net_cr3: u64, net_as: &mm::paging::AddressSpace) {
 // ---------------------------------------------------------------------------
 
 // NVMe: class=0x01 (Mass Storage), subclass=0x08 (NVM), any prog_if
-fn scan_pci_for_nvme() -> Option<(u64, u8)> {
+fn scan_pci_for_nvme() -> Option<(u64, u32, u8)> {
     scan_pci_for_device(0x01, 0x08, None, "nvme")
+}
+
+/// Number of 4 KiB pages needed to cover `size` bytes, with a floor of 16
+/// pages (64 KiB) so tiny BAR reports from virtualised devices still leave
+/// us enough room for the NVMe register sprawl (admin queues, CMB, etc.).
+fn bar_size_pages(size: u32, min_pages: u64) -> u64 {
+    let pages = (size as u64).div_ceil(0x1000);
+    pages.max(min_pages)
 }
 
 /// Load the NVMe driver as a separate process.
 fn load_nvme_process(nvme_data: &[u8]) {
-    let (bar0_phys, _irq_line) = match scan_pci_for_nvme() {
+    let (bar0_phys, bar0_size, _irq_line) = match scan_pci_for_nvme() {
         Some(r) => r,
         None => {
             kdebug!("  nvme: no NVMe controller found on PCI bus — skipping");
@@ -1363,7 +1413,8 @@ fn load_nvme_process(nvme_data: &[u8]) {
         Some(p) => p,
         None => return,
     };
-    map_bar0_mmio(&proc.addr_space, bar0_phys, 16, "nvme");
+    let pages = bar_size_pages(bar0_size, 16);
+    map_bar0_mmio(&proc.addr_space, bar0_phys, pages, "nvme");
     write_nvme_boot_info(&proc.addr_space);
     proc.spawn();
     kdebug!("  nvme: separate process, cr3={:#x}", proc.cr3);
@@ -1393,13 +1444,13 @@ fn write_nvme_boot_info(nvme_as: &mm::paging::AddressSpace) {
 // ---------------------------------------------------------------------------
 
 // xHCI: class=0x0C (Serial Bus), subclass=0x03 (USB), prog_if=0x30 (xHCI)
-fn scan_pci_for_xhci() -> Option<(u64, u8)> {
+fn scan_pci_for_xhci() -> Option<(u64, u32, u8)> {
     scan_pci_for_device(0x0C, 0x03, Some(0x30), "xhci")
 }
 
 /// Load the xHCI driver as a separate process.
 fn load_xhci_process(xhci_data: &[u8], init_cr3: u64) {
-    let (bar0_phys, irq_line) = match scan_pci_for_xhci() {
+    let (bar0_phys, bar0_size, irq_line) = match scan_pci_for_xhci() {
         Some(r) => r,
         None => {
             kdebug!("  xhci: no xHCI controller found on PCI bus — skipping");
@@ -1414,7 +1465,11 @@ fn load_xhci_process(xhci_data: &[u8], init_cr3: u64) {
         Some(p) => p,
         None => return,
     };
-    map_bar0_mmio(&proc.addr_space, bar0_phys, 32, "xhci");
+    // Intel PCH xHCI BARs run 16-64 KiB; QEMU's qemu-xhci reports ~4 KiB.
+    // Floor at 32 pages (128 KiB) to cover the worst real-HW case plus the
+    // extended-capabilities tail that trails the operational registers.
+    let pages = bar_size_pages(bar0_size, 32);
+    map_bar0_mmio(&proc.addr_space, bar0_phys, pages, "xhci");
     proc.map_shared_ring(init_cr3, KB_RING_PAGE);
     write_xhci_boot_info(&proc.addr_space, irq_line);
     proc.spawn();

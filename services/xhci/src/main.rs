@@ -192,6 +192,27 @@ pub extern "C" fn _start() -> ! {
     print_u32(info.max_ports as u32);
     sys::debug_print(b'\n');
 
+    // Log Supported Protocol caps (xECP ID 0x02) so real-HW bringup shows
+    // the USB2/USB3 port split. No-op on qemu-xhci (no extended caps).
+    let mut protos = [sotos_xhci::controller::SupportedProtocol {
+        major: 0, minor: 0, port_offset: 0, port_count: 0,
+    }; 4];
+    let n_protos = ctrl.supported_protocols(&mut protos);
+    for i in 0..n_protos {
+        let p = &protos[i];
+        print(b"xhci:   proto USB");
+        print_u32(p.major as u32);
+        sys::debug_print(b'.');
+        print_u32(p.minor as u32);
+        print(b" ports ");
+        print_u32(p.port_offset as u32);
+        print(b"..=");
+        print_u32(
+            p.port_offset.saturating_add(p.port_count).saturating_sub(1) as u32,
+        );
+        sys::debug_print(b'\n');
+    }
+
     // --- No Op self-test ---
     let noop = trb::cmd_no_op();
     match unsafe { ctrl.submit_command(noop, xhci_wait) } {
@@ -210,15 +231,41 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
-    // --- Find connected port ---
+    // --- Scan root-hub for connected ports ---
+    // Real laptops frequently expose 8-16 root-hub ports across USB2 and
+    // USB3 halves; the HID keyboard can land on any of them (especially
+    // behind internal hubs that bridge the builtin keyboard + touchpad +
+    // webcam + BT radio onto a single upstream port). Log every port so
+    // Pavilion-side diagnostics have something to grep through.
+    //
+    // TODO: once real HW testing shows the builtin kbd isn't on the first
+    // connected port, extract the enumeration flow below into a
+    // `try_enumerate(port) -> Option<HidInfo>` function and retry across
+    // ports until HID kbd shows up. Today we pick the first connected
+    // port which works on QEMU's qemu-xhci+usb-kbd (single port 1).
     let connected = unsafe { port::connected_ports(&ctrl) };
     let mut first_port: u8 = 0;
+    let mut connected_count: u32 = 0;
     for p in 1..=ctrl.max_ports {
         if connected & (1 << p) != 0 {
-            first_port = p;
-            break;
+            connected_count += 1;
+            let portsc_p = unsafe { ctrl.portsc(p) };
+            let speed_p = regs::portsc_speed(portsc_p);
+            print(b"xhci:   port ");
+            print_u32(p as u32);
+            print(b" CCS=1 speed=");
+            print_u32(speed_p as u32);
+            sys::debug_print(b'\n');
+            if first_port == 0 {
+                first_port = p;
+            }
         }
     }
+    print(b"xhci: root-hub scan: ");
+    print_u32(connected_count);
+    print(b" of ");
+    print_u32(ctrl.max_ports as u32);
+    print(b" ports connected\n");
     if first_port == 0 {
         print(b"xhci: no connected ports, parking on notify_wait\n");
         // TCG fix (run-full deadlock U2): sleep on notify instead of
