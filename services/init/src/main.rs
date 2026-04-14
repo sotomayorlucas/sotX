@@ -951,6 +951,27 @@ fn init_virtio_blk(boot_info: &BootInfo) -> Option<VirtioBlk> {
     print(b"DBG: caps[0]=");
     print_u64(boot_info.caps[0]);
     print(b" (expected IoPort for 0xCF8-0xCFF)\n");
+    // Direct port_in32 test — bypasses the enumeration loop so we can
+    // see exactly what the syscall returns.
+    let pci_cap_raw = boot_info.caps[CAP_PCI];
+    print(b"DBG: port_out32(cap, 0xCF8, 0x80000000) -> ");
+    match sys::port_out32(pci_cap_raw, 0xCF8, 0x80000000) {
+        Ok(()) => print(b"Ok\n"),
+        Err(e) => { print(b"Err("); print_u64(e as u64); print(b")\n"); }
+    }
+    print(b"DBG: port_in32(cap, 0xCFC) -> ");
+    match sys::port_in32(pci_cap_raw, 0xCFC) {
+        Ok(v) => { print(b"Ok(0x"); print_hex(v); print(b") (expected 0x12378086 on i440fx)\n"); }
+        Err(e) => { print(b"Err("); print_u64(e as u64); print(b")\n"); }
+    }
+    // Also enumerate ALL caps in boot_info
+    print(b"DBG: all caps: ");
+    for idx in 0..boot_info.cap_count as usize {
+        if idx >= boot_info.caps.len() { break; }
+        print_u64(boot_info.caps[idx]);
+        print(b" ");
+    }
+    print(b"\n");
     let pci_cap = boot_info.caps[CAP_PCI];
     let pci = PciBus::new(pci_cap);
 
