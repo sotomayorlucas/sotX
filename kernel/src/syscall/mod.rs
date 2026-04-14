@@ -71,6 +71,9 @@ pub(super) const SYS_UNMAP: u64 = 23;
 /// Syscall numbers — capabilities.
 pub(super) const SYS_CAP_GRANT: u64 = 30;
 pub(super) const SYS_CAP_REVOKE: u64 = 31;
+/// Enumerate occupied slots of the cap table (read-only introspection).
+/// rdi = userspace `*mut CapInfo`, rsi = max entry count.
+pub(super) const SYS_CAP_LIST: u64 = 190;
 
 /// Syscall numbers — threads.
 pub(super) const SYS_THREAD_CREATE: u64 = 40;

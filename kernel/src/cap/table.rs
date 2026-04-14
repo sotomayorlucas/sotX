@@ -176,6 +176,16 @@ impl CapabilityTable {
         Some((entry.object, entry.rights))
     }
 
+    /// Iterate occupied cap slots as `(PoolHandle, CapObject, Rights)`.
+    ///
+    /// Read-only — used by `SYS_CAP_LIST` to snapshot the table for
+    /// introspection. Does not expose parent/epoch metadata.
+    pub fn iter_entries(&self) -> impl Iterator<Item = (PoolHandle, CapObject, Rights)> + '_ {
+        self.entries
+            .iter()
+            .map(|(h, e)| (h, e.object, e.rights))
+    }
+
     /// Create a derived capability with narrowed rights (child in CDT).
     ///
     /// The new cap refers to the same object but with `rights & mask`.

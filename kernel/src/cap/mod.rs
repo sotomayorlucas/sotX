@@ -105,3 +105,40 @@ pub fn current_epoch() -> u64 {
 pub fn advance_epoch() -> u64 {
     GLOBAL_EPOCH.fetch_add(1, Ordering::Release) + 1
 }
+
+/// Read-only snapshot of occupied cap-table slots, used by `SYS_CAP_LIST`.
+///
+/// Invokes `visit(cap_id, kind_discriminant, rights_raw)` for each live entry
+/// until `visit` returns false or the table is exhausted. The callback runs
+/// under the table spinlock — keep it short and non-blocking. `kind` matches
+/// the `CapInfo::KIND_*` constants in `sotos_common`.
+pub fn for_each<F: FnMut(u32, u32, u32) -> bool>(mut visit: F) {
+    let table = CAP_TABLE.lock();
+    for (handle, obj, rights) in table.iter_entries() {
+        let kind = kind_of(&obj);
+        if !visit(handle.raw(), kind, rights.raw()) {
+            break;
+        }
+    }
+}
+
+/// Map a `CapObject` to its `CapInfo::KIND_*` discriminant. Kept centralized
+/// so the kernel and `sotos_common::CapInfo` can't drift out of sync.
+fn kind_of(obj: &CapObject) -> u32 {
+    use sotos_common::CapInfo as K;
+    match obj {
+        CapObject::Null => K::KIND_NULL,
+        CapObject::Memory { .. } => K::KIND_MEMORY,
+        CapObject::Endpoint { .. } => K::KIND_ENDPOINT,
+        CapObject::Channel { .. } => K::KIND_CHANNEL,
+        CapObject::Thread { .. } => K::KIND_THREAD,
+        CapObject::Irq { .. } => K::KIND_IRQ,
+        CapObject::IoPort { .. } => K::KIND_IOPORT,
+        CapObject::Notification { .. } => K::KIND_NOTIFICATION,
+        CapObject::Domain { .. } => K::KIND_DOMAIN,
+        CapObject::AddrSpace { .. } => K::KIND_ADDR_SPACE,
+        CapObject::Interposed { .. } => K::KIND_INTERPOSED,
+        CapObject::Vm { .. } => K::KIND_VM,
+        CapObject::Msi { .. } => K::KIND_MSI,
+    }
+}
