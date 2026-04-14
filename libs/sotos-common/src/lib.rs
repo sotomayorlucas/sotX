@@ -1788,9 +1788,40 @@ pub mod sys {
 
     /// Get thread info by pool index.
     /// Returns (tid, state, priority, cpu_ticks, mem_pages, is_user) or error.
+    ///
+    /// The kernel returns the six fields via rdi/rsi/rdx/r8/r9/r10 (see
+    /// `kernel/src/syscall/thread.rs` SYS_THREAD_INFO). A plain `syscall1`
+    /// wrapper only reads rax, so we issue the `syscall` instruction
+    /// directly here to capture all output registers.
     #[inline(always)]
     pub fn thread_info(idx: u64) -> Result<(u64, u64, u64, u64, u64, u64), i64> {
-        check_val(syscall1(super::Syscall::ThreadInfo as u64, idx)).map(|_| (0, 0, 0, 0, 0, 0))
+        let rax: u64;
+        let tid: u64;
+        let state: u64;
+        let pri: u64;
+        let ticks: u64;
+        let mem: u64;
+        let is_user: u64;
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                inlateout("rax") super::Syscall::ThreadInfo as u64 => rax,
+                inlateout("rdi") idx => tid,
+                lateout("rsi") state,
+                lateout("rdx") pri,
+                lateout("r8") ticks,
+                lateout("r9") mem,
+                lateout("r10") is_user,
+                lateout("rcx") _,
+                lateout("r11") _,
+                options(nostack),
+            );
+        }
+        if (rax as i64) < 0 {
+            Err(rax as i64)
+        } else {
+            Ok((tid, state, pri, ticks, mem, is_user))
+        }
     }
 
     /// Get total live thread count.
