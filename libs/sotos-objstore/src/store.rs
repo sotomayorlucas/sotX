@@ -151,12 +151,13 @@ impl ObjectStore {
 
     /// Mount an existing filesystem from disk.
     pub fn mount(blk: VirtioBlk) -> Result<&'static mut Self, &'static str> {
+        dbg(b"MOUNT: init_pages\n");
         init_pages()?;
 
         let store = unsafe { &mut *(STORE_VADDR as *mut ObjectStore) };
         store.blk = blk;
 
-        // Read superblock.
+        dbg(b"MOUNT: read superblock\n");
         store.blk.read_sector(SECTOR_SUPERBLOCK as u64)?;
         unsafe {
             core::ptr::copy_nonoverlapping(
@@ -165,6 +166,11 @@ impl ObjectStore {
                 SECTOR_SIZE,
             );
         }
+        dbg(b"MOUNT: superblock magic=");
+        dbg_u64(store.sb.magic as u64);
+        dbg(b" version=");
+        dbg_u64(store.sb.version as u64);
+        dbg(b"\n");
         if store.sb.magic != SUPERBLOCK_MAGIC {
             return Err("bad superblock magic");
         }
@@ -177,7 +183,7 @@ impl ObjectStore {
             return Err("old version");
         }
 
-        // WAL replay (also rebuilds the hash index).
+        dbg(b"MOUNT: WAL replay\n");
         let replayed = wal::replay(&mut store.blk, &mut store.wal, &mut store.wal_buf, &mut store.wal_index)?;
         if replayed {
             store.blk.read_sector(SECTOR_SUPERBLOCK as u64)?;
@@ -190,16 +196,16 @@ impl ObjectStore {
             }
         }
 
-        // Read bitmap.
+        dbg(b"MOUNT: read_bitmap\n");
         store.read_bitmap()?;
 
-        // Read directory.
+        dbg(b"MOUNT: read_dir\n");
         store.read_dir()?;
 
-        // Read refcount table.
+        dbg(b"MOUNT: read_refcount\n");
         store.read_refcount()?;
 
-        // Read snapshot metadata.
+        dbg(b"MOUNT: read_snap_meta\n");
         store.read_snap_meta()?;
 
         // Fix next_oid: scan all entries to ensure next_oid > max(existing OIDs).
