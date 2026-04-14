@@ -781,6 +781,13 @@ run-full-quick: image create-test-disk create-nvme-disk
         -no-reboot \
         -m 2048M
 
+# Build futex-stress (A4 regression test for LUCAS->LKL SYS_FUTEX routing).
+# Produces a statically-linked x86_64 ELF suitable for the initrd.
+# Runs under WSL so the host Linux gcc+pthread+static libs are available; the
+# Windows MSVC toolchain cannot link -static -pthread.
+build-futex-stress:
+    wsl -- make -C services/futex-stress
+
 # ---------------------------------------------------------------------------
 # B3 -- opt-in sotSh boot integration
 # ---------------------------------------------------------------------------
