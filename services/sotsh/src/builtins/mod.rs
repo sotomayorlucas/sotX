@@ -15,7 +15,9 @@ pub mod arm;
 pub mod cap;
 pub mod cat;
 pub mod cd;
+pub mod export;
 pub mod ls;
+pub mod lua;
 pub mod ps;
 pub mod jobs;
 pub mod fg;
@@ -75,6 +77,8 @@ pub fn required_caps(name: &str) -> &'static [&'static str] {
         "ps" => &["proc:list"],
         "cap" => &[],
         "arm" => &["deception:read"],
+        "export" => &[],
+        "eval" | "lua" => &[],
         "jobs" => &[],
         "fg" => &[],
         "bg" => &[],
@@ -95,6 +99,8 @@ pub fn dispatch(name: &str, args: &[Value], ctx: &mut Context) -> Result<Value, 
         "ps" => ps::run(args, ctx),
         "cap" => cap::run(args, ctx),
         "arm" => arm::run(args, ctx),
+        "export" => export::run(args, ctx),
+        "eval" | "lua" => lua::run(args, ctx),
         "jobs" => jobs::run(args, ctx),
         "fg" => fg::run(args, ctx),
         "bg" => bg::run(args, ctx),

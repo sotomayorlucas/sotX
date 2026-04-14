@@ -46,6 +46,11 @@ pub struct Command {
     pub stdout: Option<Redirect>,
     /// `true` when the stdout redirect was `>>` (append), `false` for `>`.
     pub append: bool,
+    /// Command-scoped `VAR=val` prefixes (à la bash). Parsed before the
+    /// command name; merged into the runtime env for this command only.
+    /// When the command name is empty, these are set as permanent
+    /// assignments in `ctx.env` instead (handled by the runtime).
+    pub prefix_env: Vec<(String, String)>,
 }
 
 /// Where a redirection sources / sinks data.

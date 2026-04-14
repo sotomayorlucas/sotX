@@ -12,6 +12,10 @@ edition = "2021"
 # keeps the parser no_std-friendly (chumsky still pulls in `alloc` itself).
 chumsky = { version = "0.9", default-features = false }
 sotos-common = { path = "../../libs/sotos-common" }
+# sotos-lua is a small no_std Lua 5.4 subset interpreter with no extra
+# features or deps of its own, so the default import is already the
+# no_std build. Used by the `eval` / `lua` built-ins.
+sotos-lua = { path = "../../libs/sotos-lua" }
 
 [lib]
 name = "sotos_sotsh"
