@@ -95,11 +95,10 @@ pub extern "C" fn _start() -> ! {
     let mut ctx = Context::new();
     let mut editor = LineEditor::new();
     let mut history = History::new();
-    // Persistent history would live at `/var/sotsh/history`; `save_to`
-    // returns -ENOSYS pending a `vfs_write` wrapper, so we skip the
-    // load-from-disk round-trip for now. Uncomment once the write path
-    // lands:
-    //     let _ = history.load_from(b"/var/sotsh/history");
+    // Persistent history lives at `/var/sotsh/history`. The file may
+    // not exist on first boot (ENOENT) — that's benign, so we discard
+    // the result.
+    let _ = history.load_from(b"/var/sotsh/history");
 
     loop {
         let line = editor.read_line(PROMPT, &mut history);

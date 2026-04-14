@@ -20,9 +20,10 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use sotos_common::sys;
 use sotos_common::IpcMsg;
+use sotos_common::linux_abi::{O_APPEND, O_CREAT, O_TRUNC};
 use sotos_common::vfs::{
-    VFS_OPEN, VFS_CLOSE, VFS_READ, VFS_STAT, VFS_GETDENTS64, VFS_CHDIR, VFS_FSTAT,
-    VFS_MAX_INLINE_PATH, VFS_READ_CHUNK, VFS_DIRENT_NAME_MAX,
+    VFS_OPEN, VFS_CLOSE, VFS_READ, VFS_STAT, VFS_GETDENTS64, VFS_CHDIR, VFS_FSTAT, VFS_WRITE,
+    VFS_MAX_INLINE_PATH, VFS_READ_CHUNK, VFS_DIRENT_NAME_MAX, VFS_WRITE_CHUNK,
 };
 use sotos_objstore::{DirEntry, ROOT_OID};
 
@@ -67,11 +68,13 @@ struct FdSlot {
     off: u64,
     /// Monotonic directory cursor — index into `store.list_dir` output.
     dir_pos: u32,
+    /// Open flags (O_APPEND etc.) — consulted by write path.
+    flags: u64,
 }
 
 impl FdSlot {
     const fn empty() -> Self {
-        Self { in_use: false, oid: 0, is_dir: false, size: 0, off: 0, dir_pos: 0 }
+        Self { in_use: false, oid: 0, is_dir: false, size: 0, off: 0, dir_pos: 0, flags: 0 }
     }
 }
 
@@ -252,6 +255,7 @@ extern "C" fn vfs_service_thread() -> ! {
             VFS_GETDENTS64  => handle_getdents64(ep, &msg),
             VFS_CHDIR       => handle_chdir(ep, &msg),
             VFS_FSTAT       => handle_fstat(ep, &msg),
+            VFS_WRITE       => handle_write(ep, &msg),
             _               => reply_err(ep, EINVAL),
         }
     }
@@ -267,20 +271,60 @@ fn handle_open(ep: u64, msg: &IpcMsg) {
         Ok(n) => n,
         Err(e) => return reply_err(ep, e),
     };
+    let flags = msg.regs[6];
     let mut resolved = [0u8; 256];
     let rlen = resolve_cwd(&path_buf[..path_len], &mut resolved);
     let name = &resolved[..rlen];
 
+    // Step 1: try existing path. O_TRUNC zeroes regular files in place.
     vfs_lock();
     let lookup = unsafe { shared_store() }.and_then(|store| {
-        store.resolve_path(name, ROOT_OID).ok()
-            .and_then(|oid| store.stat(oid).map(|entry| (oid, entry)))
+        let oid = store.resolve_path(name, ROOT_OID).ok()?;
+        let entry = store.stat(oid)?;
+        if !entry.is_dir() && flags & (O_TRUNC as u64) != 0 {
+            let _ = store.write_obj(oid, &[]);
+            return Some((oid, store.stat(oid)?));
+        }
+        Some((oid, entry))
     });
     vfs_unlock();
 
+    // Step 2: missing file + O_CREAT → create under parent directory.
     let (oid, entry) = match lookup {
         Some(x) => x,
-        None => return reply_err(ep, ENOENT),
+        None => {
+            if flags & (O_CREAT as u64) == 0 {
+                return reply_err(ep, ENOENT);
+            }
+            vfs_lock();
+            let created = unsafe { shared_store() }.and_then(|store| {
+                let mut last_slash: Option<usize> = None;
+                for (i, &b) in name.iter().enumerate() { if b == b'/' { last_slash = Some(i); } }
+                let (parent, fname) = match last_slash {
+                    Some(pos) => {
+                        let parent_oid = if pos == 0 {
+                            ROOT_OID
+                        } else {
+                            match store.resolve_path(&name[..pos], ROOT_OID) {
+                                Ok(o) => o,
+                                Err(_) => return None,
+                            }
+                        };
+                        (parent_oid, &name[pos + 1..])
+                    }
+                    None => (ROOT_OID, name),
+                };
+                if fname.is_empty() { return None; }
+                let oid = store.create_in(fname, &[], parent).ok()?;
+                let entry = store.stat(oid)?;
+                Some((oid, entry))
+            });
+            vfs_unlock();
+            match created {
+                Some(x) => x,
+                None => return reply_err(ep, ENOENT),
+            }
+        }
     };
 
     let fd_idx = match fd_alloc() {
@@ -295,10 +339,53 @@ fn handle_open(ep: u64, msg: &IpcMsg) {
         size: entry.size,
         off: 0,
         dir_pos: 0,
+        flags,
     });
     let kind: u8 = if is_dir { 14 } else { 13 };
     let size = if is_dir { 0 } else { entry.size };
     reply_ok(ep, [fd_idx as u64, kind as u64, size, 0, 0, 0, 0, 0]);
+}
+
+fn handle_write(ep: u64, msg: &IpcMsg) {
+    let fd = msg.regs[0];
+    let len = (msg.regs[1] as usize).min(VFS_WRITE_CHUNK);
+
+    let mut slot = match fd_get(fd) {
+        Some(s) => s,
+        None => return reply_err(ep, EBADF),
+    };
+    if slot.is_dir { return reply_err(ep, EISDIR); }
+    if len == 0 { return reply_tag(ep, 0, [0; 8]); }
+
+    // Unpack payload from regs[2..8] (6 × 8 = 48 B).
+    let mut data = [0u8; VFS_WRITE_CHUNK];
+    for i in 0..6 {
+        data[i * 8..i * 8 + 8].copy_from_slice(&msg.regs[2 + i].to_le_bytes());
+    }
+    let payload = &data[..len];
+
+    // O_APPEND: re-seek to end-of-file before each write.
+    if slot.flags & (O_APPEND as u64) != 0 {
+        slot.off = slot.size;
+    }
+
+    let write_off = slot.off as usize;
+    vfs_lock();
+    let result = unsafe { shared_store() }
+        .ok_or(EIO)
+        .and_then(|store| store.write_obj_range(slot.oid, write_off, payload).map_err(|_| EIO));
+    vfs_unlock();
+
+    if let Err(e) = result {
+        return reply_err(ep, e);
+    }
+    slot.off += len as u64;
+    if slot.off > slot.size {
+        slot.size = slot.off;
+    }
+    fd_set(fd, slot);
+
+    reply_tag(ep, len as u64, [0; 8]);
 }
 
 fn handle_close(ep: u64, msg: &IpcMsg) {

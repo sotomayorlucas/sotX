@@ -4,12 +4,10 @@
 //! `no_std` port. Backed by an `alloc::collections::VecDeque<String>` with
 //! a fixed cap so the shell never unboundedly consumes its bump heap.
 //!
-//! **Persistence status:** `libs/sotos-common::vfs` currently exposes
-//! `vfs_open`/`vfs_read`/`vfs_close` but no `vfs_write`, so history lives
-//! only for the lifetime of the shell process. `load_from` is wired to
-//! the existing read path so a future `vfs_write` landing automatically
-//! brings `save_to` online — callers can already invoke both and get a
-//! benign `Err(-ENOSYS)` for now.
+//! **Persistence status:** as of B1.5e, `vfs_write` exists alongside
+//! `vfs_open`/`vfs_read`/`vfs_close`, so `save_to` persists history to
+//! the VFS (newline-terminated, oldest-to-newest). `load_from` is
+//! symmetric with the save path.
 
 extern crate alloc;
 
@@ -17,13 +15,11 @@ use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use sotos_common::linux_abi::{O_CREAT, O_TRUNC, O_WRONLY};
 use sotos_common::vfs;
 
 /// Default ring capacity (matches rustyline's historical default).
 pub const DEFAULT_MAX_LEN: usize = 1000;
-
-/// Errno returned when persistence is not yet implemented.
-const ENOSYS: i64 = -38;
 
 /// Command history ring + cursor for up/down navigation.
 ///
@@ -35,6 +31,20 @@ pub struct History {
     max_len: usize,
     cursor: Option<usize>,
     dirty: bool,
+}
+
+/// Write every byte of `buf` to `fd`, looping across VFS_WRITE chunks.
+/// Returns an errno on any IPC error or short write stall.
+fn write_all(fd: u64, buf: &[u8]) -> Result<(), i64> {
+    let mut written = 0usize;
+    while written < buf.len() {
+        let n = vfs::vfs_write(fd, &buf[written..])?;
+        if n == 0 {
+            return Err(-5); // EIO — server accepted but wrote nothing.
+        }
+        written += n;
+    }
+    Ok(())
 }
 
 impl History {
@@ -151,11 +161,28 @@ impl History {
         Ok(())
     }
 
-    /// Persist history to `path`. **Not yet implemented** — pending a
-    /// `vfs_write` wrapper in `sotos-common::vfs`. Returns `-ENOSYS` so
-    /// callers can branch on the error.
-    pub fn save_to(&self, _path: &[u8]) -> Result<(), i64> {
-        Err(ENOSYS)
+    /// Persist history to `path` via the VFS IPC server. Lines are
+    /// written oldest-first, newline-separated. Truncates any existing
+    /// file.
+    pub fn save_to(&self, path: &[u8]) -> Result<(), i64> {
+        let flags = (O_WRONLY | O_CREAT | O_TRUNC) as u64;
+        let open = vfs::vfs_open(path, flags)?;
+        // `lines` is newest-first; walk in reverse so the on-disk order
+        // matches what `load_from` expects.
+        let mut err: Option<i64> = None;
+        for line in self.lines.iter().rev() {
+            if let Err(e) = write_all(open.fd, line.as_bytes()) {
+                err = Some(e);
+                break;
+            }
+            if let Err(e) = write_all(open.fd, b"\n") {
+                err = Some(e);
+                break;
+            }
+        }
+        let close_res = vfs::vfs_close(open.fd);
+        if let Some(e) = err { return Err(e); }
+        close_res
     }
 }
 
