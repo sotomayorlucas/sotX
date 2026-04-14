@@ -137,26 +137,35 @@ pub fn cmd_bench() {
     print_u64(ITERS);
     print(b" round-trips...\n");
 
-    // Try creating an IPC endpoint (syscall 10 = EndpointCreate).
-    let ep = kernel_syscall0(10);
+    // Always-available syscall-overhead baseline (getpid, no IPC).
+    let start = rdtsc();
+    for _ in 0..ITERS {
+        crate::syscall::syscall0(39); // getpid
+    }
+    let elapsed = rdtsc().wrapping_sub(start);
+    print_bench_result(b"Syscall overhead (getpid)", ITERS, elapsed);
+
+    // Try the IPC path on top: create an endpoint and measure the cost
+    // of `call_timeout` returning -ETIMEDOUT (no receiver). Previous code
+    // used SYS_SEND (sync, blocks forever without a receiver) which hung
+    // the shell. SYS_CALL_TIMEOUT (135) with timeout=1 tick fails fast.
+    let ep = kernel_syscall0(10); // SYS_ENDPOINT_CREATE
     if ep <= 0 {
-        print(b"bench: endpoint_create failed, falling back to syscall-only timing\n");
-        let start = rdtsc();
-        for _ in 0..ITERS {
-            crate::syscall::syscall0(39); // getpid
-        }
-        let elapsed = rdtsc().wrapping_sub(start);
-        print_bench_result(b"Syscall overhead (getpid)", ITERS, elapsed);
+        print(b"bench: endpoint_create failed (ep=");
+        print_u64((-ep) as u64);
+        print(b"), skipping IPC measurement\n");
         return;
     }
 
-    // Measure IPC send (syscall 1) which returns immediately with no receiver.
+    // SYS_CALL_TIMEOUT: rdi packs ep_cap (low 32) + timeout_ticks (high 32).
+    let timeout_ticks: u64 = 1;
+    let rdi = (ep as u64 & 0xFFFFFFFF) | (timeout_ticks << 32);
     let start = rdtsc();
     for _ in 0..ITERS {
-        kernel_syscall3(1, ep as u64, 0, 0);
+        kernel_syscall3(135, rdi, 0, 0);
     }
     let elapsed = rdtsc().wrapping_sub(start);
-    print_bench_result(b"IPC send", ITERS, elapsed);
+    print_bench_result(b"IPC call (timed out)", ITERS, elapsed);
 }
 
 // --- caps ---
