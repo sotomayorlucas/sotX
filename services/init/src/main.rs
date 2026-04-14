@@ -233,6 +233,14 @@ pub extern "C" fn _start() -> ! {
         // Replay any kernel boot messages that were buffered in the console ring
         // before init had its framebuffer ready.
         unsafe { framebuffer::drain_console_ring(); }
+        // Hand the framebuffer off to the compositor **immediately**. The
+        // previous sweet spot was right before `start_lucas`, but ~20
+        // spawn_process calls + supervisor::run_smf_test (100 yields) +
+        // tier6d_demo::run could hang in real HW before that point,
+        // leaving init's fb_putchar racing the compositor's 30fps repaint.
+        // From here on, every init/child debug_print only hits serial;
+        // trace-boot keeps kernel-side FB text for diagnostic builds.
+        framebuffer::suspend();
     }
 
     // Clear kernel boot splash on serial and show Tokyo Night init header.
@@ -516,20 +524,9 @@ pub extern "C" fn _start() -> ! {
     // if let Some(ref mut b) = blk { run_fat_test(b); }
     // run_phase_validation();
 
-    // --- Phase 8.9: Hand the framebuffer off to the compositor ---
-    //
-    // Every init-side text path (kernel ring drain, `print!`, VTE glyph
-    // rasteriser, the sotos-gui chrome from `fb_init_gui`) has done its
-    // job by now: boot banner, stage progress, cap dumps, and SMF sweep
-    // are all on screen. From here on the Wayland compositor owns every
-    // pixel. Without this suspend, init's ~5-10 glyphs/sec of ongoing
-    // output would race the compositor's ~30 fps wallpaper repaint and
-    // corrupt the display on any framebuffer that doesn't match the
-    // legacy 1024x768 window chrome (observed on HP Pavilion 1366x768 /
-    // 1920x1080 panels as "pedazos de texto superpuestos").
-    framebuffer::suspend();
-
     // --- Phase 9: LUCAS shell ---
+    // (framebuffer::suspend() already called right after drain_console_ring
+    // above; see that site for rationale.)
     let boot_info = unsafe { &*(BOOT_INFO_ADDR as *const BootInfo) };
     print(b"LUCAS-DBG: guest_entry=");
     print_u64(boot_info.guest_entry);

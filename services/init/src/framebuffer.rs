@@ -914,6 +914,11 @@ impl vte::Perform for FbPerformer {
 /// Write a single character to the framebuffer console.
 pub(crate) unsafe fn fb_putchar(ch: u8) {
     if *FB_PTR.get() == 0 { return; }
+    // Respect the `suspend()` kill-switch: once the compositor owns the FB,
+    // any further init-side rasterisation would race the repaint cycle and
+    // corrupt the screen. Direct callers outside this module (boot_tests,
+    // child_handler) hit this path without checking FB_ACTIVE themselves.
+    if !*FB_ACTIVE.get() { return; }
     if (*VTE_PARSER.get()).is_none() {
         *VTE_PARSER.get() = Some(vte::Parser::new());
     }

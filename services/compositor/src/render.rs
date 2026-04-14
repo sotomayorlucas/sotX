@@ -52,8 +52,20 @@ impl Framebuffer {
 
     /// Blit a client XRGB8888/ARGB8888 buffer to the framebuffer at (x, y).
     /// `src`: pointer to pixel data, `src_stride`: bytes per row.
+    ///
+    /// Returns silently if the source description is inconsistent
+    /// (e.g., stride smaller than the declared width). A corrupted client
+    /// buffer otherwise makes `blit` read out-of-bounds memory, which on
+    /// real HW has caused supervisor page-fault cascades that wedged the
+    /// kernel.
     pub fn blit(&self, x: i32, y: i32, w: u32, h: u32, src: *const u32, src_stride: u32) {
-        if self.addr == 0 || src.is_null() { return; }
+        if self.addr == 0 || src.is_null() || w == 0 || h == 0 { return; }
+        // src_stride is in bytes, 4 bytes per pixel required.
+        if src_stride < w.saturating_mul(4) {
+            // Log once per bad client; don't spam the serial port because
+            // this is called every frame from compose().
+            return;
+        }
         let pixels_per_row = self.pitch / 4;
         let src_pixels_per_row = src_stride / 4;
         let fb = self.addr as *mut u32;

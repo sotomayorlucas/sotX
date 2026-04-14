@@ -1382,8 +1382,20 @@ fn compose() {
                 }
             }
         }
+        // Tweens request a follow-up frame, but don't keep DAMAGE sticky —
+        // the main loop already forces a refresh every N idle yields as a
+        // recovery, and the previous sticky behaviour could pin DAMAGE=true
+        // forever if a tween's TSC duration outlived the CPU's TSC rate
+        // assumptions (real Pavilion ~2 GHz vs the 1 GHz ticks_per_second
+        // the animation module was calibrated against). Result on real HW:
+        // compose() runs every loop iteration without yield → kernel
+        // scheduler starvation → silent hang.
         if tweens_active {
-            *DAMAGE.get() = true;
+            // Request one compose next iteration; the main loop clears
+            // DAMAGE after running compose, so this can't lock in.
+            if !*DAMAGE.get() {
+                *DAMAGE.get() = true;
+            }
         }
 
         // Draw all active toplevels.
