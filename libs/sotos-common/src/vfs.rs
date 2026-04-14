@@ -17,8 +17,11 @@
 //! | 6   | `VFS_GETDENTS64`| regs[0]=fd                                  | tag=name_len (0=EOF, neg=errno), regs[0]=oid, regs[1]=kind, regs[2..7]=name bytes (≤ 40 B) |
 //! | 11  | `VFS_CHDIR`     | path inline regs[0..6], len regs[7]         | tag=0 / -errno                                                            |
 //! | 12  | `VFS_FSTAT`     | regs[0]=fd                                  | same layout as VFS_STAT                                                   |
+//! | 13  | `VFS_WRITE`     | regs[0]=fd, regs[1]=len (<=48), regs[2..8]=data | tag=bytes_written (>=0) / -errno                                     |
 //!
 //! Paths travel inline only; anything >48 B gets `-ENAMETOOLONG`.
+//! `VFS_WRITE` sends at most 48 B per round-trip; the `vfs_write`
+//! wrapper loops until the whole buffer is transmitted.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -36,6 +39,7 @@ pub const VFS_STAT: u64 = 5;
 pub const VFS_GETDENTS64: u64 = 6;
 pub const VFS_CHDIR: u64 = 11;
 pub const VFS_FSTAT: u64 = 12;
+pub const VFS_WRITE: u64 = 13;
 
 /// Max path bytes that fit inline in a single IpcMsg (regs[0..6] = 48 B).
 pub const VFS_MAX_INLINE_PATH: usize = 48;
@@ -43,6 +47,8 @@ pub const VFS_MAX_INLINE_PATH: usize = 48;
 pub const VFS_READ_CHUNK: usize = 56;
 /// Max name bytes per VFS_GETDENTS64 entry.
 pub const VFS_DIRENT_NAME_MAX: usize = 40;
+/// Max data bytes per VFS_WRITE round-trip (regs[2..8] = 6 × 8 B).
+pub const VFS_WRITE_CHUNK: usize = 48;
 
 // Errno negatives used by the client (mirror subset of linux_abi).
 const ENAMETOOLONG: i64 = -36;
@@ -271,6 +277,48 @@ pub fn vfs_fstat(fd: u64) -> Result<StatResult, i64> {
         mtime: reply.regs[5],
         kind: reply.regs[6] as u8,
     })
+}
+
+/// Write `buf` to `fd`. Loops across multiple IPC round-trips
+/// (VFS_WRITE caps each request at 48 B of payload). Returns the
+/// number of bytes written (may be short if the server reports a
+/// short write; the caller can retry with the remainder).
+pub fn vfs_write(fd: u64, buf: &[u8]) -> Result<usize, i64> {
+    let ep = vfs_ep()?;
+    let mut total = 0usize;
+    while total < buf.len() {
+        let chunk_len = (buf.len() - total).min(VFS_WRITE_CHUNK);
+        let mut msg = IpcMsg::empty();
+        msg.tag = VFS_WRITE;
+        msg.regs[0] = fd;
+        msg.regs[1] = chunk_len as u64;
+        // Pack up to 48 B of payload into regs[2..8] as LE u64 chunks.
+        let mut pad = [0u8; VFS_WRITE_CHUNK];
+        pad[..chunk_len].copy_from_slice(&buf[total..total + chunk_len]);
+        for i in 0..6 {
+            msg.regs[2 + i] = u64::from_le_bytes([
+                pad[i * 8], pad[i * 8 + 1], pad[i * 8 + 2], pad[i * 8 + 3],
+                pad[i * 8 + 4], pad[i * 8 + 5], pad[i * 8 + 6], pad[i * 8 + 7],
+            ]);
+        }
+        let reply = sys::call(ep, &msg).map_err(|_| EIO)?;
+        let n = tag_to_result(reply.tag)? as usize;
+        if n == 0 {
+            // Server accepted the request but wrote nothing — treat as
+            // error rather than spinning forever.
+            if total == 0 {
+                return Err(EIO);
+            }
+            break;
+        }
+        total += n;
+        if n < chunk_len {
+            // Short write — caller can retry with the remainder, but we
+            // return the partial count rather than looping forever.
+            break;
+        }
+    }
+    Ok(total)
 }
 
 /// Change the server-side cwd for this client.

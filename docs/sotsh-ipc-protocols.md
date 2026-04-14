@@ -67,13 +67,14 @@ extend with sotsh-only ops. All tags fit in u32:
 
 | tag | op                 | notes                          |
 |----:|--------------------|--------------------------------|
-| 1   | `VFS_OPEN`         | path + flags → fd              |
+| 1   | `VFS_OPEN`         | path + flags → fd (O_CREAT/O_TRUNC/O_APPEND honoured) |
 | 2   | `VFS_CLOSE`        | fd → 0 / -errno                |
 | 3   | `VFS_READ`         | fd, count → chunked data       |
 | 5   | `VFS_STAT`         | path → inline stat fields      |
 | 6   | `VFS_GETDENTS64`   | fd → chunked dirent stream     |
 | 11  | `VFS_CHDIR`        | path → 0 / -errno (server-side cwd) |
 | 12  | `VFS_FSTAT`        | fd → inline stat fields        |
+| 13  | `VFS_WRITE`        | fd + chunk → bytes written (chunked) |
 
 Replies use `tag = 0` on success or `tag = (neg errno as u64)` on
 failure, exactly like sotfs (`main.rs:182, :236`). Errno constants from
@@ -141,6 +142,37 @@ Part D q3).
 **`VFS_CHDIR` (tag=11)**
 - request: path inline.
 - reply: `tag=0` ok, else `-errno`.
+
+**`VFS_WRITE` (tag=13)**
+- request: `regs[0] = fd`, `regs[1] = chunk_len` (≤ 48),
+  `regs[2..8] = up to 48 B of data` (LE-packed, 6 × 8 = 48 B — mirrors
+  the 40-B send chunk convention but uses one extra reg since no
+  `max_bytes` return field is needed).
+- reply: `tag = bytes_written` (non-negative) or `tag = -errno`.
+  Short writes are permitted — client loops with successive chunks
+  until all data is transmitted. On success the fd's file offset
+  advances by the written bytes.
+- `O_APPEND` semantics: if the fd was opened with `O_APPEND`, the server
+  re-seeks to end-of-file before each write.
+- `O_CREAT`/`O_TRUNC` are honoured at `VFS_OPEN` time: opening with
+  `O_CREAT` creates a zero-length file if missing; `O_TRUNC` zeroes an
+  existing file. These flags are ignored for directory opens.
+
+### Flow example — `ls > out.txt`
+
+```text
+1. sotsh → call(vfs_ep, VFS_OPEN "/out.txt",
+                         flags=O_WRONLY|O_CREAT|O_TRUNC)
+   reply: tag=0, regs[0]=fd=7, regs[1]=13, regs[2]=0.
+
+2. loop over 48-B chunks of rendered output:
+     sotsh → call(vfs_ep, VFS_WRITE fd=7, len=N, data=…)
+     reply: tag=N (bytes_written).
+   until all bytes transmitted.
+
+3. sotsh → call(vfs_ep, VFS_CLOSE fd=7)
+   reply: tag=0.
+```
 
 ### Flow example — `ls /tmp`
 
