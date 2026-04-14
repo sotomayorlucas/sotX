@@ -1,94 +1,168 @@
-//! sotSh REPL entry point.
+//! sotSh REPL entry point (native sotOS userspace binary).
+//!
+//! Address layout: the linker places `.text` at 0x1000000 (see
+//! `linker.ld`). A fixed-size BSS bump allocator backs `alloc::*`; no
+//! dynamic mmap() support yet. The REPL reads scancodes from the shared
+//! KB ring and echoes typed characters through the debug serial.
 
-use rustyline::error::ReadlineError;
-use rustyline::history::DefaultHistory;
-use rustyline::Editor;
+#![no_std]
+#![no_main]
+
+extern crate alloc;
+
+use core::sync::atomic::{AtomicUsize, Ordering};
+
+use sotos_common::sys;
 
 use sotos_sotsh::ast::{Ast, Command};
 use sotos_sotsh::builtins;
 use sotos_sotsh::context::Context;
 use sotos_sotsh::error::Error;
+use sotos_sotsh::linedit::LineEditor;
 use sotos_sotsh::parser;
 use sotos_sotsh::value::Value;
 
-const PROMPT: &str = "sotsh> ";
+// ---------------------------------------------------------------------------
+// Bump allocator
+// ---------------------------------------------------------------------------
+//
+// `alloc::vec::Vec`, `alloc::string::String`, and chumsky's internals all
+// need a global allocator. We follow the pattern used by `services/net` and
+// `services/sotfs`: a fixed 512 KiB BSS buffer with lock-free bump
+// allocation. `dealloc` is a no-op — the REPL loop is short-lived enough
+// that fragmentation is acceptable for the B1 milestone. B4 will swap this
+// for a proper heap (likely `linked_list_allocator`).
 
-type ReplEditor = Editor<(), DefaultHistory>;
+const HEAP_SIZE: usize = 512 * 1024;
+static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
+static HEAP_POS: AtomicUsize = AtomicUsize::new(0);
 
-fn main() -> std::io::Result<()> {
-    let mut ctx = Context::new()?;
-    let mut rl: ReplEditor = match ReplEditor::new() {
-        Ok(e) => e,
-        Err(e) => {
-            eprintln!("sotsh: failed to init line editor: {e}");
-            std::process::exit(1);
+struct BumpAlloc;
+
+unsafe impl core::alloc::GlobalAlloc for BumpAlloc {
+    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
+        let size = layout.size();
+        let align = layout.align();
+        loop {
+            let pos = HEAP_POS.load(Ordering::Relaxed);
+            let aligned = (pos + align - 1) & !(align - 1);
+            let new_pos = aligned + size;
+            if new_pos > HEAP_SIZE {
+                return core::ptr::null_mut();
+            }
+            if HEAP_POS
+                .compare_exchange_weak(pos, new_pos, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                // Safety: HEAP is a BSS buffer with a static lifetime.
+                // Successful CAS reserved [aligned, aligned+size). Using
+                // `addr_of_mut!` avoids forming a reference to the mutable
+                // static (2024-edition-compatible).
+                let base = core::ptr::addr_of_mut!(HEAP) as *mut u8;
+                return unsafe { base.add(aligned) };
+            }
         }
-    };
+    }
+    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: core::alloc::Layout) {}
+}
 
+#[global_allocator]
+static ALLOCATOR: BumpAlloc = BumpAlloc;
+
+// ---------------------------------------------------------------------------
+// Serial output helpers
+// ---------------------------------------------------------------------------
+
+fn write_bytes(s: &[u8]) {
+    for &b in s {
+        sys::debug_print(b);
+    }
+}
+
+const PROMPT: &[u8] = b"sotsh> ";
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
+#[no_mangle]
+pub extern "C" fn _start() -> ! {
+    write_bytes(b"sotsh: entered REPL\n");
     print_banner();
 
+    let mut ctx = Context::new();
+    let mut editor = LineEditor::new();
+
     loop {
-        match rl.readline(PROMPT) {
-            Ok(line) => {
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                let _ = rl.add_history_entry(trimmed);
+        let line = editor.read_line(PROMPT);
+        let trimmed = line.trim_ascii();
+        if trimmed.is_empty() {
+            continue;
+        }
 
-                if let Some(stop) = handle_meta(trimmed) {
-                    if stop {
-                        break;
-                    }
-                    continue;
-                }
+        // Meta-commands (':quit' / ':help') short-circuit the parser.
+        match handle_meta(trimmed) {
+            Some(true) => break,
+            Some(false) => continue,
+            None => {}
+        }
 
-                match run_line(trimmed, &mut ctx) {
-                    Ok(value) => print_value(&value),
-                    Err(e) => eprintln!("sotsh: {e}"),
-                }
-            }
-            Err(ReadlineError::Interrupted) => {
-                // Ctrl-C: drop the current line, keep the REPL alive.
+        // Convert the line bytes to a &str for the parser. Lines are
+        // ASCII-only today (the scancode table doesn't produce multi-byte
+        // UTF-8), so this is safe; any non-ASCII would just fail to parse.
+        let s = match core::str::from_utf8(trimmed) {
+            Ok(s) => s,
+            Err(_) => {
+                write_bytes(b"sotsh: non-UTF-8 input rejected\n");
                 continue;
             }
-            Err(ReadlineError::Eof) => {
-                println!();
-                break;
-            }
+        };
+
+        match run_line(s, &mut ctx) {
+            Ok(value) => print_value(&value),
             Err(e) => {
-                eprintln!("sotsh: readline error: {e}");
-                break;
+                write_bytes(b"sotsh: ");
+                write_display(&e);
+                write_bytes(b"\n");
             }
         }
     }
 
-    Ok(())
+    write_bytes(b"sotsh: exit\n");
+    sys::thread_exit();
 }
+
+// ---------------------------------------------------------------------------
+// Line handling
+// ---------------------------------------------------------------------------
 
 /// Handle `:` meta-commands. Returns `Some(true)` to exit the REPL,
 /// `Some(false)` when the line was a consumed meta-command, and `None`
 /// when the line should flow through the normal pipeline path.
-fn handle_meta(line: &str) -> Option<bool> {
-    if !line.starts_with(':') {
+fn handle_meta(line: &[u8]) -> Option<bool> {
+    if line.first() != Some(&b':') {
         return None;
     }
-    let mut parts = line[1..].split_whitespace();
-    match parts.next().unwrap_or("") {
-        "quit" | "q" | "exit" => Some(true),
-        "help" | "h" | "?" => {
-            println!("{}", help_text());
+    // The verb is the first whitespace-delimited token after ':'.
+    let rest = &line[1..];
+    let verb_end = rest
+        .iter()
+        .position(|&c| c == b' ' || c == b'\t')
+        .unwrap_or(rest.len());
+    let verb = &rest[..verb_end];
+    match verb {
+        b"quit" | b"q" | b"exit" => Some(true),
+        b"help" | b"h" | b"?" => {
+            write_bytes(help_text());
             Some(false)
         }
-        other => {
-            eprintln!("sotsh: unknown meta-command ':{other}' (try :help)");
+        _ => {
+            write_bytes(b"sotsh: unknown meta-command (try :help)\n");
             Some(false)
         }
     }
 }
 
-/// Parse one line and execute its pipeline. The final stage's [`Value`] is
-/// returned — Wave-2 will grow this into streaming intermediate values.
 fn run_line(line: &str, ctx: &mut Context) -> Result<Value, Error> {
     let ast = parser::parse(line)?;
     let Ast::Pipeline(cmds) = ast;
@@ -104,7 +178,7 @@ fn execute_pipeline(cmds: &[Command], ctx: &mut Context) -> Result<Value, Error>
     Ok(last)
 }
 
-/// Stub capability check. Wave-2+ will wire this to the real cap set held
+/// Stub capability check. B2+ will wire this to the real cap set held
 /// in [`Context`]; today every cap is "held" so dispatch succeeds.
 fn check_caps(name: &str) -> Result<(), Error> {
     let _required = builtins::required_caps(name);
@@ -112,21 +186,47 @@ fn check_caps(name: &str) -> Result<(), Error> {
 }
 
 fn print_value(v: &Value) {
-    match v {
-        Value::Nil => {}
-        other => println!("{other}"),
+    if matches!(v, Value::Nil) {
+        return;
     }
+    write_display(v);
+    write_bytes(b"\n");
 }
 
 fn print_banner() {
-    println!("sotSh v0.1.0 — capability-first native shell for sotOS");
-    println!("Type :help for meta-commands, :quit to exit.");
+    write_bytes(b"sotSh v0.1.0 -- capability-first native shell for sotOS\n");
+    write_bytes(b"Type :help for meta-commands, :quit to exit.\n");
 }
 
-fn help_text() -> &'static str {
-    "meta-commands:\n\
-     \x20  :help, :h, :?       show this help\n\
-     \x20  :quit, :q, :exit    leave the shell\n\
-     \n\
-     built-ins (Wave-2 work in progress): ls cat cd ps cap arm\n"
+fn help_text() -> &'static [u8] {
+    b"meta-commands:\n\
+      :help, :h, :?       show this help\n\
+      :quit, :q, :exit    leave the shell\n\
+      built-ins: ls cat cd ps cap arm (ls/cat/cd are stubbed pending B2a)\n"
+}
+
+/// `core::fmt::Display` -> serial, via a tiny adapter. Avoids pulling in
+/// `alloc::format!` (which would allocate per-call).
+fn write_display<T: core::fmt::Display>(v: &T) {
+    use core::fmt::Write;
+    struct SerialWriter;
+    impl core::fmt::Write for SerialWriter {
+        fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            write_bytes(s.as_bytes());
+            Ok(())
+        }
+    }
+    let _ = write!(SerialWriter, "{v}");
+}
+
+// ---------------------------------------------------------------------------
+// Panic handler
+// ---------------------------------------------------------------------------
+
+#[panic_handler]
+fn panic(_info: &core::panic::PanicInfo) -> ! {
+    write_bytes(b"SOTSH PANIC\n");
+    loop {
+        sys::yield_now();
+    }
 }

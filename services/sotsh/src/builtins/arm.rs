@@ -32,32 +32,3 @@ pub fn run(_args: &[Value], _ctx: &mut Context) -> Result<Value, Error> {
         .collect();
     Ok(Value::Table(rows))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn returns_four_profiles() {
-        let mut ctx = Context::new().unwrap();
-        let v = run(&[], &mut ctx).unwrap();
-        let Value::Table(rows) = v else {
-            panic!("expected Table");
-        };
-        assert_eq!(rows.len(), 4);
-    }
-
-    #[test]
-    fn contains_ubuntu_webserver() {
-        let mut ctx = Context::new().unwrap();
-        let Value::Table(rows) = run(&[], &mut ctx).unwrap() else {
-            panic!("expected Table");
-        };
-        let found = rows.iter().any(|row| {
-            row.cells.iter().any(|(k, v)| {
-                k == "name" && matches!(v, Value::Str(s) if s == "ubuntu_webserver")
-            })
-        });
-        assert!(found, "ubuntu_webserver profile not found");
-    }
-}

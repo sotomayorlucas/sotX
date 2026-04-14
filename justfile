@@ -55,6 +55,7 @@ USER_SOT_LAUNCHER := "services/sot-launcher/target/x86_64-unknown-none/debug/sot
 USER_SOT_NOTIFY := "services/sot-notify/target/x86_64-unknown-none/debug/sot-notify"
 USER_ABI_FUZZ := "services/abi-fuzz/target/x86_64-unknown-none/debug/abi-fuzz"
 USER_SOTFS := "services/sotfs/target/x86_64-unknown-none/debug/sotos-sotfs-svc"
+USER_SOTSH := "services/sotsh/target/x86_64-unknown-none/debug/sotsh"
 USER_CAP_ESC_TEST := "services/cap-escalation-test/target/x86_64-unknown-none/debug/cap-escalation-test"
 USER_IPC_STORM := "services/ipc-storm/target/x86_64-unknown-none/debug/ipc-storm"
 USER_SMP_STRESS := "services/smp-stress/target/x86_64-unknown-none/debug/smp-stress"
@@ -80,6 +81,10 @@ build-user-lkl:
 # Build LUCAS shell (Linux-ABI guest binary)
 build-shell:
     cd services/lucas-shell && CARGO_ENCODED_RUSTFLAGS="$(printf '%s\x1f%s\x1f%s' '-Clink-arg=-Tlinker.ld' '-Crelocation-model=static' '-Zstack-protector=strong')" cargo build
+
+# Build sotSh (native sotOS shell, B1 port: no_std + x86_64-unknown-none)
+build-sotsh:
+    cd services/sotsh && CARGO_ENCODED_RUSTFLAGS="$(printf '%s\x1f%s\x1f%s' '-Clink-arg=-Tlinker.ld' '-Crelocation-model=static' '-Zstack-protector=strong')" cargo build
 
 # Build keyboard driver (separate process)
 build-kbd:

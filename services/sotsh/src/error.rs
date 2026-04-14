@@ -1,5 +1,10 @@
 //! sotSh error type.
+//!
+//! `Error` is independent of `std::io` — this crate is `no_std`. The `Io`
+//! variant carries a raw errno (negative `i32` as returned by sotOS
+//! syscalls via `sotos_common::sys`).
 
+use alloc::string::String;
 use core::fmt;
 
 #[derive(Debug)]
@@ -8,7 +13,11 @@ pub enum Error {
     CapDenied(&'static str),
     UnknownBuiltin(String),
     BadArgs(String),
-    Io(std::io::Error),
+    /// Raw errno from a `sotos_common::sys` call. Kept as an `i32` so
+    /// built-ins can forward whatever the kernel actually returned
+    /// without lossy mapping to a bespoke error enum.
+    Io(i32),
+    Other(&'static str),
 }
 
 impl fmt::Display for Error {
@@ -18,22 +27,8 @@ impl fmt::Display for Error {
             Error::CapDenied(c) => write!(f, "capability denied: {c}"),
             Error::UnknownBuiltin(n) => write!(f, "unknown built-in: {n}"),
             Error::BadArgs(s) => write!(f, "bad arguments: {s}"),
-            Error::Io(e) => write!(f, "io: {e}"),
+            Error::Io(e) => write!(f, "io: errno {e}"),
+            Error::Other(s) => write!(f, "{s}"),
         }
-    }
-}
-
-impl std::error::Error for Error {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Error::Io(e) => Some(e),
-            _ => None,
-        }
-    }
-}
-
-impl From<std::io::Error> for Error {
-    fn from(e: std::io::Error) -> Self {
-        Error::Io(e)
     }
 }

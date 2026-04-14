@@ -6,6 +6,8 @@
 //! Future variants: `Fd(CapRef)` for capability-tagged file descriptors,
 //! `Graph(DagId)` for sotFS DAG references.
 
+use alloc::string::String;
+use alloc::vec::Vec;
 use core::fmt;
 
 /// A value moving between built-ins.

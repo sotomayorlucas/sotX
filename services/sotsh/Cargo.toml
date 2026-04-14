@@ -3,13 +3,15 @@ name = "sotos-sotsh"
 version = "0.1.0"
 edition = "2021"
 
-# Isolate from the root x86_64-unknown-none workspace. sotsh is a standard
-# userspace binary that uses std/alloc — it builds for the host target.
+# Isolate from the root workspace — sotsh is a native sotOS userspace
+# binary that builds against x86_64-unknown-none with its own config.
 [workspace]
 
 [dependencies]
-chumsky = { version = "0.9", default-features = false, features = ["std"] }
-rustyline = { version = "13", default-features = false }
+# chumsky 0.9 with default features off drops `std` + `spill-stack` and
+# keeps the parser no_std-friendly (chumsky still pulls in `alloc` itself).
+chumsky = { version = "0.9", default-features = false }
+sotos-common = { path = "../../libs/sotos-common" }
 
 [lib]
 name = "sotos_sotsh"
@@ -19,6 +21,8 @@ path = "src/lib.rs"
 name = "sotsh"
 path = "src/main.rs"
 
-# Leave panic strategy at the default (unwind on host targets). The repo
-# root .cargo/config.toml forces build-std, and mixing panic=abort for the
-# bin with unwinding std/test causes duplicate lang-item errors.
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
