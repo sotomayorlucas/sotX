@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "kernel",
     "libs/sotos-common",
+    "libs/sotos-linux-abi",
     "libs/sotos-pci",
     "libs/sotos-virtio",
     "libs/sotos-objstore",

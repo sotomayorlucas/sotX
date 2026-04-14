@@ -11,6 +11,7 @@ edition = "2021"
 
 [dependencies]
 sotos-common = { path = "../../libs/sotos-common" }
+sotos-linux-abi = { path = "../../libs/sotos-linux-abi", default-features = false, features = ["backend-lucas"] }
 sotos-deception = { path = "../../personality/common/deception" }
 sotos-provenance = { path = "../../personality/common/provenance" }
 sot-fma = { path = "../../libs/sot-fma" }
@@ -37,6 +38,11 @@ ed25519-compact = { version = "2", default-features = false }
 default = ["trace"]
 trace = []
 https-proxy = []
+# Linux ABI backend selection (forwarded to sotos-linux-abi).
+# backend-lucas is on implicitly via the dep above; this flag exists so
+# downstream configs can toggle backends symmetrically.
+backend-lucas = ["sotos-linux-abi/backend-lucas"]
+backend-lkl = ["sotos-linux-abi/backend-lkl"]
 
 [profile.dev]
 panic = "abort"
