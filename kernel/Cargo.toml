@@ -18,6 +18,13 @@ test-shutdown = []
 # userspace emits via `SYS_DEBUG_PRINT` ends up on the laptop screen.
 # Default off: QEMU hands off so the compositor owns the FB cleanly.
 trace-boot = []
+# Enable to auto-load the Wayland compositor, sotos-term and hello-gui
+# from the initrd at boot. OFF by default: the kernel hands control to
+# init's FB text console and LUCAS shell renders directly on the framebuffer,
+# which is much more robust on real laptops. With this feature, boot ends in
+# the LUCAS Terminal Wayland window exactly like the QEMU demo.
+# Mutually independent from `trace-boot`.
+gui-boot = []
 
 [dependencies]
 limine = "0.5"

@@ -233,14 +233,25 @@ pub extern "C" fn _start() -> ! {
         // Replay any kernel boot messages that were buffered in the console ring
         // before init had its framebuffer ready.
         unsafe { framebuffer::drain_console_ring(); }
-        // Hand the framebuffer off to the compositor **immediately**. The
-        // previous sweet spot was right before `start_lucas`, but ~20
-        // spawn_process calls + supervisor::run_smf_test (100 yields) +
-        // tier6d_demo::run could hang in real HW before that point,
-        // leaving init's fb_putchar racing the compositor's 30fps repaint.
-        // From here on, every init/child debug_print only hits serial;
-        // trace-boot keeps kernel-side FB text for diagnostic builds.
-        framebuffer::suspend();
+
+        // Hand the framebuffer off to the compositor only if a compositor
+        // service will actually come up (`gui-boot` kernel feature). On a
+        // console-only build the init-side FB text console is what LUCAS
+        // shell renders into — suspending it would leave the user with a
+        // blank screen and no interactive shell.
+        //
+        // Detection: try to look up the compositor service. It's spawned by
+        // the kernel before init runs when `gui-boot` is set. The service
+        // registers its IPC endpoint during its own startup, so allow a few
+        // yields for it to appear before we decide.
+        for _ in 0..500 { sys::yield_now(); }
+        let compositor_name = b"compositor";
+        if sys::svc_lookup(
+            compositor_name.as_ptr() as u64,
+            compositor_name.len() as u64,
+        ).is_ok() {
+            framebuffer::suspend();
+        }
     }
 
     // Clear kernel boot splash on serial and show Tokyo Night init header.

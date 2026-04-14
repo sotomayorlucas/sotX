@@ -1170,11 +1170,19 @@ fn load_initrd(cr3: u64) {
         kdebug!("  initrd: found 'xhci' ({} bytes)", xhci_data.len());
         load_xhci_process(xhci_data, cr3);
     }
-    // Under `trace-boot` we skip every Wayland/GUI service so the kernel
-    // framebuffer text renderer stays the only thing touching the screen.
-    // Without this the compositor repaints the wallpaper every ~33 ms in
-    // `compose()`, burying the kernel's boot logs before they can be read.
-    #[cfg(not(feature = "trace-boot"))]
+    // GUI services (compositor, sotos-term, hello-gui) are opt-in via the
+    // `gui-boot` cargo feature. Default boot stays in the init-side FB text
+    // console so LUCAS shell renders directly on the framebuffer — much
+    // more robust on real HW where the compositor's 30fps repaint cycle
+    // competes with init's VTE renderer and accumulates VMM CoW pressure
+    // under Tier 6 demos. Users can opt in with:
+    //     cargo build --package sotos-kernel --features gui-boot
+    // or later spawn the compositor explicitly from LUCAS (future work).
+    //
+    // `trace-boot` keeps the kernel-side FB text renderer active through
+    // the whole boot for serial-less diagnostics; it's independent of
+    // whether GUI services are loaded.
+    #[cfg(feature = "gui-boot")]
     {
         if let Some(comp_data) = found[7] {
             kdebug!("  initrd: found 'compositor' ({} bytes)", comp_data.len());
@@ -1188,10 +1196,6 @@ fn load_initrd(cr3: u64) {
             kdebug!("  initrd: found 'sotos-term' ({} bytes)", term_data.len());
             load_sotos_term_process(term_data);
         }
-    }
-    #[cfg(feature = "trace-boot")]
-    {
-        kerr!("trace-boot: compositor/hello-gui/sotos-term suppressed");
     }
 }
 
