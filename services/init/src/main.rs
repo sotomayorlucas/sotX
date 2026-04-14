@@ -572,15 +572,17 @@ pub extern "C" fn _start() -> ! {
     // returns -EIO until SHARED_STORE_PTR is set.
     vfs_service::start_vfs_service();
 
-    // B3: opt-in sotSh boot integration. When the `shell-sotsh` cargo feature
-    // is enabled (e.g. `just run-sotsh`), load the native sotOS shell from
-    // initrd and spawn it as a plain (non-redirected) thread IN ADDITION to
-    // lucas-shell. Both are live; test rigs can interact with either over IPC.
-    // Default build: feature off, only lucas-shell runs -- behavior unchanged.
-    #[cfg(feature = "shell-sotsh")]
+    // B5: default shell swap. sotsh (native sotOS shell, B1 port) is now the
+    // sole boot shell. lucas-shell is opt-in legacy via the `shell-lucas`
+    // cargo feature (covers the post-B4 soak period; slated for removal).
+    // The deprecated `shell-sotsh` feature pulls in `shell-lucas` so old
+    // `just run-sotsh` invocations continue to spawn both shells.
     spawn_sotsh_native();
 
+    #[cfg(feature = "shell-lucas")]
     start_lucas(blk);
+    #[cfg(not(feature = "shell-lucas"))]
+    let _ = blk;
 
     sys::thread_exit();
 }
@@ -1327,6 +1329,10 @@ fn run_fat_test(blk: &mut sotos_virtio::blk::VirtioBlk) {
 // ---------------------------------------------------------------------------
 
 /// Set up LUCAS: create handler + guest threads, establish IPC redirect.
+///
+/// Post-B5: opt-in legacy. Only compiled when the `shell-lucas` cargo
+/// feature is enabled. sotsh is the default shell (see `spawn_sotsh_native`).
+#[cfg(feature = "shell-lucas")]
 fn start_lucas(blk: Option<VirtioBlk>) {
     let boot_info = unsafe { &*(BOOT_INFO_ADDR as *const BootInfo) };
 
@@ -1376,7 +1382,7 @@ fn start_lucas(blk: Option<VirtioBlk>) {
 }
 
 // ---------------------------------------------------------------------------
-// B3 -- sotSh native boot integration (opt-in via `shell-sotsh` cargo feature)
+// B5 -- sotSh native boot integration (default shell, always spawned)
 // ---------------------------------------------------------------------------
 //
 // sotSh is a native sotOS userspace binary (B1 port: no_std, x86_64-unknown-
@@ -1394,8 +1400,8 @@ fn start_lucas(blk: Option<VirtioBlk>) {
 // thread runs), allocates a fresh stack, and spawns a native thread.
 //
 // On success the boot log prints `sotsh: spawned (entry=..)` so a `grep
-// 'sotsh: spawned'` on serial output confirms the feature-gated path ran.
-#[cfg(feature = "shell-sotsh")]
+// 'sotsh: spawned'` on serial output confirms the path ran. Post-B5 this
+// runs unconditionally on every boot (sotsh is the default shell).
 fn spawn_sotsh_native() {
     use exec::{EXEC_BUF_BASE, EXEC_BUF_PAGES, EXEC_LOCK, MAP_WRITABLE,
                map_elf_segments, map_temp_buf, parse_elf_goblin, unmap_temp_buf};
