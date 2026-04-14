@@ -18,15 +18,21 @@ pub enum Ast {
     Pipeline(Pipeline),
 }
 
-/// A pipeline: `cmd1 | cmd2 | ... | cmdN`.
+/// A pipeline: `cmd1 | cmd2 | ... | cmdN` optionally followed by `&`.
 ///
 /// `commands` is guaranteed non-empty by the parser. Stdin redirects are
 /// only meaningful on `commands[0]`; stdout redirects only on the last
 /// command. The parser accepts them anywhere syntactically but the runtime
 /// may warn / error if placed mid-pipeline.
+///
+/// `background = true` when the pipeline ended with a `&` terminator
+/// (B4b job-control). The runtime records a [`Job`](crate::context::Job)
+/// entry and returns immediately; actual threaded backgrounding is a
+/// follow-up (see runtime.rs).
 #[derive(Debug, Clone)]
 pub struct Pipeline {
     pub commands: Vec<Command>,
+    pub background: bool,
 }
 
 /// A single invocation: `name arg1 arg2 ...` plus optional redirections.
@@ -40,6 +46,11 @@ pub struct Command {
     pub stdout: Option<Redirect>,
     /// `true` when the stdout redirect was `>>` (append), `false` for `>`.
     pub append: bool,
+    /// Command-scoped `VAR=val` prefixes (à la bash). Parsed before the
+    /// command name; merged into the runtime env for this command only.
+    /// When the command name is empty, these are set as permanent
+    /// assignments in `ctx.env` instead (handled by the runtime).
+    pub prefix_env: Vec<(String, String)>,
 }
 
 /// Where a redirection sources / sinks data.
