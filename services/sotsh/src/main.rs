@@ -35,7 +35,16 @@ use sotos_sotsh::value::Value;
 // that fragmentation is acceptable for the B1 milestone. B4 will swap this
 // for a proper heap (likely `linked_list_allocator`).
 
-const HEAP_SIZE: usize = 512 * 1024;
+// 4 MiB bump heap. Sized so that a single `ls` call over a reasonable
+// directory plus the intermediate chumsky-parser state fits comfortably;
+// 512 KiB was enough for the REPL prompt + ":help" but any builtin that
+// returns a `Value::Table` of non-trivial size OOM'd the allocator and
+// tripped `alloc::alloc::handle_alloc_error` (seen as
+// `SOTSH PANIC at alloc/src/alloc.rs:553`). The bump allocator never
+// frees, so the effective working set is "sum of all allocations since
+// `_start`"; budget generously. 4 MiB lands in BSS, no runtime cost
+// beyond the binary growing from ~13 MiB to ~17 MiB.
+const HEAP_SIZE: usize = 4 * 1024 * 1024;
 static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 static HEAP_POS: AtomicUsize = AtomicUsize::new(0);
 
