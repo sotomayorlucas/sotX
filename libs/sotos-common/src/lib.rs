@@ -19,6 +19,7 @@ pub mod linux_abi;
 pub mod spsc;
 pub mod trace;
 pub mod typed_channel;
+pub mod vfs;
 
 // ---------------------------------------------------------------
 // SyncUnsafeCell — Rust 2024-safe replacement for `static mut`
@@ -2091,6 +2092,118 @@ pub mod sys {
     #[cfg(not(target_os = "none"))]
     #[inline(always)]
     pub fn vm_run_bzimage(_vm_cap: u64) -> Result<(), i64> {
+        Err(-38)
+    }
+
+    // ---------------------------------------------------------------
+    // Deception query IPC client (B1.5d).
+    //
+    // Mirrors the server in `services/init/src/deception_service.rs`.
+    // Wire format is documented there and in
+    // `docs/sotsh-ipc-protocols.md` Part B.
+    // ---------------------------------------------------------------
+
+    /// Operation tag for the single query op.
+    pub const DECEPTION_QUERY_ARMS: u64 = 1;
+
+    /// Reply `tag` used to signal end-of-list.
+    pub const DECEPTION_EOT: u64 = 0xFFFF_FFFF;
+
+    /// Maximum number of builtin profiles returned in one walk.
+    /// Matches `sotos_deception::BUILTIN_PROFILE_COUNT`.
+    pub const DECEPTION_MAX_ARMS: usize = 4;
+
+    /// Plain-data view of one deception profile as advertised over IPC.
+    /// `name` is NUL-padded; `name_len` is the significant byte count.
+    #[derive(Clone, Copy)]
+    pub struct DeceptionArm {
+        pub name: [u8; 32],
+        pub name_len: u8,
+        pub active: bool,
+    }
+
+    impl DeceptionArm {
+        pub const fn empty() -> Self {
+            Self {
+                name: [0; 32],
+                name_len: 0,
+                active: false,
+            }
+        }
+        pub fn name_bytes(&self) -> &[u8] {
+            &self.name[..self.name_len as usize]
+        }
+    }
+
+    /// Cached deception endpoint cap. Zero = not yet looked up.
+    static DECEPTION_EP_CACHE: core::sync::atomic::AtomicU64 =
+        core::sync::atomic::AtomicU64::new(0);
+
+    /// Look up (or return cached) `"deception"` service endpoint.
+    fn deception_ep() -> Result<u64, i64> {
+        let c = DECEPTION_EP_CACHE.load(core::sync::atomic::Ordering::Acquire);
+        if c != 0 {
+            return Ok(c);
+        }
+        let name = b"deception";
+        let ep = svc_lookup(name.as_ptr() as u64, name.len() as u64)?;
+        DECEPTION_EP_CACHE.store(ep, core::sync::atomic::Ordering::Release);
+        Ok(ep)
+    }
+
+    /// Walk the list of builtin deception profiles. Fills `out` with up
+    /// to `DECEPTION_MAX_ARMS` entries and returns the count. Issues one
+    /// IPC call per entry + one for the EOT sentinel, as specified in
+    /// the design doc. No heap required — the caller provides storage.
+    #[cfg(target_os = "none")]
+    pub fn deception_query_arms(
+        out: &mut [DeceptionArm; DECEPTION_MAX_ARMS],
+    ) -> Result<usize, i64> {
+        let ep = deception_ep()?;
+
+        let mut count: usize = 0;
+        // Bound the loop defensively: we expect at most
+        // DECEPTION_MAX_ARMS + 1 round-trips (last one returns EOT).
+        for _ in 0..=DECEPTION_MAX_ARMS {
+            let req = super::IpcMsg {
+                tag: DECEPTION_QUERY_ARMS,
+                regs: [0; 8],
+            };
+            let reply = call(ep, &req)?;
+            if reply.tag == DECEPTION_EOT {
+                return Ok(count);
+            }
+            // Guard against unexpected errnos (negative tag).
+            let idx = reply.tag as i64;
+            if idx < 0 {
+                return Err(idx);
+            }
+            if count >= DECEPTION_MAX_ARMS {
+                // Server returned more entries than we can store.
+                return Ok(count);
+            }
+
+            let mut arm = DeceptionArm::empty();
+            arm.active = reply.regs[0] != 0;
+            // Unpack 32 bytes of name from regs[1..=4].
+            for chunk in 0..4 {
+                let bytes = reply.regs[1 + chunk].to_le_bytes();
+                arm.name[chunk * 8..chunk * 8 + 8].copy_from_slice(&bytes);
+            }
+            let raw_len = reply.regs[5];
+            arm.name_len = if raw_len > 32 { 32 } else { raw_len as u8 };
+            out[count] = arm;
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    /// Host-side stub so unit tests on Linux/Windows can link this
+    /// crate without pulling in the syscall ABI.
+    #[cfg(not(target_os = "none"))]
+    pub fn deception_query_arms(
+        _out: &mut [DeceptionArm; DECEPTION_MAX_ARMS],
+    ) -> Result<usize, i64> {
         Err(-38)
     }
 }

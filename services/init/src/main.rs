@@ -90,12 +90,14 @@ mod udev;
 mod child_handler;
 mod lucas_handler;
 mod lkl;
+mod vfs_service;
 mod wine_diag;
 mod boot_tests;
 mod sot_types;
 mod sot_bridge;
 mod crossbow_demo;
 mod deception_demo;
+mod deception_service;
 mod fma_demo;
 mod tier4_demo;
 mod tier5_demo;
@@ -423,6 +425,13 @@ pub extern "C" fn _start() -> ! {
     // path with the Ubuntu 22.04 webserver profile.
     spawn_process(b"attacker");
     for _ in 0..200 { sys::yield_now(); }
+
+    // Start the deception-query IPC service (B1.5d). Registers as
+    // "deception" and serves DECEPTION_QUERY_ARMS over a new endpoint.
+    // Consumed by the sotsh `arm` builtin; see
+    // `docs/sotsh-ipc-protocols.md` Part B.
+    deception_service::start();
+
     deception_demo::run();
 
     // --- Phase 6d2: FMA predictive engine demo (Unit 12) ---

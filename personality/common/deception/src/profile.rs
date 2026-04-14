@@ -148,6 +148,128 @@ impl DeceptionProfile {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Minimal profile registry — runtime list of available deception profiles.
+//
+// This is intentionally tiny: name + `active` bit per entry. It is the
+// source of truth for the `arm` builtin (`services/sotsh/src/builtins/arm.rs`)
+// which reaches init via the `"deception"` IPC service (see
+// `docs/sotsh-ipc-protocols.md` Part B). The full deception machinery
+// (fake files, fake services, migration orchestrator) lives elsewhere
+// and is driven by `deception_demo.rs`; this registry only advertises
+// which builtin profiles exist and which one is currently armed.
+// ---------------------------------------------------------------------------
+
+/// Number of builtin profiles known at compile time. Must match the
+/// submodule list in `profiles/mod.rs`.
+pub const BUILTIN_PROFILE_COUNT: usize = 4;
+
+/// Single entry in the profile registry. Names are NUL-padded in a
+/// fixed 32-byte buffer; `name_len` stores the significant byte count so
+/// IPC replies know how much to send without scanning for the NUL.
+#[derive(Clone, Copy)]
+pub struct ProfileEntry {
+    pub name: [u8; 32],
+    pub name_len: u8,
+    pub active: bool,
+}
+
+impl ProfileEntry {
+    pub const fn empty() -> Self {
+        Self {
+            name: [0; 32],
+            name_len: 0,
+            active: false,
+        }
+    }
+
+    /// Construct from a compile-time name (truncated to 32 bytes).
+    pub const fn from_static(name: &'static [u8]) -> Self {
+        let mut buf = [0u8; 32];
+        let len = if name.len() < 32 { name.len() } else { 32 };
+        let mut i = 0;
+        while i < len {
+            buf[i] = name[i];
+            i += 1;
+        }
+        Self {
+            name: buf,
+            name_len: len as u8,
+            active: false,
+        }
+    }
+
+    /// Returns the name as a byte slice up to `name_len`.
+    pub fn name_bytes(&self) -> &[u8] {
+        &self.name[..self.name_len as usize]
+    }
+}
+
+/// Minimal runtime registry of builtin deception profiles. Owns the
+/// `active` bit; does **not** own the full `DeceptionProfile` body (that
+/// is constructed lazily by the submodules in `profiles/*` when a
+/// profile is actually armed).
+pub struct ProfileRegistry {
+    entries: [ProfileEntry; BUILTIN_PROFILE_COUNT],
+}
+
+impl ProfileRegistry {
+    /// Construct the canonical builtin registry. Profile names match the
+    /// submodule list at `profiles/mod.rs:6-9`. All profiles start
+    /// inactive; callers flip `active` via `set_active()` when they
+    /// install a profile (see `deception_demo.rs`).
+    pub const fn with_builtins() -> Self {
+        Self {
+            entries: [
+                ProfileEntry::from_static(b"ubuntu_webserver"),
+                ProfileEntry::from_static(b"centos_database"),
+                ProfileEntry::from_static(b"iot_device"),
+                ProfileEntry::from_static(b"windows_workstation"),
+            ],
+        }
+    }
+
+    /// Number of entries currently tracked.
+    pub const fn len(&self) -> usize {
+        BUILTIN_PROFILE_COUNT
+    }
+
+    /// Access entry by index. Returns `None` if out of range.
+    pub fn get(&self, index: usize) -> Option<&ProfileEntry> {
+        self.entries.get(index)
+    }
+
+    /// Iterate over `(index, entry)` pairs.
+    pub fn iter(&self) -> impl Iterator<Item = (usize, &ProfileEntry)> {
+        self.entries.iter().enumerate()
+    }
+
+    /// Mark a profile by its exact name as active (or inactive). Returns
+    /// `true` if a match was found.
+    pub fn set_active(&mut self, name: &[u8], active: bool) -> bool {
+        for e in &mut self.entries {
+            if e.name_bytes() == name {
+                e.active = active;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Set the active flag by index. No-op if out of range.
+    pub fn set_active_at(&mut self, index: usize, active: bool) {
+        if let Some(e) = self.entries.get_mut(index) {
+            e.active = active;
+        }
+    }
+}
+
+impl Default for ProfileRegistry {
+    fn default() -> Self {
+        Self::with_builtins()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,5 +297,47 @@ mod tests {
         let s = p.lookup_service(22).unwrap();
         assert_eq!(s.protocol, 6);
         assert_eq!(s.banner_len, 21);
+    }
+
+    #[test]
+    fn registry_has_four_builtins() {
+        let r = ProfileRegistry::with_builtins();
+        assert_eq!(r.len(), 4);
+        let names: [&[u8]; 4] = [
+            b"ubuntu_webserver",
+            b"centos_database",
+            b"iot_device",
+            b"windows_workstation",
+        ];
+        for (i, want) in names.iter().enumerate() {
+            let e = r.get(i).unwrap();
+            assert_eq!(e.name_bytes(), *want);
+            assert!(!e.active);
+        }
+    }
+
+    #[test]
+    fn registry_set_active_by_name() {
+        let mut r = ProfileRegistry::with_builtins();
+        assert!(r.set_active(b"ubuntu_webserver", true));
+        assert!(r.get(0).unwrap().active);
+        assert!(!r.set_active(b"nonexistent", true));
+    }
+
+    #[test]
+    fn registry_set_active_at_index() {
+        let mut r = ProfileRegistry::with_builtins();
+        r.set_active_at(2, true);
+        assert!(r.get(2).unwrap().active);
+        r.set_active_at(99, true); // out of range no-op
+    }
+
+    #[test]
+    fn registry_iter() {
+        let r = ProfileRegistry::with_builtins();
+        let count = r.iter().count();
+        assert_eq!(count, 4);
+        let first = r.iter().next().unwrap();
+        assert_eq!(first.0, 0);
     }
 }
