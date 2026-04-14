@@ -578,10 +578,21 @@ pub extern "C" fn _start() -> ! {
 
     // Spawn the sotOS-native VFS-IPC service (for sotsh + future clients).
     // Registers as "vfs" in the service registry; clients reach it via
-    // `sotos_common::vfs::*`. Ops use the shared ObjectStore owned by
-    // lucas_handler, so any VFS op issued before that mount completes
-    // returns -EIO until SHARED_STORE_PTR is set.
+    // `sotos_common::vfs::*`. Ops need SHARED_STORE_PTR to be set — which
+    // is what `start_vfs_substrate` below takes care of in the default
+    // (non-shell-lucas) path.
     vfs_service::start_vfs_service();
+
+    // Mount ObjectStore on a dedicated "keeper" thread so the native VFS
+    // path (sotsh + anything using `sotos_common::vfs::*`) has a real
+    // store to resolve against, *even when the Linux-ABI LUCAS handler is
+    // gated out*. When `shell-lucas` is on, lucas_handler does its own
+    // mount in its startup sequence — our keeper checks SHARED_STORE_PTR
+    // and bails if a mount already landed, so the two paths don't fight.
+    #[cfg(not(feature = "shell-lucas"))]
+    if let Some(blk_dev) = blk.take() {
+        start_vfs_substrate(blk_dev);
+    }
 
     // B5: default shell swap. sotsh (native sotOS shell, B1 port) is now the
     // sole boot shell. lucas-shell is opt-in legacy via the `shell-lucas`
@@ -1409,6 +1420,86 @@ fn start_lucas(blk: Option<VirtioBlk>) {
 // fine since we use the kernel-loaded mapping there but sotsh's
 // map_elf_segments overwrites that region with sotsh's code before the
 // thread runs), allocates a fresh stack, and spawns a native thread.
+/// Mount the ObjectStore on a dedicated keeper thread so the native VFS
+/// path (sotsh + anything using `sotos_common::vfs::*`) has a real store
+/// to resolve against when `shell-lucas` is gated out and `lucas_handler`
+/// therefore never runs. The keeper parks itself in an infinite
+/// `yield_now` loop after publishing — both to keep the stack-resident
+/// `Vfs` alive forever (dropping it would invalidate `SHARED_STORE_PTR`)
+/// and to avoid freeing the mapped frames.
+#[cfg(not(feature = "shell-lucas"))]
+fn start_vfs_substrate(blk_dev: VirtioBlk) {
+    // Reuse LUCAS_BLK_STORE as the page that backs the blk handle — it's
+    // a well-known 1-page slot that lucas_handler would have used anyway.
+    // Safe to reuse because `shell-lucas` is off, so lucas_handler never
+    // reads from this address.
+    let blk_frame = match sys::frame_alloc() {
+        Ok(f) => f,
+        Err(_) => { print(b"VFS substrate: frame_alloc(blk) failed\n"); return; }
+    };
+    if sys::map(LUCAS_BLK_STORE, blk_frame, MAP_WRITABLE).is_err() {
+        print(b"VFS substrate: map(blk) failed\n");
+        return;
+    }
+    unsafe { core::ptr::write(LUCAS_BLK_STORE as *mut VirtioBlk, blk_dev); }
+    LUCAS_VFS_READY.store(1, Ordering::Release);
+
+    // Map a keeper stack (8 pages, 32 KiB).
+    const KEEPER_STACK: u64 = 0xEA0000;
+    const KEEPER_STACK_PAGES: u64 = 8;
+    for i in 0..KEEPER_STACK_PAGES {
+        let f = match sys::frame_alloc() {
+            Ok(f) => f,
+            Err(_) => { print(b"VFS substrate: frame_alloc(stack) failed\n"); return; }
+        };
+        if sys::map(KEEPER_STACK + i * 0x1000, f, MAP_WRITABLE).is_err() {
+            print(b"VFS substrate: map(stack) failed\n");
+            return;
+        }
+    }
+    let tid = match sys::thread_create(
+        vfs_keeper_thread as *const () as u64,
+        KEEPER_STACK + KEEPER_STACK_PAGES * 0x1000,
+    ) {
+        Ok(t) => t,
+        Err(_) => { print(b"VFS substrate: thread_create failed\n"); return; }
+    };
+    print(b"vfs-keeper: spawned (tid=");
+    print_u64(tid);
+    print(b")\n");
+}
+
+/// Dedicated thread that mounts the ObjectStore, runs sysroot_init,
+/// publishes `SHARED_STORE_PTR`, then idles forever to keep its
+/// stack-resident `Vfs` alive. Does nothing if the pointer is already set
+/// (e.g. lucas_handler beat us to it in some future hybrid build).
+#[cfg(not(feature = "shell-lucas"))]
+extern "C" fn vfs_keeper_thread() -> ! {
+    use sotos_objstore::Vfs;
+    if SHARED_STORE_PTR.load(Ordering::Acquire) == 0 {
+        let blk = unsafe { core::ptr::read(LUCAS_BLK_STORE as *const VirtioBlk) };
+        match ObjectStore::mount(blk) {
+            Ok(mut store) => {
+                lucas_handler::sysroot_init(&mut store);
+                let vfs = Vfs::new(store);
+                let ptr = vfs.store() as *const _ as u64;
+                SHARED_STORE_PTR.store(ptr, Ordering::Release);
+                print(b"vfs-keeper: ObjectStore mounted, SHARED_STORE_PTR=");
+                print_u64(ptr);
+                print(b"\n");
+                // Park forever holding `vfs` on this thread's stack so the
+                // pointer we just published stays valid for the life of
+                // the system.
+                loop { sys::yield_now(); }
+            }
+            Err(_) => {
+                print(b"vfs-keeper: ObjectStore::mount failed\n");
+            }
+        }
+    }
+    loop { sys::yield_now(); }
+}
+
 //
 // On success the boot log prints `sotsh: spawned (entry=..)` so a `grep
 // 'sotsh: spawned'` on serial output confirms the path ran. Post-B5 this

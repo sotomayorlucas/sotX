@@ -31,7 +31,7 @@ use crate::syscalls::task as syscalls_task;
 const MAP_WRITABLE: u64 = 2;
 
 /// Ensure sysroot directories exist for dynamic binary support.
-fn sysroot_init(store: &mut ObjectStore) {
+pub(crate) fn sysroot_init(store: &mut ObjectStore) {
     let dirs: &[&[u8]] = &[b"lib", b"lib64", b"bin", b"sbin", b"usr", b"tmp", b"root"];
     for name in dirs {
         if store.resolve_path(name, ROOT_OID).is_err() {
