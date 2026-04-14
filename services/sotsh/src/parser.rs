@@ -1,14 +1,17 @@
 //! Minimal pipeline parser for sotSh.
 //!
-//! Grammar (B4a: pipes + redirection):
+//! Grammar (B4b: pipes + redirection + background):
 //!
 //! ```text
-//! pipeline = command ( '|' command )*
+//! pipeline = command ( '|' command )* '&'?
 //! command  = ident arg* redirect*
 //! arg      = quoted_string | bare_word
 //! redirect = ( '>>' | '>' | '<' ) path
 //! path     = quoted_string | bare_word
 //! ```
+//!
+//! The trailing `&` marks the pipeline as a **background job**. It is a
+//! statement terminator only — `&&` (short-circuit AND) is not supported.
 //!
 //! Redirection tokens are consumed after the ident+args and are attached
 //! to the [`Command`]'s `stdin` / `stdout` fields. `>>` sets `append=true`;
@@ -141,12 +144,21 @@ fn pipeline_parser() -> impl Parser<char, Ast, Error = Simple<char>> {
         .ignore_then(just('|'))
         .then_ignore(opt_hspace.clone());
 
+    // Optional `&` terminator (B4b): marks the pipeline as background.
+    // Appears after the last command, before trailing whitespace / EOF.
+    let bg_mark = opt_hspace
+        .clone()
+        .ignore_then(just::<_, _, Simple<char>>('&'))
+        .or_not()
+        .map(|m| m.is_some());
+
     command
         .separated_by(pipe_sep)
         .at_least(1)
+        .then(bg_mark)
         .padded()
         .then_ignore(end())
-        .map(|commands| Ast::Pipeline(Pipeline { commands }))
+        .map(|(commands, background)| Ast::Pipeline(Pipeline { commands, background }))
 }
 
 /// Collapse the flat `Suffix` list produced by the parser into a fully-
