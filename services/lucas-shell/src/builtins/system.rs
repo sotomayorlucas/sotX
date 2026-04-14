@@ -427,3 +427,21 @@ pub fn cmd_meminfo() {
     print_u64(bytes / 1024);
     print(b" KiB)\n");
 }
+
+// --- shutdown / poweroff / halt ---
+
+/// Power off the machine via SYS_SHUTDOWN (257). The kernel runs the ACPI
+/// PM1a sequence (with HW fallbacks: 8042 reset, triple-fault). Never
+/// returns under normal circumstances; if it does, something failed and we
+/// print a hint then exit the shell so the user can retry.
+pub fn cmd_shutdown() {
+    color::color(color::FG_CYAN);
+    print(b"shutdown: ");
+    color::reset();
+    print(b"requesting ACPI power-off...\n");
+    let ret = kernel_syscall0(257);
+    // SYS_SHUTDOWN is `-> !` in the kernel, so we should never get here.
+    print(b"shutdown: kernel returned (ret=");
+    print_u64(ret as u64);
+    print(b"). Try `poweroff` or hold the power button.\n");
+}

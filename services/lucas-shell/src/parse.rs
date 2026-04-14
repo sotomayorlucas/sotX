@@ -25,13 +25,14 @@ pub fn get_exit_status() -> i64 { unsafe { LAST_EXIT_STATUS } }
 pub const BUILTIN_NAMES: &[&[u8]] = &[
     b".", b"apt", b"bench", b"bg", b"break", b"caps", b"cat", b"cd",
     b"continue", b"curl", b"diff", b"echo", b"env", b"exec", b"exit",
-    b"export", b"false", b"fg", b"fork", b"getpid", b"grep", b"head",
-    b"help", b"hexdump", b"history", b"jobs", b"kill", b"ls", b"lua",
-    b"meminfo", b"mkdir", b"netmirror", b"ping", b"pkg", b"ps", b"pwd",
-    b"read", b"resolve", b"rm", b"rmdir", b"services", b"sleep", b"snap",
-    b"snapshot", b"sort", b"source", b"stat", b"syslog", b"tail",
-    b"threads", b"top", b"trace", b"traceroute", b"true", b"type",
-    b"uname", b"uniq", b"unset", b"uptime", b"wc", b"wget", b"write",
+    b"export", b"false", b"fg", b"fork", b"getpid", b"grep", b"halt",
+    b"head", b"help", b"hexdump", b"history", b"jobs", b"kill", b"ls",
+    b"lua", b"meminfo", b"mkdir", b"netmirror", b"ping", b"pkg",
+    b"poweroff", b"ps", b"pwd", b"read", b"reboot", b"resolve", b"rm",
+    b"rmdir", b"services", b"shutdown", b"sleep", b"snap", b"snapshot",
+    b"sort", b"source", b"stat", b"syslog", b"tail", b"threads", b"top",
+    b"trace", b"traceroute", b"true", b"type", b"uname", b"uniq",
+    b"unset", b"uptime", b"wc", b"wget", b"write",
 ];
 
 // ---------------------------------------------------------------------------
@@ -939,6 +940,8 @@ pub fn dispatch_command(line: &[u8]) {
             cmd_threads();
         } else if eq(line, b"meminfo") {
             cmd_meminfo();
+        } else if eq(line, b"shutdown") || eq(line, b"poweroff") || eq(line, b"halt") {
+            cmd_shutdown();
         } else if eq(line, b"bench") {
             cmd_bench();
         } else if starts_with(line, b"echo ") {
