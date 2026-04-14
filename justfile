@@ -787,3 +787,43 @@ run-full-quick: image create-test-disk create-nvme-disk
 # Windows MSVC toolchain cannot link -static -pthread.
 build-futex-stress:
     wsl -- make -C services/futex-stress
+
+# ---------------------------------------------------------------------------
+# B3 -- opt-in sotSh boot integration
+# ---------------------------------------------------------------------------
+# sotSh is the native sotOS shell (B1 port: no_std, x86_64-unknown-none).
+# These targets build init with the `shell-sotsh` cargo feature, which makes
+# init spawn sotsh alongside lucas-shell on boot (native, non-redirected
+# thread). Default `just run` is unchanged -- only lucas-shell spawns there.
+#
+# Usage:
+#     just run-sotsh     # build image + boot in QEMU with sotsh spawned
+#     just image-sotsh   # just build the image
+#     just build-user-sotsh  # just build init with `shell-sotsh` enabled
+#
+# Verify: grep `sotsh: spawned` on the serial log.
+
+# Build init with the `shell-sotsh` feature enabled (spawns sotsh at boot).
+build-user-sotsh:
+    cd services/init && CARGO_ENCODED_RUSTFLAGS="$(printf '%s\x1f%s\x1f%s\x1f%s' '-Clink-arg=-Tlinker.ld' '-Crelocation-model=static' '-Zstack-protector=strong' '-Zub-checks=no')" cargo build --features shell-sotsh
+
+# Initrd that bundles sotsh alongside the baseline LUCAS payload. Mirrors the
+# `initrd` target's --file list but uses the sotsh-enabled init and adds
+# --file sotsh={{USER_SOTSH}}.
+initrd-sotsh: build-user-sotsh build-shell build-sotsh build-kbd build-net build-nvme build-xhci build-vmm build-hello build-hello-linux build-drm-test build-net-test build-testlib build-compositor build-styx-test build-rump-vfs build-attacker build-posix-test build-kernel-test build-sot-dtrace build-sot-pkg build-sot-carp build-sot-cheri build-sot-statusbar build-hello-gui build-sotos-term build-sot-launcher build-sot-notify build-abi-fuzz build-sotfs build-cap-escalation-test build-ipc-storm build-smp-stress sigmanifest
+    python scripts/mkinitrd.py --output {{INITRD}} --file init={{USER_INIT}} --file shell={{USER_SHELL}} --file sotsh={{USER_SOTSH}} --file kbd={{USER_KBD}} --file net={{USER_NET}} --file nvme={{USER_NVME}} --file xhci={{USER_XHCI}} --file vmm={{USER_VMM}} --file compositor={{USER_COMPOSITOR}} --file hello-gui={{USER_HELLO_GUI}} --file sotos-term={{USER_SOTOS_TERM}} --file sot-launcher={{USER_SOT_LAUNCHER}} --file sot-notify={{USER_SOT_NOTIFY}} --file hello={{USER_HELLO}} --file hello-linux={{USER_HELLO_LINUX}} --file drm-test={{USER_DRM_TEST}} --file net-test={{USER_NET_TEST}} --file libtest.so={{TESTLIB}} --file styx-test={{USER_STYX_TEST}} --file rump-vfs={{USER_RUMP_VFS}} --file attacker={{USER_ATTACKER}} --file posix-test={{USER_POSIX_TEST}} --file kernel-test={{USER_KERNEL_TEST}} --file sot-dtrace={{USER_SOT_DTRACE}} --file sot-pkg={{USER_SOT_PKG}} --file sot-carp={{USER_SOT_CARP}} --file sot-cheri={{USER_SOT_CHERI}} --file sot-statusbar={{USER_SOT_STATUSBAR}} --file abi-fuzz={{USER_ABI_FUZZ}} --file sotfs={{USER_SOTFS}} --file cap-escalation-test={{USER_CAP_ESC_TEST}} --file ipc-storm={{USER_IPC_STORM}} --file smp-stress={{USER_SMP_STRESS}} --file sigmanifest=target/sigmanifest
+
+# Image with the sotsh-enabled initrd.
+image-sotsh: build initrd-sotsh
+    python scripts/mkimage.py --kernel {{KERNEL}} --initrd {{INITRD}} --output {{IMAGE}} --size 512
+
+# Boot QEMU with sotsh spawned at init time. Mirrors `run` but uses the
+# sotsh-enabled image. Serial stdio; grep `sotsh: spawned` to confirm.
+run-sotsh: image-sotsh
+    "{{QEMU}}" \
+        -cpu max \
+        -drive format=raw,file={{IMAGE}} \
+        -serial stdio \
+        -display none \
+        -no-reboot \
+        -m 2048M
