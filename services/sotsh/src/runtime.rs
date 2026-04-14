@@ -51,8 +51,10 @@
 //! * No error-stream redirection (`2>`) and no fd duplication (`2>&1`).
 
 use alloc::collections::BTreeMap;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::fmt::Write;
 
 use sotos_common::vfs;
 
@@ -72,6 +74,21 @@ use crate::value::Value;
 pub fn execute_pipeline(pipe: &Pipeline, ctx: &mut Context) -> Result<Value, Error> {
     if pipe.commands.is_empty() {
         return Ok(Value::Nil);
+    }
+
+    // `cmd &` — B4b background jobs.
+    //
+    // Scope note: we currently record the job in `ctx.jobs` and return
+    // immediately with `"[N] tid"` WITHOUT spawning a real thread. A real
+    // `sys::thread_create` spawn needs (a) a trampoline that re-enters the
+    // builtin dispatcher with an owned Context clone, (b) a way to collect
+    // the exit Value back into the table, and (c) a reaper hook for
+    // `fg`/`bg`. That's a follow-up; for now the pipeline is dropped and
+    // the job shows `state=Running, tid=0` in `jobs`.
+    if pipe.background {
+        let summary = summarize_pipeline(pipe);
+        let id = ctx.register_job(summary, 0);
+        return Ok(Value::Str(format!("[{id}] 0")));
     }
 
     let last_idx = pipe.commands.len() - 1;
@@ -222,4 +239,25 @@ fn write_value_to_file(_path: &str, _value: &Value, _append: bool) -> Result<(),
     Err(Error::Other(
         "stdout redirection (> / >>): VFS write path not wired yet; see runtime.rs docs",
     ))
+}
+
+/// Render a human-readable summary of a pipeline for the job table.
+///
+/// Format: `"cmd1 arg1 | cmd2 arg2"`. Values are formatted via `Display`,
+/// so strings appear unquoted and ints as bare digits — this matches what
+/// the user typed closely enough for `jobs` output.
+fn summarize_pipeline(pipe: &Pipeline) -> String {
+    let mut out = String::new();
+    for (i, cmd) in pipe.commands.iter().enumerate() {
+        if i > 0 {
+            out.push_str(" | ");
+        }
+        out.push_str(&cmd.name);
+        for a in &cmd.args {
+            // `Value: Display` handles str/int/bool; Table/Nil are
+            // unlikely in argv but fall through harmlessly.
+            let _ = write!(out, " {a}");
+        }
+    }
+    out
 }
