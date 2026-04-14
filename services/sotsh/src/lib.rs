@@ -21,6 +21,7 @@ pub mod ast;
 pub mod builtins;
 pub mod context;
 pub mod error;
+pub mod history;
 pub mod linedit;
 pub mod parser;
 pub mod value;

@@ -5,16 +5,24 @@
 //! services) and echoes typed characters to the kernel debug serial via
 //! `sotos_common::sys::debug_print`.
 //!
-//! Scope kept deliberately tiny: ASCII chars, Enter finalises a line,
-//! Backspace erases the last byte. History/arrows/tab-completion/Ctrl-C
-//! are explicitly **out of scope** for B1 — they land in B4c.
+//! Scope:
+//! - ASCII chars, Enter finalises a line, Backspace erases the last byte.
+//! - **B4c**: up/down arrow keys walk an injected `History` ring; the
+//!   current buffer is replaced + redrawn. Arrow scancodes arrive as the
+//!   two-byte PS/2 set-1 sequence `0xE0 0x48` (up) / `0xE0 0x50` (down).
 //!
 //! Ring layout (from `sotos_common`): `[write_idx: u32, read_idx: u32,
 //! data: [u8; 256]]` at `KB_RING_ADDR`. Scancodes are set-1; key release
 //! events have bit 7 set and are ignored.
 
+extern crate alloc;
+
+use alloc::string::String;
+
 use sotos_common::sys;
 use sotos_common::KB_RING_ADDR;
+
+use crate::history::History;
 
 /// Maximum editable line length. Anything beyond is silently dropped
 /// (preserves the simplest possible control flow — no reallocation).
@@ -26,6 +34,9 @@ const SC_BACKSPACE: u8 = 0x0E;
 const SC_LSHIFT: u8 = 0x2A;
 const SC_RSHIFT: u8 = 0x36;
 const SC_RELEASE_MASK: u8 = 0x80;
+const SC_EXT_PREFIX: u8 = 0xE0;
+const SC_UP: u8 = 0x48;
+const SC_DOWN: u8 = 0x50;
 
 /// Fixed-size editable line buffer. Using `no_std`-friendly stack storage
 /// rather than `alloc::vec::Vec` keeps the line editor reentrant even if
@@ -34,6 +45,12 @@ pub struct LineEditor {
     buf: [u8; LINE_CAP],
     len: usize,
     shift_held: bool,
+    /// Set when we've just seen a 0xE0 prefix; the next scancode is part
+    /// of an "extended" key (arrows, numpad-nav, etc).
+    ext_pending: bool,
+    /// Snapshot of the user's in-progress line when they start walking
+    /// history — restored when the cursor returns "past newest".
+    saved: Option<String>,
 }
 
 impl LineEditor {
@@ -42,6 +59,8 @@ impl LineEditor {
             buf: [0; LINE_CAP],
             len: 0,
             shift_held: false,
+            ext_pending: false,
+            saved: None,
         }
     }
 
@@ -49,9 +68,12 @@ impl LineEditor {
     ///
     /// The returned slice borrows from the editor's internal buffer and is
     /// valid until the next `read_line` call.
-    pub fn read_line(&mut self, prompt: &[u8]) -> &[u8] {
+    pub fn read_line(&mut self, prompt: &[u8], history: &mut History) -> &[u8] {
         write_bytes(prompt);
         self.len = 0;
+        self.ext_pending = false;
+        self.saved = None;
+        history.reset_cursor();
 
         loop {
             let sc = match read_scancode() {
@@ -62,22 +84,65 @@ impl LineEditor {
                 }
             };
 
+            // Extended-key prefix: next byte is the real scancode.
+            if sc == SC_EXT_PREFIX {
+                self.ext_pending = true;
+                continue;
+            }
+
             // Track shift state from both press (0x2A/0x36) and release
-            // (0xAA/0xB6) before filtering out release events.
+            // (0xAA/0xB6) before filtering out release events. Shift
+            // scancodes are never extended, so clear the prefix first.
             if sc == SC_LSHIFT || sc == SC_RSHIFT {
                 self.shift_held = true;
+                self.ext_pending = false;
                 continue;
             }
             if sc == (SC_LSHIFT | SC_RELEASE_MASK) || sc == (SC_RSHIFT | SC_RELEASE_MASK) {
                 self.shift_held = false;
+                self.ext_pending = false;
                 continue;
             }
             if sc & SC_RELEASE_MASK != 0 {
+                // Releases always terminate a pending extended sequence.
+                self.ext_pending = false;
+                continue;
+            }
+
+            // Handle extended keys (arrows). Anything we don't recognise
+            // gets dropped so stray 0xE0-prefixed keys don't flood the
+            // editable buffer.
+            if self.ext_pending {
+                self.ext_pending = false;
+                match sc {
+                    SC_UP => {
+                        // Snapshot the in-progress line before the first
+                        // walk so down-past-newest can restore it.
+                        if self.saved.is_none() && history.len() > 0 {
+                            if let Ok(s) = core::str::from_utf8(&self.buf[..self.len]) {
+                                self.saved = Some(String::from(s));
+                            }
+                        }
+                        let candidate = history.prev().map(String::from);
+                        self.apply_history(candidate);
+                    }
+                    SC_DOWN => {
+                        let candidate = history.next().map(String::from);
+                        self.apply_history(candidate);
+                    }
+                    _ => {}
+                }
                 continue;
             }
 
             if sc == SC_ENTER {
                 write_bytes(b"\n");
+                if self.len > 0 {
+                    if let Ok(s) = core::str::from_utf8(&self.buf[..self.len]) {
+                        history.add(String::from(s));
+                    }
+                }
+                self.saved = None;
                 return &self.buf[..self.len];
             }
             if sc == SC_BACKSPACE {
@@ -99,6 +164,30 @@ impl LineEditor {
             }
         }
     }
+
+    /// Replace the live buffer with the candidate history line (or, if
+    /// `None` arrives from `next()`, the pre-walk snapshot if any). Redraws
+    /// the current line using plain VT100 escapes.
+    fn apply_history(&mut self, candidate: Option<String>) {
+        let replacement: &str = match candidate.as_deref() {
+            Some(s) => s,
+            None => self.saved.as_deref().unwrap_or(""),
+        };
+
+        // Erase the current line, then re-emit the prompt + replacement.
+        write_bytes(b"\r\x1b[K");
+        write_bytes(PROMPT_HINT);
+
+        self.len = 0;
+        for &b in replacement.as_bytes() {
+            if self.len >= LINE_CAP {
+                break;
+            }
+            self.buf[self.len] = b;
+            self.len += 1;
+            sys::debug_print(b);
+        }
+    }
 }
 
 impl Default for LineEditor {
@@ -106,6 +195,11 @@ impl Default for LineEditor {
         Self::new()
     }
 }
+
+/// Prompt echoed after a history redraw. Kept in sync with `main.rs`'s
+/// `PROMPT` constant; promote to a field on `LineEditor` if the prompt
+/// ever becomes dynamic.
+const PROMPT_HINT: &[u8] = b"sotsh> ";
 
 /// Non-blocking pop of one scancode from the KB ring. Returns `None` when
 /// the ring is empty. Mirrors the pattern used by `sot-launcher` and the
