@@ -125,3 +125,6 @@ formal/*_TTrace_*.tla
 formal/*_TTrace_*.bin
 formal/states/
 tools/tlc.jar
+
+# OVMF firmware — downloaded by `just fetch-ovmf`, don't commit the binary
+tools/ovmf/*.fd

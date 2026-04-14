@@ -352,6 +352,69 @@ run: image
         -no-reboot \
         -m 2048M
 
+# ── UEFI boot (OVMF firmware) — M0 of HP Pavilion bootstrap ──
+#
+# Downloads OVMF.fd (combined EDK2 OVMF firmware, ~3 MiB) from the retrage
+# nightly mirror into tools/ovmf/. Only runs if the file is missing.
+# See tools/ovmf/README.md for alternative sources and split-firmware setup.
+fetch-ovmf:
+    @mkdir -p tools/ovmf
+    @if [ ! -f tools/ovmf/OVMF.fd ]; then \
+        echo "Downloading OVMF.fd from retrage.github.io edk2-nightly..."; \
+        curl -L --fail -o tools/ovmf/OVMF.fd \
+            https://retrage.github.io/edk2-nightly/bin/RELEASEX64_OVMF.fd; \
+        echo "OVMF.fd ready at tools/ovmf/OVMF.fd"; \
+    else \
+        echo "OVMF.fd already present at tools/ovmf/OVMF.fd"; \
+    fi
+
+# Boot the sotX image under QEMU with UEFI firmware (OVMF). Mirrors `run-fast`
+# (WHPX acceleration, virtio-blk data disk) but routes through Limine's UEFI
+# loader (BOOTX64.EFI) instead of the BIOS path. This is the iteration loop
+# for HP Pavilion bring-up: every change should land green here before
+# flashing a USB.
+#
+# WHPX default because TCG is ~8× slower (25s vs 230s to LUCAS prompt).
+# Use `run-uefi-tcg` if you need to exercise a pure-software execution path.
+run-uefi: image fetch-ovmf create-test-disk
+    "{{QEMU}}" \
+        -accel whpx -machine q35 \
+        -bios tools/ovmf/OVMF.fd \
+        -drive format=raw,file={{IMAGE}} \
+        -drive if=none,format=raw,file=target/disk.img,id=disk0 \
+        -device virtio-blk-pci,drive=disk0,disable-modern=on \
+        -serial stdio \
+        -display none \
+        -no-reboot \
+        -m 2048M
+
+# Same as run-uefi but pure TCG. Slower but doesn't require Hyper-V.
+run-uefi-tcg: image fetch-ovmf create-test-disk
+    "{{QEMU}}" \
+        -cpu max \
+        -bios tools/ovmf/OVMF.fd \
+        -drive format=raw,file={{IMAGE}} \
+        -drive if=none,format=raw,file=target/disk.img,id=disk0 \
+        -device virtio-blk-pci,drive=disk0,disable-modern=on \
+        -serial stdio \
+        -display none \
+        -no-reboot \
+        -m 2048M
+
+# Like run-uefi but with an SDL window, so the framebuffer path is exercised.
+# Use this once A.1 (kernel-side FB text) lands to validate rendering without
+# relying on serial.
+run-uefi-gui: image fetch-ovmf create-test-disk
+    "{{QEMU}}" \
+        -accel whpx -machine q35 \
+        -bios tools/ovmf/OVMF.fd \
+        -drive format=raw,file={{IMAGE}} \
+        -drive if=none,format=raw,file=target/disk.img,id=disk0 \
+        -device virtio-blk-pci,drive=disk0,disable-modern=on \
+        -serial stdio \
+        -no-reboot \
+        -m 2048M
+
 # Run with WHPX hardware acceleration (12x faster boot, requires Hyper-V)
 run-fast: image create-test-disk
     "{{QEMU}}" \
