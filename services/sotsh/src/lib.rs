@@ -8,12 +8,19 @@
 //! - Deception-aware: the `arm` built-in inspects active deception profiles
 //!   from the `sotos-deception` crate (personality/common/deception/).
 //!
-//! This is Wave-1 seed work. Wave-2 workers each replace one stub in
-//! `src/builtins/{ls,cat,cd,ps,cap,arm}.rs`.
+//! B1 port: the crate now builds for `x86_64-unknown-none`. The host-std
+//! prototype used `rustyline` + `std::fs`; the no_std build uses a
+//! framebuffer-backed line editor (`linedit`) and stubs the filesystem
+//! built-ins (ls/cat/cd) — B2a replaces those stubs with real syscalls.
+
+#![no_std]
+
+extern crate alloc;
 
 pub mod ast;
 pub mod builtins;
 pub mod context;
 pub mod error;
+pub mod linedit;
 pub mod parser;
 pub mod value;

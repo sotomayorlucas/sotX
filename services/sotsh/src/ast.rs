@@ -5,6 +5,9 @@
 //!
 //! Future work: extend `Ast` with `Let`, `Assign`, `If`, `Graph(DagId)`, etc.
 
+use alloc::string::String;
+use alloc::vec::Vec;
+
 use crate::value::Value;
 
 /// Top-level parsed form.

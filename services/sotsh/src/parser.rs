@@ -12,6 +12,9 @@
 //! everything else stays a [`Value::Str`]. No env-var substitution, no
 //! redirection, no subshells.
 
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
 use chumsky::prelude::*;
 
 use crate::ast::{Ast, Command};
@@ -97,79 +100,4 @@ fn pipeline_parser() -> impl Parser<char, Ast, Error = Simple<char>> {
         .padded()
         .then_ignore(end())
         .map(Ast::Pipeline)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn assert_pipeline(ast: Ast, expected_names: &[&str]) {
-        let Ast::Pipeline(cmds) = ast;
-        let got: Vec<&str> = cmds.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(got, expected_names);
-    }
-
-    #[test]
-    fn parses_bare_ls() {
-        let ast = parse("ls").expect("ls should parse");
-        assert_pipeline(ast, &["ls"]);
-    }
-
-    #[test]
-    fn parses_ls_with_arg() {
-        let ast = parse("ls /tmp").expect("ls /tmp should parse");
-        let Ast::Pipeline(cmds) = ast;
-        assert_eq!(cmds.len(), 1);
-        assert_eq!(cmds[0].name, "ls");
-        assert_eq!(cmds[0].args.len(), 1);
-        if let Value::Str(s) = &cmds[0].args[0] {
-            assert_eq!(s, "/tmp");
-        } else {
-            panic!("expected Str arg");
-        }
-    }
-
-    #[test]
-    fn parses_ls_pipe_cat() {
-        let ast = parse("ls | cat").expect("ls | cat should parse");
-        assert_pipeline(ast, &["ls", "cat"]);
-    }
-
-    #[test]
-    fn parses_three_stage_pipeline_with_args() {
-        let ast = parse("ls /etc | cat foo | ps").expect("three-stage should parse");
-        assert_pipeline(ast, &["ls", "cat", "ps"]);
-    }
-
-    #[test]
-    fn parses_quoted_string_arg() {
-        let ast = parse(r#"cat "hello world""#).expect("quoted should parse");
-        let Ast::Pipeline(cmds) = ast;
-        if let Value::Str(s) = &cmds[0].args[0] {
-            assert_eq!(s, "hello world");
-        } else {
-            panic!("expected quoted Str");
-        }
-    }
-
-    #[test]
-    fn parses_integer_arg() {
-        let ast = parse("cat 42").expect("int should parse");
-        let Ast::Pipeline(cmds) = ast;
-        if let Value::Int(n) = &cmds[0].args[0] {
-            assert_eq!(*n, 42);
-        } else {
-            panic!("expected Int");
-        }
-    }
-
-    #[test]
-    fn rejects_empty_input() {
-        assert!(parse("").is_err());
-    }
-
-    #[test]
-    fn rejects_trailing_pipe() {
-        assert!(parse("ls |").is_err());
-    }
 }

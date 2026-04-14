@@ -18,6 +18,8 @@ pub mod cd;
 pub mod ls;
 pub mod ps;
 
+use alloc::string::ToString;
+
 use crate::context::Context;
 use crate::error::Error;
 use crate::value::Value;
@@ -41,8 +43,9 @@ pub fn required_caps(name: &str) -> &'static [&'static str] {
 
 /// Dispatch a single command to its built-in implementation.
 ///
-/// Wave-1 (this PR) wires up the routing only — each stub returns
-/// `Value::Str("not implemented")`. Wave-2 workers replace those bodies.
+/// The ls/cat/cd bodies are stubbed pending B2a (they will be rewritten
+/// over `sotos_common::sys` syscalls); ps/cap/arm remain as the hardcoded
+/// placeholders from Wave-2.
 pub fn dispatch(name: &str, args: &[Value], ctx: &mut Context) -> Result<Value, Error> {
     match name {
         "ls" => ls::run(args, ctx),
@@ -51,33 +54,6 @@ pub fn dispatch(name: &str, args: &[Value], ctx: &mut Context) -> Result<Value, 
         "ps" => ps::run(args, ctx),
         "cap" => cap::run(args, ctx),
         "arm" => arm::run(args, ctx),
-        other => Err(Error::UnknownBuiltin(other.into())),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn required_caps_known_builtins() {
-        assert_eq!(required_caps("ls"), &["fs:read"]);
-        assert_eq!(required_caps("cat"), &["fs:read"]);
-        assert_eq!(required_caps("cd"), &[] as &[&str]);
-        assert_eq!(required_caps("ps"), &["proc:list"]);
-        assert_eq!(required_caps("cap"), &[] as &[&str]);
-        assert_eq!(required_caps("arm"), &["deception:read"]);
-    }
-
-    #[test]
-    fn required_caps_unknown_returns_empty() {
-        assert_eq!(required_caps("nope"), &[] as &[&str]);
-    }
-
-    #[test]
-    fn dispatch_unknown_errors() {
-        let mut ctx = Context::new().unwrap();
-        let err = dispatch("nope", &[], &mut ctx).unwrap_err();
-        matches!(err, Error::UnknownBuiltin(_));
+        other => Err(Error::UnknownBuiltin(other.to_string())),
     }
 }
