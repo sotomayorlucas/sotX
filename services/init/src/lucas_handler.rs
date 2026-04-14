@@ -748,6 +748,20 @@ pub(crate) extern "C" fn lucas_handler() -> ! {
             SYS_FDATASYNC=> { let mut ctx = make_ctx!(); syscalls_fs::sys_fsync(&mut ctx, &msg); }
 
             // ═══════════════════════════════════════════════════════════
+            // sotX-native syscalls forwarded from redirected LUCAS threads
+            // ═══════════════════════════════════════════════════════════
+            // Numbers >= 250 are reserved for sotX debug/kernel info calls.
+            // LUCAS tries to bypass the redirect via raw `syscall` but the
+            // kernel dispatcher always routes redirected threads here first.
+            // Init isn't redirected, so we can re-issue the syscall from
+            // our own context and forward the result.
+            252 => {
+                // SYS_DEBUG_FREE_FRAMES — used by LUCAS `meminfo` builtin.
+                let frames = sys::debug_free_frames() as i64;
+                reply_val(ep_cap, frames);
+            }
+
+            // ═══════════════════════════════════════════════════════════
             // Unknown syscall
             // ═══════════════════════════════════════════════════════════
             _ => {

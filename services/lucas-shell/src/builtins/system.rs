@@ -399,8 +399,21 @@ pub fn cmd_threads() {
 
 /// Show free physical memory (syscall 252 = DebugFreeFrames).
 pub fn cmd_meminfo() {
-    let frames = kernel_syscall0(252) as u64;
-    let bytes = frames * 4096;
+    let raw = kernel_syscall0(252);
+    if raw < 0 {
+        // -ENOSYS or other error from the kernel/lucas_handler. Degrade to
+        // an error print instead of multiplying a negative-cast-to-u64 by
+        // 4096 (which overflows and panics on debug builds).
+        color::color(color::FG_CYAN);
+        print(b"meminfo: ");
+        color::reset();
+        print(b"kernel syscall 252 unavailable (err=");
+        print_u64((-raw) as u64);
+        print(b")\n");
+        return;
+    }
+    let frames = raw as u64;
+    let bytes = frames.saturating_mul(4096);
     let mb = bytes / (1024 * 1024);
     color::color(color::FG_CYAN);
     print(b"Free frames: ");
