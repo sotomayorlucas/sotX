@@ -344,7 +344,9 @@ pub extern "C" fn _start() -> ! {
 
     // --- Phase 4b (Unit 3): persistent rootdisk on the SECOND virtio-blk ---
     // Safe no-op when only one drive is present (e.g. plain `just run`).
-    mount_or_format_root(boot_info);
+    // Returns the VirtioBlk after the marker test so we can dedicate
+    // it to LKL's blk service below (Camino A disk passthrough).
+    let mut rootblk = mount_or_format_root(boot_info);
 
     // --- Phase 5: Look up net service endpoint ---
     for _ in 0..50 { sys::yield_now(); }
@@ -361,17 +363,16 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
-    // --- Phase 5b prelude: net-raw service for LKL (§10.7 Camino B) ---
-    // Spawns a handler thread owning the SECOND virtio-net NIC (QEMU
-    // cmdline needs `-netdev ... -device virtio-net-pci` repeated). With
-    // a single-NIC build, this no-ops silently. Handler idles with
-    // SOTOS_LKL=0 — cost is ~1 thread + 4 pages stack.
-    //
-    // NOTE: start_blk_service (in this file) is currently NOT called
-    // because its `.take()` would steal the VirtioBlk the VFS keeper
-    // needs. Enabling LKL's disk passthrough (Camino A for disk) needs
-    // a separate fix — either share the VirtioBlk via a lock, or claim
-    // the SECOND virtio-blk for the service. Tracked as follow-up.
+    // --- Phase 5b prelude: services that LKL's bridges consume ---
+    // - start_blk_service: claims the SECOND virtio-blk (the rootdisk
+    //   from mount_or_format_root) for LKL's disk_backend.c. The
+    //   FIRST virtio-blk stays with vfs-keeper for the native shell.
+    //   No-ops gracefully when only one drive is present.
+    // - start_raw_net_service: claims the SECOND virtio-net for LKL's
+    //   net_backend.c (Camino B). No-ops when only one NIC.
+    // Both handlers idle with SOTOS_LKL=0; cost is ~2 threads + ~8
+    // pages stack total.
+    start_blk_service(&mut rootblk);
     start_raw_net_service(boot_info);
 
     // --- Phase 5b: LKL (Linux 6.6 kernel as in-process backend) ---
@@ -1527,15 +1528,19 @@ fn rootblk_write_sector(blk: &mut VirtioBlk, sector: u64, bytes: &[u8], prefix: 
 /// Probe for SOTROOT signature, format if absent, write/read the boot marker,
 /// and publish the store via SHARED_ROOT_STORE_PTR. Prints the PASS marker on
 /// success. Safe to call when no second drive is present (returns early).
-fn mount_or_format_root(boot_info: &BootInfo) {
+/// Runs the persistent rootdisk marker test on the SECOND virtio-blk
+/// (if present) and returns the VirtioBlk afterwards so the caller can
+/// hand it to `start_blk_service` for LKL passthrough. Returns None if
+/// no second drive exists or if the marker test fails fatally.
+fn mount_or_format_root(boot_info: &BootInfo) -> Option<VirtioBlk> {
     let mut blk = match init_virtio_root_blk(boot_info) {
         Some(b) => b,
-        None => return,
+        None => return None,
     };
 
     if blk.read_sector(ROOT_SECTOR_SIGNATURE).is_err() {
         print(b"ROOTBLK: read sector 0 failed\n");
-        return;
+        return None;
     }
     let head = unsafe { core::slice::from_raw_parts(blk.data_ptr(), ROOT_SIGNATURE.len()) };
     let formatted_now = head != &ROOT_SIGNATURE[..];
@@ -1544,7 +1549,7 @@ fn mount_or_format_root(boot_info: &BootInfo) {
         print(b"ROOTBLK: no signature, formatting...\n");
         if !rootblk_write_sector(&mut blk, ROOT_SECTOR_SIGNATURE, ROOT_SIGNATURE,
                                  b"ROOTBLK: write signature failed: ") {
-            return;
+            return None;
         }
     } else {
         print(b"ROOTBLK: SOTROOT signature found (persistent boot)\n");
@@ -1552,33 +1557,20 @@ fn mount_or_format_root(boot_info: &BootInfo) {
 
     if !rootblk_write_sector(&mut blk, ROOT_SECTOR_MARKER, ROOT_MARKER_BODY,
                              b"ROOTBLK: write marker failed: ") {
-        return;
+        return None;
     }
 
     if let Err(e) = blk.read_sector(ROOT_SECTOR_MARKER) {
         print(b"ROOTBLK: re-read marker failed: ");
         print(e.as_bytes());
         print(b"\n");
-        return;
+        return None;
     }
     let verify = unsafe { core::slice::from_raw_parts(blk.data_ptr(), 20) };
     if verify != b"/persist/boot_marker" {
         print(b"ROOTBLK: marker mismatch on read-back\n");
-        return;
+        return None;
     }
-
-    let frame = match sys::frame_alloc() {
-        Ok(f) => f,
-        Err(_) => { print(b"ROOTBLK: frame_alloc failed\n"); return; }
-    };
-    if sys::map(ROOT_STORE_BASE, frame, MAP_WRITABLE).is_err() {
-        print(b"ROOTBLK: map failed\n");
-        return;
-    }
-    unsafe {
-        core::ptr::write(ROOT_STORE_BASE as *mut RootStore, RootStore { blk });
-    }
-    SHARED_ROOT_STORE_PTR.store(ROOT_STORE_BASE, Ordering::Release);
 
     if formatted_now {
         print(b"ROOTBLK: formatted + marker written\n");
@@ -1586,6 +1578,12 @@ fn mount_or_format_root(boot_info: &BootInfo) {
         print(b"ROOTBLK: marker re-verified across boot\n");
     }
     print(b"=== persistent rootdisk: PASS ===\n");
+
+    // SHARED_ROOT_STORE_PTR was never consumed by anyone (legacy
+    // /persist/* I/O TODO comment). Drop the publishing and return
+    // the VirtioBlk so the caller can hand it to start_blk_service
+    // for LKL passthrough — see commit message.
+    Some(blk)
 }
 
 // ---------------------------------------------------------------------------
