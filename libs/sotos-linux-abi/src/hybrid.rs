@@ -15,28 +15,42 @@ use crate::types::{CapSet, Fd, LinuxPid, ProcessImage, Signal, SyscallResult};
 
 /// Routing table: which syscalls should try LKL first.
 ///
-/// Empty in wave-3 (phase 3 of the deprecation plan). Each entry is a
-/// raw x86_64 Linux syscall number. If LKL is not yet ready (see
-/// [`crate::lkl::is_lkl_ready`]), the HybridBackend transparently
-/// falls back to LUCAS regardless of the whitelist.
+/// Each entry is a raw x86_64 Linux syscall number. If LKL is not yet
+/// ready (see [`crate::lkl::is_lkl_ready`]), the HybridBackend
+/// transparently falls back to LUCAS regardless of the whitelist.
 ///
-/// Phase 4 seed (commented out; uncomment when LKL can actually serve
-/// these without a virtio passthrough):
+/// Phase 4 — info domain.
+/// Stateless reads of kernel metadata that LKL can serve without any
+/// virtio-blk/net passthrough. All safe to forward: if LKL returns
+/// -ENOSYS (unregistered / not built), the dispatch layer falls back
+/// to the LUCAS implementation.
 ///
-///   63,  // SYS_UNAME
-///   99,  // SYS_SYSINFO
-///   100, // SYS_TIMES
-///   201, // SYS_TIME
-///   228, // SYS_CLOCK_GETTIME
-///   318, // SYS_GETRANDOM
-pub const LKL_WHITELIST: &[u64] = &[];
+///   63  SYS_UNAME         — kernel name/version/machine strings
+///   96  SYS_GETTIMEOFDAY  — seconds + microseconds since epoch
+///   99  SYS_SYSINFO       — uptime, loads, meminfo, procs
+///   100 SYS_TIMES         — process CPU-time accounting
+///   201 SYS_TIME          — seconds since epoch
+///   228 SYS_CLOCK_GETTIME — per-clock_id time (non-vDSO path)
+///   318 SYS_GETRANDOM     — kernel RNG draw
+pub const LKL_WHITELIST: &[u64] = &[
+    63,   // SYS_UNAME
+    96,   // SYS_GETTIMEOFDAY
+    99,   // SYS_SYSINFO
+    100,  // SYS_TIMES
+    201,  // SYS_TIME
+    228,  // SYS_CLOCK_GETTIME
+    318,  // SYS_GETRANDOM
+];
 
 /// Returns `true` if `nr` is in the LKL whitelist.
+///
+/// Exposed so the init-side dispatcher can pre-route whitelisted
+/// arms to LKL without threading a full HybridBackend handle through
+/// its context machinery. A linear scan is fine for the small sizes
+/// we expect (<30 entries through phase 6); switch to perfect-hash
+/// if it ever grows past that.
 #[inline]
-fn is_lkl_route(nr: u64) -> bool {
-    // Linear scan is fine for the small whitelist sizes we expect
-    // (<30 entries through phase 6). Switch to a perfect-hash or
-    // sorted-bsearch layout if it ever grows past that.
+pub fn is_lkl_route(nr: u64) -> bool {
     let mut i = 0;
     while i < LKL_WHITELIST.len() {
         if LKL_WHITELIST[i] == nr { return true; }

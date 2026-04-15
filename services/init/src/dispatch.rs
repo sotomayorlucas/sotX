@@ -33,12 +33,37 @@ pub(crate) enum DispatchOutcome {
 /// Returns `Handled` for the common cases, `Break` to signal loop exit,
 /// or `NotHandled` when the caller must handle the arm itself (open,
 /// clone, execve, LKL-forwarded, etc.).
+///
+/// Phase 4: before entering the LUCAS match, pre-routes whitelisted
+/// syscalls (info domain: uname/sysinfo/getrandom/times/time/
+/// clock_gettime/gettimeofday) to the LKL backend when it has
+/// reported readiness. If LKL returns `-ENOSYS` we fall through to
+/// LUCAS so a misconfigured build (SOTOS_LKL=1 but kernel never
+/// reached the handler) degrades gracefully rather than breaking
+/// every callsite.
 pub(crate) fn dispatch_linux_arm(
     ctx: &mut SyscallContext,
     msg: &IpcMsg,
     syscall_nr: u64,
 ) -> DispatchOutcome {
     let ep_cap = ctx.ep_cap;
+
+    // LKL pre-route for whitelisted stateless queries.
+    if sotos_linux_abi::hybrid::is_lkl_route(syscall_nr)
+        && sotos_linux_abi::lkl::is_lkl_ready()
+    {
+        let args = [msg.regs[0], msg.regs[1], msg.regs[2],
+                    msg.regs[3], msg.regs[4], msg.regs[5]];
+        let ret = sotos_linux_abi::lkl::dispatch_syscall(
+            syscall_nr, &args, ctx.child_as_cap, ctx.pid,
+        );
+        if ret != -ENOSYS {
+            reply_val(ep_cap, ret);
+            return DispatchOutcome::Handled;
+        }
+        // LKL returned -ENOSYS — fall through to LUCAS.
+    }
+
     match syscall_nr {
         // ── File / IO ──────────────────────────────────────────
         SYS_READ       => syscalls_fs::sys_read(ctx, msg),
