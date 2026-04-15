@@ -165,11 +165,6 @@ extern void thread_trampoline(void);
 
 static unsigned long lkl_thread_create(void (*fn)(void *), void *arg)
 {
-    serial_puts("[lkl-host] thread_create fn=");
-    serial_put_hex((uint64_t)fn);
-    serial_puts(" arg=");
-    serial_put_hex((uint64_t)arg);
-    serial_puts("\n");
     int slot = __atomic_fetch_add(&next_tid, 1, __ATOMIC_RELAXED) % MAX_LKL_THREADS;
 
     uint8_t *stack = (uint8_t *)arena_alloc(THREAD_STACK_SIZE);
@@ -186,20 +181,20 @@ static unsigned long lkl_thread_create(void (*fn)(void *), void *arg)
      * Just push ctx_ptr onto the stack. */
     sp -= 8; *(uint64_t *)sp = (uint64_t)ctx;
 
-    serial_puts("[lkl-host] sys_thread_create rip=");
-    serial_put_hex((uint64_t)thread_trampoline);
-    serial_puts(" rsp=");
-    serial_put_hex(sp);
-    serial_puts("\n");
     int64_t tcap = sys_thread_create((uint64_t)thread_trampoline, sp, 0);
-    serial_puts("[lkl-host] thread_create result=");
-    serial_put_hex((uint64_t)tcap);
-    serial_puts("\n");
     if (tcap < 0) return 0;
 
     thread_table[slot].cap = (uint64_t)tcap;
     thread_table[slot].done = 0;
-    return (unsigned long)(slot + 1); /* non-zero = success */
+
+    /* MUST return the SAME value that lkl_thread_self() reads from the
+     * new thread FS_BASE. The trampoline sets FS_BASE to the address
+     * of ctx->slot (unique stable per-thread). Returning slot+1 was a
+     * Phase-12 bug: lkl_cpu_put then called thread_equal(cpu.owner,
+     * thread_self()) where cpu.owner had been set from THIS fn return
+     * (slot+1) but thread_self returned the FS_BASE pointer. Mismatch
+     * triggered "lkl_cpu_put: unbalanced put" then Linux kernel BUG. */
+    return (unsigned long)&ctx->slot;
 }
 
 static void lkl_thread_detach(void) { /* noop */ }
@@ -211,7 +206,10 @@ static void lkl_thread_exit(void)
 
 static int lkl_thread_join(unsigned long tid)
 {
-    int slot = (int)tid - 1;
+    /* tid is now (uintptr_t)&ctx->slot per the create-side change.
+     * Recover slot by deref'ing the pointer (slot was written into ctx). */
+    if (tid == 0) return -1;
+    int slot = *(volatile int *)tid;
     if (slot < 0 || slot >= MAX_LKL_THREADS) return -1;
     int spins = 0;
     while (!thread_table[slot].done) {

@@ -299,11 +299,19 @@ int net_backend_up(int nd_id)
 #else
     if (nd_id < 0) return -22;
 
+    /* Linux probes virtio-mmio devices asynchronously after registration.
+     * Yield several times so the device thread has CPU to run scan + probe
+     * before we look up the ifindex. Without this, get_ifindex returns
+     * -ENODEV (19) because eth0 hasn't materialized yet. */
+    for (int i = 0; i < 200; i++) {
+        sys_yield();
+    }
+
     int ifidx = lkl_netdev_get_ifindex(nd_id);
     if (ifidx < 0) {
         serial_puts("[lkl-net-raw] get_ifindex failed: ");
         serial_put_dec((uint64_t)(-(long)ifidx));
-        serial_puts("\n");
+        serial_puts(" (probe may need more time — try increasing yield count)\n");
         return ifidx;
     }
     serial_puts("[lkl-net-raw] ifindex=");

@@ -106,13 +106,15 @@ static void lkl_boot_thread_fn(void *arg)
 {
     (void)arg;
 
-    /* Net backend MUST register BEFORE lkl_start_kernel.
-     * Verified empirically: post-start triggers `lkl_cpu_put: unbalanced
-     * put` inside virtio_dev_setup → Linux kernel BUG. The pre-start
-     * path uses the cmdline `virtio_mmio.device=...` mechanism instead
-     * of lkl_sys_virtio_mmio_device_add, which avoids the cpu_put issue. */
+    /* net_backend_init MUST run before start_kernel (looks up service +
+     * fetches MAC). Actual lkl_netdev_add can go either side per our
+     * empirical test:
+     *   - pre-start: registers via cmdline `virtio_mmio.device=...` but
+     *     Linux fails to find the iface afterwards (get_ifindex ENODEV)
+     *   - post-start: uses lkl_sys_virtio_mmio_device_add — works once
+     *     the FS_BASE thread-identity fix is in place (see host_ops
+     *     trampoline + lkl_thread_create). */
     net_backend_init();
-    int lkl_net_id = net_backend_register();
 
     serial_puts("[lkl-boot] starting kernel (background)...\n");
     int rc = lkl_start_kernel("mem=64M loglevel=3");
@@ -122,7 +124,7 @@ static void lkl_boot_thread_fn(void *arg)
     }
     serial_puts("[lkl-boot] Linux kernel running!\n");
 
-    /* if_up/set_ipv4 require start_kernel (use real syscalls). */
+    int lkl_net_id = net_backend_register();
     if (lkl_net_id >= 0) {
         (void)net_backend_up(lkl_net_id);
     }
@@ -243,13 +245,27 @@ static void lkl_boot_thread_fn(void *arg)
     sys_thread_exit();
 }
 
-/* Boot thread entry: naked asm stub for stack alignment + call. */
+/* Boot thread entry: naked asm stub for stack alignment + FS_BASE setup
+ * + call. CRITICAL: the FS_BASE write is what makes lkl_thread_self()
+ * return non-zero from the boot thread. Without it, threads_init() in
+ * Linux sets init_task->tid = 0, then __switch_to BUG_ON's on the first
+ * context switch ("BUG: failure at arch/lkl/kernel/threads.c:98").
+ *
+ * We use the address of `boot_thread_fs_base_marker` itself as the
+ * FS_BASE value — guaranteed unique and stable for the boot thread
+ * lifetime, distinct from any &ctx->slot from lkl_thread_create. */
 static volatile uint64_t boot_thread_fn_ptr;
+static volatile uint64_t boot_thread_fs_base_marker = 0xB007B007;
 __asm__(
     ".globl lkl_boot_trampoline\n"
     "lkl_boot_trampoline:\n"
     "    and $-16, %rsp\n"
-    "    xor %edi, %edi\n"           /* arg = NULL */
+    /* Set FS_BASE to a unique non-zero address so lkl_thread_self
+     * returns the boot thread's identity (not 0). */
+    "    movabs $boot_thread_fs_base_marker, %rdi\n"
+    "    mov $160, %eax\n"            /* SYS_SET_FS_BASE */
+    "    syscall\n"
+    "    xor %edi, %edi\n"            /* arg = NULL */
     "    movabs $boot_thread_fn_ptr, %rax\n"
     "    movq (%rax), %rax\n"
     "    call *%rax\n"
