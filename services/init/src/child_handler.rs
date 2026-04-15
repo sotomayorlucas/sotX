@@ -41,29 +41,36 @@ const MAP_WRITABLE: u64 = 2;
 
 // ── LKL FD ownership tracking ──
 // Bitset per process: bit N set ⇒ guest fd N is managed by LKL, not LUCAS.
-// 128 fds per process (2 × u64).
+// 128 fds per process (2 × AtomicU64). Atomic to avoid `static mut` UB;
+// handler threads are per-pid so there's no actual contention on a given
+// slot, but the atomics document the single-writer invariant.
 use crate::process::MAX_PROCS;
-static mut LKL_FDS: [[u64; 2]; MAX_PROCS] = [[0u64; 2]; MAX_PROCS];
+use core::sync::atomic::AtomicU64;
+static LKL_FDS: [[AtomicU64; 2]; MAX_PROCS] =
+    [const { [const { AtomicU64::new(0) }; 2] }; MAX_PROCS];
 
 #[inline]
 fn lkl_fd_set(pid: usize, fd: i64) {
     if fd >= 0 && (fd as usize) < 128 && pid > 0 && pid <= MAX_PROCS {
         let i = pid - 1;
-        unsafe { LKL_FDS[i][(fd as usize) / 64] |= 1u64 << ((fd as usize) % 64); }
+        let bit = 1u64 << ((fd as usize) % 64);
+        LKL_FDS[i][(fd as usize) / 64].fetch_or(bit, Ordering::AcqRel);
     }
 }
 #[inline]
 fn lkl_fd_clear(pid: usize, fd: i64) {
     if fd >= 0 && (fd as usize) < 128 && pid > 0 && pid <= MAX_PROCS {
         let i = pid - 1;
-        unsafe { LKL_FDS[i][(fd as usize) / 64] &= !(1u64 << ((fd as usize) % 64)); }
+        let bit = 1u64 << ((fd as usize) % 64);
+        LKL_FDS[i][(fd as usize) / 64].fetch_and(!bit, Ordering::AcqRel);
     }
 }
 #[inline]
 fn lkl_fd_is_set(pid: usize, fd: u64) -> bool {
     if (fd as usize) >= 128 || pid == 0 || pid > MAX_PROCS { return false; }
     let i = pid - 1;
-    unsafe { LKL_FDS[i][(fd as usize) / 64] & (1u64 << ((fd as usize) % 64)) != 0 }
+    let bit = 1u64 << ((fd as usize) % 64);
+    LKL_FDS[i][(fd as usize) / 64].load(Ordering::Acquire) & bit != 0
 }
 
 /// Forward a syscall to LKL, return the result (caller decides when to reply).
@@ -85,25 +92,34 @@ fn forward_to_lkl(ep_cap: u64, syscall_nr: u64,
 }
 
 /// Per-pid retry counters to suppress repeated pipe-retry log lines.
-/// Index by pid (0..MAX_PROCS). Incremented when PIPE_RETRY_TAG sent,
-/// cleared when a non-retry syscall is processed for that pid.
-pub(crate) static mut RETRY_COUNT: [u64; 16] = [0; 16];
+/// Index by pid (0..MAX_PROCS). Atomic to avoid `static mut` UB; single
+/// writer per slot (the pid's handler thread), but readers can be other
+/// handlers (deadlock detector cross-reads via fs_pipe).
+use core::sync::atomic::{AtomicU8, AtomicBool};
+pub(crate) static RETRY_COUNT: [AtomicU64; 16] = [const { AtomicU64::new(0) }; 16];
 /// Cumulative pipe stall counter per-pid. Only cleared on successful pipe I/O.
-pub(crate) static mut PIPE_STALL: [u64; 16] = [0; 16];
+pub(crate) static PIPE_STALL: [AtomicU64; 16] = [const { AtomicU64::new(0) }; 16];
 /// Which pipe each process is currently stalling on (0xFF = none).
-pub(crate) static mut PIPE_STALL_ID: [u8; 16] = [0xFF; 16];
+pub(crate) static PIPE_STALL_ID: [AtomicU8; 16] = [const { AtomicU8::new(0xFF) }; 16];
 /// Processes that received EOF from the deadlock detector.
 /// If they exit with non-zero status shortly after, treat it as clean exit.
-pub(crate) static mut DEADLOCK_EOF: [bool; 16] = [false; 16];
+pub(crate) static DEADLOCK_EOF: [AtomicBool; 16] = [const { AtomicBool::new(false) }; 16];
 
 pub(crate) fn mark_pipe_retry_on(pid: usize, pipe_id: usize) {
-    if pid < 16 { unsafe { RETRY_COUNT[pid] += 1; PIPE_STALL[pid] += 1; PIPE_STALL_ID[pid] = pipe_id as u8; } }
+    if pid < 16 {
+        RETRY_COUNT[pid].fetch_add(1, Ordering::Relaxed);
+        PIPE_STALL[pid].fetch_add(1, Ordering::Relaxed);
+        PIPE_STALL_ID[pid].store(pipe_id as u8, Ordering::Relaxed);
+    }
 }
 pub(crate) fn clear_pipe_retry(pid: usize) {
-    if pid < 16 { unsafe { RETRY_COUNT[pid] = 0; } }
+    if pid < 16 { RETRY_COUNT[pid].store(0, Ordering::Relaxed); }
 }
 pub(crate) fn clear_pipe_stall(pid: usize) {
-    if pid < 16 { unsafe { PIPE_STALL[pid] = 0; PIPE_STALL_ID[pid] = 0xFF; } }
+    if pid < 16 {
+        PIPE_STALL[pid].store(0, Ordering::Relaxed);
+        PIPE_STALL_ID[pid].store(0xFF, Ordering::Relaxed);
+    }
 }
 
 /// Format a u64 as decimal into buf, return bytes written.
@@ -300,25 +316,6 @@ pub(crate) extern "C" fn child_handler() -> ! {
 
         let syscall_nr = msg.tag;
 
-        // === PWC watchpoint: detect spurious pipe close (should not fire after deadlock fix) ===
-        if pid >= 3 && pid <= 5 {
-            use core::sync::atomic::Ordering as Ord;
-            let pwc1 = PIPE_WRITE_CLOSED[1].load(Ord::Relaxed);
-            let wref1 = PIPE_WRITE_REFS[1].load(Ord::Relaxed);
-            let act1 = PIPE_ACTIVE[1].load(Ord::Relaxed);
-            if pwc1 != 0 && wref1 > 0 && act1 != 0 {
-                static mut PWC_FIRED: bool = false;
-                if !unsafe { PWC_FIRED } {
-                    unsafe { PWC_FIRED = true; }
-                    print(b"!! PWC-ANOM P"); print_u64(pid as u64);
-                    print(b" S"); print_u64(syscall_nr);
-                    print(b" pwc1="); print_u64(pwc1);
-                    print(b" wref1="); print_u64(wref1);
-                    print(b"\n");
-                }
-            }
-        }
-
         // Phase 5: Syscall shadow logging (record every child syscall)
         syscall_log_record(pid as u16, syscall_nr as u16, msg.regs[0], 0);
         // Wine PE loader diagnostics: log every syscall for Wine PIDs
@@ -335,10 +332,11 @@ pub(crate) extern "C" fn child_handler() -> ! {
 
         // Trace syscalls for separate-AS child processes (P6+)
         if pid >= 6 {
-            static mut AS_TRACE_N: [u32; 16] = [0; 16];
-            let tn = if pid < 16 { unsafe { &mut AS_TRACE_N[pid] } } else { unsafe { &mut AS_TRACE_N[0] } };
-            *tn += 1;
-            if *tn <= 20 || *tn % 200 == 0 {
+            use core::sync::atomic::AtomicU32;
+            static AS_TRACE_N: [AtomicU32; 16] = [const { AtomicU32::new(0) }; 16];
+            let slot = if pid < 16 { pid } else { 0 };
+            let tn = AS_TRACE_N[slot].fetch_add(1, Ordering::Relaxed) + 1;
+            if tn <= 20 || tn % 200 == 0 {
                 print(b"AS-SYS P"); print_u64(pid as u64);
                 print(b" #"); print_u64(syscall_nr);
                 if syscall_nr == 0 || syscall_nr == 1 || syscall_nr == 3 || syscall_nr == 7 {
@@ -452,7 +450,8 @@ pub(crate) extern "C" fn child_handler() -> ! {
                 // per-fd — forward only if LKL has ANY fds (best effort)
                 SYS_POLL | SYS_PPOLL | SYS_SELECT | SYS_PSELECT6
                 if pid > 0 && pid <= MAX_PROCS &&
-                   unsafe { LKL_FDS[pid-1][0] | LKL_FDS[pid-1][1] } != 0 => {
+                   (LKL_FDS[pid-1][0].load(Ordering::Acquire)
+                    | LKL_FDS[pid-1][1].load(Ordering::Acquire)) != 0 => {
                     forward_to_lkl(ep_cap, syscall_nr, &msg, pid, child_as_cap);
                     true
                 }
@@ -480,15 +479,8 @@ pub(crate) extern "C" fn child_handler() -> ! {
         }
 
         match syscall_nr {
-            // SYS_read(fd, buf, len)
-            SYS_READ => {
-                let mut ctx = make_ctx!();
-                syscalls_fs::sys_read(&mut ctx, &msg);
-            }
-
-            // SYS_write(fd, buf, len)
+            // SYS_write — traces P4 pipe writes for wineserver debug, then delegates.
             SYS_WRITE => {
-                // Trace P4 writes to pipe fds (wineserver reply pipe)
                 if pid == 4 && (msg.regs[0] as usize) < 128 {
                     let wfd = msg.regs[0] as usize;
                     let wlen = msg.regs[2];
@@ -506,13 +498,8 @@ pub(crate) extern "C" fn child_handler() -> ! {
                 syscalls_fs::sys_write(&mut ctx, &msg);
             }
 
-            // SYS_close(fd)
-            SYS_CLOSE => {
-                let mut ctx = make_ctx!();
-                syscalls_fs::sys_close(&mut ctx, &msg);
-            }
-
-            // SYS_open(path, flags, mode) — used by musl dynamic linker + busybox
+            // SYS_open — debug print, then delegate. (Not in shared dispatch: paths
+            // vary per handler; LUCAS has /snap/ + /proc/ preprocessing.)
             SYS_OPEN => {
                 print(b"CH-OPEN P"); crate::framebuffer::print_u64(pid as u64);
                 print(b" ptr="); crate::framebuffer::print_hex64(msg.regs[0]);
@@ -521,43 +508,13 @@ pub(crate) extern "C" fn child_handler() -> ! {
                 syscalls_fs::sys_open(&mut ctx, &msg);
             }
 
-            // SYS_fstat(fd, stat_buf)
-            SYS_FSTAT => {
-                let mut ctx = make_ctx!();
-                syscalls_fs::sys_fstat(&mut ctx, &msg);
-            }
-
-            // SYS_stat(path, statbuf) — check if path exists (for terminfo etc.)
-            SYS_STAT | SYS_LSTAT => {
-                let mut ctx = make_ctx!();
-                syscalls_fs::sys_stat(&mut ctx, &msg);
-            }
-
-            // SYS_poll(fds, nfds, timeout)
-            SYS_POLL => {
-                let mut ctx = make_ctx!();
-                syscalls_net::sys_poll(&mut ctx, &msg);
-            }
-
-            // SYS_lseek(fd, offset, whence)
-            SYS_LSEEK => {
-                let mut ctx = make_ctx!();
-                syscalls_fs::sys_lseek(&mut ctx, &msg);
-            }
-
-            // SYS_mmap — delegated to syscalls::mm
-            SYS_MMAP => {
-                let mut ctx = make_ctx!();
-                syscalls_mm::sys_mmap(&mut ctx, &msg);
-            }
-
-            // SYS_mprotect — delegated to syscalls::mm
+            // SYS_mprotect — P2 debug trace, then delegate.
             SYS_MPROTECT => {
-                // Trace mprotect for Wine debug
                 if pid == 2 {
-                    static mut MP_COUNT: u32 = 0;
-                    let c = unsafe { &mut MP_COUNT };
-                    if *c < 5 || *c % 100 == 0 {
+                    use core::sync::atomic::AtomicU32;
+                    static MP_COUNT: AtomicU32 = AtomicU32::new(0);
+                    let c = MP_COUNT.fetch_add(1, Ordering::Relaxed);
+                    if c < 5 || c % 100 == 0 {
                         print(b"MPROT P2 addr=");
                         crate::framebuffer::print_hex64(msg.regs[0]);
                         print(b" len=");
@@ -566,97 +523,12 @@ pub(crate) extern "C" fn child_handler() -> ! {
                         print_u64(msg.regs[2]);
                         print(b"\n");
                     }
-                    *c += 1;
                 }
                 let mut ctx = make_ctx!();
                 syscalls_mm::sys_mprotect(&mut ctx, &msg);
             }
 
-            // SYS_pread64(fd, buf, count, offset)
-            SYS_PREAD64 => {
-                let mut ctx = make_ctx!();
-                syscalls_fs::sys_pread64(&mut ctx, &msg);
-            }
-
-            // SYS_munmap — delegated to syscalls::mm
-            SYS_MUNMAP => {
-                let mut ctx = make_ctx!();
-                syscalls_mm::sys_munmap(&mut ctx, &msg);
-            }
-
-            // SYS_brk(addr) — delegated to syscalls::mm
-            SYS_BRK => {
-                let mut ctx = make_ctx!();
-                syscalls_mm::sys_brk(&mut ctx, &msg);
-            }
-
-            // SYS_rt_sigaction(sig, act, oldact, sigsetsize)
-            SYS_RT_SIGACTION => {
-                let mut ctx = make_ctx!();
-                syscalls_signal::sys_rt_sigaction(&mut ctx, &msg);
-            }
-
-            // SYS_rt_sigprocmask(how, set, oldset, sigsetsize)
-            SYS_RT_SIGPROCMASK => {
-                let mut ctx = make_ctx!();
-                syscalls_signal::sys_rt_sigprocmask(&mut ctx, &msg);
-            }
-
-            // SYS_ioctl — terminal emulation
-            SYS_IOCTL => {
-                let mut ctx = make_ctx!();
-                syscalls_fs::sys_ioctl(&mut ctx, &msg);
-            }
-
-            // SYS_readv(fd, iov, iovcnt) — scatter read
-            SYS_READV => {
-                let mut ctx = make_ctx!();
-                syscalls_fs::sys_readv(&mut ctx, &msg);
-            }
-
-            // SYS_writev
-            SYS_WRITEV => {
-                let mut ctx = make_ctx!();
-                syscalls_fs::sys_writev(&mut ctx, &msg);
-            }
-
-            // SYS_access / SYS_faccessat — check file accessibility
-            SYS_ACCESS | SYS_FACCESSAT => {
-                let mut ctx = make_ctx!();
-                syscalls_fs::sys_access(&mut ctx, &msg, syscall_nr);
-            }
-
-            // SYS_pipe
-            SYS_PIPE => {
-                let mut ctx = make_ctx!();
-                syscalls_fs::sys_pipe(&mut ctx, &msg);
-            }
-
-            // SYS_nanosleep
-            SYS_NANOSLEEP => { let mut ctx = make_ctx!(); syscalls_info::sys_nanosleep(&mut ctx, &msg); }
-
-            SYS_GETPID => {
-                let mut ctx = make_ctx!();
-                syscalls_task::sys_getpid(&mut ctx, &msg);
-            }
-
-            SYS_GETTID => {
-                let mut ctx = make_ctx!();
-                syscalls_task::sys_gettid(&mut ctx, &msg);
-            }
-
-            // SYS_dup(oldfd) — copies fd kind + socket/VFS metadata
-            SYS_DUP => {
-                let mut ctx = make_ctx!();
-                syscalls_fs::sys_dup(&mut ctx, &msg);
-            }
-
-            SYS_DUP2 => {
-                let mut ctx = make_ctx!();
-                syscalls_fs::sys_dup2(&mut ctx, &msg);
-            }
-
-            // SYS_execve(path, argv, envp) — generic: loads any ELF from initrd
+            // SYS_execve — custom block below (loads ELF from initrd)
             SYS_EXECVE => {
                 print(b"EXEC P"); print_u64(pid as u64); print(b"\n");
                 let path_ptr = msg.regs[0];
@@ -1762,112 +1634,8 @@ pub(crate) extern "C" fn child_handler() -> ! {
                 reply_val(ep_cap, fork_cpid as i64);
             }
 
-            // SYS_wait4(61) — wait for child process
-            SYS_WAIT4 => {
-                let mut ctx = make_ctx!();
-                syscalls_task::sys_wait4(&mut ctx, &msg);
-            }
-
-            // SYS_uname
-            SYS_UNAME => {
-                let mut ctx = make_ctx!();
-                let buf_ptr = msg.regs[0];
-                if buf_ptr != 0 && buf_ptr < 0x0000_8000_0000_0000 {
-                    let mut buf = [0u8; 390];
-                    let fields: [&[u8]; 5] = [b"Linux", b"sotos", b"6.1.0-sotX", b"#1 SMP sotX 0.1.0", b"x86_64"];
-                    for (i, field) in fields.iter().enumerate() {
-                        let off = i * 65;
-                        let len = field.len().min(64);
-                        buf[off..off + len].copy_from_slice(&field[..len]);
-                    }
-                    ctx.guest_write(buf_ptr, &buf);
-                }
-                reply_val(ep_cap, 0);
-            }
-
-            // SYS_fcntl
-            SYS_FCNTL => {
-                let mut ctx = make_ctx!();
-                syscalls_fs::sys_fcntl(&mut ctx, &msg);
-            }
-
-            // SYS_getcwd
-            SYS_GETCWD => {
-                let mut ctx = make_ctx!();
-                syscalls_fs::sys_getcwd(&mut ctx, &msg);
-            }
-
-            // SYS_fsync / SYS_fdatasync — flush (no-op, data is already persistent)
-            SYS_FSYNC | SYS_FDATASYNC => {
-                let mut ctx = make_ctx!();
-                syscalls_fs::sys_fsync(&mut ctx, &msg);
-            }
-
-            // SYS_ftruncate(fd, length)
-            SYS_FTRUNCATE => {
-                let mut ctx = make_ctx!();
-                syscalls_fs::sys_ftruncate(&mut ctx, &msg);
-            }
-
-            // SYS_rename(oldpath, newpath)
-            SYS_RENAME => {
-                let mut ctx = make_ctx!();
-                syscalls_fs::sys_rename(&mut ctx, &msg);
-            }
-
-            // SYS_gettimeofday
-            SYS_GETTIMEOFDAY => {
-                let mut ctx = make_ctx!();
-                syscalls_info::sys_gettimeofday(&mut ctx, &msg);
-            }
-
-            // SYS_sysinfo
-            SYS_SYSINFO => {
-                let mut ctx = make_ctx!();
-                syscalls_info::sys_sysinfo(&mut ctx, &msg);
-            }
-
-            SYS_GETUID | SYS_GETGID | SYS_GETEUID | SYS_GETEGID => {
-                let mut ctx = make_ctx!();
-                syscalls_task::sys_getuid_family(&mut ctx, &msg);
-            }
-
-            // SYS_setpgid
-            SYS_SETPGID => {
-                let mut ctx = make_ctx!();
-                syscalls_task::sys_setpgid(&mut ctx, &msg);
-            }
-
-            SYS_GETPPID => {
-                let mut ctx = make_ctx!();
-                syscalls_task::sys_getppid(&mut ctx, &msg);
-            }
-
-            // SYS_getpgrp
-            SYS_GETPGRP => {
-                let mut ctx = make_ctx!();
-                syscalls_task::sys_getpgrp(&mut ctx, &msg);
-            }
-
-            // SYS_setsid
-            SYS_SETSID => {
-                let mut ctx = make_ctx!();
-                syscalls_task::sys_setsid(&mut ctx, &msg);
-            }
-
-            // SYS_setfsuid / SYS_setfsgid — return previous (0)
-            SYS_SETFSUID | SYS_SETFSGID => {
-                let mut ctx = make_ctx!();
-                syscalls_task::sys_setfsuid_family(&mut ctx, &msg);
-            }
-
-            // SYS_sigaltstack — stub
-            SYS_SIGALTSTACK => {
-                let mut ctx = make_ctx!();
-                syscalls_signal::sys_sigaltstack(&mut ctx, &msg);
-            }
-
-            // SYS_openat — /dev files + initrd files + VFS files
+            // SYS_openat — has debug print above fd 5 (kept inline); shared logic
+            // beyond that lives in dispatch. Keep here because of pid-gated trace.
             SYS_OPENAT => {
                 if pid >= 6 {
                     print(b"CH-OA P"); crate::framebuffer::print_u64(pid as u64);
@@ -1878,341 +1646,25 @@ pub(crate) extern "C" fn child_handler() -> ! {
                 syscalls_fs::sys_openat(&mut ctx, &msg);
             }
 
-            // SYS_set_tid_address — store clear_child_tid pointer, return TID
-            SYS_SET_TID_ADDRESS => {
-                let mut ctx = make_ctx!();
-                syscalls_task::sys_set_tid_address(&mut ctx, &msg);
-            }
-
-            // SYS_clock_gettime
-            SYS_CLOCK_GETTIME => {
-                let mut ctx = make_ctx!();
-                syscalls_info::sys_clock_gettime(&mut ctx, &msg);
-            }
-
-            // SYS_time(201)
-            SYS_TIME => {
-                let mut ctx = make_ctx!();
-                syscalls_info::sys_time(&mut ctx, &msg);
-            }
-
-            // SYS_exit_group
-            SYS_EXIT_GROUP => {
-                let mut ctx = make_ctx!();
-                if syscalls_task::sys_exit_group(&mut ctx, &msg).is_break() {
-                    break;
-                }
-            }
-
-            // SYS_fstatat(dirfd, path, statbuf, flags)
-            SYS_FSTATAT => {
-                let mut ctx = make_ctx!();
-                syscalls_fs::sys_fstatat(&mut ctx, &msg);
-            }
-
-            // SYS_readlinkat(dirfd, path, buf, bufsiz)
-            SYS_READLINKAT => {
-                let mut ctx = make_ctx!();
-                syscalls_fs::sys_readlinkat(&mut ctx, &msg);
-            }
-
-            // SYS_prlimit64
-            SYS_PRLIMIT64 => {
-                let mut ctx = make_ctx!();
-                syscalls_info::sys_prlimit64(&mut ctx, &msg);
-            }
-
-            // SYS_getrandom
-            SYS_GETRANDOM => {
-                let mut ctx = make_ctx!();
-                syscalls_info::sys_getrandom(&mut ctx, &msg);
-            }
-
-            // SYS_futex — fallback when LKL is not ready (routed to LKL upstream when it is).
-            SYS_FUTEX => {
-                let mut ctx = make_ctx!();
-                syscalls_info::sys_futex(&mut ctx, &msg);
-            }
-
-            // SYS_sched_getaffinity
-            SYS_SCHED_GETAFFINITY => {
-                let mut ctx = make_ctx!();
-                syscalls_info::sys_sched_getaffinity(&mut ctx, &msg);
-            }
-
-            // SYS_getdents64(fd, dirp, count)
-            SYS_GETDENTS64 => {
-                let mut ctx = make_ctx!();
-                syscalls_fs::sys_getdents64(&mut ctx, &msg);
-            }
-
-            // SYS_fadvise64 — stub
-            SYS_FADVISE64 => {
-                let mut ctx = make_ctx!();
-                syscalls_fs::sys_fadvise64(&mut ctx, &msg);
-            }
-
-            // SYS_ppoll — like poll but with signal mask
-            SYS_PPOLL => {
-                let mut ctx = make_ctx!();
-                syscalls_net::sys_ppoll(&mut ctx, &msg);
-            }
-
-            // SYS_statx — musl 1.2.5+ uses this exclusively (no fstatat fallback)
-            SYS_STATX => {
-                let mut ctx = make_ctx!();
-                syscalls_fs::sys_statx(&mut ctx, &msg);
-            }
-
-            // SYS_rseq — restartable sequences (musl may use)
-            SYS_RSEQ => reply_val(ep_cap, -ENOSYS), // -ENOSYS is fine
-
-            // SYS_SIGNAL_TRAMPOLINE (0x7F00) — async signal delivery
-            0x7F00 => {
-                let mut ctx = make_ctx!();
-                if syscalls_signal::sys_signal_trampoline(&mut ctx, &msg).is_break() {
-                    break;
-                }
-            }
-
-            SYS_SOCKET => {
-                let mut ctx = make_ctx!();
-                syscalls_net::sys_socket(&mut ctx, &msg);
-            }
-
-            SYS_CONNECT => {
-                let mut ctx = make_ctx!();
-                syscalls_net::sys_connect(&mut ctx, &msg);
-            }
-
-            SYS_SENDTO => {
-                let mut ctx = make_ctx!();
-                syscalls_net::sys_sendto(&mut ctx, &msg);
-            }
-
-            SYS_SENDMSG => {
-                let mut ctx = make_ctx!();
-                syscalls_net::sys_sendmsg(&mut ctx, &msg);
-            }
-
-            SYS_RECVFROM => {
-                let mut ctx = make_ctx!();
-                syscalls_net::sys_recvfrom(&mut ctx, &msg);
-            }
-
-            SYS_RECVMSG => {
-                let mut ctx = make_ctx!();
-                syscalls_net::sys_recvmsg(&mut ctx, &msg);
-            }
-
-            SYS_BIND => {
-                let mut ctx = make_ctx!();
-                syscalls_net::sys_bind(&mut ctx, &msg);
-            }
-            SYS_LISTEN => {
-                let mut ctx = make_ctx!();
-                syscalls_net::sys_listen(&mut ctx, &msg);
-            }
-            SYS_SETSOCKOPT => {
-                let mut ctx = make_ctx!();
-                syscalls_net::sys_setsockopt(&mut ctx, &msg);
-            }
-
-            SYS_GETSOCKNAME | SYS_GETPEERNAME => {
-                let mut ctx = make_ctx!();
-                syscalls_net::sys_getsockname(&mut ctx, &msg, syscall_nr);
-            }
-
-            SYS_GETSOCKOPT => {
-                let mut ctx = make_ctx!();
-                syscalls_net::sys_getsockopt(&mut ctx, &msg);
-            }
-
-            SYS_SHUTDOWN => {
-                let mut ctx = make_ctx!();
-                syscalls_net::sys_shutdown(&mut ctx, &msg);
-            }
-
-            // SYS_chmod(90) — stub
-            SYS_CHMOD => { let mut ctx = make_ctx!(); syscalls_info::sys_identity_stubs(&mut ctx, &msg); }
-
-            // SYS_mkdir(83) — create directory in VFS
-            SYS_MKDIR => {
-                let mut ctx = make_ctx!();
-                syscalls_fs::sys_mkdir(&mut ctx, &msg);
-            }
-
-            // SYS_select(23) / SYS_pselect6(270) — check readability/writability
-            SYS_SELECT | SYS_PSELECT6 => {
-                let mut ctx = make_ctx!();
-                syscalls_net::sys_select(&mut ctx, &msg, syscall_nr);
-            }
-
-            // SYS_epoll_create1(291) — stub: return a fake FD
-            SYS_EPOLL_CREATE1 => {
-                let mut ctx = make_ctx!();
-                syscalls_net::sys_epoll_create(&mut ctx, &msg);
-            }
-
-            // SYS_epoll_ctl(233) — stub: always succeed
-            SYS_EPOLL_CTL => {
-                let mut ctx = make_ctx!();
-                syscalls_net::sys_epoll_ctl(&mut ctx, &msg);
-            }
-
-            // SYS_epoll_wait(232), SYS_epoll_pwait(281) — real fd tracking
-            SYS_EPOLL_WAIT | SYS_EPOLL_PWAIT => {
-                let mut ctx = make_ctx!();
-                syscalls_net::sys_epoll_wait(&mut ctx, &msg);
-            }
-
-            // SYS_epoll_create(213) — old API, same as epoll_create1
-            SYS_EPOLL_CREATE => {
-                let mut ctx = make_ctx!();
-                syscalls_net::sys_epoll_create(&mut ctx, &msg);
-            }
-
-            // SYS_pidfd_open(293) — stub: not supported
-            SYS_PIPE2 => {
-                let mut ctx = make_ctx!();
-                syscalls_fs::sys_pipe2(&mut ctx, &msg);
-            }
-
-            // --- glibc compatibility stubs ---
-
-            // SYS_set_robust_list(273) — glibc pthread robust mutex tracking
-            SYS_SET_ROBUST_LIST => {
-                let mut ctx = make_ctx!();
-                syscalls_task::sys_set_robust_list(&mut ctx, &msg);
-            }
-
-            // SYS_get_robust_list(274)
-            SYS_GET_ROBUST_LIST => {
-                let mut ctx = make_ctx!();
-                syscalls_task::sys_get_robust_list(&mut ctx, &msg);
-            }
-
-            // SYS_madvise(28) — memory advisory (MADV_DONTNEED zeros pages)
-            SYS_MADVISE => { let mut ctx = make_ctx!(); syscalls_mm::sys_madvise(&mut ctx, &msg); }
-
-            // SYS_sched_setaffinity(203) — stub
-            SYS_SCHED_SETAFFINITY => { let mut ctx = make_ctx!(); syscalls_info::sys_identity_stubs(&mut ctx, &msg); }
-
-            // SYS_sysinfo(99) — already handled above but add memory info
-            // (already in match)
-
-            // SYS_getrlimit(97) / SYS_setrlimit(160)
-            SYS_GETRLIMIT => {
-                let mut ctx = make_ctx!();
-                syscalls_info::sys_getrlimit(&mut ctx, &msg);
-            }
-            SYS_SETRLIMIT => { let mut ctx = make_ctx!(); syscalls_info::sys_identity_stubs(&mut ctx, &msg); }
-
-
-            // SYS_prctl(157)
-            SYS_PRCTL => {
-                let mut ctx = make_ctx!();
-                syscalls_info::sys_prctl(&mut ctx, &msg);
-            }
-
-
-            // SYS_mremap(25) — delegated to syscalls::mm
-            SYS_MREMAP => {
-                let mut ctx = make_ctx!();
-                syscalls_mm::sys_mremap(&mut ctx, &msg);
-            }
-
             // ═══════════════════════════════════════════════════════════
             // Phase A–C: comprehensive Linux ABI for distro binaries + Wine
             // ═══════════════════════════════════════════════════════════
 
-            // ─── Phase A: File operations ────────────────────────────
+            // ─── Phase A arms NOT in shared dispatch ──────────────────
 
-            // SYS_pwrite64(18) — write at offset (VFS)
-            SYS_PWRITE64 => {
-                let mut ctx = make_ctx!();
-                syscalls_fs::sys_pwrite64(&mut ctx, &msg);
-            }
-
-            // SYS_readlink(89) — /proc/self/exe → /bin/program
-            SYS_READLINK => {
-                let mut ctx = make_ctx!();
-                syscalls_fs::sys_readlink(&mut ctx, &msg);
-            }
-
-            // SYS_dup3(292) — dup with O_CLOEXEC
-            SYS_DUP3 => {
-                let mut ctx = make_ctx!();
-                syscalls_fs::sys_dup3(&mut ctx, &msg);
-            }
-
-            // SYS_statfs(137) / SYS_fstatfs(138) — filesystem info
-            SYS_STATFS | SYS_FSTATFS => {
-                let mut ctx = make_ctx!();
-                syscalls_fs::sys_statfs(&mut ctx, &msg, syscall_nr);
-            }
-
-            // SYS_creat(85) — redirect to open with O_CREAT|O_WRONLY|O_TRUNC
+            // SYS_creat — not in dispatch (distinct from open).
             SYS_CREAT => {
                 let mut ctx = make_ctx!();
                 syscalls_fs::sys_creat(&mut ctx, &msg);
             }
 
-            // SYS_rmdir(84) — remove directory
-            SYS_RMDIR => {
-                let mut ctx = make_ctx!();
-                syscalls_fs::sys_rmdir(&mut ctx, &msg);
-            }
-
-            // SYS_unlinkat(263) — unlink with dirfd
-            // SYS_unlink(87) — delete file from VFS
-            SYS_UNLINK => {
-                let mut ctx = make_ctx!();
-                syscalls_fs::sys_unlink(&mut ctx, &msg);
-            }
-
-            SYS_UNLINKAT => {
-                let mut ctx = make_ctx!();
-                syscalls_fs::sys_unlinkat(&mut ctx, &msg);
-            }
-
-            // SYS_renameat(264) / SYS_renameat2(316) — rename with dirfd
-            SYS_RENAMEAT | SYS_RENAMEAT2 => {
-                let mut ctx = make_ctx!();
-                syscalls_fs::sys_renameat(&mut ctx, &msg);
-            }
-
-            // SYS_mkdirat(258) — mkdir with dirfd
-            SYS_MKDIRAT => {
-                let mut ctx = make_ctx!();
-                syscalls_fs::sys_mkdirat(&mut ctx, &msg);
-            }
-
-            // SYS_preadv(295) — scatter read at offset
-            SYS_PREADV => {
-                let mut ctx = make_ctx!();
-                syscalls_fs::sys_preadv(&mut ctx, &msg);
-            }
-
-            // SYS_pwritev(296) — scatter write at offset
-            SYS_PWRITEV => {
-                let mut ctx = make_ctx!();
-                syscalls_fs::sys_pwritev(&mut ctx, &msg);
-            }
-
-            // SYS_copy_file_range(326) — copy between file descriptors
+            // SYS_copy_file_range — not in dispatch.
             SYS_COPY_FILE_RANGE => {
                 let mut ctx = make_ctx!();
                 syscalls_fs::sys_copy_file_range(&mut ctx, &msg);
             }
 
-            // SYS_sendfile(40) — send file data to socket/fd
-            SYS_SENDFILE => {
-                let mut ctx = make_ctx!();
-                syscalls_fs::sys_sendfile(&mut ctx, &msg);
-            }
-
-            // link/linkat — return -EPERM so callers (git) fall back to rename()
+            // link/linkat — -EPERM so callers (git) fall back to rename().
             SYS_LINK | SYS_LINKAT => {
                 reply_val(ep_cap, -EPERM);
             }
@@ -2251,7 +1703,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
                 reply_val(ep_cap, 0);
             }
 
-            // File metadata stubs — return 0 (pretend success)
+            // File metadata stubs — not in shared dispatch.
             SYS_FCHMOD | SYS_FCHOWN | SYS_LCHOWN
             | SYS_FLOCK | SYS_FALLOCATE | SYS_UTIMES
             | SYS_FCHMODAT | SYS_FCHOWNAT
@@ -2261,90 +1713,21 @@ pub(crate) extern "C" fn child_handler() -> ! {
                 syscalls_fs::sys_file_metadata_stubs(&mut ctx, &msg);
             }
 
-            // SYS_umask(95)
-            SYS_UMASK => {
-                let mut ctx = make_ctx!();
-                syscalls_fs::sys_umask(&mut ctx, &msg);
-            }
+            // ─── Phase B arms NOT in shared dispatch ──────────────────
 
-            // SYS_faccessat2(439) — like faccessat
-            SYS_FACCESSAT2 => {
-                let mut ctx = make_ctx!();
-                syscalls_fs::sys_faccessat2(&mut ctx, &msg);
-            }
-
-            // ─── Phase B: Process management & signals ───────────────
-
-            // SYS_sched_yield(24)
-            SYS_SCHED_YIELD => { let mut ctx = make_ctx!(); syscalls_info::sys_sched_yield(&mut ctx, &msg); }
-
-            // SYS_waitid(247) — like wait4
+            // SYS_waitid(247) — not in dispatch.
             SYS_WAITID => {
                 let mut ctx = make_ctx!();
                 syscalls_task::sys_waitid(&mut ctx, &msg);
             }
 
-            // SYS_getpgid(121) / SYS_getsid(124)
-            SYS_GETPGID | SYS_GETSID => {
-                let mut ctx = make_ctx!();
-                syscalls_task::sys_getpgid(&mut ctx, &msg);
-            }
-
-            // SYS_tgkill(234)
-            SYS_TGKILL => {
-                let mut ctx = make_ctx!();
-                syscalls_task::sys_tgkill(&mut ctx, &msg);
-            }
-
-            // SYS_clock_getres(229)
-            SYS_CLOCK_GETRES => {
-                let mut ctx = make_ctx!();
-                syscalls_info::sys_clock_getres(&mut ctx, &msg);
-            }
-
-            // SYS_clock_nanosleep(230)
-            SYS_CLOCK_NANOSLEEP => {
-                let mut ctx = make_ctx!();
-                syscalls_info::sys_clock_nanosleep(&mut ctx, &msg);
-            }
-
-            // SYS_getrusage(98)
-            SYS_GETRUSAGE => {
-                let mut ctx = make_ctx!();
-                syscalls_info::sys_getrusage(&mut ctx, &msg);
-            }
-
-            // SYS_times(100)
-            SYS_TIMES => {
-                let mut ctx = make_ctx!();
-                syscalls_info::sys_times(&mut ctx, &msg);
-            }
-
-            // SYS_rt_sigpending(127)
-            SYS_RT_SIGPENDING => {
-                let mut ctx = make_ctx!();
-                syscalls_signal::sys_rt_sigpending(&mut ctx, &msg);
-            }
-
-            // SYS_rt_sigtimedwait(128)
-            SYS_RT_SIGTIMEDWAIT => {
-                let mut ctx = make_ctx!();
-                syscalls_signal::sys_rt_sigtimedwait(&mut ctx, &msg);
-            }
-
-            // SYS_rt_sigsuspend(130)
-            SYS_RT_SIGSUSPEND => {
-                let mut ctx = make_ctx!();
-                syscalls_signal::sys_rt_sigsuspend(&mut ctx, &msg);
-            }
-
-            // SYS_rt_sigqueueinfo(129)
+            // SYS_rt_sigqueueinfo — not in dispatch.
             SYS_RT_SIGQUEUEINFO => {
                 let mut ctx = make_ctx!();
                 syscalls_signal::sys_rt_sigqueueinfo(&mut ctx, &msg);
             }
 
-            // Identity stubs
+            // Identity/scheduler stubs not in dispatch.
             SYS_PERSONALITY | SYS_ALARM => { let mut ctx = make_ctx!(); syscalls_info::sys_identity_stubs(&mut ctx, &msg); }
             SYS_PAUSE => { let mut ctx = make_ctx!(); syscalls_info::sys_pause(&mut ctx, &msg); }
             SYS_SETUID | SYS_SETGID | SYS_SETREUID | SYS_SETREGID
@@ -2352,19 +1735,10 @@ pub(crate) extern "C" fn child_handler() -> ! {
             | SYS_CAPSET | SYS_UNSHARE | SYS_SETPRIORITY
             => { let mut ctx = make_ctx!(); syscalls_info::sys_identity_stubs(&mut ctx, &msg); }
 
-            SYS_GETPRIORITY => reply_val(ep_cap, 20), // nice=0 encoded as 20
-            SYS_GETGROUPS => reply_val(ep_cap, 0), // no supplementary groups
+            SYS_GETPRIORITY => reply_val(ep_cap, 20),
+            SYS_GETGROUPS => reply_val(ep_cap, 0),
 
-            SYS_GETRESUID | SYS_GETRESGID => {
-                let mut ctx = make_ctx!();
-                syscalls_info::sys_getresuid(&mut ctx, &msg);
-            }
-            SYS_CAPGET => {
-                let mut ctx = make_ctx!();
-                syscalls_info::sys_capget(&mut ctx, &msg);
-            }
-
-            // Scheduler stubs
+            // Scheduler stubs not in dispatch.
             SYS_SCHED_GETPARAM => {
                 let mut ctx = make_ctx!();
                 syscalls_info::sys_sched_getparam(&mut ctx, &msg);
@@ -2374,7 +1748,7 @@ pub(crate) extern "C" fn child_handler() -> ! {
             SYS_SCHED_GET_PRIORITY_MAX => reply_val(ep_cap, 99),
             SYS_SCHED_GET_PRIORITY_MIN => reply_val(ep_cap, 0),
 
-            // Timer stubs
+            // Timer stubs not in dispatch.
             SYS_GETITIMER => {
                 let mut ctx = make_ctx!();
                 syscalls_info::sys_getitimer(&mut ctx, &msg);
@@ -2384,26 +1758,20 @@ pub(crate) extern "C" fn child_handler() -> ! {
                 syscalls_info::sys_setitimer(&mut ctx, &msg);
             }
 
-            // Memory stubs
+            // Memory stubs not in shared dispatch.
             SYS_MSYNC => { let mut ctx = make_ctx!(); syscalls_info::sys_identity_stubs(&mut ctx, &msg); }
             SYS_MINCORE => reply_val(ep_cap, -ENOMEM),
             SYS_MLOCK | SYS_MUNLOCK | SYS_MLOCKALL | SYS_MUNLOCKALL => reply_val(ep_cap, 0),
 
-            // AIO stubs (Wine probes these)
+            // AIO stubs (Wine probes these) — not in dispatch.
             SYS_IO_SETUP | SYS_IO_DESTROY | SYS_IO_GETEVENTS | SYS_IO_SUBMIT | SYS_IO_CANCEL => reply_val(ep_cap, 0),
 
-            // SysV Shared Memory (real implementation for Wine)
+            // SysV SHM — not in dispatch.
             SYS_SHMGET => { let mut ctx = make_ctx!(); syscalls_mm::sys_shmget(&mut ctx, &msg); }
             SYS_SHMAT  => { let mut ctx = make_ctx!(); syscalls_mm::sys_shmat(&mut ctx, &msg); }
             SYS_SHMCTL => { let mut ctx = make_ctx!(); syscalls_mm::sys_shmctl(&mut ctx, &msg); }
 
-            // SYS_chdir(80)
-            SYS_CHDIR => {
-                let mut ctx = make_ctx!();
-                syscalls_fs::sys_chdir(&mut ctx, &msg);
-            }
-
-            // SYS_fchdir(81)
+            // SYS_fchdir(81) — debug trace, not in dispatch (uses raw number).
             81 => {
                 print(b"FCHDIR-HIT P"); print_u64(pid as u64);
                 print(b" fd="); print_u64(msg.regs[0]);
@@ -2412,97 +1780,39 @@ pub(crate) extern "C" fn child_handler() -> ! {
                 syscalls_fs::sys_fchdir(&mut ctx, &msg);
             }
 
-            // ─── Phase C: Event subsystems (epoll, eventfd, timerfd) ─
-
-            // SYS_eventfd(284) / SYS_eventfd2(290)
-            SYS_EVENTFD | SYS_EVENTFD2 => {
-                let mut ctx = make_ctx!();
-                syscalls_info::sys_eventfd(&mut ctx, &msg, syscall_nr);
-            }
-
-            // SYS_timerfd_create(283)
-            SYS_TIMERFD_CREATE => {
-                let mut ctx = make_ctx!();
-                syscalls_info::sys_timerfd_create(&mut ctx, &msg);
-            }
-
-            // SYS_timerfd_settime(286)
-            SYS_TIMERFD_SETTIME => {
-                let mut ctx = make_ctx!();
-                syscalls_info::sys_timerfd_settime(&mut ctx, &msg);
-            }
-
-            // SYS_timerfd_gettime(287)
-            SYS_TIMERFD_GETTIME => {
-                let mut ctx = make_ctx!();
-                syscalls_info::sys_timerfd_gettime(&mut ctx, &msg);
-            }
-
-            // Improved epoll: SYS_epoll_create/create1 (213/291) — already handled above
-            // but now with proper fd tracking in epoll_reg_*
-
-            // SYS_epoll_ctl(233) — register/modify/delete fd interest
-            // (override the stub above)
-
-            // SYS_epoll_wait(232) / SYS_epoll_pwait(281) — poll registered fds
-            // (override the stub above)
-
-            // SYS_socketpair(53) — create connected AF_UNIX pair
-            SYS_SOCKETPAIR => {
-                let mut ctx = make_ctx!();
-                syscalls_net::sys_socketpair(&mut ctx, &msg);
-            }
-
-            // SYS_accept(43) / SYS_accept4(288)
-            SYS_ACCEPT | SYS_ACCEPT4 => {
-                let mut ctx = make_ctx!();
-                syscalls_net::sys_accept(&mut ctx, &msg);
-            }
-
-            // SYS_memfd_create(319)
-            SYS_MEMFD_CREATE => {
-                let mut ctx = make_ctx!();
-                syscalls_info::sys_memfd_create(&mut ctx, &msg);
-            }
-
-            // SYS_splice(275) / SYS_tee(276)
+            // Splice/tee stubs — not in dispatch.
             SYS_SPLICE | SYS_TEE => reply_val(ep_cap, -ENOSYS),
 
-            // SYS_inotify_init1(294) / SYS_inotify_add_watch(254) / SYS_inotify_rm_watch(255)
-            SYS_INOTIFY_INIT1 => {
-                let mut ctx = make_ctx!();
-                syscalls_info::sys_inotify_init1(&mut ctx, &msg);
-            }
+            // inotify stubs returning fixed values — not in dispatch.
             SYS_INOTIFY_ADD_WATCH => reply_val(ep_cap, 1),
             SYS_INOTIFY_RM_WATCH => reply_val(ep_cap, 0),
 
-            // SYS_signalfd(282) / SYS_signalfd4(289)
-            SYS_SIGNALFD | SYS_SIGNALFD4 => {
-                let mut ctx = make_ctx!();
-                syscalls_info::sys_signalfd(&mut ctx, &msg);
-            }
-
-            // SYS_clone3(435) — modern clone
-            SYS_CLONE3 => {
-                // Return -ENOSYS to force fallback to clone(56)
-                reply_val(ep_cap, -ENOSYS);
-            }
-
-            // SYS_membarrier(324) — memory barrier (stub)
+            // SYS_membarrier(324) — not in dispatch (raw number).
             324 => {
                 reply_val(ep_cap, 0);
             }
 
             // Unknown → -ENOSYS (with logging)
             _ => {
-                print(b"UNHANDLED pid=");
-                print_u64(pid as u64);
-                print(b" sys=");
-                print_u64(syscall_nr);
-                print(b" a0=");
-                print_u64(msg.regs[0]);
-                print(b"\n");
-                reply_val(ep_cap, -ENOSYS);
+                // Fallthrough to shared Linux-ABI dispatcher. Most arms are
+                // already handled above inline; dispatch picks up anything
+                // that has been moved to syscalls/* but not yet removed here.
+                let mut ctx = make_ctx!();
+                match crate::dispatch::dispatch_linux_arm(&mut ctx, &msg, syscall_nr) {
+                    crate::dispatch::DispatchOutcome::Handled => {}
+                    crate::dispatch::DispatchOutcome::Break => break,
+                    crate::dispatch::DispatchOutcome::NotHandled => {
+                        drop(ctx);
+                        print(b"UNHANDLED pid=");
+                        print_u64(pid as u64);
+                        print(b" sys=");
+                        print_u64(syscall_nr);
+                        print(b" a0=");
+                        print_u64(msg.regs[0]);
+                        print(b"\n");
+                        reply_val(ep_cap, -ENOSYS);
+                    }
+                }
             }
         }
     }

@@ -88,7 +88,9 @@ mod xkb;
 mod seatd;
 mod udev;
 mod child_handler;
-mod lucas_handler;
+mod lucas_shell;
+mod init_boot;
+mod dispatch;
 mod lkl;
 mod vfs_service;
 mod wine_diag;
@@ -1423,7 +1425,7 @@ fn start_lucas(blk: Option<VirtioBlk>) {
     }
 
     let _handler_thread_cap = sys::thread_create(
-        lucas_handler::lucas_handler as *const () as u64,
+        crate::lucas_shell::shell_main as *const () as u64,
         LUCAS_HANDLER_STACK + LUCAS_HANDLER_STACK_PAGES * 0x1000,
     ).unwrap_or_else(|_| panic_halt());
 
@@ -1512,7 +1514,7 @@ extern "C" fn vfs_keeper_thread() -> ! {
         let blk = unsafe { core::ptr::read(LUCAS_BLK_STORE as *const VirtioBlk) };
         match ObjectStore::mount(blk) {
             Ok(mut store) => {
-                lucas_handler::sysroot_init(&mut store);
+                crate::init_boot::sysroot_init(&mut store);
                 let vfs = Vfs::new(store);
                 let ptr = vfs.store() as *const _ as u64;
                 SHARED_STORE_PTR.store(ptr, Ordering::Release);
@@ -1589,7 +1591,10 @@ fn spawn_sotsh_native() {
     }
     cleanup(true);
 
-    const SOTSH_STACK_PAGES: u64 = 16;
+    // Debug-build chumsky parser recurses heavily on error recovery paths;
+    // 64 KiB (16 pages) overflowed and faulted at `calculate_layout_for`.
+    // 512 KiB gives enough headroom for any realistic shell line.
+    const SOTSH_STACK_PAGES: u64 = 128;
     let stack_base = process::NEXT_CHILD_STACK
         .fetch_add(SOTSH_STACK_PAGES * 0x1000 + 0x1000, Ordering::SeqCst);
     for i in 0..SOTSH_STACK_PAGES {

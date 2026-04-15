@@ -62,18 +62,19 @@ pub(crate) fn read_pipe(ctx: &mut SyscallContext, fd: usize, buf_ptr: u64, len: 
         // processes each hold the write end of the other's pipe.
         // Two processes waiting for a third (e.g., wineserver) is NOT
         // a deadlock — just a temporary stall.
-        let stall = unsafe { crate::child_handler::PIPE_STALL[ctx.pid] };
+        use core::sync::atomic::Ordering;
+        let stall = crate::child_handler::PIPE_STALL[ctx.pid].load(Ordering::Relaxed);
         if stall > 50000 {
             // Find another process also stalled for a long time
             let mut other_pid = 0usize;
             for p in 1..16usize {
-                if p != ctx.pid && unsafe { crate::child_handler::PIPE_STALL[p] } > 50000 {
+                if p != ctx.pid && crate::child_handler::PIPE_STALL[p].load(Ordering::Relaxed) > 50000 {
                     other_pid = p;
                     break;
                 }
             }
             if other_pid != 0 {
-                let other_pipe = unsafe { crate::child_handler::PIPE_STALL_ID[other_pid] } as usize;
+                let other_pipe = crate::child_handler::PIPE_STALL_ID[other_pid].load(Ordering::Relaxed) as usize;
                 // Verify REAL cycle: the writer of MY pipe must be other_pid,
                 // AND the writer of THEIR pipe must be me. If either pipe's
                 // writer is a third process, this is NOT a deadlock cycle.
@@ -95,10 +96,8 @@ pub(crate) fn read_pipe(ctx: &mut SyscallContext, fd: usize, buf_ptr: u64, len: 
                     }
                     crate::child_handler::clear_pipe_stall(ctx.pid);
                     crate::child_handler::clear_pipe_stall(other_pid);
-                    unsafe {
-                        crate::child_handler::DEADLOCK_EOF[ctx.pid] = true;
-                        crate::child_handler::DEADLOCK_EOF[other_pid] = true;
-                    }
+                    crate::child_handler::DEADLOCK_EOF[ctx.pid].store(true, Ordering::Release);
+                    crate::child_handler::DEADLOCK_EOF[other_pid].store(true, Ordering::Release);
                 } else {
                     // Not a real cycle — just two processes waiting for a
                     // third (e.g., wineserver). Log but don't kill pipes.

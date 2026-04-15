@@ -231,8 +231,10 @@ fn exit_cleanup(ctx: &mut SyscallContext, status: u64) {
     // The deadlock detector closed their pipe write-ends, causing EOF which
     // makes the process exit non-zero. Treat as clean exit (0) so the
     // parent (git) sees a successful helper exit.
-    let status = if status != 0 && pid < 16 && unsafe { crate::child_handler::DEADLOCK_EOF[pid] } {
-        unsafe { crate::child_handler::DEADLOCK_EOF[pid] = false; }
+    let status = if status != 0 && pid < 16
+        && crate::child_handler::DEADLOCK_EOF[pid].load(Ordering::Acquire)
+    {
+        crate::child_handler::DEADLOCK_EOF[pid].store(false, Ordering::Release);
         0
     } else {
         status
