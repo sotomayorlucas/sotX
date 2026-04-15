@@ -299,15 +299,17 @@ int net_backend_up(int nd_id)
 #else
     if (nd_id < 0) return -22;
 
-    /* Linux probes virtio-mmio devices asynchronously after registration.
-     * Yield several times so the device thread has CPU to run scan + probe
-     * before we look up the ifindex. Without this, get_ifindex returns
-     * -ENODEV (19) because eth0 hasn't materialized yet. */
-    for (int i = 0; i < 200; i++) {
-        sys_yield();
+    /* Linux probes virtio-mmio devices asynchronously. Use lkl_sys_nanosleep
+     * to actually park inside the LKL scheduler (sys_yield only releases the
+     * host thread, doesn't necessarily let LKL's worker run the probe).
+     * Retry ifindex lookup 50x at 10ms intervals = ~500ms upper bound. */
+    int ifidx = -19;
+    for (int attempt = 0; attempt < 50; attempt++) {
+        struct __lkl__kernel_timespec ts = { .tv_sec = 0, .tv_nsec = 10 * 1000 * 1000 };
+        lkl_sys_nanosleep(&ts, 0);
+        ifidx = lkl_netdev_get_ifindex(nd_id);
+        if (ifidx >= 0) break;
     }
-
-    int ifidx = lkl_netdev_get_ifindex(nd_id);
     if (ifidx < 0) {
         serial_puts("[lkl-net-raw] get_ifindex failed: ");
         serial_put_dec((uint64_t)(-(long)ifidx));

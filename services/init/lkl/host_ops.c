@@ -403,11 +403,19 @@ static void *lkl_ioremap(long addr, int size)
     return NULL;
 }
 
-static int lkl_iomem_access(const volatile void *addr, void *val,
-                             int size, int write)
+/* iomem_access used to be a stub returning -1, which broke virtio_mmio
+ * device probing (Linux's readl(magic) got garbage → -ENODEV → eth0
+ * never materialized). The real implementation lives in
+ * tools/lkl/lib/iomem.c — it dispatches to the registered
+ * struct lkl_iomem_ops (e.g. virtio_ops in virtio.c) keyed by the
+ * iomem region index encoded in the addr pointer. liblkl.a exports
+ * the symbol, we just forward to it. */
+extern int lkl_iomem_access(const volatile void *addr, void *res, int size, int write);
+
+static int my_iomem_access_shim(const volatile void *addr, void *val,
+                                int size, int write)
 {
-    (void)addr; (void)val; (void)size; (void)write;
-    return -1;
+    return lkl_iomem_access(addr, val, size, write);
 }
 
 /* ---------------------------------------------------------------
@@ -490,7 +498,7 @@ void host_ops_init(struct lkl_host_operations *ops)
     ops->timer_free        = lkl_timer_free;
 
     ops->ioremap           = lkl_ioremap;
-    ops->iomem_access      = lkl_iomem_access;
+    ops->iomem_access      = my_iomem_access_shim;
 
     ops->jmp_buf_set       = lkl_jmp_buf_set;
     ops->jmp_buf_longjmp   = lkl_jmp_buf_longjmp;
