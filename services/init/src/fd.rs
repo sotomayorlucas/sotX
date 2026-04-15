@@ -1,9 +1,20 @@
 // ---------------------------------------------------------------------------
 // FD table types, group management, and related helpers (extracted from main.rs)
+//
+// NOTE on `static mut` (fase 2 continuation):
+//   Most `static mut` here are multi-dim byte buffers (PIPE_BUF, UNIX_PENDING,
+//   SYMLINK_PATH/TARGET, DIR_FD_PATHS, MSG_QUEUE, SCM_FDS_*) or struct arrays
+//   (THREAD_GROUPS) that cannot become atomics without a wrapper. They are
+//   safe in practice under a single-writer-per-slot invariant (each pid has
+//   exactly one handler thread). A future refactor will wrap them in
+//   `sotos_common::spinlock::SpinLock<T>` or an UnsafeCell + Sync newtype
+//   to satisfy Rust 2024 strict rules without per-element atomics.
+//   Primitive counters (SYMLINK_COUNT, FORK_SOCK_READY, PIPE_WRITE_REFS,
+//   PIPE_READ_REFS, UNIX_CONN_REFS) are already atomic.
 // ---------------------------------------------------------------------------
 
 use sotos_common::sys;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use crate::process::MAX_PROCS;
 
 // ---------------------------------------------------------------------------
@@ -834,21 +845,25 @@ const SYMLINK_LEN: usize = 128;
 pub(crate) static mut SYMLINK_PATH: [[u8; SYMLINK_LEN]; MAX_SYMLINKS] = [[0; SYMLINK_LEN]; MAX_SYMLINKS];
 /// Symlink targets (may be relative).
 pub(crate) static mut SYMLINK_TARGET: [[u8; SYMLINK_LEN]; MAX_SYMLINKS] = [[0; SYMLINK_LEN]; MAX_SYMLINKS];
-pub(crate) static mut SYMLINK_COUNT: usize = 0;
+/// Count of registered symlinks. Atomic so readers (e.g. vfs_path
+/// resolution) and the single writer (`symlink_register`) don't rely
+/// on `static mut`. Write with Release, read with Acquire: the count
+/// publishes the path/target slots up to `count - 1`.
+pub(crate) static SYMLINK_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 /// Register a symlink: linkpath → target.
 pub(crate) fn symlink_register(linkpath: &[u8], target: &[u8]) {
+    let i = SYMLINK_COUNT.load(Ordering::Acquire);
+    if i >= MAX_SYMLINKS { return; }
     unsafe {
-        if SYMLINK_COUNT >= MAX_SYMLINKS { return; }
-        let i = SYMLINK_COUNT;
         let plen = linkpath.len().min(SYMLINK_LEN - 1);
         let tlen = target.len().min(SYMLINK_LEN - 1);
         SYMLINK_PATH[i][..plen].copy_from_slice(&linkpath[..plen]);
         SYMLINK_PATH[i][plen] = 0;
         SYMLINK_TARGET[i][..tlen].copy_from_slice(&target[..tlen]);
         SYMLINK_TARGET[i][tlen] = 0;
-        SYMLINK_COUNT += 1;
     }
+    SYMLINK_COUNT.store(i + 1, Ordering::Release);
 }
 
 /// Find needle in haystack, return position of start. None if not found.
@@ -909,8 +924,9 @@ pub(crate) fn symlink_resolve(path: &[u8], out: &mut [u8; 256]) -> usize {
             return pos;
         }
     }
+    let sym_count = SYMLINK_COUNT.load(Ordering::Acquire);
     unsafe {
-        for i in 0..SYMLINK_COUNT {
+        for i in 0..sym_count {
             let sp = &SYMLINK_PATH[i];
             let slen = sp.iter().position(|&b| b == 0).unwrap_or(SYMLINK_LEN);
             if slen == 0 { continue; }

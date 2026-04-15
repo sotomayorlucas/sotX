@@ -5,12 +5,21 @@ extern crate alloc;
 
 use sotos_common::sys;
 use sotos_linux_abi::lucas::LucasBackend;
+use sotos_linux_abi::hybrid::HybridBackend;
 
 /// Wave-1 seed of the LUCAS -> LKL migration: a type-marker backend so the
 /// rest of the tree can hold a `&'static dyn sotos_linux_abi::LinuxBackend`.
 /// Dispatch still runs through `child_handler` today -- see the adapter at
 /// libs/sotos-linux-abi/src/lucas.rs.
 pub(crate) static LUCAS_BACKEND: LucasBackend = LucasBackend;
+
+/// Wave-3 seed (fase 3): HybridBackend with empty LKL whitelist. At this
+/// stage every syscall routes to LUCAS so behavior is byte-identical to
+/// pre-fase-3 builds. Phase 4+ will grow the whitelist one domain at a
+/// time. Linked regardless of SOTOS_LKL so the trait surface stays
+/// stable; the LKL FFI only fires once `crate::lkl::init()` has
+/// registered the bridge AND the LKL kernel has marked itself ready.
+pub(crate) static HYBRID_BACKEND: HybridBackend = HybridBackend::new();
 
 // ======================================================================
 // Bump allocator for goblin ELF parsing (128 KiB, resettable)
@@ -88,7 +97,9 @@ mod xkb;
 mod seatd;
 mod udev;
 mod child_handler;
-mod lucas_handler;
+mod lucas_shell;
+mod init_boot;
+mod dispatch;
 mod lkl;
 mod vfs_service;
 mod wine_diag;
@@ -235,6 +246,7 @@ pub extern "C" fn _start() -> ! {
     // synced text console (`fb_init`) still runs so kernel panics and
     // early-boot logs remain visible on the framebuffer before the
     // compositor finishes coming up.
+    #[cfg(not(feature = "minimal-boot"))]
     if boot_info.fb_addr != 0 {
         unsafe { fb_init(boot_info); }
         // Draw Tokyo Night desktop GUI (positions terminal in window)
@@ -266,6 +278,7 @@ pub extern "C" fn _start() -> ! {
     // Clear kernel boot splash on serial and show Tokyo Night init header.
     // Box-drawing uses ASCII-safe substitutes (+, -, |) for maximum
     // terminal compatibility (serial consoles may not have Unicode).
+    #[cfg(not(feature = "minimal-boot"))]
     {
         fn serial_str(s: &[u8]) {
             for &b in s { sys::debug_print(b); }
@@ -294,11 +307,13 @@ pub extern "C" fn _start() -> ! {
         print(b"\n");
     }
 
-    // Wave-1 seed of the LUCAS -> LKL migration: observable-only marker
-    // confirming the LucasBackend adapter (LUCAS_BACKEND, static) linked.
-    // Dispatch still runs through child_handler today.
+    // Wave-1/3 seed: observable-only markers confirming both backends
+    // (LUCAS_BACKEND + HYBRID_BACKEND) linked. Dispatch still runs
+    // through child_handler today; hybrid routing activates when the
+    // LKL whitelist in libs/sotos-linux-abi/src/hybrid.rs grows.
     let _ = &LUCAS_BACKEND;
-    print(b"LinuxBackend: LucasBackend registered\n");
+    let _ = &HYBRID_BACKEND;
+    print(b"LinuxBackend: LucasBackend + HybridBackend registered\n");
 
     // --- Phase 2/3: SPSC test + benchmarks ---
     {
@@ -358,6 +373,13 @@ pub extern "C" fn _start() -> ! {
     signify::verify_manifest();
 
     // --- Phase 6: Userspace process spawning ---
+    // Everything between here and just before `vfs_service::start_vfs_service`
+    // is boot-time demo/QA scaffolding (test harnesses, deception / tier4-6
+    // demos, supervisor walk). With `--features minimal-boot`, skip the whole
+    // lot and go straight to the native VFS service + sotsh spawn — useful
+    // when the graphical stack is misbehaving and you just want a shell.
+    #[cfg(not(feature = "minimal-boot"))]
+    {
     spawn_process(b"hello");
 
     // --- Phase 6a: Tokyo Night layer-shell status bar ---
@@ -557,6 +579,8 @@ pub extern "C" fn _start() -> ! {
     // if let Some(ref mut b) = blk { run_fat_test(b); }
     // run_phase_validation();
 
+    } // end of `#[cfg(not(feature = "minimal-boot"))]` demo/QA block
+
     // --- Phase 9: LUCAS shell ---
     // (framebuffer::suspend() already called right after drain_console_ring
     // above; see that site for rationale.)
@@ -567,10 +591,21 @@ pub extern "C" fn _start() -> ! {
 
     // Spawn the sotOS-native VFS-IPC service (for sotsh + future clients).
     // Registers as "vfs" in the service registry; clients reach it via
-    // `sotos_common::vfs::*`. Ops use the shared ObjectStore owned by
-    // lucas_handler, so any VFS op issued before that mount completes
-    // returns -EIO until SHARED_STORE_PTR is set.
+    // `sotos_common::vfs::*`. Ops need SHARED_STORE_PTR to be set — which
+    // is what `start_vfs_substrate` below takes care of in the default
+    // (non-shell-lucas) path.
     vfs_service::start_vfs_service();
+
+    // Mount ObjectStore on a dedicated "keeper" thread so the native VFS
+    // path (sotsh + anything using `sotos_common::vfs::*`) has a real
+    // store to resolve against, *even when the Linux-ABI LUCAS handler is
+    // gated out*. When `shell-lucas` is on, lucas_handler does its own
+    // mount in its startup sequence — our keeper checks SHARED_STORE_PTR
+    // and bails if a mount already landed, so the two paths don't fight.
+    #[cfg(not(feature = "shell-lucas"))]
+    if let Some(blk_dev) = blk.take() {
+        start_vfs_substrate(blk_dev);
+    }
 
     // B5: default shell swap. sotsh (native sotOS shell, B1 port) is now the
     // sole boot shell. lucas-shell is opt-in legacy via the `shell-lucas`
@@ -915,12 +950,41 @@ fn spawn_process(name: &[u8]) -> Option<u64> {
 // Block storage initialization
 // ---------------------------------------------------------------------------
 
-fn init_virtio_blk(boot_info: &BootInfo) -> Option<VirtioBlk> {
-    if boot_info.cap_count <= CAP_PCI as u64 {
-        print(b"BLK: no PCI cap, skipping\n");
-        return None;
+fn init_virtio_blk(_boot_info: &BootInfo) -> Option<VirtioBlk> {
+    // Find the PCI I/O port capability by type, not by position. The old
+    // `CAP_PCI = 0` assumption broke whenever kernel-internal caps landed
+    // at lower CapIds (happens routinely with trace-boot / UEFI boot where
+    // ACPI + IOAPIC bring-up creates its own IoPort caps before init's
+    // PCI cap is minted). `sys::cap_list` gives us every cap with its
+    // `CapObject` kind tag, so we can scan for IOPORT whose base covers
+    // 0xCF8-0xCFF.
+    let mut buf = [sotos_common::CapInfo::zeroed(); 32];
+    let n = match sys::cap_list(&mut buf) {
+        Ok(n) => n,
+        Err(e) => {
+            print(b"BLK: cap_list failed errno=");
+            print_u64(e as u64);
+            print(b"\n");
+            return None;
+        }
+    };
+    let mut pci_cap: Option<u64> = None;
+    for entry in &buf[..n] {
+        if entry.kind == sotos_common::CapInfo::KIND_IOPORT {
+            pci_cap = Some(entry.cap_id);
+            break;
+        }
     }
-    let pci_cap = boot_info.caps[CAP_PCI];
+    let pci_cap = match pci_cap {
+        Some(c) => c,
+        None => {
+            print(b"BLK: no IoPort cap in table\n");
+            return None;
+        }
+    };
+    print(b"BLK: PCI IoPort cap=");
+    print_u64(pci_cap);
+    print(b"\n");
     let pci = PciBus::new(pci_cap);
 
     let (devices, count) = pci.enumerate::<32>();
@@ -950,6 +1014,7 @@ fn init_virtio_blk(boot_info: &BootInfo) -> Option<VirtioBlk> {
     let blk_dev = match pci.find_device(0x1AF4, 0x1001) {
         Some(d) => d,
         None => {
+            print(b"BLK: virtio-blk (0x1AF4:0x1001) not found on bus 0\n");
             return None;
         }
     };
@@ -1044,10 +1109,12 @@ fn init_block_storage(boot_info: &BootInfo) -> Option<VirtioBlk> {
         }
     }
 
+    print(b"DBG: calling init_objstore\n");
     init_objstore(blk)
 }
 
 fn init_objstore(blk: VirtioBlk) -> Option<VirtioBlk> {
+    print(b"DBG: init_objstore entered, calling ObjectStore::mount\n");
     match ObjectStore::mount(blk) {
         Ok(store) => {
             // List first 32 root entries (avoid 256KB stack alloc for full DIR_ENTRY_COUNT)
@@ -1369,7 +1436,7 @@ fn start_lucas(blk: Option<VirtioBlk>) {
     }
 
     let _handler_thread_cap = sys::thread_create(
-        lucas_handler::lucas_handler as *const () as u64,
+        crate::lucas_shell::shell_main as *const () as u64,
         LUCAS_HANDLER_STACK + LUCAS_HANDLER_STACK_PAGES * 0x1000,
     ).unwrap_or_else(|_| panic_halt());
 
@@ -1398,6 +1465,86 @@ fn start_lucas(blk: Option<VirtioBlk>) {
 // fine since we use the kernel-loaded mapping there but sotsh's
 // map_elf_segments overwrites that region with sotsh's code before the
 // thread runs), allocates a fresh stack, and spawns a native thread.
+/// Mount the ObjectStore on a dedicated keeper thread so the native VFS
+/// path (sotsh + anything using `sotos_common::vfs::*`) has a real store
+/// to resolve against when `shell-lucas` is gated out and `lucas_handler`
+/// therefore never runs. The keeper parks itself in an infinite
+/// `yield_now` loop after publishing — both to keep the stack-resident
+/// `Vfs` alive forever (dropping it would invalidate `SHARED_STORE_PTR`)
+/// and to avoid freeing the mapped frames.
+#[cfg(not(feature = "shell-lucas"))]
+fn start_vfs_substrate(blk_dev: VirtioBlk) {
+    // Reuse LUCAS_BLK_STORE as the page that backs the blk handle — it's
+    // a well-known 1-page slot that lucas_handler would have used anyway.
+    // Safe to reuse because `shell-lucas` is off, so lucas_handler never
+    // reads from this address.
+    let blk_frame = match sys::frame_alloc() {
+        Ok(f) => f,
+        Err(_) => { print(b"VFS substrate: frame_alloc(blk) failed\n"); return; }
+    };
+    if sys::map(LUCAS_BLK_STORE, blk_frame, MAP_WRITABLE).is_err() {
+        print(b"VFS substrate: map(blk) failed\n");
+        return;
+    }
+    unsafe { core::ptr::write(LUCAS_BLK_STORE as *mut VirtioBlk, blk_dev); }
+    LUCAS_VFS_READY.store(1, Ordering::Release);
+
+    // Map a keeper stack (8 pages, 32 KiB).
+    const KEEPER_STACK: u64 = 0xEA0000;
+    const KEEPER_STACK_PAGES: u64 = 8;
+    for i in 0..KEEPER_STACK_PAGES {
+        let f = match sys::frame_alloc() {
+            Ok(f) => f,
+            Err(_) => { print(b"VFS substrate: frame_alloc(stack) failed\n"); return; }
+        };
+        if sys::map(KEEPER_STACK + i * 0x1000, f, MAP_WRITABLE).is_err() {
+            print(b"VFS substrate: map(stack) failed\n");
+            return;
+        }
+    }
+    let tid = match sys::thread_create(
+        vfs_keeper_thread as *const () as u64,
+        KEEPER_STACK + KEEPER_STACK_PAGES * 0x1000,
+    ) {
+        Ok(t) => t,
+        Err(_) => { print(b"VFS substrate: thread_create failed\n"); return; }
+    };
+    print(b"vfs-keeper: spawned (tid=");
+    print_u64(tid);
+    print(b")\n");
+}
+
+/// Dedicated thread that mounts the ObjectStore, runs sysroot_init,
+/// publishes `SHARED_STORE_PTR`, then idles forever to keep its
+/// stack-resident `Vfs` alive. Does nothing if the pointer is already set
+/// (e.g. lucas_handler beat us to it in some future hybrid build).
+#[cfg(not(feature = "shell-lucas"))]
+extern "C" fn vfs_keeper_thread() -> ! {
+    use sotos_objstore::Vfs;
+    if SHARED_STORE_PTR.load(Ordering::Acquire) == 0 {
+        let blk = unsafe { core::ptr::read(LUCAS_BLK_STORE as *const VirtioBlk) };
+        match ObjectStore::mount(blk) {
+            Ok(mut store) => {
+                crate::init_boot::sysroot_init(&mut store);
+                let vfs = Vfs::new(store);
+                let ptr = vfs.store() as *const _ as u64;
+                SHARED_STORE_PTR.store(ptr, Ordering::Release);
+                print(b"vfs-keeper: ObjectStore mounted, SHARED_STORE_PTR=");
+                print_u64(ptr);
+                print(b"\n");
+                // Park forever holding `vfs` on this thread's stack so the
+                // pointer we just published stays valid for the life of
+                // the system.
+                loop { sys::yield_now(); }
+            }
+            Err(_) => {
+                print(b"vfs-keeper: ObjectStore::mount failed\n");
+            }
+        }
+    }
+    loop { sys::yield_now(); }
+}
+
 //
 // On success the boot log prints `sotsh: spawned (entry=..)` so a `grep
 // 'sotsh: spawned'` on serial output confirms the path ran. Post-B5 this
@@ -1455,7 +1602,10 @@ fn spawn_sotsh_native() {
     }
     cleanup(true);
 
-    const SOTSH_STACK_PAGES: u64 = 16;
+    // Debug-build chumsky parser recurses heavily on error recovery paths;
+    // 64 KiB (16 pages) overflowed and faulted at `calculate_layout_for`.
+    // 512 KiB gives enough headroom for any realistic shell line.
+    const SOTSH_STACK_PAGES: u64 = 128;
     let stack_base = process::NEXT_CHILD_STACK
         .fetch_add(SOTSH_STACK_PAGES * 0x1000 + 0x1000, Ordering::SeqCst);
     for i in 0..SOTSH_STACK_PAGES {

@@ -16,8 +16,10 @@ sotos-common = { path = "../sotos-common" }
 default = ["backend-lucas"]
 # Enables the LucasBackend adapter shim (zero-sized type marker).
 backend-lucas = []
-# Enables the LKL backend (not yet implemented in this crate -- actual LKL
-# bindings live in services/init/src/lkl.rs, gated by SOTOS_LKL=1 at build
-# time). This flag is reserved for a follow-up wave that moves the LKL
-# dispatch glue into this crate.
+# Enables the LklBackend type marker + indirect FFI dispatch via fn
+# pointer (see src/lkl.rs). The init crate registers its concrete
+# lkl_bridge_syscall via `set_lkl_syscall_fn` when built with SOTOS_LKL=1.
+# Without registration, all calls return -ENOSYS.
 backend-lkl = []
+# Enables the HybridBackend routing wrapper. Requires both backends.
+backend-hybrid = ["backend-lucas", "backend-lkl"]

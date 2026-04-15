@@ -133,6 +133,48 @@ def check_output(output: str, expected: list[str], forbidden: list[str] = None) 
 
 
 # ---------------------------------------------------------------------------
+# Linux-ABI dispatcher freeze gate (phase 0 of lucas/child_handler deprecation)
+# ---------------------------------------------------------------------------
+# Baseline captured 2026-04-14. These handler files are being deprecated in
+# favor of LinuxBackend + LKL (see docs/linux_abi_map.md). Do NOT add new
+# `SYS_*` arms here — add them via `syscalls/` submodules instead. When the
+# handlers are deleted (fase 1), this gate switches to `dispatch.rs`.
+import re
+ABI_ARMS_BASELINE = {
+    # lucas_handler.rs deleted in fase 1.6 — content lives in lucas_shell.rs now.
+    "services/init/src/lucas_shell.rs": 8,
+    "services/init/src/child_handler.rs": 34,
+    "services/init/src/dispatch.rs": 102,
+}
+_ARM_RE = re.compile(r"^\s*(?:SYS_\w+|\d+)\s*=>", re.MULTILINE)
+
+
+def abi_freeze_check() -> int:
+    """Fail if dispatcher files regrow SYS_* arms beyond the phase-0 baseline.
+    Returns 0 on OK, 1 on violation."""
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    violations = []
+    for rel_path, baseline in ABI_ARMS_BASELINE.items():
+        full = os.path.join(repo_root, rel_path.replace("/", os.sep))
+        if not os.path.exists(full):
+            # File deleted — that's the end state we want, not a violation.
+            continue
+        with open(full, "rb") as f:
+            src = f.read().decode("utf-8", errors="replace")
+        count = len(_ARM_RE.findall(src))
+        if count > baseline:
+            violations.append((rel_path, baseline, count))
+    if violations:
+        print("ABI FREEZE VIOLATION -- new SYS_* arms added to deprecated dispatchers:")
+        for path, base, now in violations:
+            print(f"  {path}: baseline {base} arms -> now {now} (+{now - base})")
+        print("Add new syscalls via services/init/src/syscalls/ or libs/sotos-linux-abi")
+        print("instead. See docs/linux_abi_map.md.")
+        return 1
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # Test Definitions
 # ---------------------------------------------------------------------------
 
@@ -465,6 +507,10 @@ def main():
     if args.list:
         list_tests(args.filter)
         return 0
+
+    # Linux-ABI freeze gate — fail fast before building if dispatchers regrow.
+    if abi_freeze_check() != 0:
+        return 1
 
     # Build image
     if not args.no_build:

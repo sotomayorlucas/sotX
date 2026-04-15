@@ -1,6 +1,10 @@
 //! LKL (Linux Kernel Library) FFI bindings.
 //! Compiled only when SOTOS_LKL=1 (cfg(lkl)).
 //! When disabled, all functions are no-ops and LKL_READY is always false.
+//!
+//! Since fase 3, this module also publishes its `syscall` fn to the
+//! hybrid backend in `sotos-linux-abi::lkl` so that HybridBackend can
+//! route whitelisted calls without holding a direct FFI dependency.
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -14,6 +18,12 @@ extern "C" {
 }
 
 pub(crate) fn init() {
+    // Register our FFI shim with the backend crate so HybridBackend can
+    // dispatch without holding a direct link against lkl_bridge_*.
+    // Safe to call in both lkl and non-lkl builds — under `not(lkl)` the
+    // registered fn just returns -ENOSYS.
+    sotos_linux_abi::lkl::set_lkl_syscall_fn(syscall);
+
     #[cfg(lkl)]
     unsafe {
         let rc = lkl_bridge_init();
@@ -35,6 +45,7 @@ pub(crate) fn poll_ready() {
         unsafe {
             if lkl_bridge_ready() != 0 {
                 LKL_READY.store(true, Ordering::Release);
+                sotos_linux_abi::lkl::mark_lkl_ready();
                 crate::framebuffer::print(b"LKL: forwarding activated\n");
             }
         }

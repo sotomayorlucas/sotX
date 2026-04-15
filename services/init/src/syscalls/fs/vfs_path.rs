@@ -209,8 +209,10 @@ pub(crate) fn sys_readlinkat(ctx: &mut SyscallContext, msg: &IpcMsg) {
             n
         };
         let mut found = false;
+        use core::sync::atomic::Ordering;
+        let sym_count = crate::fd::SYMLINK_COUNT.load(Ordering::Acquire).min(16);
         unsafe {
-            for i in 0..crate::fd::SYMLINK_COUNT.min(16) {
+            for i in 0..sym_count {
                 let sp = &crate::fd::SYMLINK_PATH[i];
                 let slen = sp.iter().position(|&b| b == 0).unwrap_or(128);
                 if slen > 0 && alen == slen && abs[..alen] == sp[..slen] {

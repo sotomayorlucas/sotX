@@ -709,8 +709,8 @@ build-lkl-server:
     wsl bash -c "cd $$(wslpath '{{justfile_directory()}}/services/lkl-server') && make"
 
 # Create CPIO initrd with LKL server included
-initrd-lkl: build-user-lkl build-shell build-kbd build-net build-nvme build-xhci build-vmm build-hello build-hello-linux build-drm-test build-net-test build-testlib build-compositor
-    python scripts/mkinitrd.py --output {{INITRD}} --file init={{USER_INIT}} --file shell={{USER_SHELL}} --file kbd={{USER_KBD}} --file net={{USER_NET}} --file nvme={{USER_NVME}} --file xhci={{USER_XHCI}} --file vmm={{USER_VMM}} --file compositor={{USER_COMPOSITOR}} --file hello-gui={{USER_HELLO_GUI}} --file sotos-term={{USER_SOTOS_TERM}} --file hello={{USER_HELLO}} --file hello-linux={{USER_HELLO_LINUX}} --file drm-test={{USER_DRM_TEST}} --file hello-musl={{USER_HELLO_MUSL}} --file hello_dynamic={{USER_HELLO_DYNAMIC}} --file ld-musl-x86_64.so.1={{MUSL_LD}} --file wine64_test=wine64_test --file libunwind.so.8=libunwind.so.8 --file libunwind-x86_64.so.8=libunwind-x86_64.so.8 --file nano={{USER_NANO}} --file libncursesw.so.6={{LIBNCURSESW}} --file xterm={{TERMINFO_XTERM}} --file libtest.so={{TESTLIB}} --file net-test={{USER_NET_TEST}} --file busybox={{USER_BUSYBOX}} --file links={{USER_LINKS}} --file hello_glibc={{USER_HELLO_GLIBC}} --file ld-linux-x86-64.so.2={{GLIBC_LD}} --file libc.so.6={{GLIBC_LIBC}} --file toybox={{USER_TOYBOX}} --file jq={{USER_JQ}} --file bash-static={{USER_BASH}} --file grep_alpine={{USER_GREP}} --file sed_alpine={{USER_SED}} --file hello_gnu={{USER_HELLO_GNU}} --file libgcc_s.so.1={{LIBGCC_S}} --file libstdc++.so.6={{LIBSTDCPP}} --file libz.so.1={{LIBZ}} --file fastfetch={{USER_FASTFETCH}} --file apk={{USER_APK}} --file htop={{USER_HTOP}} --file lkl-server={{USER_LKL_SERVER}} --file weston=weston --file libweston-14.so.0=libweston-14.so.0 --file libexec_weston.so.0=libexec_weston.so.0 --file libdrm.so.2=libdrm.so.2 --file libpixman-1.so.0=libpixman-1.so.0 --file libwayland-server.so.0=libwayland-server.so.0 --file libwayland-client.so.0=libwayland-client.so.0 --file libxkbcommon.so.0=libxkbcommon.so.0 --file libinput.so.10=libinput.so.10 --file libevdev.so.2=libevdev.so.2 --file libgbm.so.1=libgbm.so.1 --file libseat.so.1=libseat.so.1 --file libudev.so.1=libudev.so.1 --file libva.so.2=libva.so.2 --file libva-drm.so.2=libva-drm.so.2 --file libdisplay-info.so.2=libdisplay-info.so.2 --file libglapi.so.0=libglapi.so.0 --file drm-backend.so=weston-drm-backend.so --file libgallium-24.2.8.so=libgallium-24.2.8.so --file libexpat.so.1=libexpat.so.1 --file libxcb-randr.so.0=libxcb-randr.so.0 --file libxcb.so.0=libxcb.so.0 --file libffi.so.8=libffi.so.8 --file libmtdev.so.1=libmtdev.so.1 --file libelogind.so.0=libelogind.so.0 --file libelogind-shared-252.so=libelogind-shared-252.so --file libcap.so.2=libcap.so.2 --file libLLVM.so.19.1=libLLVM.so.19.1 --file libzstd.so.1=libzstd.so.1 --file libxml2.so.2=libxml2.so.2 --file libelf.so.1=libelf.so.1 --file libdrm_amdgpu.so.1=libdrm_amdgpu.so.1 --file libdrm_intel.so.1=libdrm_intel.so.1 --file libdrm_radeon.so.1=libdrm_radeon.so.1 --file libxcb.so.1=libxcb.so.1 --file libxcb-sync.so.1=libxcb-sync.so.1 --file libxcb-randr.so.1=libxcb-randr.so.1 --file libxcb-dri2.so.0=libxcb-dri2.so.0 --file libxcb-dri3.so.0=libxcb-dri3.so.0 --file libxcb-present.so.0=libxcb-present.so.0 --file libxcb-shm.so.0=libxcb-shm.so.0 --file libxcb-xfixes.so.0=libxcb-xfixes.so.0 --file libxcb-render.so.0=libxcb-render.so.0 --file libxcb-glx.so.0=libxcb-glx.so.0 --file libX11-xcb.so.1=libX11-xcb.so.1 --file libxshmfence.so.1=libxshmfence.so.1 --file libX11.so.6=libX11.so.6 --file libXau.so.6=libXau.so.6 --file libXdmcp.so.6=libXdmcp.so.6 --file libpciaccess.so.0=libpciaccess.so.0 --file libbsd.so.0=libbsd.so.0 --file libmd.so.0=libmd.so.0 --file libXext.so.6=libXext.so.6 --file libXrender.so.1=libXrender.so.1 --file libpsx.so.2=libpsx.so.2 --file libdrm_nouveau.so.2=libdrm_nouveau.so.2 --file liblzma.so.5=liblzma.so.5 --file xkb_rules_evdev=xkb_rules_evdev --file xkb_keycodes_evdev=xkb_keycodes_evdev --file xkb_types_complete=xkb_types_complete --file xkb_types_basic=xkb_types_basic --file xkb_compat_complete=xkb_compat_complete --file xkb_compat_basic=xkb_compat_basic --file xkb_symbols_us=xkb_symbols_us --file xkb_symbols_pc=xkb_symbols_pc --file xkb_symbols_latin=xkb_symbols_latin --file xkb_symbols_inet=xkb_symbols_inet
+initrd-lkl: build-user-lkl build-shell build-sotsh build-kbd build-net build-nvme build-xhci build-vmm build-hello build-hello-linux build-drm-test build-net-test build-testlib build-compositor
+    python scripts/mkinitrd.py --output {{INITRD}} --file init={{USER_INIT}} --file shell={{USER_SHELL}} --file sotsh={{USER_SOTSH}} --file kbd={{USER_KBD}} --file net={{USER_NET}} --file nvme={{USER_NVME}} --file xhci={{USER_XHCI}} --file vmm={{USER_VMM}} --file compositor={{USER_COMPOSITOR}} --file hello-gui={{USER_HELLO_GUI}} --file sotos-term={{USER_SOTOS_TERM}} --file hello={{USER_HELLO}} --file hello-linux={{USER_HELLO_LINUX}} --file drm-test={{USER_DRM_TEST}} --file hello-musl={{USER_HELLO_MUSL}} --file hello_dynamic={{USER_HELLO_DYNAMIC}} --file ld-musl-x86_64.so.1={{MUSL_LD}} --file wine64_test=wine64_test --file libunwind.so.8=libunwind.so.8 --file libunwind-x86_64.so.8=libunwind-x86_64.so.8 --file nano={{USER_NANO}} --file libncursesw.so.6={{LIBNCURSESW}} --file xterm={{TERMINFO_XTERM}} --file libtest.so={{TESTLIB}} --file net-test={{USER_NET_TEST}} --file busybox={{USER_BUSYBOX}} --file links={{USER_LINKS}} --file hello_glibc={{USER_HELLO_GLIBC}} --file ld-linux-x86-64.so.2={{GLIBC_LD}} --file libc.so.6={{GLIBC_LIBC}} --file toybox={{USER_TOYBOX}} --file jq={{USER_JQ}} --file bash-static={{USER_BASH}} --file grep_alpine={{USER_GREP}} --file sed_alpine={{USER_SED}} --file hello_gnu={{USER_HELLO_GNU}} --file libgcc_s.so.1={{LIBGCC_S}} --file libstdc++.so.6={{LIBSTDCPP}} --file libz.so.1={{LIBZ}} --file fastfetch={{USER_FASTFETCH}} --file apk={{USER_APK}} --file htop={{USER_HTOP}} --file lkl-server={{USER_LKL_SERVER}} --file weston=weston --file libweston-14.so.0=libweston-14.so.0 --file libexec_weston.so.0=libexec_weston.so.0 --file libdrm.so.2=libdrm.so.2 --file libpixman-1.so.0=libpixman-1.so.0 --file libwayland-server.so.0=libwayland-server.so.0 --file libwayland-client.so.0=libwayland-client.so.0 --file libxkbcommon.so.0=libxkbcommon.so.0 --file libinput.so.10=libinput.so.10 --file libevdev.so.2=libevdev.so.2 --file libgbm.so.1=libgbm.so.1 --file libseat.so.1=libseat.so.1 --file libudev.so.1=libudev.so.1 --file libva.so.2=libva.so.2 --file libva-drm.so.2=libva-drm.so.2 --file libdisplay-info.so.2=libdisplay-info.so.2 --file libglapi.so.0=libglapi.so.0 --file drm-backend.so=weston-drm-backend.so --file libgallium-24.2.8.so=libgallium-24.2.8.so --file libexpat.so.1=libexpat.so.1 --file libxcb-randr.so.0=libxcb-randr.so.0 --file libxcb.so.0=libxcb.so.0 --file libffi.so.8=libffi.so.8 --file libmtdev.so.1=libmtdev.so.1 --file libelogind.so.0=libelogind.so.0 --file libelogind-shared-252.so=libelogind-shared-252.so --file libcap.so.2=libcap.so.2 --file libLLVM.so.19.1=libLLVM.so.19.1 --file libzstd.so.1=libzstd.so.1 --file libxml2.so.2=libxml2.so.2 --file libelf.so.1=libelf.so.1 --file libdrm_amdgpu.so.1=libdrm_amdgpu.so.1 --file libdrm_intel.so.1=libdrm_intel.so.1 --file libdrm_radeon.so.1=libdrm_radeon.so.1 --file libxcb.so.1=libxcb.so.1 --file libxcb-sync.so.1=libxcb-sync.so.1 --file libxcb-randr.so.1=libxcb-randr.so.1 --file libxcb-dri2.so.0=libxcb-dri2.so.0 --file libxcb-dri3.so.0=libxcb-dri3.so.0 --file libxcb-present.so.0=libxcb-present.so.0 --file libxcb-shm.so.0=libxcb-shm.so.0 --file libxcb-xfixes.so.0=libxcb-xfixes.so.0 --file libxcb-render.so.0=libxcb-render.so.0 --file libxcb-glx.so.0=libxcb-glx.so.0 --file libX11-xcb.so.1=libX11-xcb.so.1 --file libxshmfence.so.1=libxshmfence.so.1 --file libX11.so.6=libX11.so.6 --file libXau.so.6=libXau.so.6 --file libXdmcp.so.6=libXdmcp.so.6 --file libpciaccess.so.0=libpciaccess.so.0 --file libbsd.so.0=libbsd.so.0 --file libmd.so.0=libmd.so.0 --file libXext.so.6=libXext.so.6 --file libXrender.so.1=libXrender.so.1 --file libpsx.so.2=libpsx.so.2 --file libdrm_nouveau.so.2=libdrm_nouveau.so.2 --file liblzma.so.5=liblzma.so.5 --file xkb_rules_evdev=xkb_rules_evdev --file xkb_keycodes_evdev=xkb_keycodes_evdev --file xkb_types_complete=xkb_types_complete --file xkb_types_basic=xkb_types_basic --file xkb_compat_complete=xkb_compat_complete --file xkb_compat_basic=xkb_compat_basic --file xkb_symbols_us=xkb_symbols_us --file xkb_symbols_pc=xkb_symbols_pc --file xkb_symbols_latin=xkb_symbols_latin --file xkb_symbols_inet=xkb_symbols_inet
 
 # Bootable image with LKL server
 image-lkl: build initrd-lkl
@@ -858,5 +858,66 @@ run-sotsh: image-sotsh
         -drive format=raw,file={{IMAGE}} \
         -serial stdio \
         -display none \
+        -no-reboot \
+        -m 2048M
+
+# ---------------------------------------------------------------------------
+# Minimal sotsh-only boot (serial, no GUI stack, no QA demos)
+# ---------------------------------------------------------------------------
+# Skips the entire phase-6 demo/test scaffold in init (hello, tier4-5-6 demos,
+# deception demo, supervisor SMF, FMA, Crossbow, etc.). Only init, kbd, and
+# sotsh are packed into the initrd so there's no compositor/weston/terminal
+# chrome. Boots straight to sotsh on the serial console.
+build-user-minimal:
+    cd services/init && CARGO_ENCODED_RUSTFLAGS="$(printf '%s\x1f%s\x1f%s\x1f%s' '-Clink-arg=-Tlinker.ld' '-Crelocation-model=static' '-Zstack-protector=strong' '-Zub-checks=no')" cargo build --features minimal-boot
+
+initrd-minimal: build-user-minimal build-kbd build-sotsh
+    python scripts/mkinitrd.py --output {{INITRD}} --file init={{USER_INIT}} --file kbd={{USER_KBD}} --file sotsh={{USER_SOTSH}}
+
+# Kernel with `trace-boot` — skips `fb_text::hand_off_to_init()` so the
+# kernel's framebuffer text console stays live for the whole boot. Every
+# `sys::debug_print` byte is tee'd onto the screen, which is how `sotsh`
+# output becomes visible in the QEMU display (sotsh has no direct fb access
+# of its own yet — it writes through `sys::debug_print`).
+build-trace:
+    cargo build --package sotos-kernel --features trace-boot
+
+# Smaller disk (48 MiB) — just kernel (~9 MB) + initrd (~28 MB) + limine +
+# FAT overhead fits. BIOS reads are O(disk size) for metadata scans, so
+# keeping this tight shaves seconds off cold boot.
+image-minimal: build-trace initrd-minimal
+    python scripts/mkimage.py --kernel {{KERNEL}} --initrd {{INITRD}} --output {{IMAGE}} --size 48
+
+# UEFI path is dramatically faster than BIOS INT 13h — OVMF exposes real
+# block I/O to the firmware so Limine's reads hit host speeds instead of
+# the emulated ~1 MB/s legacy channel. Use this by default; only fall back
+# to the BIOS target (`run-sotsh-minimal-bios`) if OVMF can't be fetched.
+# Uses TCG, not WHPX (WHPX+OVMF+virtio-blk injection fails). No `-machine
+# q35` either: q35's PCIe topology puts virtio-blk-pci on a root-port
+# bridge above bus 0, and init's PCI walker (libs/sotos-pci) only
+# enumerates bus 0. Leaving the machine at the QEMU default (pc-i440fx)
+# keeps virtio-blk on bus 0 slot N where the walker can see it. Matches
+# the known-working `run-uefi` target.
+run-sotsh-minimal: image-minimal create-test-disk fetch-ovmf
+    "{{QEMU}}" \
+        -drive if=pflash,format=raw,readonly=on,file=tools/ovmf/OVMF.fd \
+        -drive format=raw,file={{IMAGE}} \
+        -drive if=none,format=raw,file=target/disk.img,id=disk0 \
+        -device virtio-blk-pci,drive=disk0,disable-modern=on \
+        -serial stdio \
+        -no-reboot \
+        -m 2048M
+
+# Legacy BIOS fallback (only use if OVMF.fd isn't available). Slow:
+# BIOS INT 13h caps out around 1 MB/s in QEMU, so the 36 MB of kernel +
+# initrd reads take ~30-60 s on cold boot. Kept for parity with the
+# original target; prefer `run-sotsh-minimal`.
+run-sotsh-minimal-bios: image-minimal create-test-disk
+    "{{QEMU}}" \
+        -accel whpx -machine q35 \
+        -drive format=raw,file={{IMAGE}} \
+        -drive if=none,format=raw,file=target/disk.img,id=disk0 \
+        -device virtio-blk-pci,drive=disk0,disable-modern=on \
+        -serial stdio \
         -no-reboot \
         -m 2048M

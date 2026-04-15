@@ -266,6 +266,13 @@ extern "C" fn vfs_service_thread() -> ! {
 // ---------------------------------------------------------------
 
 fn handle_open(ep: u64, msg: &IpcMsg) {
+    // Defensive: if no ObjectStore was ever published (e.g. minimal-boot
+    // skipped start_lucas, which is what mounts + publishes it), fail loud
+    // instead of returning garbage fds that make `ls` loop forever on
+    // zero-initialised DirEntries.
+    if unsafe { shared_store() }.is_none() {
+        return reply_err(ep, EIO);
+    }
     let mut path_buf = [0u8; VFS_MAX_INLINE_PATH];
     let path_len = match unpack_path(msg, &mut path_buf) {
         Ok(n) => n,
