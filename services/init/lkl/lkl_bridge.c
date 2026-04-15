@@ -27,6 +27,7 @@
 #include "libc_stubs.h"
 #include "syscall_xlat.h"
 #include "disk_backend.h"
+#include "net_backend.h"
 
 #ifdef HAS_LKL
 #include <lkl.h>
@@ -104,6 +105,15 @@ static int sotos_blk_request(struct lkl_disk disk, struct lkl_blk_req *req)
 static void lkl_boot_thread_fn(void *arg)
 {
     (void)arg;
+
+    /* Net backend MUST register before start_kernel (per LKL docs).
+     * This scaffold is loopback-only — LKL gets an "eth0" netdev whose
+     * tx() drops frames and rx() never returns data. 127.0.0.1 traffic
+     * bypasses this backend entirely via LKL's built-in `lo` device.
+     * See docs/phase-5-design.md Camino A for upgrade path. */
+    net_backend_init();
+    int lkl_net_id = net_backend_register();
+
     serial_puts("[lkl-boot] starting kernel (background)...\n");
     int rc = lkl_start_kernel("mem=64M loglevel=3");
     if (rc < 0) {
@@ -111,6 +121,13 @@ static void lkl_boot_thread_fn(void *arg)
         sys_thread_exit();
     }
     serial_puts("[lkl-boot] Linux kernel running!\n");
+
+    /* Now that the kernel is up the netdev has a real ifindex; configure
+     * it. Non-fatal — failures here only mean LKL won't be able to send
+     * external traffic, but loopback still works. */
+    if (lkl_net_id >= 0) {
+        (void)net_backend_up(lkl_net_id);
+    }
 
     /* Smoke test */
     struct { char s[65]; char n[65]; char r[65]; char v[65]; char m[65]; char d[65]; } uts;

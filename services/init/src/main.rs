@@ -361,6 +361,19 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
+    // --- Phase 5b prelude: net-raw service for LKL (§10.7 Camino B) ---
+    // Spawns a handler thread owning the SECOND virtio-net NIC (QEMU
+    // cmdline needs `-netdev ... -device virtio-net-pci` repeated). With
+    // a single-NIC build, this no-ops silently. Handler idles with
+    // SOTOS_LKL=0 — cost is ~1 thread + 4 pages stack.
+    //
+    // NOTE: start_blk_service (in this file) is currently NOT called
+    // because its `.take()` would steal the VirtioBlk the VFS keeper
+    // needs. Enabling LKL's disk passthrough (Camino A for disk) needs
+    // a separate fix — either share the VirtioBlk via a lock, or claim
+    // the SECOND virtio-blk for the service. Tracked as follow-up.
+    start_raw_net_service(boot_info);
+
     // --- Phase 5b: LKL (Linux 6.6 kernel as in-process backend) ---
     // LKL fusion requires SMP (-smp 2+) — kernel threads starve on single CPU.
     // On single CPU, LKL stays dormant (LKL_READY=false, all syscalls go to LUCAS).
@@ -682,6 +695,237 @@ fn start_blk_service(blk: &mut Option<sotos_virtio::blk::VirtioBlk>) {
         BLK_HANDLER_STACK + BLK_HANDLER_STACK_PAGES * 0x1000,
     );
     print(b"BLK-SVC: registered, handler started\n");
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// net-raw service: L2 passthrough for LKL (§10.7 Camino B).
+// Parallel to blk service; owns a SECOND virtio-net NIC that doesn't
+// collide with sotos-net. LKL's net_backend.c talks to us via IPC.
+// ═══════════════════════════════════════════════════════════════════
+
+/// Base vaddr for net-raw's virtio memory (0x17000 bytes needed).
+/// Chosen to sit above ROOT_BLK_BASE (0xEA0000..0xEB7000) with headroom.
+const NET_RAW_VADDR_BASE: u64 = 0xEC0000;
+/// Single page storing the VirtioNet struct for cross-thread access.
+const NET_RAW_HANDLER_STORE: u64 = 0xED8000;
+
+/// IPC endpoint for the "net-raw" service.
+static NET_RAW_EP_CAP: AtomicU64 = AtomicU64::new(0);
+
+/// NET-RAW IPC protocol:
+/// CMD=1 (TX):      regs[0]=frame_vaddr, regs[1]=frame_len, regs[2]=caller_as_cap
+///                  → reply regs[0]=bytes_sent or negative errno
+/// CMD=2 (RX_POLL): regs[0]=dest_vaddr, regs[1]=dest_len, regs[2]=caller_as_cap
+///                  → reply regs[0]=bytes_received (0 if none ready, negative errno)
+/// CMD=3 (MAC):     no args → reply regs[0..5]=MAC bytes 0..5
+/// CMD=4 (RX_WAIT): regs[0]=dest_vaddr, regs[1]=dest_len, regs[2]=caller_as_cap
+///                  → block until a frame arrives, then reply as RX_POLL
+const NET_RAW_CMD_TX:      u64 = 1;
+const NET_RAW_CMD_RX_POLL: u64 = 2;
+const NET_RAW_CMD_MAC:     u64 = 3;
+const NET_RAW_CMD_RX_WAIT: u64 = 4;
+
+const NET_RAW_MAX_FRAME: usize = 1514; // standard Ethernet MTU
+/// Staging buffer for guest↔driver frame copies.
+const NET_RAW_STAGING: u64 = 0xED9000;
+
+fn start_raw_net_service(boot_info: &BootInfo) {
+    use sotos_pci::PciBus;
+    use sotos_virtio::net::{VirtioNet, NetVaddrs};
+
+    if boot_info.cap_count <= CAP_PCI as u64 {
+        print(b"NETRAW-SVC: no PCI cap\n");
+        return;
+    }
+    let pci = PciBus::new(boot_info.caps[CAP_PCI]);
+
+    // Index 0 is sotos-net's NIC, index 1 is the one we claim.
+    let dev = match VirtioNet::nth_device(&pci, 1) {
+        Some(d) => d,
+        None => {
+            print(b"NETRAW-SVC: no second virtio-net (skipping - add one to QEMU cmdline)\n");
+            return;
+        }
+    };
+    print(b"NETRAW-SVC: found second virtio-net at dev ");
+    print_u64(dev.addr.dev as u64);
+    print(b" IRQ ");
+    print_u64(dev.irq_line as u64);
+    print(b"\n");
+
+    let net = match VirtioNet::init_at(&dev, &pci, NetVaddrs::sequential(NET_RAW_VADDR_BASE)) {
+        Ok(n) => n,
+        Err(e) => {
+            print(b"NETRAW-SVC: init failed: ");
+            print(e.as_bytes());
+            print(b"\n");
+            return;
+        }
+    };
+
+    let mac = net.mac();
+    print(b"NETRAW-SVC: MAC=");
+    for (i, b) in mac.iter().enumerate() {
+        if i > 0 { print(b":"); }
+        let hi = (b >> 4) & 0xF;
+        let lo = b & 0xF;
+        sys::debug_print(if hi < 10 { b'0' + hi } else { b'a' + hi - 10 });
+        sys::debug_print(if lo < 10 { b'0' + lo } else { b'a' + lo - 10 });
+    }
+    print(b"\n");
+
+    // Store the driver at a fixed vaddr so the handler thread can reach it.
+    let frame = match sys::frame_alloc() {
+        Ok(f) => f,
+        Err(_) => { print(b"NETRAW-SVC: frame_alloc failed\n"); return; }
+    };
+    let _ = sys::map(NET_RAW_HANDLER_STORE, frame, 2);
+    unsafe {
+        core::ptr::write(NET_RAW_HANDLER_STORE as *mut VirtioNet, net);
+    }
+
+    // Map the staging page for frame copies.
+    if let Ok(sf) = sys::frame_alloc() {
+        let _ = sys::map(NET_RAW_STAGING, sf, 2);
+    }
+
+    let ep = match sys::endpoint_create() {
+        Ok(e) => e,
+        Err(_) => { print(b"NETRAW-SVC: endpoint_create failed\n"); return; }
+    };
+    NET_RAW_EP_CAP.store(ep, Ordering::Release);
+
+    let name = b"net-raw";
+    let _ = sys::svc_register(name.as_ptr() as u64, name.len() as u64, ep);
+
+    // Spawn handler thread (4 pages stack after blk's range).
+    const NET_RAW_STACK: u64 = 0xEE0000;
+    const NET_RAW_STACK_PAGES: u64 = 4;
+    for i in 0..NET_RAW_STACK_PAGES {
+        let f = match sys::frame_alloc() { Ok(f) => f, Err(_) => return };
+        let _ = sys::map(NET_RAW_STACK + i * 0x1000, f, 2);
+    }
+
+    let _ = sys::thread_create(
+        raw_net_handler as *const () as u64,
+        NET_RAW_STACK + NET_RAW_STACK_PAGES * 0x1000,
+    );
+    print(b"NETRAW-SVC: registered as 'net-raw', handler started\n");
+}
+
+extern "C" fn raw_net_handler() -> ! {
+    use sotos_virtio::net::VirtioNet;
+    let ep = NET_RAW_EP_CAP.load(Ordering::Acquire);
+    let net = unsafe { &mut *(NET_RAW_HANDLER_STORE as *mut VirtioNet) };
+    let staging = NET_RAW_STAGING as *mut u8;
+
+    loop {
+        let msg = match sys::recv(ep) {
+            Ok(m) => m,
+            Err(_) => { sys::yield_now(); continue; }
+        };
+        let mut reply = sotos_common::IpcMsg { tag: 0, regs: [0; 8] };
+
+        match msg.tag {
+            NET_RAW_CMD_TX => {
+                let src_vaddr = msg.regs[0];
+                let len = msg.regs[1] as usize;
+                let caller_as = msg.regs[2];
+                if len == 0 || len > NET_RAW_MAX_FRAME {
+                    reply.regs[0] = (-22i64) as u64; // -EINVAL
+                } else {
+                    // Copy frame into staging (cross-AS if needed).
+                    let copied = if caller_as != 0 {
+                        match sys::vm_read(caller_as, src_vaddr, staging as u64, len as u64) {
+                            Ok(_) => true,
+                            Err(_) => false,
+                        }
+                    } else {
+                        unsafe { core::ptr::copy_nonoverlapping(
+                            src_vaddr as *const u8, staging, len); }
+                        true
+                    };
+                    if !copied {
+                        reply.regs[0] = (-14i64) as u64; // -EFAULT
+                    } else {
+                        let frame = unsafe { core::slice::from_raw_parts(staging, len) };
+                        match net.transmit(frame) {
+                            Ok(()) => reply.regs[0] = len as u64,
+                            Err(_) => reply.regs[0] = (-5i64) as u64, // -EIO
+                        }
+                    }
+                }
+                let _ = sys::send(ep, &reply);
+            }
+            NET_RAW_CMD_RX_POLL => {
+                let dst_vaddr = msg.regs[0];
+                let dst_len = msg.regs[1] as usize;
+                let caller_as = msg.regs[2];
+                match net.poll_rx() {
+                    Some((idx, total)) => {
+                        // Subtract virtio-net header (10 bytes) to get the L2 frame.
+                        let hdr_size = 10usize;
+                        let frame_len = if total > hdr_size { total - hdr_size } else { 0 };
+                        let n = frame_len.min(dst_len);
+                        if n > 0 {
+                            let src = net.rx_buf(idx);
+                            if caller_as != 0 {
+                                let _ = sys::vm_write(caller_as, dst_vaddr, src as u64, n as u64);
+                            } else {
+                                unsafe { core::ptr::copy_nonoverlapping(
+                                    src, dst_vaddr as *mut u8, n); }
+                            }
+                        }
+                        net.rx_done(idx);
+                        reply.regs[0] = n as u64;
+                    }
+                    None => {
+                        reply.regs[0] = 0; // no data
+                    }
+                }
+                let _ = sys::send(ep, &reply);
+            }
+            NET_RAW_CMD_RX_WAIT => {
+                let dst_vaddr = msg.regs[0];
+                let dst_len = msg.regs[1] as usize;
+                let caller_as = msg.regs[2];
+                // Block until RX available. Yield-spin keeps it simple;
+                // upgrade to IRQ wait via net.wait_irq() as a follow-up.
+                loop {
+                    if let Some((idx, total)) = net.poll_rx() {
+                        let hdr_size = 10usize;
+                        let frame_len = if total > hdr_size { total - hdr_size } else { 0 };
+                        let n = frame_len.min(dst_len);
+                        if n > 0 {
+                            let src = net.rx_buf(idx);
+                            if caller_as != 0 {
+                                let _ = sys::vm_write(caller_as, dst_vaddr, src as u64, n as u64);
+                            } else {
+                                unsafe { core::ptr::copy_nonoverlapping(
+                                    src, dst_vaddr as *mut u8, n); }
+                            }
+                        }
+                        net.rx_done(idx);
+                        reply.regs[0] = n as u64;
+                        break;
+                    }
+                    sys::yield_now();
+                }
+                let _ = sys::send(ep, &reply);
+            }
+            NET_RAW_CMD_MAC => {
+                let m = net.mac();
+                for i in 0..6 {
+                    reply.regs[i] = m[i] as u64;
+                }
+                let _ = sys::send(ep, &reply);
+            }
+            _ => {
+                reply.regs[0] = (-38i64) as u64; // -ENOSYS
+                let _ = sys::send(ep, &reply);
+            }
+        }
+    }
 }
 
 extern "C" fn blk_handler() -> ! {

@@ -40,11 +40,57 @@ struct VirtioNetHdr {
 
 const NET_HDR_SIZE: usize = core::mem::size_of::<VirtioNetHdr>(); // 10
 
-/// Virtual address layout for net driver memory (net process AS, 0xC00000+ free).
+/// Virtual address layout for net driver memory.
+/// Default values target the `net` service's AS (0xC00000+ free).
+/// Use [`NetVaddrs`] + [`VirtioNet::init_at`] when embedding a second
+/// instance in a different AS (e.g. init's `net-raw` service).
 const RX_VQ_VADDR: u64 = 0xC00000;   // RX virtqueue (3 pages)
 const TX_VQ_VADDR: u64 = 0xC03000;   // TX virtqueue (3 pages)
 const RX_BUF_VADDR: u64 = 0xC06000;  // RX buffer pool (16 pages, one per buf)
 const TX_BUF_VADDR: u64 = 0xC16000;  // TX header+data page (1 page)
+
+/// Virtual address layout for one virtio-net instance.
+///
+/// Mirrors [`crate::blk::BlkVaddrs`] so that multiple virtio-net
+/// devices can coexist in a single address space. Each instance must
+/// occupy a disjoint 0x17000-byte block:
+///
+///   rx_vq:  3 pages (0x3000 bytes)
+///   tx_vq:  3 pages (0x3000 bytes)
+///   rx_buf: 16 pages (0x10000 bytes)
+///   tx_buf: 1 page  (0x1000 bytes)
+///                   — total 0x17000, expected to be 4K-aligned
+#[derive(Clone, Copy)]
+pub struct NetVaddrs {
+    pub rx_vq:  u64,
+    pub tx_vq:  u64,
+    pub rx_buf: u64,
+    pub tx_buf: u64,
+}
+
+impl NetVaddrs {
+    /// Default layout used by the existing sotos-net service.
+    pub const fn default() -> Self {
+        Self {
+            rx_vq:  RX_VQ_VADDR,
+            tx_vq:  TX_VQ_VADDR,
+            rx_buf: RX_BUF_VADDR,
+            tx_buf: TX_BUF_VADDR,
+        }
+    }
+
+    /// Build a sequential layout anchored at `base`. The caller is
+    /// responsible for ensuring the 0x17000-byte range below that
+    /// address is free.
+    pub const fn sequential(base: u64) -> Self {
+        Self {
+            rx_vq:  base,
+            tx_vq:  base + 0x3000,
+            rx_buf: base + 0x6000,
+            tx_buf: base + 0x16000,
+        }
+    }
+}
 
 /// Virtio-NET device driver.
 pub struct VirtioNet {
@@ -59,6 +105,11 @@ pub struct VirtioNet {
     rx_buf_phys: [u64; RX_BUFS],
     /// Physical address of the TX buffer page.
     tx_buf_phys: u64,
+    /// Virtual base of the RX buffer pool. Each slot is at
+    /// `rx_buf_vaddr + i * 4096`.
+    rx_buf_vaddr: u64,
+    /// Virtual address of the TX header+data page.
+    tx_buf_vaddr: u64,
 }
 
 fn dbg(s: &[u8]) {
@@ -88,8 +139,34 @@ fn dbg_u64(mut n: u64) {
 }
 
 impl VirtioNet {
-    /// Initialize the virtio-net device.
+    /// Find the `n`-th virtio-net device on the bus (0-indexed).
+    /// Virtio-net uses vendor=0x1AF4, device=0x1000 (legacy transport).
+    pub fn nth_device(pci_bus: &PciBus, n: usize) -> Option<PciDevice> {
+        let (devs, count) = pci_bus.enumerate::<32>();
+        let mut seen = 0usize;
+        for i in 0..count {
+            if devs[i].vendor_id == 0x1AF4 && devs[i].device_id == 0x1000 {
+                if seen == n {
+                    return Some(devs[i]);
+                }
+                seen += 1;
+            }
+        }
+        None
+    }
+
+    /// Initialize the virtio-net device using the default [`NetVaddrs`]
+    /// layout. Equivalent to `init_at(pci_dev, pci_bus, NetVaddrs::default())`.
     pub fn init(pci_dev: &PciDevice, pci_bus: &PciBus) -> Result<Self, &'static str> {
+        Self::init_at(pci_dev, pci_bus, NetVaddrs::default())
+    }
+
+    /// Initialize a virtio-net device at the caller-chosen virtual
+    /// address layout. Use [`NetVaddrs::sequential`] to pick a base
+    /// that does not collide with other drivers in the same AS.
+    pub fn init_at(pci_dev: &PciDevice, pci_bus: &PciBus, vaddrs: NetVaddrs)
+        -> Result<Self, &'static str>
+    {
         // 1. Read BAR0 (I/O port space).
         let bar0_raw = pci_bus.bar0(pci_dev.addr);
         if bar0_raw & 1 == 0 {
@@ -141,10 +218,10 @@ impl VirtioNet {
         let rx_vq_phys = sys::frame_phys(rx_vq_mem)
             .map_err(|_| "frame_phys for rx vq")?;
         for i in 0..rx_vq_pages {
-            sys::map_offset(RX_VQ_VADDR + (i as u64) * 4096, rx_vq_mem, (i as u64) * 4096, 2)
+            sys::map_offset(vaddrs.rx_vq + (i as u64) * 4096, rx_vq_mem, (i as u64) * 4096, 2)
                 .map_err(|_| "map_offset rx vq")?;
         }
-        let rx_vq = Virtqueue::new(RX_VQ_VADDR, rx_vq_phys, rx_qs);
+        let rx_vq = Virtqueue::new(vaddrs.rx_vq, rx_vq_phys, rx_qs);
         let _ = sys::port_out32(bar_cap, bar_base + VIRTIO_QUEUE_ADDRESS, rx_vq.phys_pfn());
 
         // 11. Setup queue 1 (TX).
@@ -160,10 +237,10 @@ impl VirtioNet {
         let tx_vq_phys = sys::frame_phys(tx_vq_mem)
             .map_err(|_| "frame_phys for tx vq")?;
         for i in 0..tx_vq_pages {
-            sys::map_offset(TX_VQ_VADDR + (i as u64) * 4096, tx_vq_mem, (i as u64) * 4096, 2)
+            sys::map_offset(vaddrs.tx_vq + (i as u64) * 4096, tx_vq_mem, (i as u64) * 4096, 2)
                 .map_err(|_| "map_offset tx vq")?;
         }
-        let tx_vq = Virtqueue::new(TX_VQ_VADDR, tx_vq_phys, tx_qs);
+        let tx_vq = Virtqueue::new(vaddrs.tx_vq, tx_vq_phys, tx_qs);
         let _ = sys::port_out32(bar_cap, bar_base + VIRTIO_QUEUE_ADDRESS, tx_vq.phys_pfn());
 
         // 12. Allocate RX buffer pool (16 pages).
@@ -171,7 +248,7 @@ impl VirtioNet {
         for i in 0..RX_BUFS {
             let cap = sys::frame_alloc().map_err(|_| "frame_alloc rx buf")?;
             let phys = sys::frame_phys(cap).map_err(|_| "frame_phys rx buf")?;
-            sys::map(RX_BUF_VADDR + (i as u64) * 4096, cap, 2)
+            sys::map(vaddrs.rx_buf + (i as u64) * 4096, cap, 2)
                 .map_err(|_| "map rx buf")?;
             rx_buf_phys[i] = phys;
         }
@@ -179,7 +256,7 @@ impl VirtioNet {
         // 13. Allocate TX buffer page.
         let tx_cap = sys::frame_alloc().map_err(|_| "frame_alloc tx buf")?;
         let tx_buf_phys = sys::frame_phys(tx_cap).map_err(|_| "frame_phys tx buf")?;
-        sys::map(TX_BUF_VADDR, tx_cap, 2).map_err(|_| "map tx buf")?;
+        sys::map(vaddrs.tx_buf, tx_cap, 2).map_err(|_| "map tx buf")?;
 
         // 14. Set DRIVER_OK.
         let _ = sys::port_out(bar_cap, bar_base + VIRTIO_DEVICE_STATUS,
@@ -201,6 +278,8 @@ impl VirtioNet {
             mac,
             rx_buf_phys,
             tx_buf_phys,
+            rx_buf_vaddr: vaddrs.rx_buf,
+            tx_buf_vaddr: vaddrs.tx_buf,
         };
 
         // 16. Pre-post all RX buffers.
@@ -227,7 +306,7 @@ impl VirtioNet {
         }
 
         // Write VirtioNetHdr (all zeros = no offload) + frame data to TX buffer.
-        let tx_ptr = TX_BUF_VADDR as *mut u8;
+        let tx_ptr = self.tx_buf_vaddr as *mut u8;
         unsafe {
             // Zero the header.
             for i in 0..NET_HDR_SIZE {
@@ -269,7 +348,7 @@ impl VirtioNet {
 
     /// Get a pointer to the received frame data (after VirtioNetHdr) for buffer `idx`.
     pub fn rx_buf(&self, idx: usize) -> *const u8 {
-        (RX_BUF_VADDR + (idx as u64) * 4096 + NET_HDR_SIZE as u64) as *const u8
+        (self.rx_buf_vaddr + (idx as u64) * 4096 + NET_HDR_SIZE as u64) as *const u8
     }
 
     /// Re-post an RX buffer after processing.
