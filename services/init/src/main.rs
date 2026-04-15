@@ -101,6 +101,7 @@ mod lucas_shell;
 mod init_boot;
 mod dispatch;
 mod lkl;
+mod lkl_route;
 mod vfs_service;
 mod wine_diag;
 mod boot_tests;
