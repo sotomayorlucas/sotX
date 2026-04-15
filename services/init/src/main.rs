@@ -729,15 +729,34 @@ const NET_RAW_MAX_FRAME: usize = 1514; // standard Ethernet MTU
 /// Staging buffer for guest↔driver frame copies.
 const NET_RAW_STAGING: u64 = 0xED9000;
 
-fn start_raw_net_service(boot_info: &BootInfo) {
+fn start_raw_net_service(_boot_info: &BootInfo) {
     use sotos_pci::PciBus;
     use sotos_virtio::net::{VirtioNet, NetVaddrs};
 
-    if boot_info.cap_count <= CAP_PCI as u64 {
-        print(b"NETRAW-SVC: no PCI cap\n");
-        return;
+    // Find the PCI I/O port cap via cap_list scan (same pattern as
+    // init_virtio_blk: BootInfo.caps[CAP_PCI] is unreliable on UEFI /
+    // trace-boot paths because kernel-internal caps may land at lower
+    // CapIds). See d0d751f9 commit message for the original incident.
+    let mut buf = [sotos_common::CapInfo::zeroed(); 32];
+    let n = match sys::cap_list(&mut buf) {
+        Ok(n) => n,
+        Err(_) => {
+            print(b"NETRAW-SVC: cap_list failed\n");
+            return;
+        }
+    };
+    let mut pci_cap: Option<u64> = None;
+    for entry in &buf[..n] {
+        if entry.kind == sotos_common::CapInfo::KIND_IOPORT {
+            pci_cap = Some(entry.cap_id);
+            break;
+        }
     }
-    let pci = PciBus::new(boot_info.caps[CAP_PCI]);
+    let pci_cap = match pci_cap {
+        Some(c) => c,
+        None => { print(b"NETRAW-SVC: no PCI IoPort cap\n"); return; }
+    };
+    let pci = PciBus::new(pci_cap);
 
     // Index 0 is sotos-net's NIC, index 1 is the one we claim.
     let dev = match VirtioNet::nth_device(&pci, 1) {

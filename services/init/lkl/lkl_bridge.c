@@ -106,11 +106,11 @@ static void lkl_boot_thread_fn(void *arg)
 {
     (void)arg;
 
-    /* Net backend MUST register before start_kernel (per LKL docs).
-     * This scaffold is loopback-only — LKL gets an "eth0" netdev whose
-     * tx() drops frames and rx() never returns data. 127.0.0.1 traffic
-     * bypasses this backend entirely via LKL's built-in `lo` device.
-     * See docs/phase-5-design.md Camino A for upgrade path. */
+    /* Net backend MUST register BEFORE lkl_start_kernel.
+     * Verified empirically: post-start triggers `lkl_cpu_put: unbalanced
+     * put` inside virtio_dev_setup → Linux kernel BUG. The pre-start
+     * path uses the cmdline `virtio_mmio.device=...` mechanism instead
+     * of lkl_sys_virtio_mmio_device_add, which avoids the cpu_put issue. */
     net_backend_init();
     int lkl_net_id = net_backend_register();
 
@@ -122,9 +122,7 @@ static void lkl_boot_thread_fn(void *arg)
     }
     serial_puts("[lkl-boot] Linux kernel running!\n");
 
-    /* Now that the kernel is up the netdev has a real ifindex; configure
-     * it. Non-fatal — failures here only mean LKL won't be able to send
-     * external traffic, but loopback still works. */
+    /* if_up/set_ipv4 require start_kernel (use real syscalls). */
     if (lkl_net_id >= 0) {
         (void)net_backend_up(lkl_net_id);
     }
@@ -276,6 +274,23 @@ int lkl_bridge_init(void)
     volatile char *p = (volatile char *)&g_host_ops;
     for (unsigned long i = 0; i < sizeof(g_host_ops); i++) p[i] = 0;
     host_ops_init(&g_host_ops);
+
+    /* CRITICAL: tools/lkl/lib/{posix,nt}-host.c defines a GLOBAL
+     * `struct lkl_host_operations lkl_host_ops` (NOT a pointer) whose
+     * default mem_alloc points to posix_malloc, which calls libc's
+     * malloc — unavailable in our freestanding build. virtio_net.c +
+     * other tools/lkl code use `lkl_host_ops.X` directly, bypassing
+     * lkl_init(). We must memcpy our ops INTO the global so those
+     * call sites land on our handlers. lkl_init() then also wires
+     * `lkl_ops = &g_host_ops` for the kernel-internal call sites.
+     * Discovered when lkl_netdev_add returned -ENOMEM without ever
+     * calling our lkl_mem_alloc (allocs counter unchanged). */
+    {
+        extern struct lkl_host_operations lkl_host_ops;
+        const char *src = (const char *)&g_host_ops;
+        char *dst = (char *)&lkl_host_ops;
+        for (unsigned long i = 0; i < sizeof(g_host_ops); i++) dst[i] = src[i];
+    }
 
     int rc = lkl_init(&g_host_ops);
     if (rc < 0) {
