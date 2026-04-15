@@ -120,7 +120,12 @@ static void lkl_mutex_unlock(struct lkl_mutex *m)
  * --------------------------------------------------------------- */
 
 #define MAX_LKL_THREADS 64
-#define THREAD_STACK_SIZE 32768  /* 32 KiB */
+/* Linux network stack worker threads (TCP, softirq emulation, virtio-net
+ * RX poll) need significantly more stack than the basic kernel kthreads.
+ * Empirically 32 KiB worked for tmpfs/openat but blew up during
+ * net_backend_up's if_up + virtio-net probe with rip=0 (ret reading
+ * past stack end). 128 KiB gives plenty of headroom. */
+#define THREAD_STACK_SIZE (128 * 1024)
 
 struct thread_slot {
     uint64_t cap;
@@ -243,22 +248,47 @@ static void *lkl_thread_stack(unsigned long *size)
  * TLS (thread-local storage)
  * --------------------------------------------------------------- */
 
-#define MAX_TLS_KEYS 32
+#define MAX_TLS_KEYS    32
+#define MAX_TLS_THREADS 64
 struct lkl_tls_key {
-    int used;
+    int  used;
+    int  key_idx;            /* row index in the per-thread table */
     void (*destructor)(void *);
-    /* Simplified: single-value (works for single-threaded LKL kernel) */
-    void *value;
+};
+
+/* Per-thread TLS table. Row i corresponds to a unique thread_self()
+ * value (FS_BASE-derived); columns are TLS key indices. We only insert
+ * a thread's row on first use and never evict — small bounded set
+ * given LKL's worker-thread count + a handful of foreign callers. */
+struct tls_row {
+    unsigned long owner;     /* thread_self() identity, 0 = empty slot */
+    void          *values[MAX_TLS_KEYS];
 };
 static struct lkl_tls_key tls_keys[MAX_TLS_KEYS];
+static struct tls_row     tls_rows[MAX_TLS_THREADS];
+
+static int tls_find_or_alloc_row(unsigned long owner)
+{
+    int empty = -1;
+    for (int i = 0; i < MAX_TLS_THREADS; i++) {
+        if (tls_rows[i].owner == owner) return i;
+        if (empty < 0 && tls_rows[i].owner == 0) empty = i;
+    }
+    if (empty >= 0) {
+        tls_rows[empty].owner = owner;
+        for (int k = 0; k < MAX_TLS_KEYS; k++) tls_rows[empty].values[k] = (void *)0;
+        return empty;
+    }
+    return -1;  /* table full — caller treats as failure */
+}
 
 static struct lkl_tls_key *lkl_tls_alloc(void (*destructor)(void *))
 {
     for (int i = 0; i < MAX_TLS_KEYS; i++) {
         if (!tls_keys[i].used) {
             tls_keys[i].used = 1;
+            tls_keys[i].key_idx = i;
             tls_keys[i].destructor = destructor;
-            tls_keys[i].value = NULL;
             return &tls_keys[i];
         }
     }
@@ -266,18 +296,43 @@ static struct lkl_tls_key *lkl_tls_alloc(void (*destructor)(void *))
 }
 
 static void lkl_tls_free(struct lkl_tls_key *key) {
-    if (key) key->used = 0;
+    if (!key) return;
+    /* Clear this key's value across all threads. */
+    for (int i = 0; i < MAX_TLS_THREADS; i++) {
+        tls_rows[i].values[key->key_idx] = (void *)0;
+    }
+    key->used = 0;
 }
 
 static int lkl_tls_set(struct lkl_tls_key *key, void *data) {
     if (!key) return -1;
-    key->value = data;
+    int row = tls_find_or_alloc_row(lkl_thread_self());
+    if (row < 0) return -1;
+    tls_rows[row].values[key->key_idx] = data;
     return 0;
 }
 
 static void *lkl_tls_get(struct lkl_tls_key *key) {
     if (!key) return NULL;
-    return key->value;
+    unsigned long owner = lkl_thread_self();
+    void *fallback = NULL;
+    for (int i = 0; i < MAX_TLS_THREADS; i++) {
+        if (tls_rows[i].owner == owner) {
+            return tls_rows[i].values[key->key_idx];
+        }
+        if (!fallback && tls_rows[i].owner != 0
+            && tls_rows[i].values[key->key_idx] != NULL) {
+            fallback = tls_rows[i].values[key->key_idx];
+        }
+    }
+    /* Foreign caller (e.g. init main thread invoking lkl_bridge_syscall):
+     * we have no per-thread row for them. Fall back to any other thread's
+     * value for this key — typically the LKL boot thread's, since that's
+     * what initialized current_task and friends during start_kernel. This
+     * preserves the old single-value-TLS behavior that Phase 4 (uname)
+     * needed, while still allowing per-thread isolation for callers that
+     * have actually set their own values via lkl_tls_set. */
+    return fallback;
 }
 
 /* ---------------------------------------------------------------

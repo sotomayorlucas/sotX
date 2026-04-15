@@ -118,14 +118,46 @@ pub(crate) fn try_route(syscall_nr: u64,
         return false;
     }
 
+    // Helper: read NUL-terminated path from guest memory and decide
+    // backend ownership. Returns true iff fs_route_path classifies the
+    // path as LKL and LKL is ready (we already gated on LKL_READY at
+    // function entry, but recheck for clarity at the call site).
+    let path_is_lkl = |path_ptr: u64| -> bool {
+        let mut buf = [0u8; 256];
+        let plen = crate::exec::copy_guest_path(path_ptr, &mut buf);
+        matches!(
+            sotos_linux_abi::hybrid::fs_route_path(&buf[..plen]),
+            sotos_linux_abi::hybrid::FsRoute::Lkl,
+        )
+    };
+
     match syscall_nr {
-        // ── Category A: path-only syscalls (always LKL) ──
-        SYS_STAT | SYS_LSTAT | SYS_ACCESS | SYS_GETCWD | SYS_CHDIR |
-        SYS_MKDIR | SYS_RMDIR | SYS_UNLINK | SYS_RENAME |
-        SYS_CHMOD | SYS_FSTATAT | SYS_READLINKAT |
+        // ── Category A: path-input syscalls — inspect path, route by owner ──
+        // GETCWD writes the per-process cwd; LUCAS owns CWD tracking
+        // (GRP_CWD spinlocks). Always stay LUCAS — drop from LKL routes.
+        //
+        // For RENAME the source path is the dominant decision (matches
+        // POSIX rename's atomicity guarantees on the source FS); if the
+        // source is LUCAS we don't try to move it across to LKL.
+        SYS_STAT | SYS_LSTAT | SYS_ACCESS | SYS_CHDIR |
+        SYS_MKDIR | SYS_RMDIR | SYS_UNLINK | SYS_CHMOD |
+        SYS_RENAME => {
+            if path_is_lkl(msg.regs[0]) {
+                forward_to_lkl(ep_cap, syscall_nr, msg, pid, child_as_cap);
+                true
+            } else {
+                false  // fall through to LUCAS
+            }
+        }
+        // dirfd-relative path syscalls (path at args[1])
+        SYS_FSTATAT | SYS_READLINKAT |
         SYS_FACCESSAT | SYS_MKDIRAT | SYS_UNLINKAT => {
-            forward_to_lkl(ep_cap, syscall_nr, msg, pid, child_as_cap);
-            true
+            if path_is_lkl(msg.regs[1]) {
+                forward_to_lkl(ep_cap, syscall_nr, msg, pid, child_as_cap);
+                true
+            } else {
+                false
+            }
         }
         // ── Category A: info/time/sync syscalls (always LKL) ──
         // SYS_FUTEX is safe with the per-pid scratch in lkl_bridge.c
@@ -137,12 +169,23 @@ pub(crate) fn try_route(syscall_nr: u64,
             forward_to_lkl(ep_cap, syscall_nr, msg, pid, child_as_cap);
             true
         }
-        // ── Category A: fd-creating via path/socket/etc → forward + mark fd ──
+        // ── Category A: fd-creating via path → inspect path first ──
+        // Phase 6 routing: only forward to LKL when the path lives in
+        // an LKL-owned subtree (/tmp, /mnt, ...). LUCAS keeps /proc,
+        // /etc, /bin, /lib, /usr, /sys, /dev — falling through (return
+        // false) lets the dispatcher's regular syscalls_fs impl handle
+        // it. On LKL success the returned fd goes into LKL_FDS so
+        // Category B (read/write/close/lseek/...) routes there too.
         SYS_OPEN | SYS_OPENAT => {
-            let ret = forward_to_lkl_ret(syscall_nr, msg, pid, child_as_cap);
-            if ret >= 0 { lkl_fd_set(pid, ret); }
-            reply_val(ep_cap, ret);
-            true
+            let path_ptr = if syscall_nr == SYS_OPENAT { msg.regs[1] } else { msg.regs[0] };
+            if !path_is_lkl(path_ptr) {
+                false
+            } else {
+                let ret = forward_to_lkl_ret(syscall_nr, msg, pid, child_as_cap);
+                if ret >= 0 { lkl_fd_set(pid, ret); }
+                reply_val(ep_cap, ret);
+                true
+            }
         }
         SYS_SOCKET | SYS_EPOLL_CREATE | SYS_EPOLL_CREATE1 |
         SYS_EVENTFD | SYS_EVENTFD2 |

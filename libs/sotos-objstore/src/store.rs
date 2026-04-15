@@ -151,13 +151,11 @@ impl ObjectStore {
 
     /// Mount an existing filesystem from disk.
     pub fn mount(blk: VirtioBlk) -> Result<&'static mut Self, &'static str> {
-        dbg(b"MOUNT: init_pages\n");
         init_pages()?;
 
         let store = unsafe { &mut *(STORE_VADDR as *mut ObjectStore) };
         store.blk = blk;
 
-        dbg(b"MOUNT: read superblock\n");
         store.blk.read_sector(SECTOR_SUPERBLOCK as u64)?;
         unsafe {
             core::ptr::copy_nonoverlapping(
@@ -166,24 +164,15 @@ impl ObjectStore {
                 SECTOR_SIZE,
             );
         }
-        dbg(b"MOUNT: superblock magic=");
-        dbg_u64(store.sb.magic as u64);
-        dbg(b" version=");
-        dbg_u64(store.sb.version as u64);
-        dbg(b"\n");
         if store.sb.magic != SUPERBLOCK_MAGIC {
             return Err("bad superblock magic");
         }
         // v6 layout has different sector offsets — old versions can't be migrated
         // in-place without data loss. Auto-format instead (mkdisk.py regenerates disk.img).
         if store.sb.version != FS_VERSION {
-            dbg(b"OBJSTORE: old version ");
-            dbg_u64(store.sb.version as u64);
-            dbg(b" -> auto-format to v6\n");
             return Err("old version");
         }
 
-        dbg(b"MOUNT: WAL replay\n");
         let replayed = wal::replay(&mut store.blk, &mut store.wal, &mut store.wal_buf, &mut store.wal_index)?;
         if replayed {
             store.blk.read_sector(SECTOR_SUPERBLOCK as u64)?;
@@ -196,16 +185,9 @@ impl ObjectStore {
             }
         }
 
-        dbg(b"MOUNT: read_bitmap\n");
         store.read_bitmap()?;
-
-        dbg(b"MOUNT: read_dir\n");
         store.read_dir()?;
-
-        dbg(b"MOUNT: read_refcount\n");
         store.read_refcount()?;
-
-        dbg(b"MOUNT: read_snap_meta\n");
         store.read_snap_meta()?;
 
         // Fix next_oid: scan all entries to ensure next_oid > max(existing OIDs).
@@ -217,8 +199,6 @@ impl ObjectStore {
             }
         }
         if max_oid != store.sb.next_oid {
-            dbg(b"MOUNT: next_oid fixed "); dbg_u64(store.sb.next_oid);
-            dbg(b" -> "); dbg_u64(max_oid); dbg(b"\n");
             store.sb.next_oid = max_oid;
         }
 
@@ -1152,15 +1132,6 @@ impl ObjectStore {
     /// Read all directory sectors from disk into memory.
     fn read_dir(&mut self) -> Result<(), &'static str> {
         for s in 0..DIR_SECTORS as usize {
-            // Dense trace for the first 32 sectors (to catch per-sector hangs),
-            // then every 256 for progress.
-            if s < 32 || s % 256 == 0 {
-                dbg(b"MOUNT: read_dir sector ");
-                dbg_u64(s as u64);
-                dbg(b"/");
-                dbg_u64(DIR_SECTORS as u64);
-                dbg(b"\n");
-            }
             self.blk.read_sector((SECTOR_DIR + s as u32) as u64)?;
             let src = unsafe { core::slice::from_raw_parts(self.blk.data_ptr(), SECTOR_SIZE) };
             let base = s * DIR_ENTRIES_PER_SECTOR;

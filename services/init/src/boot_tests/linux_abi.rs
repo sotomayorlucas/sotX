@@ -10,6 +10,23 @@ use crate::process::*;
 use crate::fd::*;
 
 pub(crate) fn run_linux_test() {
+    // Phase 4 validation: wait for LKL to come online so uname routes
+    // through the real Linux kernel rather than the LUCAS fallback.
+    // Bounded wait — if LKL never becomes ready (SOTOS_LKL=0 build or
+    // boot thread crashed), the test still runs, just against LUCAS.
+    print(b"LINUX-TEST: waiting for LKL ready (up to ~3s)...\n");
+    for _ in 0..3000 {
+        crate::lkl::poll_ready();
+        if sotos_linux_abi::lkl::is_lkl_ready() {
+            print(b"LINUX-TEST: LKL ready -- uname will route via LKL\n");
+            break;
+        }
+        for _ in 0..1000 { sys::yield_now(); }
+    }
+    if !sotos_linux_abi::lkl::is_lkl_ready() {
+        print(b"LINUX-TEST: LKL not ready -- uname will use LUCAS fallback\n");
+    }
+
     print(b"LINUX-TEST: loading hello-linux...\n");
 
     // Acquire exec lock
@@ -40,6 +57,13 @@ pub(crate) fn run_linux_test() {
     let mut current_brk: u64 = BRK_BASE;
     let mut mmap_next: u64 = MMAP_BASE;
 
+    // Phase 6 fd-tracking: mirror lkl_route's LKL_FDS bitmap so that
+    // writes/reads/closes on fds opened via LKL get forwarded to LKL
+    // instead of the stdio fast path. fd 0 is a real LKL fd here
+    // because the proxy worker's LKL task starts with no fds open and
+    // allocates from 0; we can't use "fd <= 2" as the stdio criterion.
+    let mut lkl_fds: u64 = 0;  // bitset for fds 0..63
+
     // Handle the child's syscalls until it exits
     loop {
         let msg = match sys::recv(ep_cap) {
@@ -49,16 +73,32 @@ pub(crate) fn run_linux_test() {
 
         let nr = msg.tag;
         match nr {
-            // write(fd, buf, len)
+            // write(fd, buf, len) — fds in lkl_fds bitmap go through
+            // LKL (Category B Phase 6 exercise); everything else
+            // (treated as stdio) is echoed to serial + framebuffer for
+            // the test log.
             1 => {
-                let buf_ptr = msg.regs[1];
-                let len = msg.regs[2] as usize;
-                let data = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, len) };
-                for &b in data {
-                    sys::debug_print(b);
-                    unsafe { fb_putchar(b); }
+                let fd = msg.regs[0];
+                let is_lkl_fd = fd < 64 && (lkl_fds & (1u64 << fd)) != 0;
+                if is_lkl_fd && sotos_linux_abi::lkl::is_lkl_ready() {
+                    let args = [msg.regs[0], msg.regs[1], msg.regs[2],
+                                msg.regs[3], msg.regs[4], msg.regs[5]];
+                    let as_cap = crate::process::INIT_SELF_AS_CAP
+                        .load(Ordering::Acquire);
+                    let ret = sotos_linux_abi::lkl::dispatch_syscall(
+                        1, &args, as_cap, test_pid,
+                    );
+                    reply_val(ep_cap, ret);
+                } else {
+                    let buf_ptr = msg.regs[1];
+                    let len = msg.regs[2] as usize;
+                    let data = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, len) };
+                    for &b in data {
+                        sys::debug_print(b);
+                        unsafe { fb_putchar(b); }
+                    }
+                    reply_val(ep_cap, len as i64);
                 }
-                reply_val(ep_cap, len as i64);
             }
             // getpid
             39 => reply_val(ep_cap, 999),
@@ -122,27 +162,99 @@ pub(crate) fn run_linux_test() {
             }
             // munmap
             11 => reply_val(ep_cap, 0),
-            // uname(buf)
+            // uname(buf) — route through LKL if ready, else emulate locally.
+            // This is the Phase 4 validation point: with LKL booted, the
+            // release field should come back as "6.6.0+" (real Linux).
+            // FS_BASE management lives in `crate::lkl::syscall` — this
+            // site doesn't need to touch MSRs directly.
             63 => {
-                let buf = msg.regs[0] as *mut u8;
-                unsafe {
-                    // Each field is 65 bytes in struct utsname
-                    core::ptr::write_bytes(buf, 0, 390);
-                    let sysname = b"sotX";
-                    core::ptr::copy_nonoverlapping(sysname.as_ptr(), buf, sysname.len());
-                    let nodename = b"lucas";
-                    core::ptr::copy_nonoverlapping(nodename.as_ptr(), buf.add(65), nodename.len());
-                    let release = b"0.1.0";
-                    core::ptr::copy_nonoverlapping(release.as_ptr(), buf.add(130), release.len());
-                    let version = b"sotX 0.1.0 LUCAS";
-                    core::ptr::copy_nonoverlapping(version.as_ptr(), buf.add(195), version.len());
-                    let machine = b"x86_64";
-                    core::ptr::copy_nonoverlapping(machine.as_ptr(), buf.add(260), machine.len());
+                let mut routed_to_lkl = false;
+                if sotos_linux_abi::hybrid::is_lkl_route(63)
+                    && sotos_linux_abi::lkl::is_lkl_ready()
+                {
+                    let args = [msg.regs[0], msg.regs[1], msg.regs[2],
+                                msg.regs[3], msg.regs[4], msg.regs[5]];
+                    let as_cap = crate::process::INIT_SELF_AS_CAP
+                        .load(Ordering::Acquire);
+                    let ret = sotos_linux_abi::lkl::dispatch_syscall(
+                        63, &args, as_cap, test_pid,
+                    );
+                    if ret != -ENOSYS {
+                        reply_val(ep_cap, ret);
+                        routed_to_lkl = true;
+                    }
+                }
+                if !routed_to_lkl {
+                    let buf = msg.regs[0] as *mut u8;
+                    unsafe {
+                        core::ptr::write_bytes(buf, 0, 390);
+                        let sysname = b"sotX";
+                        core::ptr::copy_nonoverlapping(sysname.as_ptr(), buf, sysname.len());
+                        let nodename = b"lucas";
+                        core::ptr::copy_nonoverlapping(nodename.as_ptr(), buf.add(65), nodename.len());
+                        let release = b"0.1.0";
+                        core::ptr::copy_nonoverlapping(release.as_ptr(), buf.add(130), release.len());
+                        let version = b"sotX 0.1.0 LUCAS";
+                        core::ptr::copy_nonoverlapping(version.as_ptr(), buf.add(195), version.len());
+                        let machine = b"x86_64";
+                        core::ptr::copy_nonoverlapping(machine.as_ptr(), buf.add(260), machine.len());
+                    }
+                    reply_val(ep_cap, 0);
+                }
+            }
+            // openat(dirfd, path, flags, mode) — Phase 6 fs routing.
+            // Only /tmp, /mnt etc. reach LKL; LUCAS paths and anything
+            // else get -ENOENT from this test harness (we don't wire a
+            // full VFS here). On LKL success the returned fd goes into
+            // lkl_fds so subsequent write/read/close route to LKL too.
+            257 => {
+                let path_ptr = msg.regs[1];
+                let mut path_buf = [0u8; 256];
+                let plen = crate::exec::copy_guest_path(path_ptr, &mut path_buf);
+                let path = &path_buf[..plen];
+                let mut routed_to_lkl = false;
+                if sotos_linux_abi::lkl::is_lkl_ready()
+                    && matches!(sotos_linux_abi::hybrid::fs_route_path(path),
+                                sotos_linux_abi::hybrid::FsRoute::Lkl)
+                {
+                    let args = [msg.regs[0], msg.regs[1], msg.regs[2],
+                                msg.regs[3], msg.regs[4], msg.regs[5]];
+                    let as_cap = crate::process::INIT_SELF_AS_CAP
+                        .load(Ordering::Acquire);
+                    let ret = sotos_linux_abi::lkl::dispatch_syscall(
+                        257, &args, as_cap, test_pid,
+                    );
+                    if ret != -ENOSYS {
+                        if ret >= 0 && (ret as u64) < 64 {
+                            lkl_fds |= 1u64 << (ret as u64);
+                        }
+                        reply_val(ep_cap, ret);
+                        routed_to_lkl = true;
+                    }
+                }
+                if !routed_to_lkl {
+                    reply_val(ep_cap, -ENOENT);
+                }
+            }
+            // close — clear lkl_fds bit if applicable, then reply OK
+            3 => {
+                let fd = msg.regs[0];
+                if fd < 64 {
+                    let bit = 1u64 << fd;
+                    if lkl_fds & bit != 0 && sotos_linux_abi::lkl::is_lkl_ready() {
+                        let args = [msg.regs[0], 0, 0, 0, 0, 0];
+                        let as_cap = crate::process::INIT_SELF_AS_CAP
+                            .load(Ordering::Acquire);
+                        let ret = sotos_linux_abi::lkl::dispatch_syscall(
+                            3, &args, as_cap, test_pid,
+                        );
+                        lkl_fds &= !bit;
+                        reply_val(ep_cap, ret);
+                        continue;
+                    }
                 }
                 reply_val(ep_cap, 0);
             }
-            // close
-            3 => reply_val(ep_cap, 0),
             // nanosleep
             35 => reply_val(ep_cap, 0),
             // exit / exit_group

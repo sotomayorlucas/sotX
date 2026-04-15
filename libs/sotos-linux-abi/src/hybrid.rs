@@ -59,6 +59,61 @@ pub fn is_lkl_route(nr: u64) -> bool {
     false
 }
 
+/// Which backend owns a filesystem path — used by path-taking
+/// syscalls (open/openat, stat, access, mkdir, unlink, ...) to decide
+/// whether to forward to LKL's tmpfs+ext4 or keep it in LUCAS's
+/// ObjectStore + virtual /proc,/etc,/sys layer.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum FsRoute {
+    /// LUCAS owns the file (virtual /proc, /sys, /dev, initrd + sysroot
+    /// binaries, /etc configs created by sysroot_init).
+    Lucas,
+    /// LKL owns the file (Linux tmpfs mounted at /, ext4 bind-mounted
+    /// at /mnt, anything not claimed by LUCAS).
+    Lkl,
+}
+
+/// Decide which backend owns an absolute filesystem path.
+///
+/// The policy at Phase 6 is *LUCAS-by-exception*: everything defaults
+/// to LKL, but the tree branches LUCAS has historically owned stay on
+/// LUCAS. That keeps Alpine/glibc binaries working (they read
+/// `/etc/passwd`, `/lib/ld-musl-x86_64.so.1`, `/proc/self/maps`
+/// etc from ObjectStore + virtual files), while new writes into
+/// `/tmp/` and `/mnt/` reach the real Linux tmpfs / ext4 that LKL
+/// manages.
+///
+/// A prefix match only counts when followed by either end-of-path or
+/// `/`, so `/etc` and `/etc/passwd` both match `/etc` but `/etcetera`
+/// does NOT (would route to LKL).
+///
+/// Relative paths are treated as LKL routed — CWD-based resolution
+/// lives in LUCAS today (`GRP_CWD` spinlocks), and once a fd is open
+/// its backend is tracked via `LKL_FDS`, so the CWD ambiguity only
+/// matters for the initial path-based op.
+pub fn fs_route_path(path: &[u8]) -> FsRoute {
+    const LUCAS_PREFIXES: &[&[u8]] = &[
+        b"/proc", b"/sys", b"/dev",
+        b"/etc",
+        b"/bin", b"/sbin",
+        b"/lib", b"/lib64",
+        b"/usr",
+        b"/root",
+        b"/run",
+        b"/var",
+        b"/sysroot",
+    ];
+    for pfx in LUCAS_PREFIXES {
+        if path.len() >= pfx.len() && &path[..pfx.len()] == *pfx {
+            let after = if path.len() == pfx.len() { b'/' } else { path[pfx.len()] };
+            if after == b'/' {
+                return FsRoute::Lucas;
+            }
+        }
+    }
+    FsRoute::Lkl
+}
+
 /// Routes syscalls to LUCAS by default; forwards to LKL for the
 /// whitelisted set when LKL has reported readiness.
 pub struct HybridBackend {

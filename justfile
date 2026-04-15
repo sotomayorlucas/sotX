@@ -683,8 +683,10 @@ run-linux: image build-sysroot
         -m 2048M
 
 # Build LKL (Linux Kernel Library) via WSL2
+# Hardcoded WSL path works on PowerShell, cmd, and bash alike — avoids
+# $$(wslpath) which PowerShell tries to interpolate as a subexpression.
 build-lkl:
-    wsl bash -c "cd \"$$(wslpath -u '{{justfile_directory()}}')\" && bash lkl/build-lkl.sh"
+    wsl bash -c "cd /mnt/c/Users/sotom/sotOS && bash lkl/build-lkl.sh"
 
 # Clean build artifacts
 clean:
@@ -706,7 +708,7 @@ lint:
 
 # Build LKL server (requires WSL2 with Ubuntu)
 build-lkl-server:
-    wsl bash -c "cd $$(wslpath '{{justfile_directory()}}/services/lkl-server') && make"
+    wsl bash -c "cd /mnt/c/Users/sotom/sotOS/services/lkl-server && make"
 
 # Create CPIO initrd with LKL server included
 initrd-lkl: build-user-lkl build-shell build-sotsh build-kbd build-net build-nvme build-xhci build-vmm build-hello build-hello-linux build-drm-test build-net-test build-testlib build-compositor
@@ -720,18 +722,24 @@ image-lkl: build initrd-lkl
 create-ext4-disk:
     [ -f target/ext4.img ] || wsl -d Ubuntu -- bash -c "dd if=/dev/zero of=/mnt/c/Users/sotom/sotOS/target/ext4.img bs=1M count=64 && mkfs.ext4 -F /mnt/c/Users/sotom/sotOS/target/ext4.img"
 
-# Run with LKL server (ext4 disk + virtio-net)
-run-lkl: image-lkl create-ext4-disk
+# Create a 32 MiB blank disk for LKL's dedicated ext4 (Phase 6)
+create-lkl-disk:
+    [ -f target/lkl_ext4.img ] || wsl -d Ubuntu -- bash -c "dd if=/dev/zero of=/mnt/c/Users/sotom/sotOS/target/lkl_ext4.img bs=1M count=32 && mkfs.ext4 -F /mnt/c/Users/sotom/sotOS/target/lkl_ext4.img"
+
+# Run with LKL server (ext4 disk + virtio-net + LKL-dedicated blk)
+run-lkl: image-lkl create-ext4-disk create-lkl-disk
     "{{QEMU}}" \
         -drive format=raw,file={{IMAGE}} \
         -drive if=none,format=raw,file=target/ext4.img,id=disk0 \
         -device virtio-blk-pci,drive=disk0,disable-modern=on \
+        -drive if=none,format=raw,file=target/lkl_ext4.img,id=disk1 \
+        -device virtio-blk-pci,drive=disk1,disable-modern=on \
         -netdev user,id=net0,dns=8.8.8.8 \
         -device virtio-net-pci,netdev=net0,disable-modern=on \
         -serial stdio \
         -no-reboot \
         -m 2048M \
-        -smp 2
+        -smp 1
 
 # Run TDD boot verification suite (builds image, boots QEMU, checks all stages)
 test-boot *ARGS: image

@@ -886,6 +886,14 @@ extern "C" fn page_fault_user_handler(gprs: *mut u64, iframe: *mut u64) {
             rip
         );
     }
+    // RIP=0 means the thread jumped through a null function pointer. The VMM
+    // cannot recover from this — mapping page 0 would let iret land on zero
+    // bytes (ADD instructions), which then refault instantly. Kill the
+    // thread to avoid a log-spam fault loop.
+    if rip == 0 {
+        kprintln!("#PF-RIP0 tid={} — killing thread", tid);
+        crate::sched::exit_current();
+    }
     if crate::fault::push_fault(tid, addr, code_bits, cr3) {
         crate::sched::fault_current();
     } else {

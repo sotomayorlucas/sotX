@@ -114,3 +114,32 @@ Before starting signal/task migration:
    switch.
 4. Re-run the harness after each LKL whitelist addition. Any failure
    → rollback the whitelist entry, not the kernel migration.
+
+---
+
+## Fase 7 outcome (2026-04-15) — DEFERRED INDEFINITELY
+
+After landing the LKL proxy worker architecture (Phase 5/6), the
+case for migrating signal/task syscalls to LKL evaporated:
+
+1. **Proxy worker breaks signal semantics**. All foreign LKL calls
+   marshal through one worker thread. A `rt_sigaction(SIGUSR1, h)`
+   from process X, if forwarded to LKL, would install handler `h`
+   on the WORKER's task, not X's. Signal delivery to X would never
+   fire X's handler. This is fundamentally incompatible with how
+   POSIX signals work.
+
+2. **LUCAS already covers the 3 historical bugs**. Invariants 1-3
+   are kernel + VMM concerns (#PF IST, fault routing, sigreturn
+   frame layout). Migrating the userspace `rt_sig*` syscalls to LKL
+   doesn't change any of them.
+
+3. **The harness passes in the LUCAS-only configuration**. As of
+   commit 68e4a83 the smoke-tier harness reports 3/3 markers
+   present, 5/5 regression indicators clean. No reason to disturb a
+   working signal subsystem.
+
+**Decision**: signal + task syscalls stay in LUCAS permanently.
+Phase 7 is closed without a whitelist addition. The signal regression
+harness remains in CI as a safety net against future regressions in
+the kernel/VMM signal plumbing.

@@ -100,6 +100,11 @@ static int sotos_blk_request(struct lkl_disk disk, struct lkl_blk_req *req)
     return LKL_DEV_BLK_STATUS_OK;
 }
 
+/* Forward declarations — full definitions appear after the proxy
+ * worker section below. */
+static volatile uint64_t lkl_worker_ep;
+static void lkl_proxy_worker_main(void *arg);
+
 /* Boot thread: runs lkl_start_kernel on a separate sotX thread so init
  * can continue to the shell while the Linux kernel boots in background. */
 static void lkl_boot_thread_fn(void *arg)
@@ -124,9 +129,22 @@ static void lkl_boot_thread_fn(void *arg)
     }
     serial_puts("[lkl-boot] Linux kernel running!\n");
 
+    /* Phase 5 status: net_backend_register works (LKL accepts the
+     * netdev), but the deferred if_up + nanosleep retry loop spawns
+     * an LKL kthread that crashes with rip=0 for reasons we haven't
+     * root-caused (suspected: missing host_op for some softirq /
+     * timer callback the network stack relies on). The proxy worker,
+     * per-thread TLS, and 128 KiB kthread stacks didn't fix it.
+     *
+     * Boot thread that called net_backend_up directly hung waiting
+     * for the dead kthread to wake it via semaphore. Skipping until
+     * we either route the call through the proxy worker or instrument
+     * the kthread create path to identify which fn pointer ends up
+     * running with bad state. */
     int lkl_net_id = net_backend_register();
     if (lkl_net_id >= 0) {
-        (void)net_backend_up(lkl_net_id);
+        serial_puts("[lkl-boot] netdev registered, ifindex bringup deferred\n");
+        (void)lkl_net_id;
     }
 
     /* Smoke test */
@@ -240,9 +258,42 @@ static void lkl_boot_thread_fn(void *arg)
         }
     }
 
+    /* Spawn the proxy worker as an LKL-registered thread so it has
+     * a real task_struct, FS_BASE slot, and fully initialized TLS.
+     * All foreign-caller syscalls marshal through it via lkl_worker_ep.
+     * This is what makes openat / VFS / signal-aware syscalls survive
+     * being invoked from threads outside LKL's task universe. */
+    int64_t wep = sys_endpoint_create();
+    if (wep < 0) {
+        serial_puts("[lkl-boot] worker ep_create failed -- forwarding disabled\n");
+    } else {
+        lkl_worker_ep = (uint64_t)wep;
+        serial_puts("[lkl-boot] worker ep=");
+        serial_put_dec(lkl_worker_ep);
+        serial_puts("\n");
+
+#ifdef HAS_LKL
+        unsigned long worker_tid = g_host_ops.thread_create(
+            lkl_proxy_worker_main, (void *)0);
+        if (worker_tid == 0) {
+            serial_puts("[lkl-boot] proxy worker spawn FAILED -- forwarding disabled\n");
+            lkl_worker_ep = 0;
+        } else {
+            serial_puts("[lkl-boot] proxy worker spawned\n");
+        }
+#endif
+    }
+
     lkl_ready = 1;
-    serial_puts("[lkl-boot] ready — forwarding enabled\n");
-    sys_thread_exit();
+    serial_puts("[lkl-boot] ready - forwarding enabled\n");
+
+    /* Boot thread keeps yielding so its task struct stays valid as
+     * the TLS fallback root for any LKL kthread that hasn't set its
+     * own row yet. Worker thread does the actual syscall execution. */
+    for (;;) {
+        host_ops_tick();
+        sys_yield();
+    }
 }
 
 /* Boot thread entry: naked asm stub for stack alignment + FS_BASE setup
@@ -354,8 +405,17 @@ int lkl_bridge_init(void)
  *
  * Returns: Linux return value (or -ENOSYS if not ready)
  * --------------------------------------------------------------- */
-int64_t lkl_bridge_syscall(uint64_t x86_nr, const uint64_t *args,
-                           uint64_t as_cap, uint64_t pid)
+/* Worker endpoint cap: foreign callers (init main, child_handler IPC
+ * threads, run_linux_test) marshal their syscall request to this cap
+ * via sys_call; the worker thread (running inside lkl_thread_create
+ * context with valid task_struct + TLS) services it and replies. */
+static volatile uint64_t lkl_worker_ep = 0;
+
+/* Internal: actual syscall body. Runs ONLY on the worker thread.
+ * Same code as the previous lkl_bridge_syscall; just renamed so a
+ * thin marshalling wrapper can take its old name. */
+static int64_t lkl_bridge_do_syscall(uint64_t x86_nr, const uint64_t *args,
+                                     uint64_t as_cap, uint64_t pid)
 {
     if (!lkl_ready) return -38; /* -ENOSYS */
 
@@ -1083,6 +1143,90 @@ int64_t lkl_bridge_syscall(uint64_t x86_nr, const uint64_t *args,
     (void)args; (void)as_cap; (void)s;
     return -38;
 #endif
+}
+
+/* ---------------------------------------------------------------
+ * Proxy worker — runs on a thread spawned via lkl_thread_create
+ * (so its task_struct, FS_BASE, current_task TLS are all valid
+ * from LKL's perspective). Loops on sys_recv, dispatches to
+ * lkl_bridge_do_syscall, sends reply.
+ *
+ * IPC encoding (request, foreign caller -> worker):
+ *   tag       = x86 syscall number
+ *   regs[0..6] = args[0..6]
+ *   regs[6]   = as_cap
+ *   regs[7]   = pid
+ *
+ * IPC encoding (reply, worker -> caller):
+ *   tag       = (uint64_t) result   (cast back to int64_t on the
+ *               other side)
+ *   regs[0..7] = 0
+ * --------------------------------------------------------------- */
+static void lkl_proxy_worker_main(void *arg)
+{
+    (void)arg;
+    serial_puts("[lkl-proxy] worker thread up, ep=");
+    serial_put_dec(lkl_worker_ep);
+    serial_puts("\n");
+
+    for (;;) {
+        struct ipc_msg req;
+        memset(&req, 0, sizeof(req));
+        int64_t r = sys_recv(lkl_worker_ep, &req);
+        if (r < 0) {
+            /* spurious wake or error: yield + retry */
+            sys_yield();
+            continue;
+        }
+
+        uint64_t x86_nr = req.tag;
+        uint64_t local_args[6] = {
+            req.regs[0], req.regs[1], req.regs[2],
+            req.regs[3], req.regs[4], req.regs[5],
+        };
+        uint64_t as_cap = req.regs[6];
+        uint64_t pid    = req.regs[7];
+
+        int64_t result = lkl_bridge_do_syscall(x86_nr, local_args, as_cap, pid);
+
+        struct ipc_msg reply;
+        memset(&reply, 0, sizeof(reply));
+        reply.tag = (uint64_t)result;
+        sys_send(lkl_worker_ep, &reply);
+    }
+}
+
+/* ---------------------------------------------------------------
+ * lkl_bridge_syscall (public foreign-caller entry)
+ *
+ * Marshals the request into an IPC msg and sys_call's the worker
+ * endpoint. The worker runs the actual syscall on a thread that
+ * LKL knows about, avoiding the #GP-in-VFS class of bugs from
+ * calling lkl_syscall directly off a foreign thread.
+ *
+ * If the worker isn't up yet (lkl_worker_ep == 0), return -ENOSYS
+ * so callers can fall back gracefully.
+ * --------------------------------------------------------------- */
+int64_t lkl_bridge_syscall(uint64_t x86_nr, const uint64_t *args,
+                           uint64_t as_cap, uint64_t pid)
+{
+    if (!lkl_ready || lkl_worker_ep == 0) return -38; /* -ENOSYS */
+
+    struct ipc_msg msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.tag     = x86_nr;
+    msg.regs[0] = args[0];
+    msg.regs[1] = args[1];
+    msg.regs[2] = args[2];
+    msg.regs[3] = args[3];
+    msg.regs[4] = args[4];
+    msg.regs[5] = args[5];
+    msg.regs[6] = as_cap;
+    msg.regs[7] = pid;
+
+    int64_t r = sys_call(lkl_worker_ep, &msg);
+    if (r < 0) return r;
+    return (int64_t)msg.tag;
 }
 
 /* ---------------------------------------------------------------

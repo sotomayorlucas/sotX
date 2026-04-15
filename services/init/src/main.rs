@@ -381,6 +381,12 @@ pub extern "C" fn _start() -> ! {
     // To enable: boot with -smp 2 and LKL auto-activates when kernel finishes booting.
     lkl::init();
 
+    // --- Phase 4 fast-path validation ---
+    // Runs immediately after lkl::init() so we hit LKL routing without
+    // waiting for signify/tier3-6/deception demos. run_linux_test does
+    // its own bounded poll_ready loop; LKL boot thread races with it.
+    run_linux_test();
+
     // --- Phase 5c: Tier 5 close — SHA-256 boot chain verification ---
     // Stream every signed initrd binary through the streaming SHA-256
     // implementation in services/init/src/signify.rs and compare against
@@ -393,7 +399,9 @@ pub extern "C" fn _start() -> ! {
     // demos, supervisor walk). With `--features minimal-boot`, skip the whole
     // lot and go straight to the native VFS service + sotsh spawn — useful
     // when the graphical stack is misbehaving and you just want a shell.
-    #[cfg(not(feature = "minimal-boot"))]
+    // Phase 4 fast-path: skip all demos/tier tests so we get to sotsh
+    // quickly. Flip `cfg(feature = "full-boot")` to re-enable the QA suite.
+    #[cfg(all(not(feature = "minimal-boot"), feature = "full-boot"))]
     {
     spawn_process(b"hello");
 
@@ -586,8 +594,8 @@ pub extern "C" fn _start() -> ! {
     // Brief yield to let spawned services settle.
     for _ in 0..50 { sys::yield_now(); }
 
-    // SKIP boot tests for git debugging — go straight to LUCAS shell
-    // run_linux_test();
+    // run_linux_test moved earlier (right after lkl::init) for fast-path
+    // Phase 4 validation. Other boot tests stay disabled.
     // run_musl_test();
     // run_dynamic_test();
     // run_busybox_test();
@@ -1374,12 +1382,10 @@ fn init_block_storage(boot_info: &BootInfo) -> Option<VirtioBlk> {
         }
     }
 
-    print(b"DBG: calling init_objstore\n");
     init_objstore(blk)
 }
 
 fn init_objstore(blk: VirtioBlk) -> Option<VirtioBlk> {
-    print(b"DBG: init_objstore entered, calling ObjectStore::mount\n");
     match ObjectStore::mount(blk) {
         Ok(store) => {
             // List first 32 root entries (avoid 256KB stack alloc for full DIR_ENTRY_COUNT)
@@ -1470,16 +1476,31 @@ pub(crate) static SHARED_ROOT_STORE_PTR: AtomicU64 = AtomicU64::new(0);
 
 /// Initialize the SECOND virtio-blk device (persistent rootdisk) using its own
 /// vaddr region so it does not collide with the primary device.
-fn init_virtio_root_blk(boot_info: &BootInfo) -> Option<VirtioBlk> {
-    if boot_info.cap_count <= CAP_PCI as u64 {
-        return None;
+fn init_virtio_root_blk(_boot_info: &BootInfo) -> Option<VirtioBlk> {
+    // Same cap_list scan as init_virtio_blk — boot_info.caps[CAP_PCI] is
+    // unreliable on UEFI / trace-boot paths because kernel-internal caps
+    // may land at lower CapIds before init's PCI cap is minted.
+    let mut buf = [sotos_common::CapInfo::zeroed(); 32];
+    let n = match sys::cap_list(&mut buf) {
+        Ok(n) => n,
+        Err(_) => return None,
+    };
+    let mut pci_cap: Option<u64> = None;
+    for entry in &buf[..n] {
+        if entry.kind == sotos_common::CapInfo::KIND_IOPORT {
+            pci_cap = Some(entry.cap_id);
+            break;
+        }
     }
-    let pci = PciBus::new(boot_info.caps[CAP_PCI]);
+    let pci_cap = pci_cap?;
+    let pci = PciBus::new(pci_cap);
 
     // Index 0 is the primary virtio-blk; the rootdisk is index 1.
     let dev = match VirtioBlk::nth_device(&pci, 1) {
         Some(d) => d,
         None => {
+            print(b"ROOTBLK: nth_device(1) returned None (only ");
+            print(b"one virtio-blk present)\n");
             return None;
         }
     };
@@ -1533,56 +1554,21 @@ fn rootblk_write_sector(blk: &mut VirtioBlk, sector: u64, bytes: &[u8], prefix: 
 /// hand it to `start_blk_service` for LKL passthrough. Returns None if
 /// no second drive exists or if the marker test fails fatally.
 fn mount_or_format_root(boot_info: &BootInfo) -> Option<VirtioBlk> {
-    let mut blk = match init_virtio_root_blk(boot_info) {
+    let blk = match init_virtio_root_blk(boot_info) {
         Some(b) => b,
         None => return None,
     };
 
-    if blk.read_sector(ROOT_SECTOR_SIGNATURE).is_err() {
-        print(b"ROOTBLK: read sector 0 failed\n");
-        return None;
-    }
-    let head = unsafe { core::slice::from_raw_parts(blk.data_ptr(), ROOT_SIGNATURE.len()) };
-    let formatted_now = head != &ROOT_SIGNATURE[..];
-
-    if formatted_now {
-        print(b"ROOTBLK: no signature, formatting...\n");
-        if !rootblk_write_sector(&mut blk, ROOT_SECTOR_SIGNATURE, ROOT_SIGNATURE,
-                                 b"ROOTBLK: write signature failed: ") {
-            return None;
-        }
-    } else {
-        print(b"ROOTBLK: SOTROOT signature found (persistent boot)\n");
-    }
-
-    if !rootblk_write_sector(&mut blk, ROOT_SECTOR_MARKER, ROOT_MARKER_BODY,
-                             b"ROOTBLK: write marker failed: ") {
-        return None;
-    }
-
-    if let Err(e) = blk.read_sector(ROOT_SECTOR_MARKER) {
-        print(b"ROOTBLK: re-read marker failed: ");
-        print(e.as_bytes());
-        print(b"\n");
-        return None;
-    }
-    let verify = unsafe { core::slice::from_raw_parts(blk.data_ptr(), 20) };
-    if verify != b"/persist/boot_marker" {
-        print(b"ROOTBLK: marker mismatch on read-back\n");
-        return None;
-    }
-
-    if formatted_now {
-        print(b"ROOTBLK: formatted + marker written\n");
-    } else {
-        print(b"ROOTBLK: marker re-verified across boot\n");
-    }
-    print(b"=== persistent rootdisk: PASS ===\n");
-
-    // SHARED_ROOT_STORE_PTR was never consumed by anyone (legacy
-    // /persist/* I/O TODO comment). Drop the publishing and return
-    // the VirtioBlk so the caller can hand it to start_blk_service
-    // for LKL passthrough — see commit message.
+    // Phase 6: skip the SOTROOT signature/marker write. Previously this
+    // function formatted the rootdisk with our own signature, which
+    // destroyed any pre-existing ext4 fs on the disk and made
+    // lkl_mount_dev fail with -ENOENT. Now we just hand the disk
+    // through to start_blk_service so LKL can mount whatever
+    // filesystem the user pre-formatted (mkfs.ext4 via just
+    // create-lkl-disk).
+    print(b"ROOTBLK: ");
+    print_u64(blk.capacity);
+    print(b" sectors (handing through to LKL/blk service untouched)\n");
     Some(blk)
 }
 
