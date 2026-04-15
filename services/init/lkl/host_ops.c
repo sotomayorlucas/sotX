@@ -422,17 +422,70 @@ static int my_iomem_access_shim(const volatile void *addr, void *val,
  * jmp_buf (using __builtin_setjmp / __builtin_longjmp)
  * --------------------------------------------------------------- */
 
+/* Real setjmp/longjmp in inline asm — __builtin_setjmp only saves
+ * RBP/RSP/RIP and skips callee-saved regs (rbx, r12-r15). LKL expects
+ * full callee-save semantics: when scheduler longjmps back into a
+ * blocked task, those registers must be restored or the task resumes
+ * with garbage. Symptom: VMM SEGV at addr=0 from uninitialized RIP
+ * after the first context switch through jmp_buf.
+ *
+ * Buffer layout (8 unsigned longs, 64 bytes — well within the 128-long
+ * struct lkl_jmp_buf):
+ *   [0]=rbx [1]=rbp [2]=r12 [3]=r13 [4]=r14 [5]=r15 [6]=rsp [7]=rip
+ */
+
+static int sotos_setjmp(unsigned long *buf)
+{
+    int ret;
+    __asm__ volatile (
+        "mov %%rbx, 0x00(%[b])\n"
+        "mov %%rbp, 0x08(%[b])\n"
+        "mov %%r12, 0x10(%[b])\n"
+        "mov %%r13, 0x18(%[b])\n"
+        "mov %%r14, 0x20(%[b])\n"
+        "mov %%r15, 0x28(%[b])\n"
+        "lea 0x08(%%rsp), %%rax\n"     /* rsp at caller (post-call) */
+        "mov %%rax, 0x30(%[b])\n"
+        "mov 0x00(%%rsp), %%rax\n"     /* return address */
+        "mov %%rax, 0x38(%[b])\n"
+        "xor %%eax, %%eax\n"           /* return 0 from setjmp path */
+        : "=a"(ret)
+        : [b] "r"(buf)
+        : "memory"
+    );
+    return ret;
+}
+
+static __attribute__((noreturn)) void sotos_longjmp(unsigned long *buf, int val)
+{
+    if (val == 0) val = 1;
+    __asm__ volatile (
+        "mov 0x00(%[b]), %%rbx\n"
+        "mov 0x08(%[b]), %%rbp\n"
+        "mov 0x10(%[b]), %%r12\n"
+        "mov 0x18(%[b]), %%r13\n"
+        "mov 0x20(%[b]), %%r14\n"
+        "mov 0x28(%[b]), %%r15\n"
+        "mov 0x30(%[b]), %%rsp\n"
+        "mov 0x38(%[b]), %%rdx\n"      /* saved return address */
+        "mov %[v], %%eax\n"            /* return value from setjmp */
+        "jmp *%%rdx\n"
+        :
+        : [b] "r"(buf), [v] "r"(val)
+        : "memory"
+    );
+    __builtin_unreachable();
+}
+
 static void lkl_jmp_buf_set(struct lkl_jmp_buf *jmpb, void (*f)(void))
 {
-    serial_puts("[lkl-host] jmp_buf_set\n");
-    if (__builtin_setjmp((void **)jmpb->buf) == 0)
+    if (sotos_setjmp((unsigned long *)jmpb->buf) == 0)
         f();
 }
 
 static void lkl_jmp_buf_longjmp(struct lkl_jmp_buf *jmpb, int val)
 {
-    (void)val;
-    __builtin_longjmp((void **)jmpb->buf, 1);
+    sotos_longjmp((unsigned long *)jmpb->buf, val);
 }
 
 /* ---------------------------------------------------------------
