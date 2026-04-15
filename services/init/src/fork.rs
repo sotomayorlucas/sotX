@@ -5,18 +5,21 @@
 // ---------------------------------------------------------------------------
 
 use sotos_common::sys;
-use sotos_common::linux_abi::{ENOMEM, ENOSYS};
+use sotos_common::linux_abi::{ENOMEM, ENOSYS, CLONE_CHILD_SETTID,
+                              CLONE_CHILD_CLEARTID, CLONE_PARENT_SETTID,
+                              CLONE_SETTLS};
 use sotos_common::IpcMsg;
 use core::sync::atomic::Ordering;
 use crate::framebuffer::{print, print_u64};
 use crate::process::{MAX_PROCS, NEXT_PID, NEXT_CHILD_STACK, PROCESSES,
-                     INIT_SELF_AS_CAP, proc_group_init,
+                     INIT_SELF_AS_CAP, proc_group_init, proc_thread_init,
                      CHILD_SETUP_EP, CHILD_SETUP_PID, CHILD_SETUP_FLAGS,
                      CHILD_SETUP_AS_CAP, CHILD_SETUP_READY};
 use crate::fd::{THREAD_GROUPS, DIR_FD_PATHS, MAX_DIR_SLOTS, GRP_MAX_FDS,
                 FORK_FD_FLAGS, FORK_SOCK_CONN, FORK_SOCK_UDP_LPORT,
                 FORK_SOCK_UDP_RIP, FORK_SOCK_UDP_RPORT, FORK_SOCK_READY,
-                PIPE_WRITE_REFS, PIPE_READ_REFS, MAX_PIPES};
+                PIPE_WRITE_REFS, PIPE_READ_REFS, MAX_PIPES,
+                UNIX_CONN_REFS, MAX_UNIX_CONNS};
 use crate::vdso;
 use crate::child_handler::child_handler;
 
@@ -123,8 +126,13 @@ pub(crate) unsafe extern "C" fn clone_child_trampoline() -> ! {
 ///
 /// `parent_as` is the caller's child_as_cap (0 for PID 1's own AS).
 /// `fdg` / `memg` are the FD/memory group indices of the parent.
+///
+/// `clone_flags` enables the CLONE_*_TID families used by SYS_CLONE in
+/// its fork-style path (no CLONE_VM). Pass 0 for SYS_FORK / SYS_VFORK
+/// which do not expose those flags.
 pub(crate) fn do_cow_fork(pid: usize, fdg: usize, memg: usize,
-                          parent_as: u64, msg: &IpcMsg) -> i64 {
+                          parent_as: u64, msg: &IpcMsg,
+                          clone_flags: u64) -> i64 {
     let fork_cpid = NEXT_PID.fetch_add(1, Ordering::SeqCst) as usize;
     if fork_cpid > MAX_PROCS {
         return -ENOMEM;
@@ -279,6 +287,27 @@ pub(crate) fn do_cow_fork(pid: usize, fdg: usize, memg: usize,
     };
     let _ = sys::signal_entry(child_thread, vdso::SIGNAL_TRAMPOLINE_ADDR);
 
+    // CLONE_*_TID flags (only set when called from SYS_CLONE fork-style).
+    let ctid_ptr = msg.regs[3];
+    let ptid_ptr = msg.regs[2];
+    if clone_flags & CLONE_CHILD_SETTID != 0 && ctid_ptr != 0 {
+        let tid_val = fork_cpid as u32;
+        let _ = sys::vm_write(child_as_cap, ctid_ptr,
+            &tid_val as *const u32 as u64, 4);
+    }
+    if clone_flags & CLONE_CHILD_CLEARTID != 0 && ctid_ptr != 0 {
+        PROCESSES[fork_cpid - 1].clear_tid.store(ctid_ptr, Ordering::Release);
+    }
+    if clone_flags & CLONE_PARENT_SETTID != 0 && ptid_ptr != 0 {
+        if parent_as != 0 {
+            let tid_val = fork_cpid as u32;
+            let _ = sys::vm_write(parent_as, ptid_ptr,
+                &tid_val as *const u32 as u64, 4);
+        } else {
+            unsafe { core::ptr::write_volatile(ptid_ptr as *mut u32, fork_cpid as u32); }
+        }
+    }
+
     // Set up child process metadata.
     let cidx = fork_cpid - 1;
     let pidx = pid - 1;
@@ -339,7 +368,7 @@ pub(crate) fn do_cow_fork(pid: usize, fdg: usize, memg: usize,
         }
     }
 
-    // Increment pipe refcounts for fds inherited by child.
+    // Increment pipe + unix-socket refcounts for fds inherited by child.
     for cfd in 0..GRP_MAX_FDS {
         let k = unsafe { THREAD_GROUPS[cidx].fds[cfd] };
         let p = unsafe { THREAD_GROUPS[cidx].sock_conn_id[cfd] } as usize;
@@ -347,6 +376,9 @@ pub(crate) fn do_cow_fork(pid: usize, fdg: usize, memg: usize,
             PIPE_WRITE_REFS[p].fetch_add(1, Ordering::AcqRel);
         } else if k == 10 && p < MAX_PIPES {
             PIPE_READ_REFS[p].fetch_add(1, Ordering::AcqRel);
+        }
+        if (k == 27 || k == 28) && p < MAX_UNIX_CONNS {
+            UNIX_CONN_REFS[p].fetch_add(1, Ordering::AcqRel);
         }
     }
 
@@ -386,4 +418,110 @@ pub(crate) fn do_cow_fork(pid: usize, fdg: usize, memg: usize,
     PROCESSES[cidx].state.store(1, Ordering::Release);
 
     fork_cpid as i64
+}
+
+// ---------------------------------------------------------------------------
+// SYS_CLONE thread-style (CLONE_VM) — pthread creation.
+// ---------------------------------------------------------------------------
+
+/// SYS_CLONE thread-style path — creates a new thread in the parent's
+/// address space (CLONE_VM).
+///
+/// Stack layout for the trampoline: [fn_ptr, arg, tls_ptr] pushed just
+/// below `child_stack`. `clone_child_trampoline` pops those and then
+/// optionally runs `arch_prctl(SET_FS, tls)` before calling `fn(arg)`.
+///
+/// Returns child_pid on success, negative errno on failure.
+pub(crate) fn do_thread_clone(pid: usize, msg: &IpcMsg) -> i64 {
+    let flags = msg.regs[0];
+    let child_stack = msg.regs[1];
+    let ptid_ptr = msg.regs[2];
+    let ctid_ptr = msg.regs[3];
+    let newtls = msg.regs[4];
+    let fn_ptr = msg.regs[5]; // r9 = fn (from musl's __clone)
+
+    // Allocate child PID.
+    let child_pid = NEXT_PID.fetch_add(1, Ordering::SeqCst) as usize;
+    if child_pid > MAX_PROCS {
+        return -ENOMEM;
+    }
+
+    // Thread-group state inheritance.
+    PROCESSES[child_pid - 1].parent.store(pid as u64, Ordering::Release);
+    proc_thread_init(child_pid, pid, flags);
+
+    // CLONE_PARENT_SETTID: write child TID to *ptid.
+    if flags & CLONE_PARENT_SETTID != 0 && ptid_ptr != 0 {
+        unsafe { core::ptr::write_volatile(ptid_ptr as *mut u32, child_pid as u32); }
+    }
+    // CLONE_CHILD_CLEARTID: store ctid pointer for exit cleanup.
+    if flags & CLONE_CHILD_CLEARTID != 0 && ctid_ptr != 0 {
+        PROCESSES[child_pid - 1].clear_tid.store(ctid_ptr, Ordering::Release);
+    }
+
+    // Trampoline setup: musl __clone pushed arg at [child_stack].
+    let arg = if child_stack != 0 {
+        unsafe { core::ptr::read_volatile(child_stack as *const u64) }
+    } else { 0 };
+    let tls = if flags & CLONE_SETTLS != 0 { newtls } else { 0 };
+
+    // Write [fn_ptr, arg, tls] 24 bytes below child_stack (stack grows down).
+    let child_sp = child_stack - 24;
+    unsafe {
+        core::ptr::write_volatile((child_sp) as *mut u64, fn_ptr);
+        core::ptr::write_volatile((child_sp + 8) as *mut u64, arg);
+        core::ptr::write_volatile((child_sp + 16) as *mut u64, tls);
+    }
+
+    // Allocate handler stack (32 pages = 128KB).
+    let handler_stack_base = NEXT_CHILD_STACK.fetch_add(0x20000, Ordering::SeqCst);
+    for hp in 0..32u64 {
+        let hf = match sys::frame_alloc() {
+            Ok(f) => f,
+            Err(_) => return -ENOMEM,
+        };
+        if sys::map(handler_stack_base + hp * 0x1000, hf, MAP_WRITABLE).is_err() {
+            return -ENOMEM;
+        }
+    }
+
+    // Child endpoint.
+    let child_ep = match sys::endpoint_create() {
+        Ok(e) => e,
+        Err(_) => return -ENOMEM,
+    };
+
+    // Hand setup to the child handler thread.
+    while CHILD_SETUP_READY.load(Ordering::Acquire) != 0 { sys::yield_now(); }
+    CHILD_SETUP_EP.store(child_ep, Ordering::Release);
+    CHILD_SETUP_PID.store(child_pid as u64, Ordering::Release);
+    CHILD_SETUP_FLAGS.store(flags, Ordering::Release);
+    CHILD_SETUP_AS_CAP.store(0, Ordering::Release);
+    CHILD_SETUP_READY.store(1, Ordering::Release);
+
+    if sys::thread_create(
+        child_handler as *const () as u64,
+        handler_stack_base + 0x20000,
+    ).is_err() {
+        CHILD_SETUP_READY.store(0, Ordering::Release);
+        return -ENOMEM;
+    }
+
+    // Wait for the handler to consume setup before starting guest thread.
+    while CHILD_SETUP_READY.load(Ordering::Acquire) != 0 { sys::yield_now(); }
+
+    // Spawn guest thread at the trampoline, redirected to its child handler.
+    let child_thread = match sys::thread_create_redirected(
+        clone_child_trampoline as *const () as u64,
+        child_sp,
+        child_ep,
+    ) {
+        Ok(t) => t,
+        Err(_) => return -ENOMEM,
+    };
+    let _ = sys::signal_entry(child_thread, vdso::SIGNAL_TRAMPOLINE_ADDR);
+
+    PROCESSES[child_pid - 1].state.store(1, Ordering::Release);
+
+    child_pid as i64
 }
