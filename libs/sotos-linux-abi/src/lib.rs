@@ -20,6 +20,12 @@ pub mod types;
 #[cfg(feature = "backend-lucas")]
 pub mod lucas;
 
+#[cfg(feature = "backend-lkl")]
+pub mod lkl;
+
+#[cfg(all(feature = "backend-lucas", feature = "backend-lkl"))]
+pub mod hybrid;
+
 pub use ctx::SyscallCtx;
 pub use trait_def::LinuxBackend;
 pub use types::{CapSet, Fd, LinuxPid, ProcessImage, Signal, SyscallResult};

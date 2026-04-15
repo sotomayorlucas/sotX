@@ -5,12 +5,21 @@ extern crate alloc;
 
 use sotos_common::sys;
 use sotos_linux_abi::lucas::LucasBackend;
+use sotos_linux_abi::hybrid::HybridBackend;
 
 /// Wave-1 seed of the LUCAS -> LKL migration: a type-marker backend so the
 /// rest of the tree can hold a `&'static dyn sotos_linux_abi::LinuxBackend`.
 /// Dispatch still runs through `child_handler` today -- see the adapter at
 /// libs/sotos-linux-abi/src/lucas.rs.
 pub(crate) static LUCAS_BACKEND: LucasBackend = LucasBackend;
+
+/// Wave-3 seed (fase 3): HybridBackend with empty LKL whitelist. At this
+/// stage every syscall routes to LUCAS so behavior is byte-identical to
+/// pre-fase-3 builds. Phase 4+ will grow the whitelist one domain at a
+/// time. Linked regardless of SOTOS_LKL so the trait surface stays
+/// stable; the LKL FFI only fires once `crate::lkl::init()` has
+/// registered the bridge AND the LKL kernel has marked itself ready.
+pub(crate) static HYBRID_BACKEND: HybridBackend = HybridBackend::new();
 
 // ======================================================================
 // Bump allocator for goblin ELF parsing (128 KiB, resettable)
@@ -298,11 +307,13 @@ pub extern "C" fn _start() -> ! {
         print(b"\n");
     }
 
-    // Wave-1 seed of the LUCAS -> LKL migration: observable-only marker
-    // confirming the LucasBackend adapter (LUCAS_BACKEND, static) linked.
-    // Dispatch still runs through child_handler today.
+    // Wave-1/3 seed: observable-only markers confirming both backends
+    // (LUCAS_BACKEND + HYBRID_BACKEND) linked. Dispatch still runs
+    // through child_handler today; hybrid routing activates when the
+    // LKL whitelist in libs/sotos-linux-abi/src/hybrid.rs grows.
     let _ = &LUCAS_BACKEND;
-    print(b"LinuxBackend: LucasBackend registered\n");
+    let _ = &HYBRID_BACKEND;
+    print(b"LinuxBackend: LucasBackend + HybridBackend registered\n");
 
     // --- Phase 2/3: SPSC test + benchmarks ---
     {

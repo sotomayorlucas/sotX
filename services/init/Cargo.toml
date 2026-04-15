@@ -11,7 +11,7 @@ edition = "2021"
 
 [dependencies]
 sotos-common = { path = "../../libs/sotos-common" }
-sotos-linux-abi = { path = "../../libs/sotos-linux-abi", default-features = false, features = ["backend-lucas"] }
+sotos-linux-abi = { path = "../../libs/sotos-linux-abi", default-features = false, features = ["backend-hybrid"] }
 sotos-deception = { path = "../../personality/common/deception" }
 sotos-provenance = { path = "../../personality/common/provenance" }
 sot-fma = { path = "../../libs/sot-fma" }
@@ -43,6 +43,7 @@ https-proxy = []
 # downstream configs can toggle backends symmetrically.
 backend-lucas = ["sotos-linux-abi/backend-lucas"]
 backend-lkl = ["sotos-linux-abi/backend-lkl"]
+backend-hybrid = ["sotos-linux-abi/backend-hybrid"]
 # B5: default shell swap. Post-B5, init *always* spawns sotsh (native sotOS
 # shell, B1 port). The legacy Linux-ABI lucas-shell is now opt-in via
 # `shell-lucas` -- enable it for the soak window before lucas-shell is
